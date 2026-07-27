@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+# agent-shell — the login program for Agent OS. Boot lands here, not at a desktop.
+# v0.1: cloud brain (Claude Code). Phase 1.5: swap BRAIN for a local-model runner.
+set -euo pipefail
+
+MEM="$HOME/memory"
+BANNER='\033[38;5;179m'; DIM='\033[38;5;244m'; TEAL='\033[38;5;79m'; RST='\033[0m'
+
+# --- seed the markdown-memory home tree on first boot ------------------------
+if [ ! -d "$MEM" ]; then
+  mkdir -p "$MEM"/{people,projects,system,inbox}
+  cat > "$MEM/README.md" <<'EOF'
+# This folder is the machine's memory.
+The **path is the meaning**. `~/memory/projects/agent-os.md` isn't a location —
+it's a fact the agent knows. Organize by what things ARE, not where they live.
+The agent reads and writes here as it works. So can you; it's just text.
+EOF
+  cat > "$MEM/system/this-machine.md" <<EOF
+# This machine
+- os: Agent OS v0.1 (NixOS base)
+- config: /etc/nixos (the agent may rewrite this and \`nixos-rebuild switch\`)
+- brain: ${BRAIN:-claude} (cloud). Local-model floor = phase 1.5.
+- first_boot: $(date -u +%FT%TZ)
+EOF
+fi
+
+# --- boot banner -------------------------------------------------------------
+clear || true
+printf "${BANNER}agent-os${RST} ${DIM}v0.1${RST}\n"
+printf "${TEAL}memory mounted${RST} ${DIM}· %s facts · path = meaning${RST}\n" \
+  "$(find "$MEM" -name '*.md' | wc -l | tr -d ' ')"
+printf "${DIM}config at /etc/nixos — ask me to change a setting and I rewrite it.${RST}\n\n"
+
+# --- hand off to the brain ---------------------------------------------------
+# The brain IS the shell. It can read/write $MEM, run commands, and edit the
+# system's own nix config. If no cloud brain is installed yet, fall back to a
+# minimal memory-aware REPL so the box still boots-and-talks for the demo.
+BRAIN="${BRAIN:-claude}"
+
+if command -v "$BRAIN" >/dev/null 2>&1; then
+  cd "$HOME"
+  exec "$BRAIN"          # e.g. Claude Code: boot straight into the agent
+else
+  printf "${DIM}(no cloud brain installed — run bin/setup-brain.sh. Falling back to memory REPL.)${RST}\n\n"
+  # tiny placeholder so the scaffold is demoable with zero deps
+  while true; do
+    printf "${BANNER}you ›${RST} "
+    read -r line || { echo; break; }
+    case "$line" in
+      "") : ;;
+      exit|quit) break ;;
+      "recall "*) grep -ril "${line#recall }" "$MEM" || echo "  (nothing in memory)";;
+      "remember "*) f="$MEM/inbox/$(date +%s).md"; echo "${line#remember }" > "$f"; echo "  ↳ $f";;
+      *) echo "  (placeholder brain: try 'remember <fact>', 'recall <term>', or install the real brain)";;
+    esac
+  done
+fi
