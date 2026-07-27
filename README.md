@@ -30,10 +30,14 @@ The VM comes up, autologins tty1, seeds `~/memory`, and drops into the brain
 - **Phase 1.5:** local-model floor (ollama / llama.cpp) so it thinks offline —
   ties into the grid-down resilient-mesh goal. `setup-brain.sh` will install it.
 
-## Then, onto the Dell Latitude
-1. Boot NixOS installer USB on the Latitude.
-2. `nixos-generate-config` → commit its `hardware-configuration.nix` here.
-3. `nixos-install --flake .#agentos` → reboot → it comes up talking.
+## Then, onto the Dell Latitude 5440 (32GB, 13th-gen Intel, Iris Xe)
+Confirmed target 2026-07-27. Well-supported hardware; 32GB makes the local-model floor real.
+1. **Back up anything off the Windows 11 install first — the wipe is destructive.**
+2. Boot NixOS installer USB on the Latitude.
+3. `nixos-generate-config` → commit its `hardware-configuration.nix` here.
+4. `nixos-install --flake .#agentos` → reboot → it comes up talking.
+The 5440-specific enablement (Intel microcode, Iris Xe, wifi firmware, thermald) is already in
+`configuration.nix` — the generated hardware-configuration.nix just adds the disk/partition layout.
 
 ## Honest status
 This is a **v0 skeleton**, not flash-ready. It needs: the Dell's

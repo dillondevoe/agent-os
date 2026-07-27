@@ -4,6 +4,7 @@
 
 {
   # --- boot / hardware ---------------------------------------------------------
+  # Target: Dell Latitude 5440 — 13th-gen Intel (Raptor Lake), Iris Xe, Intel wifi, 32GB.
   # NOTE: the real install generates ./hardware-configuration.nix from the Dell
   # (`nixos-generate-config`). Until we have the device, the VM build supplies its
   # own disk/boot. These are placeholders so `configuration.nix` reads cleanly.
@@ -11,6 +12,16 @@
   boot.loader.efi.canTouchEfiVariables = lib.mkDefault true;
   # fileSystems."/" is provided by hardware-configuration.nix on real hardware
   # and by the VM builder in the flake's `vm` output.
+
+  # 5440-specific enablement (safe to set blind — standard for 13th-gen Intel laptops):
+  hardware.enableRedistributableFirmware = true;   # Intel AX2xx wifi/bt firmware
+  hardware.cpu.intel.updateMicrocode = true;       # Raptor Lake microcode
+  hardware.graphics.enable = true;                 # Iris Xe (iGPU) — also gives local-model
+  hardware.graphics.extraPackages = with pkgs; [ intel-media-driver ];
+  services.thermald.enable = true;                 # Intel thermal daemon (laptop)
+  services.fwupd.enable = true;                     # firmware updates
+  # 32GB RAM = the local-model floor is real here (phase 1.5): a quantized 13-14B runs
+  # comfortably. setup-brain.sh will install ollama/llama.cpp against the iGPU + CPU.
 
   # --- identity ----------------------------------------------------------------
   networking.hostName = "agent-os";
