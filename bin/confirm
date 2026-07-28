@@ -239,6 +239,12 @@ def render_frame(req, first_time, for_getty, confirm_code=None):
     L.append("CAPABILITY: " + cap)
     L.append("TIER: " + tier)
     L.append("PROVENANCE: " + prov)
+    if cap == "taint.reset":
+        # Fixed literal in the TRUST region (never prefixed, never model-introducible): taint.reset
+        # is not a registry capability and is unreachable from any tool-call (CF-1a), so this banner
+        # can only appear for a human-initiated `taint reset` (CF-1c). Make the stakes unmissable.
+        L.append("*** THIS CLEARS THE UNTRUSTED-SESSION (TAINT) BIT — approve ONLY if you just "
+                 "ran `taint reset` yourself ***")
     if first_time:
         L.append("*** NEVER-SEEN-DESTINATION *** (verify the recipient/host below)")
     L.append("--- untrusted model input (verify carefully) ---")

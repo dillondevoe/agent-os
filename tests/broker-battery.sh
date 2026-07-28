@@ -40,7 +40,7 @@ export AGENT_OS_REGISTRY="$REGREAL"       # default; TESTREG legs override in a 
 mkdir -p "$AGENT_OS_TAINT_DIR" "$AGENT_OS_AUDIT_DIR" "$SCRATCH/mark"
 LOG="$AGENT_OS_AUDIT_DIR/audit.log"
 
-"$PY" "$TAINT" reset --confirm-human >/dev/null 2>&1 || fail "could not bless a clean start session"
+"$PY" "$TAINT" reset --confirm-human --break-glass >/dev/null 2>&1 || fail "could not bless a clean start session"
 
 # ── helpers ──────────────────────────────────────────────────────────────────
 # Feed ONE verdict line to `broker run`; echo its single result line. (Broker's exit code is
@@ -66,7 +66,10 @@ try: json.load(sys.stdin)
 except Exception: pass
 if os.environ.get("CONFIRM_MARKER"): open(os.environ["CONFIRM_MARKER"], "w").close()
 if os.environ.get("CONFIRM_RESET") == "1":
-    subprocess.run([sys.executable, os.environ["TAINT_BIN"], "reset", "--confirm-human"],
+    # CF-1c: bump the epoch via the audited break-glass (channel-free) — this stub IS the confirm
+    # channel, so it cannot drive the confirm-channel reset path without recursing. --confirm-human
+    # ALONE no longer clears taint, so it would leave the epoch unbumped and void the race sim.
+    subprocess.run([sys.executable, os.environ["TAINT_BIN"], "reset", "--confirm-human", "--break-glass"],
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 sys.stdout.write(json.dumps({"approved": os.environ.get("CONFIRM_APPROVE", "0") == "1",
                              "reason": "test"}))
@@ -192,7 +195,7 @@ case "$OUT" in *"audit-failed"*) : ;; *) fail "dead audit did not deny audit-fai
 # net.fetch (TESTREG, enum removed) is UNTRUSTED by broker policy. Approve it; the invoke seam
 # even LIES origin=TRUSTED — the broker must ignore that and STILL taint the session, and the
 # taint must be committed by the time the (DATA-fenced) content is returned.
-"$PY" "$TAINT" reset --confirm-human >/dev/null || fail "reset before untrusted-return leg"
+"$PY" "$TAINT" reset --confirm-human --break-glass >/dev/null || fail "reset before untrusted-return leg"
 VNET='{"ok":true,"method":"tools/call","id":21,"name":"net.fetch","arguments":{"url":"https://pub.example/"}}'
 OUT="$( AGENT_OS_REGISTRY="$TESTREG" CONFIRM_APPROVE=1 AGENT_OS_CONFIRM_SEAM="$SEAM_CONFIRM" \
         INVOKE_CONTENT="FETCHBODY" INVOKE_LIE_ORIGIN=1 AGENT_OS_INVOKE_SEAM="$SEAM_INVOKE" one "$VNET" )"
@@ -202,7 +205,7 @@ taint_is TAINTED   # the broker tainted despite the impl claiming TRUSTED — or
 
 # error BODY also carries attacker bytes: ok=false must STILL flow through taint + DATA fence,
 # and the bytes must NOT land in an instruction-carrying error.message.
-"$PY" "$TAINT" reset --confirm-human >/dev/null || fail "reset before error-body leg"
+"$PY" "$TAINT" reset --confirm-human --break-glass >/dev/null || fail "reset before error-body leg"
 OUT="$( AGENT_OS_REGISTRY="$TESTREG" CONFIRM_APPROVE=1 AGENT_OS_CONFIRM_SEAM="$SEAM_CONFIRM" \
         INVOKE_OK=0 INVOKE_CONTENT="ATTACKERBYTES" AGENT_OS_INVOKE_SEAM="$SEAM_INVOKE" one "$VNET" )"
 [ "$(jf "$OUT" 'o["result"]["capability_ok"]')" = "false" ] || fail "error body not marked capability_ok=false: $OUT"
@@ -222,22 +225,22 @@ case "$OUT" in *LEAKME*) fail "content LEAKED despite the taint effect failing t
 # ── 12. mem.recall RE-TAINT ACROSS SESSIONS (§4.9): recall of an UNTRUSTED-stored key re-taints;
 #        recall of a TRUSTED key does not. The broker calls `taint recall <meta.key>`; taint owns
 #        the tag (the impl cannot forge it).
-"$PY" "$TAINT" reset --confirm-human >/dev/null || fail "reset before recall seed"
+"$PY" "$TAINT" reset --confirm-human --break-glass >/dev/null || fail "reset before recall seed"
 "$PY" "$TAINT" set "seed untrusted" >/dev/null || fail "set before untrusted stamp"
 "$PY" "$TAINT" stamp untrusted/k >/dev/null || fail "stamp untrusted/k"      # tagged UNTRUSTED
-"$PY" "$TAINT" reset --confirm-human >/dev/null || fail "reset after seeding"
+"$PY" "$TAINT" reset --confirm-human --break-glass >/dev/null || fail "reset after seeding"
 "$PY" "$TAINT" stamp trusted/k >/dev/null || fail "stamp trusted/k"          # clean session -> TRUSTED
 VREC='{"ok":true,"method":"tools/call","id":31,"name":"mem.recall","arguments":{"namespace":"session","query":"q"}}'
 OUT="$( INVOKE_KEY="untrusted/k" INVOKE_CONTENT="recalled" AGENT_OS_INVOKE_SEAM="$SEAM_INVOKE" one "$VREC" )"
 [ "$(jf "$OUT" 'o["result"]["content_type"]')" = "data" ] || fail "recall result not DATA: $OUT"
 taint_is TAINTED   # recalling the UNTRUSTED-origin entry re-tainted the fresh session
-"$PY" "$TAINT" reset --confirm-human >/dev/null || fail "reset before trusted recall"
+"$PY" "$TAINT" reset --confirm-human --break-glass >/dev/null || fail "reset before trusted recall"
 OUT="$( INVOKE_KEY="trusted/k" INVOKE_CONTENT="recalled" AGENT_OS_INVOKE_SEAM="$SEAM_INVOKE" one "$VREC" )"
 taint_is clean     # recalling a TRUSTED entry does NOT taint
 
 # ── 13. mem.remember — the BROKER owns the stamp (§4.9). A stamped key recalls as "no change"
 #        (proof it was tagged); a missing key withholds; a stamp that can't commit withholds.
-"$PY" "$TAINT" reset --confirm-human >/dev/null || fail "reset before stamp leg"
+"$PY" "$TAINT" reset --confirm-human --break-glass >/dev/null || fail "reset before stamp leg"
 OUT="$( CONFIRM_APPROVE=1 AGENT_OS_CONFIRM_SEAM="$SEAM_CONFIRM" \
         INVOKE_KEY="session/n1" AGENT_OS_INVOKE_SEAM="$SEAM_INVOKE" one "$V_REMEMBER" )"
 [ "$(jf "$OUT" 'o["result"]["content_type"]')" = "data" ] || fail "remember result not DATA: $OUT"
@@ -253,7 +256,7 @@ case "$OUT" in *"content-withheld"*) : ;; *) fail "remember stamp-fail did not w
 
 # ── 14. CONFIRM EPOCH BINDING (§4.6): an approval that arrives under a DIFFERENT session_id
 #        (a taint reset raced in during confirm) is rejected.
-"$PY" "$TAINT" reset --confirm-human >/dev/null || fail "reset before epoch leg"
+"$PY" "$TAINT" reset --confirm-human --break-glass >/dev/null || fail "reset before epoch leg"
 OUT="$( CONFIRM_APPROVE=1 CONFIRM_RESET=1 AGENT_OS_CONFIRM_SEAM="$SEAM_CONFIRM" \
         AGENT_OS_INVOKE_SEAM="$SEAM_INVOKE" one "$V_REMEMBER" )"
 case "$OUT" in *"session-id-mismatch"*) : ;; *) fail "approval under a bumped session_id was not rejected: $OUT";; esac
