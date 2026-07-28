@@ -65,6 +65,7 @@ let
   #    weights, so loopback egress is effectively T3.
   egressDenyList = [
     "127.0.0.0/8" "10.0.0.0/8" "172.16.0.0/12" "192.168.0.0/16"
+    "100.64.0.0/10"   # CGNAT / shared-address space (RFC 6598) — real LAN/router hops
     "169.254.0.0/16" "::1/128" "fc00::/7" "fe80::/10"
   ];
 
@@ -174,9 +175,26 @@ let
   # would silently default network=false — safe here, but unvalidated for Step 7).
   sandboxKeysKnown = c: all (k: lib.elem k (lib.attrNames defaultSandbox)) (lib.attrNames c.sandbox);
 
+  # Sandbox value TYPES: without this, a `network = "true"` string is truthy and would
+  # silently pass the T0/T1-no-network guard (check 4); asserting types fails-loud instead.
+  isStrList = v: lib.isList v && all lib.isString v;
+  sandboxTypesOk = c:
+    let s = c.sandbox; in
+    lib.isBool s.network
+    && isStrList s.readWritePaths && isStrList s.readOnlyPaths
+    && isStrList s.egressDeny && isStrList s.egressAllow;
+
   denyCovers = c: all (cidr: lib.elem cidr c.sandbox.egressDeny) egressDenyList;
 
   checks =
+    # (0) sandbox value TYPES first — a wrong-typed field (e.g. network = "true") must
+    #     fail LOUD here, before a later guard silently coerces it. `all` forces this
+    #     list left-to-right, so putting it first makes the clean message win.
+    (map (c: {
+      cond = sandboxTypesOk c;
+      msg  = "capability-registry: '${c.name}' sandbox has a wrong-typed field (network must be a bool; readWritePaths/readOnlyPaths/egressDeny/egressAllow must be lists of strings).";
+    }) caps)
+    ++
     # (1) every capability declares a runtime tier — T3 is non-expressible.
     (map (c: {
       cond = lib.elem c.tier runtimeTiers;
