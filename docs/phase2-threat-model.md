@@ -58,11 +58,13 @@ surface. Phase 2 opens it, so it gets the whole safety budget.
   zero authorization**, and confirmation never happens on it. Model bytes on the tty keep the
   hardened control-char stripping from Phase-1 PR#1 (widened to `[\x00-\x08\x0b-\x1f\x7f-\x9f]`).
 
-- **INV-2 — egress denies loopback / RFC1918 / link-local by default.** A *confirmed* fetch to
-  `127.0.0.1:11434` could drive the in-guest ollama or pull weights; loopback/private egress is
+- **INV-2 — egress denies loopback / RFC1918 / CGNAT / link-local by default.** A *confirmed* fetch
+  to `127.0.0.1:11434` could drive the in-guest ollama or pull weights; loopback/private egress is
   effectively T3. Egress capability impls deny `127.0.0.0/8`, `10.0.0.0/8`, `172.16.0.0/12`,
-  `192.168.0.0/16`, `169.254.0.0/16`, `::1`, `fc00::/7`, `fe80::/10` unless an operator-config
-  allowlist entry names a specific host — and that allowlist is config-only (T3 to change).
+  `192.168.0.0/16`, `100.64.0.0/10` (CGNAT / shared-address space, RFC 6598 — a real LAN/router
+  hop range, not routable public), `169.254.0.0/16`, `::1`, `fc00::/7`, `fe80::/10` unless an
+  operator-config allowlist entry names a specific host — and that allowlist is config-only (T3 to
+  change). The registry's `egressDenyList` encodes exactly this set.
 
 ---
 
