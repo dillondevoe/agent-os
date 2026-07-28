@@ -25,6 +25,11 @@
 let
   auditWrapper = import ./audit-pkg.nix { inherit pkgs; };
   taintWrapper = import ./taint-pkg.nix { inherit pkgs; };
+  # Step 6: the SAME confirm wrapper modules/confirm.nix installs. Pinning the seam here — in the
+  # broker's OWN wrapper, not via inheritable environment.variables — makes AGENT_OS_CONFIRM_SEAM
+  # authoritative regardless of launch context, so no model-influenced parent env can redirect the
+  # confirm seam to an auto-approver (Fable Step-6 ruling; see modules/confirm-pkg.nix header).
+  confirmWrapper = import ./confirm-pkg.nix { inherit pkgs; };
 
   # Materialize the registry to JSON. Reading `reg.registry` FORCES the Step-1 `assert ok`,
   # so a registry that violates a mechanism-3 invariant fails THIS module's build too — the
@@ -40,6 +45,8 @@ let
     export TAINT_BIN=${taintWrapper}/bin/taint
     export AUDIT_BIN=${auditWrapper}/bin/audit
     export AGENT_OS_BROKER_DIR=/var/lib/agent-os/broker
+    export AGENT_OS_CONFIRM_SEAM=${confirmWrapper.wrapper}/bin/confirm
+    export AGENT_OS_CONFIRM_TIMEOUT_S=${toString confirmWrapper.brokerTimeout}
     exec ${pkgs.python3}/bin/python3 ${../bin/broker} "$@"
   '';
 in

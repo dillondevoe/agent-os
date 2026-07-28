@@ -333,7 +333,24 @@ if errs:
 print("validator unit battery: OK")
 PYEOF
 
-# ── 18. AUDIT INTEGRATION — the broker's decisions were logged via the Step-2 primitive and
+# ── 18. CONFIRM-SEAM TIMEOUT (§5, Fable follow-up #2): a confirm seam that runs past
+#        AGENT_OS_CONFIRM_TIMEOUT_S is KILLED+reaped and the request DENIES 'confirm-timeout' —
+#        a hung/absent human never wedges the single-flight broker, and the killed child's late
+#        output is never read (fail-closed, never OPEN). This is the broker half of Step 6 §8.4.
+SEAM_SLEEP="$SCRATCH/seam_sleep.py"
+cat > "$SEAM_SLEEP" <<'PYEOF'
+import sys, json, time
+try: json.load(sys.stdin)
+except Exception: pass
+time.sleep(30)                                   # far past the 1s backstop below
+sys.stdout.write('{"approved": true, "reason": "should-never-be-read"}')
+PYEOF
+OUT="$( AGENT_OS_CONFIRM_TIMEOUT_S=1 AGENT_OS_CONFIRM_SEAM="$SEAM_SLEEP" \
+        AGENT_OS_INVOKE_SEAM="$SEAM_INVOKE" one "$V_REMEMBER" )"
+case "$OUT" in *confirm-timeout*) : ;; *) fail "sleeping confirm seam did not deny confirm-timeout: $OUT";; esac
+case "$OUT" in *should-never-be-read*) fail "broker read a killed seam's late stdout (not reaped): $OUT";; esac
+
+# ── 19. AUDIT INTEGRATION — the broker's decisions were logged via the Step-2 primitive and
 #        the chain still verifies (single-flight -> no interleaved appends corrupt it).
 "$PY" "$AUDIT" verify >/dev/null 2>&1 || fail "audit chain does not verify after broker decisions"
 grep -q '"src":"broker"' "$LOG" || fail "no broker records in the audit log (decisions unlogged)"
