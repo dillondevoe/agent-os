@@ -1,0 +1,6 @@
+# Nix build output symlink (from `nix build .#vm`)
+/result
+/result-*
+
+# VM disk image created by run-agent-os-vm on first boot
+*.qcow2
