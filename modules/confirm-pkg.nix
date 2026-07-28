@@ -52,11 +52,36 @@ let
     export AGENT_OS_CONFIRM_GETTY_TTY=/dev/${gettyTty}
     exec ${pkgs.python3}/bin/python3 ${../bin/confirm} "$@"
   '';
+
+  # The egress allowance the confirm.nix sandbox asserts is EXACTLY one pinned endpoint.
+  relayEndpoints = [ { addr = relayAddr; port = relayPort; } ];
+
+  # ── Intrinsic seam invariants (spec §7) ──────────────────────────────────────
+  # Defined HERE, alongside the wrapper, so every consumer that PINS this store-path — confirm.nix
+  # (install), broker.nix + taint-pkg.nix (their AGENT_OS_CONFIRM_SEAM `export`s) — forces the SAME
+  # facts the wrapper embeds. The guarantee travels WITH the pin and survives confirm.nix ever being
+  # dropped from the system imports (Fable Step-6 follow-up: refactor-proof the by-construction
+  # store-path identity across all three consumers). Install-context checks (writable-scope vs
+  # protected paths, secret under a protected-READ path) stay in confirm.nix — they only exist when
+  # THAT module installs the client + provisions its 0700-root seen-store.
+  checks = [
+    { cond = builtins.length relayEndpoints == 1;
+      msg  = "confirm: egress allowance must be EXACTLY one pinned endpoint (addr+port, NO fallback list) — Fable ruling Q1; more than one and it can become a general exfil channel."; }
+    { cond = pkgs.lib.all (e: builtins.isString e.addr && e.addr != ""
+                            && builtins.isInt e.port && e.port > 0 && e.port < 65536) relayEndpoints;
+      msg  = "confirm: the pinned relay endpoint must be a non-empty addr + a 1..65535 int port."; }
+    { cond = gettyTty != modelTty;
+      msg  = "confirm: the second-getty console '${gettyTty}' must NEVER be the model's login tty '${modelTty}' (INV-1: the model's tty carries zero authorization)."; }
+    { cond = humanWindow + roundTrip <= brokerTimeout;
+      msg  = "confirm: human window (${toString humanWindow}s) + one relay round-trip (${toString roundTrip}s) must be <= the broker backstop (${toString brokerTimeout}s) so the client's graceful deny precedes the SIGKILL backstop (§5 ordering constraint)."; }
+  ];
+  # Forces every check; throws the first violated message. ANY consumer that references checksOk
+  # therefore fails the build on a violating pin — same guarantee as the registry's `assert ok`.
+  checksOk = pkgs.lib.all (c: pkgs.lib.asserts.assertMsg c.cond c.msg) checks;
 in
 {
   inherit wrapper
     confirmDir gettyTty modelTty channels brokerTimeout humanWindow roundTrip
-    relayAddr relayPort relaySecretFile dillonUserId;
-  # The egress allowance the confirm.nix sandbox asserts is EXACTLY one pinned endpoint.
-  relayEndpoints = [ { addr = relayAddr; port = relayPort; } ];
+    relayAddr relayPort relaySecretFile dillonUserId
+    relayEndpoints checksOk;
 }

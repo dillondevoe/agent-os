@@ -30,6 +30,11 @@ let
   # authoritative regardless of launch context, so no model-influenced parent env can redirect the
   # confirm seam to an auto-approver (Fable Step-6 ruling; see modules/confirm-pkg.nix header).
   confirmWrapper = import ./confirm-pkg.nix { inherit pkgs; };
+  # Couple the seam pin to confirm-pkg's sandbox invariants: `assert confirmWrapper.checksOk` forces
+  # the intrinsic §7 checks (single endpoint, INV-1 tty, §5 timing) at THIS wrapper's build, so the
+  # pin stays sandbox-validated even if modules/confirm.nix is ever dropped from the system imports
+  # (the store-path identity is by-construction; this makes its SAFETY refactor-proof too).
+  confirmSeam = assert confirmWrapper.checksOk; "${confirmWrapper.wrapper}/bin/confirm";
 
   # Materialize the registry to JSON. Reading `reg.registry` FORCES the Step-1 `assert ok`,
   # so a registry that violates a mechanism-3 invariant fails THIS module's build too — the
@@ -45,7 +50,7 @@ let
     export TAINT_BIN=${taintWrapper}/bin/taint
     export AUDIT_BIN=${auditWrapper}/bin/audit
     export AGENT_OS_BROKER_DIR=/var/lib/agent-os/broker
-    export AGENT_OS_CONFIRM_SEAM=${confirmWrapper.wrapper}/bin/confirm
+    export AGENT_OS_CONFIRM_SEAM=${confirmSeam}
     export AGENT_OS_CONFIRM_TIMEOUT_S=${toString confirmWrapper.brokerTimeout}
     exec ${pkgs.python3}/bin/python3 ${../bin/broker} "$@"
   '';
