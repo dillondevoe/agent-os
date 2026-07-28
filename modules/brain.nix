@@ -19,13 +19,18 @@
     # only on hardware that has it.
   };
 
-  # Make the whole stack agree on ONE model WITHOUT editing the security-reviewed
-  # shim: brain-ollama's built-in default is the 7B fast tier, but the 5440 runs the
-  # 14.8B. Set it here (session env) and have setup-brain.sh pull exactly this tag, so
-  # `brain-ollama --check` (>=1 model) AND the /api/chat model line agree — otherwise
-  # --check could pass on the 14B while the shim silently defaults to an un-pulled 7B.
+  # Make the whole stack agree on ONE brain + ONE model WITHOUT editing the security-
+  # reviewed shim. v0.1 (sovereign, CPU-only 5440) defaults to the snappy 7B-instruct
+  # tier; the 14.8B stays PULLABLE as the judgment lane (`setup-brain.sh --model
+  # qwen2.5:14b`). BRAIN is pinned to the local floor so the login shell NEVER selects a
+  # cloud brain even if a `claude` CLI were ever present (belt-and-suspenders on the
+  # no-cloud-path-in-v0.1 rule; none is installed on the image). setup-brain.sh pulls
+  # exactly OLLAMA_MODEL, so `brain-ollama --check` (>=1 model) AND the /api/chat model
+  # line agree — otherwise --check could pass on one tag while the shim defaults to an
+  # un-pulled other.
   environment.variables = {
+    BRAIN        = "brain-ollama";          # local floor IS the brain in v0.1 — no cloud path
     OLLAMA_HOST  = "http://127.0.0.1:11434";
-    OLLAMA_MODEL = "qwen2.5:14b";   # 14.8B Q4 (~9GB) = DVo's `gwen:latest` weights
+    OLLAMA_MODEL = "qwen2.5:7b-instruct";   # 7B (~4.7GB) fast tier = v0.1 default brain
   };
 }
