@@ -201,6 +201,65 @@ case "$o" in *"taint: TAINTED"*) : ;; *) fail "corrupt session.json did not read
   case "$b" in *"BOOT TAINTED"*) : ;; *) exit 61;; esac
 ) || fail "corrupt origins.json: recall/boot did not fail-closed to tainted"
 
+# 14. GAP-3: `status --json` structured consult (the Step-5 broker's ONLY hard prerequisite).
+#     Additive read-only mode on the SAME load_session() fail-closed owner. It must (a) emit a
+#     single canonical JSON line with EXACTLY the four keys the broker reads, (b) its `tainted`
+#     bit + `session_id` AGREE with the human `status` line in every state, and (c) fail-closed
+#     identically: uninitialized/corrupt session -> tainted=true, session_id=-1. The broker
+#     derives its LIVE decision from this bit, never from `gate`'s (always-0 shadow) exit code
+#     — a lie or a disagreement here is a wall breach. status is read-only (no audit emission),
+#     so it neither needs the audit binary nor perturbs the chain the final `av` re-verifies.
+
+# Extract one field from the --json line using the same json the tool serializes with. Prints
+# a shell-comparable token (true/false for bools, str() otherwise); non-zero if not valid JSON
+# or the key is absent (strict — the happy shape must actually ship, not just fail-close).
+json_field() {  # $1 = json string, $2 = key
+  printf '%s' "$1" | "$PY" -c 'import sys,json
+o=json.load(sys.stdin); k=sys.argv[1]
+if k not in o: sys.exit(7)
+v=o[k]; sys.stdout.write("true" if v is True else "false" if v is False else str(v))' "$2"
+}
+
+# (a) clean session: exit 0, valid JSON, EXACTLY the four broker keys, tainted=false, session>=0.
+t reset --confirm-human >/dev/null || fail "reset before json(clean) failed"
+J="$(t status --json)" || fail "status --json exited non-zero on clean session"
+keys="$(printf '%s' "$J" | "$PY" -c 'import sys,json; print(",".join(sorted(json.load(sys.stdin))))')" \
+  || fail "status --json did not emit valid JSON on clean session: $J"
+[ "$keys" = "note,reasons,session_id,tainted" ] \
+  || fail "status --json keys wrong (want note,reasons,session_id,tainted): $keys"
+[ "$(json_field "$J" tainted)" = "false" ] || fail "clean session json tainted!=false: $J"
+sid_clean="$(json_field "$J" session_id)" || fail "clean session json missing session_id: $J"
+case "$sid_clean" in -*|"") fail "clean session json session_id negative/empty: $J";; esac
+
+# (b) tainted session: tainted=true; a set only raises the bit, it must NOT bump session_id.
+t set "json-mode untrusted source" >/dev/null || fail "set before json(tainted) failed"
+J="$(t status --json)" || fail "status --json exited non-zero on tainted session"
+[ "$(json_field "$J" tainted)" = "true" ] || fail "tainted session json tainted!=true: $J"
+[ "$(json_field "$J" session_id)" = "$sid_clean" ] \
+  || fail "set changed session_id in json (only reset bumps it): $J"
+status_is TAINTED                                  # (c) --json and human line agree: tainted
+
+# (c cont.) after a human reset both read clean again — the two views never disagree on the bit.
+t reset --confirm-human >/dev/null || fail "reset before json(agreement) failed"
+J="$(t status --json)" || fail "status --json exited non-zero after reset"
+[ "$(json_field "$J" tainted)" = "false" ] || fail "post-reset json tainted!=false: $J"
+status_is clean
+
+# (d) FAIL-CLOSED uninitialized/corrupt: an isolated empty dir and a garbage session.json must
+#     BOTH read tainted=true, session_id=-1 — the load_session sentinel the broker keys on. The
+#     human line already asserts this (tests 1 + 13a); --json must carry the same bit + sentinel.
+( export AGENT_OS_TAINT_DIR="$SCRATCH/taint-json-uninit"; mkdir -p "$AGENT_OS_TAINT_DIR"
+  J="$("$PY" "$TAINT" status --json)" || exit 71                       # no state on disk
+  ts=$(printf '%s' "$J" | "$PY" -c 'import sys,json; o=json.load(sys.stdin); print(o["tainted"],o["session_id"])')
+  [ "$ts" = "True -1" ] || exit 72
+) || fail "status --json on uninitialized dir did not fail-closed to tainted/-1"
+( export AGENT_OS_TAINT_DIR="$SCRATCH/taint-json-corrupt"; mkdir -p "$AGENT_OS_TAINT_DIR"
+  printf 'not json }{' > "$AGENT_OS_TAINT_DIR/session.json"
+  J="$("$PY" "$TAINT" status --json)" || exit 73
+  ts=$(printf '%s' "$J" | "$PY" -c 'import sys,json; o=json.load(sys.stdin); print(o["tainted"],o["session_id"])')
+  [ "$ts" = "True -1" ] || exit 74
+) || fail "status --json on corrupt session.json did not fail-closed to tainted/-1"
+
 # Final: the corrupt/no-log sections logged only via the real audit (or not at all); the
 # real chain must STILL verify end-to-end.
 av || fail "audit chain broken after the no-log / corrupt-state sections"
