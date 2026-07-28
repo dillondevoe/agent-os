@@ -19,26 +19,14 @@
 { config, pkgs, lib, ... }:
 
 let
-  # The SAME production audit wrapper audit.nix installs — imported so AUDIT_BIN below
-  # pins the exact same store-path binary (no drift, no PATH lookup).
-  auditWrapper = import ./audit-pkg.nix { inherit pkgs; };
-
-  # Wrap the Python primitive so `taint` is on PATH with a pinned interpreter.
-  # Pin the state dir unconditionally (same lesson as the audit wrapper): a stray
-  # $AGENT_OS_TAINT_DIR in the broker's env must NOT redirect the PRODUCTION binary to a
-  # different taint store — that would silently read a clean bit from the wrong place and
-  # void the monotonicity guarantee.
-  # Pin AUDIT_BIN to the store-path audit wrapper (Fable Step-3 FIX-1): leaving it unset
-  # would let a stray $AUDIT_BIN=/bin/true, or any PATH-shadow of `audit`, make every
-  # `audit append` silently "succeed" — taint decisions would go UNLOGGED while ops
-  # proceed, voiding no-log->no-execute and the entire shadow-evidence base.
-  # Both env overrides survive only as TEST affordances via a DIRECT `python3 bin/taint`
-  # invocation — exactly how tests/taint-battery.sh drives it.
-  taint = pkgs.writeShellScriptBin "taint" ''
-    export AGENT_OS_TAINT_DIR=/var/lib/agent-os/taint
-    export AUDIT_BIN=${auditWrapper}/bin/audit
-    exec ${pkgs.python3}/bin/python3 ${../bin/taint} "$@"
-  '';
+  # The production `taint` wrapper, defined once in modules/taint-pkg.nix (single source of
+  # truth, mirroring modules/audit-pkg.nix) so modules/broker.nix pins the EXACT same
+  # store-path binary — same state dir, same AUDIT_BIN — with no drift. The wrapper pins
+  # AGENT_OS_TAINT_DIR + AUDIT_BIN unconditionally (a stray env override would redirect the
+  # PRODUCTION binary to the wrong taint store / a silently-succeeding audit sink, voiding
+  # monotonicity and no-log->no-execute); the overrides survive only as TEST affordances via
+  # a DIRECT `python3 bin/taint` invocation — exactly how tests/taint-battery.sh drives it.
+  taint = import ./taint-pkg.nix { inherit pkgs; };
 in
 {
   environment.systemPackages = [ taint ];

@@ -1,0 +1,616 @@
+#!/usr/bin/env python3
+"""broker — the Djinn capability broker ("the wall"). Phase 2 · Step 5.
+
+See docs/phase2-broker-spec.md (the merged, Fable-reviewed spec this file implements
+line-for-line) and docs/phase2-threat-model.md §5/§6/§7/§8/§12.
+
+The broker is the ONE trusted decision point. Upstream is untrusted (the model's bytes,
+normalized by bin/mcp) or a pure primitive (Steps 1-4); everything an action actually
+*does* is downstream, behind two narrow injected seams that DEFAULT TO FAIL-CLOSED STUBS:
+
+  * confirm_seam(request) -> APPROVE|DENY   — Step-5 default = DENY (channel not wired).
+                                              Step 6 replaces it with the Telegram relay.
+  * invoke_seam(cap, args) -> {ok,content}  — Step-5 default = not-implemented (a
+                                              fail-closed error, NEVER a fabricated
+                                              success). Step 7 replaces it with sandboxed
+                                              impls whose sandboxes are derived from the
+                                              same registry declarations validated here.
+
+Step 5 INVOKES NO CAPABILITY OF ITS OWN. Its only effects are the monotonic, fail-safe
+state effects the wall itself owns: `audit` appends (Step 2) and `taint` set/recall/stamp
+(Step 3) — all append-only / set-only, all fail-closed. It turns a validated MCP verdict
+into exactly one of {DENY, ALLOW-AUTO, REQUIRE-CONFIRM}, audits that decision BEFORE any
+effect (no-log -> no-execute), and — on the return path, the anti-laundering core —
+commits the taint effect that covers a result BEFORE the result's bytes are released.
+
+Single-flight: one verdict is resolved completely (through the return) before the next
+line is read, so the taint consult -> decision -> taint side-effect sequence is TOCTOU-free.
+
+Command:
+  broker run   < verdicts.ndjson   read one normalized mcp verdict dict per line, emit ONE
+                                    canonical result line per verdict. In production
+                                    `mcp parse < model-stdio | broker run`; tests feed
+                                    verdict lines directly (same input contract: the dict).
+
+Env (all pinned by modules/broker.nix in production; overridable ONLY via a direct
+`python3 bin/broker` call, exactly how tests/broker-battery.sh drives it):
+  AGENT_OS_REGISTRY     materialized registry JSON (a Step-1 protected path). Unreadable
+                        -> empty registry -> every tools/call denies unknown-capability.
+  TAINT_BIN / AUDIT_BIN the Step-3 / Step-2 binaries the broker shells out to.
+  AGENT_OS_CONFIRM_SEAM / AGENT_OS_INVOKE_SEAM   the two effect seams (unset = fail-closed
+                        stub). A seam program reads a request JSON on stdin and prints one
+                        JSON object on stdout; the broker reads content+status ONLY and
+                        NEVER an `origin` field (origin is broker policy, §4.5a).
+  AGENT_OS_BROKER_DIR   optional: anchor the audit head hash OUTSIDE the audit dir
+                        (Step-2 FIX-3 — makes a suffix-rewrite detectable before Step 7).
+
+Exit: 0 after a clean stream; 3 if stdin is unreadable or a malformed verdict line forces
+the stream shut (fail-closed). Every per-verdict failure is a `{ok:false,...}` deny LINE,
+not a process exit.
+"""
+import sys
+import os
+import json
+import re
+import ipaddress
+import subprocess
+from urllib.parse import urlsplit
+
+# ── Constants ────────────────────────────────────────────────────────────────
+E_DENY = -32000                 # broker policy denial (mirrors mcp's E_POLICY namespace)
+UNTRUSTED = "UNTRUSTED"
+TRUSTED = "TRUSTED"
+MAX_ARG_BYTES = 65536           # `bytes`-typed arg payload cap (matches mcp per-string cap)
+MAX_RECIPIENT = 256             # `recipient`-typed arg length bound
+
+# Origin is a SECURITY decision derived from the capability by BROKER POLICY — never read
+# off the impl's output (§4.5a: an impl reporting TRUSTED for a fetched page is fail-OPEN).
+# net.fetch body is attacker-controlled; file.read is operator-curated + sandbox-confined;
+# mem.recall consults the stored tag via `taint recall`; anything else defaults UNTRUSTED.
+ORIGIN_BY_CAP = {"net.fetch": UNTRUSTED, "file.read": TRUSTED}
+
+# namespace charset: no "/", no "..", bounded — so <root>/<ns> is confined by construction.
+_NS_RE = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
+
+
+# ── Child-process plumbing (taint / audit / seams) ───────────────────────────
+def _argv(binpath, *args):
+    """A plain (non-executable) file is run with THIS interpreter (repo bin/ in tests); an
+    installed shell wrapper is exec'd directly (production). Mirrors bin/taint's dispatch."""
+    a = [binpath] + list(args)
+    if os.path.isfile(binpath) and not os.access(binpath, os.X_OK):
+        a = [sys.executable, binpath] + list(args)
+    return a
+
+
+def _run(binpath, args, stdin_bytes=None, capture=False):
+    """Run a child; return (returncode, stdout_bytes). OSError -> (-1, b'') (fail-closed:
+    an unreachable primitive is a denial, never a silent success)."""
+    try:
+        p = subprocess.run(
+            _argv(binpath, *args),
+            input=stdin_bytes,
+            stdout=(subprocess.PIPE if capture else subprocess.DEVNULL),
+            stderr=subprocess.DEVNULL,
+        )
+    except OSError:
+        return -1, b""
+    return p.returncode, (p.stdout or b"")
+
+
+# ── Taint (Step 3) — the live bit via `status --json`, effects via set/recall/stamp ──
+def taint_status():
+    """Live provenance consult (CF-2). Return (tainted:bool, session_id:int). Fail-closed:
+    ANY error / non-zero / unparseable / corrupt -> (True, -1). The broker reads the
+    STRUCTURED bit (GAP-3), never `taint gate`'s exit code (always 0 in shadow), and never
+    reimplements load_session (no two-reader differential)."""
+    tb = os.environ.get("TAINT_BIN", "taint")
+    rc, out = _run(tb, ["status", "--json"], capture=True)
+    if rc != 0:
+        return True, -1
+    try:
+        o = json.loads(out.decode("utf-8"))
+        return bool(o["tainted"]), int(o["session_id"])
+    except (ValueError, KeyError, TypeError):
+        return True, -1
+
+
+def taint_gate_shadow(tier):
+    """Fire the SHADOW gate purely so the evidence log keeps accruing would_auto_authorize
+    (§4.4). Its exit status is DISCARDED — the live decision was already made from the bit."""
+    tb = os.environ.get("TAINT_BIN", "taint")
+    _run(tb, ["gate", tier])
+
+
+def taint_effect(*args):
+    """A mutating taint op (set/recall/stamp). Return True iff it COMMITTED (exit 0). On the
+    return path the broker withholds content unless the covering effect committed first."""
+    tb = os.environ.get("TAINT_BIN", "taint")
+    rc, _ = _run(tb, list(args), capture=True)
+    return rc == 0
+
+
+# ── Audit (Step 2) — append BEFORE effect; a non-zero append is a fail-closed deny ──
+def audit_append(record):
+    """Append one broker record via Step-2 audit. Return (ok:bool, head_hash:str|None).
+    Canonical serialization discipline (sort_keys / compact / ascii) like bin/audit."""
+    ab = os.environ.get("AUDIT_BIN", "audit")
+    payload = json.dumps(record, sort_keys=True, separators=(",", ":"),
+                         ensure_ascii=True).encode("utf-8")
+    rc, out = _run(ab, ["append"], stdin_bytes=payload, capture=True)
+    if rc != 0:
+        return False, None
+    return True, out.decode("utf-8").strip() or None
+
+
+# ── Injected effect seams (fail-closed stubs by default) ─────────────────────
+def _run_seam(env_var, request_obj):
+    """Exec an injected seam program with request JSON on stdin, parse its JSON stdout.
+    Return (obj, None) or (None, reason). Unset env -> (None, 'not-wired')."""
+    prog = os.environ.get(env_var)
+    if not prog:
+        return None, "not-wired"
+    payload = json.dumps(request_obj, sort_keys=True, separators=(",", ":"),
+                         ensure_ascii=True).encode("utf-8")
+    rc, out = _run(prog, [], stdin_bytes=payload, capture=True)
+    if rc != 0:
+        return None, "seam-exit-%d" % rc
+    try:
+        return json.loads(out.decode("utf-8")), None
+    except ValueError as e:
+        return None, "seam-bad-json: %s" % e
+
+
+def confirm_seam(confirm_request):
+    """Step-5 default = DENY ('confirm-channel-not-wired'). Any configured seam that fails,
+    errors, or returns a non-approving/malformed answer ALSO denies (fail-closed). Only an
+    explicit {approved:true} approves."""
+    obj, err = _run_seam("AGENT_OS_CONFIRM_SEAM", confirm_request)
+    if err is not None:
+        return {"approved": False, "reason": "confirm-channel-not-wired"}
+    if not isinstance(obj, dict) or obj.get("approved") is not True:
+        reason = obj.get("reason") if isinstance(obj, dict) else "confirm-malformed"
+        return {"approved": False, "reason": str(reason or "denied")}
+    return {"approved": True, "reason": str(obj.get("reason") or "approved")}
+
+
+def invoke_seam(cap_name, validated_args):
+    """Step-5 default = not-implemented (fail-closed error, NEVER a fabricated success).
+    Return {wired, ran, ok, content, meta}. content+status ONLY — any `origin` field the
+    impl reports is IGNORED (reading it would be fail-open; origin is broker policy §4.5a).
+    `meta.key` (identity, not trust) is the only meta field consulted, for taint recall/stamp."""
+    prog = os.environ.get("AGENT_OS_INVOKE_SEAM")
+    if not prog:
+        return {"wired": False, "ran": False, "ok": False, "content": None,
+                "meta": {"reason": "impl-not-wired"}}
+    obj, err = _run_seam("AGENT_OS_INVOKE_SEAM", {"capability": cap_name,
+                                                  "arguments": validated_args})
+    if err is not None:
+        # Configured but could not run/parse — a seam INFRASTRUCTURE failure, not attacker
+        # content. Deny; do not route it through the origin/taint path (no bytes to launder).
+        return {"wired": True, "ran": False, "ok": False, "content": None,
+                "meta": {"reason": "invoke-failed: %s" % err}}
+    meta = obj.get("meta") if isinstance(obj, dict) and isinstance(obj.get("meta"), dict) else {}
+    return {"wired": True, "ran": True, "ok": (isinstance(obj, dict) and obj.get("ok") is True),
+            "content": (obj.get("content") if isinstance(obj, dict) else None), "meta": meta}
+
+
+# ── Arg-schema validation (§4.3, CF-7) — total, fail-closed per type ─────────
+def path_is_canonical(p):
+    """Leading '/', no empty/'.'/'..' segment, no trailing '/'. This is the PYTHON reader of
+    the SAME rule as the Nix `pathIsCanonical`; the two are pinned to shared golden vectors
+    in the battery (§7) — any differential between them is a confinement bypass."""
+    if not isinstance(p, str) or not p.startswith("/"):
+        return False
+    parts = p.split("/")
+    if parts[0] != "" or len(parts) < 2:
+        return False
+    return all(seg not in ("", ".", "..") for seg in parts[1:])
+
+
+def path_confined(p, roots):
+    """p is canonical and confined iff it EQUALS a cap root or lies strictly under one.
+    Roots are registry-canonical (no trailing slash), so `root + '/'` is the boundary. This
+    is textual defense-in-depth OVER the Step-7 systemd sandbox — symlink-escape is Step-7's
+    OS job (ProtectSystem / InaccessiblePaths)."""
+    for r in roots:
+        if p == r or p.startswith(r.rstrip("/") + "/"):
+            return True
+    return False
+
+
+def _obfuscated_ip_host(host):
+    """Reject host forms that ONLY ever encode an obfuscated IP: all-digit (decimal int like
+    2130706433), 0x-hex (0x7f000001), or a dotted label with a leading-zero octal octet
+    (0177.0.0.1). A literal deny-list misses all of these; rejecting the FORM closes them."""
+    h = host.lower()
+    if host.isdigit():
+        return True
+    if h.startswith("0x"):
+        return True
+    for label in host.split("."):
+        if len(label) > 1 and label[0] == "0" and label.isdigit():
+            return True
+    return False
+
+
+def validate_url(v):
+    """INV-2, evasion-hardened (§4.3). http/https + non-empty host; reject obfuscated-IP host
+    forms outright; for any host that parses as an IP, unwrap ipv4_mapped and deny the whole
+    private/loopback/link-local/reserved/unspecified/multicast space. A hostname that RESOLVES
+    into a denied range is caught by Step-7 systemd IPAddressDeny (no DNS in the broker, v1)."""
+    if not isinstance(v, str):
+        return False, "url-not-string"
+    try:
+        parts = urlsplit(v)
+    except ValueError:
+        return False, "url-unparseable"
+    if parts.scheme not in ("http", "https"):
+        return False, "url-scheme-not-http(s)"
+    host = parts.hostname
+    if not host:
+        return False, "url-no-host"
+    if _obfuscated_ip_host(host):
+        return False, "egress-denied (obfuscated-ip host form)"
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        ip = None
+    if ip is not None:
+        if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
+            ip = ip.ipv4_mapped            # unwrap ::ffff:127.0.0.1 -> 127.0.0.1
+        if (ip.is_loopback or ip.is_private or ip.is_link_local or ip.is_reserved
+                or ip.is_unspecified or ip.is_multicast):
+            return False, "egress-denied (INV-2)"
+    return True, None
+
+
+def validate_recipient(v):
+    """Printable ASCII, NO control / whitespace / non-ASCII (0x21-0x7e). The §4.3 range names
+    0x20-0x7e but ALSO forbids whitespace; 0x20 IS space, so the tighter, intent-bearing
+    constraint wins — space is excluded. A confusable/homoglyph destination is approve-under-
+    deception in the confirm frame, so the value is charset-locked here; it is never trusted
+    for authorization (it is surfaced verbatim to the human in Step 6)."""
+    if not isinstance(v, str):
+        return False, "recipient-not-string"
+    if not (1 <= len(v) <= MAX_RECIPIENT):
+        return False, "recipient-length"
+    if not all(0x21 <= ord(c) <= 0x7e for c in v):
+        return False, "recipient-not-printable-ascii"
+    return True, None
+
+
+def validate_namespace(v, cap):
+    """Charset-bounded and resolving STRICTLY under the cap's mem root as <root>/<ns> — never
+    a sibling of session/ (§4.3). The regex already bars '/' and '..', so <root>/<ns> is
+    confined by construction; the resolved-path check is belt-and-suspenders on TOP of that."""
+    if not isinstance(v, str) or not _NS_RE.match(v):
+        return False, "namespace-charset"
+    sb = cap.get("sandbox", {})
+    roots = list(sb.get("readWritePaths", [])) or list(sb.get("readOnlyPaths", []))
+    if not roots:
+        return False, "namespace-no-root"
+    root = roots[0].rstrip("/")
+    resolved = os.path.normpath(root + "/" + v)
+    if resolved != root + "/" + v or not resolved.startswith(root + "/"):
+        return False, "namespace-not-under-root"
+    return True, None
+
+
+def validate_value(argtype, v, cap):
+    """Per-type value validator. Total and fail-closed: an unknown type denies (the registry
+    assert already restricts types, but the broker does not ASSUME it)."""
+    if argtype == "string":
+        return (isinstance(v, str), None if isinstance(v, str) else "not-a-string")
+    if argtype == "bytes":
+        if not isinstance(v, str):
+            return False, "not-a-string"
+        if len(v.encode("utf-8")) > MAX_ARG_BYTES:
+            return False, "bytes-exceeds-cap"
+        return True, None
+    if argtype == "enum":
+        # GAP-1: the registry declares no member set, so the broker cannot validate an enum
+        # -> deny (fail-closed). net.fetch.method is thus unusable in v1 (net.fetch is T2/
+        # confirm-gated anyway). Lands when the additive Step-1 `argEnums` field ships.
+        return False, "enum-no-member-set (GAP-1, fail-closed)"
+    if argtype == "path":
+        if not path_is_canonical(v):
+            return False, "path-not-canonical"
+        sb = cap.get("sandbox", {})
+        roots = list(sb.get("readWritePaths", [])) + list(sb.get("readOnlyPaths", []))
+        if not path_confined(v, roots):
+            return False, "arg-confinement (path outside cap root)"
+        return True, None
+    if argtype == "namespace":
+        return validate_namespace(v, cap)
+    if argtype == "url":
+        return validate_url(v)
+    if argtype == "recipient":
+        return validate_recipient(v)
+    return False, "unknown-arg-type"
+
+
+def check_args(cap, arguments):
+    """Exact-key-match + per-type validation (§4.3). Every provided key must be declared;
+    every declared arg is required (v1 — the registry has no optional marker, GAP-2)."""
+    declared = cap.get("args", {}) or {}
+    provided = set(arguments.keys())
+    declared_keys = set(declared.keys())
+    unknown = provided - declared_keys
+    if unknown:
+        return False, "arg-schema: unknown arg(s): %s" % ",".join(sorted(unknown))
+    missing = declared_keys - provided
+    if missing:
+        return False, "arg-schema: missing required arg(s): %s" % ",".join(sorted(missing))
+    for name in sorted(declared_keys):
+        ok, why = validate_value(declared[name], arguments[name], cap)
+        if not ok:
+            return False, "arg-schema: arg '%s': %s" % (name, why)
+    return True, None
+
+
+# ── Result shaping ───────────────────────────────────────────────────────────
+def deny(rid, message, code=E_DENY):
+    return {"ok": False, "id": rid, "error": {"code": code, "message": message}}
+
+
+def data_result(rid, capability_ok, content):
+    """Every returned capability payload is wrapped in a `content_type:"data"` envelope
+    (§4.9) — structurally distinct from the instruction stream, so an HONEST model keeps
+    them apart. ADVISORY defense-in-depth only: the load-bearing guarantee is taint + the
+    T2 floor. Both a success and an error body are wrapped, so attacker bytes NEVER land in
+    the instruction-carrying `error.message`."""
+    return {"ok": True, "id": rid,
+            "result": {"content_type": "data", "capability_ok": bool(capability_ok),
+                       "content": content}}
+
+
+# ── The broker ───────────────────────────────────────────────────────────────
+class Broker:
+    def __init__(self):
+        self.initialized = False
+        self.audit_head = None
+        self.registry = self._load_registry()
+
+    def _load_registry(self):
+        """Read the materialized registry JSON from a Step-1 protected path. Unreadable ->
+        empty -> every tools/call denies unknown-capability (fail-closed; a missing registry
+        never fails OPEN into 'allow')."""
+        path = os.environ.get("AGENT_OS_REGISTRY", "/etc/agent-os/registry/registry.json")
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                reg = json.load(f)
+            if not isinstance(reg, dict):
+                raise ValueError("registry is not an object")
+            return reg
+        except (OSError, ValueError) as e:
+            sys.stderr.write("broker: registry unreadable (%s) — all tools/call deny "
+                             "unknown-capability (fail-closed)\n" % e)
+            return {}
+
+    def _audit(self, event, rid, **fields):
+        """Append one broker audit record; return True iff logged. Drops None fields. On
+        success, anchors the head hash outside the audit dir (Step-2 FIX-3, best-effort)."""
+        rec = {"src": "broker", "event": event, "id": rid}
+        for k, v in fields.items():
+            if v is not None:
+                rec[k] = v
+        ok, head = audit_append(rec)
+        if ok and head:
+            self.audit_head = head
+            self._anchor(head)
+        return ok
+
+    def _anchor(self, head):
+        """Anchor the audit head OUTSIDE the audit dir so a suffix-rewrite of the log (which
+        the hash chain alone cannot detect) is caught before Step-7 `chattr +a` lands. Zero
+        protocol cost; best-effort — a failed anchor weakens future tamper-EVIDENCE but does
+        not make the just-logged action unsafe, so it never blocks the request."""
+        d = os.environ.get("AGENT_OS_BROKER_DIR")
+        if not d:
+            return
+        try:
+            with open(os.path.join(d, "audit_head"), "w", encoding="utf-8") as f:
+                f.write(head + "\n")
+        except OSError as e:
+            sys.stderr.write("broker: could not anchor audit head: %s\n" % e)
+
+    # ── provenance side-effects (§3 stage 9) — taint MUST commit before content leaves ──
+    def _commit_provenance(self, name, invoke_res):
+        """Derive origin by BROKER POLICY and commit the required taint effect FIRST. Return
+        (proceed:bool, reason). proceed=False -> withhold content, typed error, audit."""
+        meta = invoke_res.get("meta") or {}
+        if name == "mem.recall":
+            key = meta.get("key")
+            if isinstance(key, str) and key:
+                # taint owns the tag; the broker asks it, never trusts an impl origin field.
+                ok = taint_effect("recall", key)
+            else:
+                # can't identify the recalled entry -> unknown provenance -> untrusted.
+                ok = taint_effect("set", "mem.recall unidentified-key (fail-closed untrusted)")
+            return ok, (None if ok else "taint-recall-failed")
+        if name == "mem.remember":
+            key = meta.get("key")
+            if not (isinstance(key, str) and key):
+                # a write whose origin cannot be pinned is a laundering hole -> fail the request.
+                return False, "mem.remember: no key to stamp (provenance unpinnable)"
+            ok = taint_effect("stamp", key)          # the BROKER stamps (§4.9 MUST-FIX #2)
+            return ok, (None if ok else "taint-stamp-failed")
+        # Everything else: taint iff the broker-derived origin is UNTRUSTED (net.fetch, or any
+        # unmapped cap that somehow returned content). TRUSTED (file.read) needs no effect.
+        if ORIGIN_BY_CAP.get(name, UNTRUSTED) == UNTRUSTED:
+            ok = taint_effect("set", "untrusted-origin result (cap=%s)" % name)
+            return ok, (None if ok else "taint-set-failed")
+        return True, None
+
+    # ── tools/call — the 10-stage pipeline (§3) ──
+    def _handle_call(self, v):
+        rid = v.get("id")
+        name = v.get("name")
+        arguments = v.get("arguments") or {}
+
+        # Stage 2 — registry lookup. reset/taint.modify/... are simply NOT keys -> denied
+        # here; T3 non-expressibility is automatic (CF-1a), no special case.
+        cap = self.registry.get(name)
+        if cap is None:
+            self._audit("deny", rid, capability=name, reason="unknown-capability")
+            return deny(rid, "unknown-capability: %s" % name)
+
+        # Stage 3 — arg-schema (semantics; mcp already guaranteed structure).
+        ok, why = check_args(cap, arguments)
+        if not ok:
+            self._audit("deny", rid, capability=name, reason=why)
+            return deny(rid, why)
+
+        # Stage 4 — tier (pure registry read; the model cannot set it).
+        tier = cap.get("tier")
+        if tier not in ("T0", "T1", "T2"):
+            self._audit("deny", rid, capability=name, reason="bad-tier")
+            return deny(rid, "capability has no valid tier")
+
+        # Stage 5 — taint consult: LIVE bit from the structured owner; shadow gate parallel
+        # (evidence only, exit discarded).
+        tainted, sid = taint_status()
+        taint_gate_shadow(tier)
+        provenance = "TAINTED" if tainted else "TRUSTED"
+
+        # Stage 6 — authorize (v1: confirm EVERYTHING above T0, provenance-independent).
+        decision = "ALLOW-AUTO" if tier == "T0" else "REQUIRE-CONFIRM"
+
+        # Stage 7 — audit the routing decision BEFORE any effect (no-log -> no-execute).
+        nonce = os.urandom(16).hex() if decision == "REQUIRE-CONFIRM" else None
+        if not self._audit("route", rid, capability=name, tier=tier, provenance=provenance,
+                           decision=decision, nonce=nonce):
+            return deny(rid, "audit-failed (no-log->no-execute)")
+
+        # Stage 8 — effect.
+        if decision == "REQUIRE-CONFIRM":
+            confirm_request = {
+                "capability": name, "tier": tier, "typed_args": arguments,
+                "provenance": provenance,
+                "destination": arguments.get("recipient") or arguments.get("url"),
+                "nonce": nonce, "session_id": sid,
+            }
+            ans = confirm_seam(confirm_request)
+            if not ans.get("approved"):
+                self._audit("deny", rid, capability=name, tier=tier, nonce=nonce,
+                            reason="confirm-denied: %s" % ans.get("reason"))
+                return deny(rid, "confirm: %s" % ans.get("reason"))
+            # Nonce/epoch binding: an approval must arrive under the SAME session_id it was
+            # minted under. A taint reset / new epoch between mint and approve -> deny.
+            _, sid_now = taint_status()
+            if sid_now != sid:
+                self._audit("deny", rid, capability=name, tier=tier, nonce=nonce,
+                            reason="confirm-session-id-mismatch")
+                return deny(rid, "confirm-session-id-mismatch (epoch changed since mint)")
+            if not self._audit("approve", rid, capability=name, tier=tier, nonce=nonce,
+                               decision="APPROVED"):
+                return deny(rid, "audit-failed (no-log->no-execute)")
+
+        res = invoke_seam(name, arguments)
+        if not res.get("wired"):
+            self._audit("deny", rid, capability=name, reason="impl-not-wired")
+            return deny(rid, "impl-not-wired")
+        if not res.get("ran"):
+            # seam infrastructure failure — no attacker bytes to launder; deny.
+            self._audit("deny", rid, capability=name,
+                        reason=res.get("meta", {}).get("reason", "invoke-failed"))
+            return deny(rid, res.get("meta", {}).get("reason", "invoke-failed"))
+
+        # Stage 9 — provenance side-effects BEFORE any content leaves. A success body AND an
+        # error body both carry potential attacker bytes, so BOTH flow through here.
+        proceed, reason = self._commit_provenance(name, res)
+        if not proceed:
+            self._audit("withhold", rid, capability=name, reason=reason)
+            return deny(rid, "content-withheld: %s" % reason)
+
+        # Stage 10 — return the now-taint-covered result in the advisory DATA envelope.
+        self._audit("invoke", rid, capability=name, tier=tier,
+                    decision=("ok" if res.get("ok") else "capability-error"))
+        return data_result(rid, res.get("ok"), res.get("content"))
+
+    # ── initialize / tools/list — audited metadata, no tier/taint/impl ──
+    def _handle_initialize(self, v):
+        rid = v.get("id")
+        if self.initialized:
+            self._audit("deny", rid, reason="second-initialize")
+            return deny(rid, "already initialized (handshake is once)")
+        self.initialized = True
+        self._audit("initialize", rid, protocolVersion=v.get("protocolVersion"))
+        return {"ok": True, "id": rid,
+                "result": {"protocolVersion": v.get("protocolVersion")}}
+
+    def _handle_tools_list(self, v):
+        rid = v.get("id")
+        # Enumerate the registry (a T0 view). An unknown/stale cursor -> a FRESH enumeration;
+        # the cursor is never trusted to resume state.
+        tools = sorted(({"name": n, "tier": c.get("tier")}
+                        for n, c in self.registry.items()), key=lambda t: t["name"])
+        self._audit("tools/list", rid, count=len(tools))
+        return {"ok": True, "id": rid, "result": {"tools": tools, "cursor": None}}
+
+    # ── per-verdict dispatch (§3 stage 1) ──
+    def process(self, v):
+        """v is a normalized mcp verdict dict. Return the result dict to emit."""
+        rid = v.get("id")
+        if v.get("ok") is not True:
+            # ok:false is the model's error — pass it through verbatim, audit, STOP. Never
+            # re-parse or 'recover' it (CF-6: one parser, one meaning).
+            err = v.get("error") if isinstance(v.get("error"), dict) else \
+                {"code": E_DENY, "message": "denied"}
+            self._audit("deny-passthrough", rid, reason=err.get("message"))
+            return {"ok": False, "id": rid, "error": err}
+        method = v.get("method")
+        if method == "initialize":
+            return self._handle_initialize(v)
+        if method == "tools/list":
+            return self._handle_tools_list(v)
+        if method == "tools/call":
+            return self._handle_call(v)
+        self._audit("deny", rid, reason="unknown-method: %s" % method)
+        return deny(rid, "unknown method: %s" % method)
+
+
+def emit(obj):
+    # Canonical compact serialization, same discipline as bin/mcp / bin/audit: sort_keys =>
+    # deterministic goldens; ensure_ascii keeps it single-line + 7-bit so no result field can
+    # forge a second output line; allow_nan=False fails closed over a non-JSON token.
+    sys.stdout.write(json.dumps(obj, sort_keys=True, separators=(",", ":"),
+                                ensure_ascii=True, allow_nan=False) + "\n")
+    sys.stdout.flush()
+
+
+def cmd_run(argv):
+    """Read one verdict dict per line; resolve each COMPLETELY before reading the next
+    (single-flight). A malformed verdict line (not JSON / not an object) can only mean the
+    mcp child died or was tampered — deny AND shut the stream (fail-closed)."""
+    broker = Broker()
+    stream = sys.stdin
+    for raw in stream:
+        line = raw.rstrip("\n")
+        if not line.strip():
+            continue
+        try:
+            v = json.loads(line)
+        except ValueError:
+            emit(deny(None, "malformed verdict line — shutting stream (child died/tampered)"))
+            return 3
+        if not isinstance(v, dict):
+            emit(deny(None, "verdict is not an object — shutting stream"))
+            return 3
+        emit(broker.process(v))
+    return 0
+
+
+def main(argv):
+    if not argv:
+        sys.stderr.write(__doc__)
+        return 2
+    if argv[0] == "run":
+        return cmd_run(argv[1:])
+    sys.stderr.write("broker: unknown command '%s' (run)\n" % argv[0])
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

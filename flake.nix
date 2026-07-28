@@ -18,6 +18,7 @@
           ./modules/audit.nix
           ./modules/taint.nix
           ./modules/mcp.nix
+          ./modules/broker.nix
         ];
       };
 
@@ -79,6 +80,29 @@
               bash ${./tests/mcp-battery.sh} ${./bin/mcp} "$work"
               touch $out
             '';
+
+        # Phase 2 · Step 5 — the broker's property battery ("the wall"). Proves the 10-stage
+        # fail-closed pipeline against the REAL materialized registry + the REAL taint/audit
+        # primitives as children: the routing matrix (T0 ALLOW-AUTO, T1/T2 REQUIRE-CONFIRM),
+        # T3 non-expressibility, per-type arg validation (path canonical+confined via shared
+        # golden vectors, url INV-2 + obfuscated-IP evasion, namespace-under-root, recipient
+        # charset, enum-denies-pre-GAP-1), verdict passthrough, single-flight + malformed-line
+        # stream-shut, no-log->no-execute, the return-path taint-before-content ordering
+        # (origin broker-derived not impl-reported, withhold-on-taint-fail, broker-owns-the-
+        # stamp), the DATA fence, confirm epoch binding, and mcp-input-contract compatibility.
+        # It materializes the registry with the SAME builtins.toJSON the broker module ships,
+        # so a registry change that would break classification fails `nix flake check` here.
+        broker-core =
+          let
+            reg = import ./modules/capability-registry.nix { lib = nixpkgs.lib; };
+            pkgs = nixpkgs.legacyPackages.${system};
+            registryJson = pkgs.writeText "registry.json" (builtins.toJSON reg.registry);
+          in pkgs.runCommand "broker-core-check" { nativeBuildInputs = [ pkgs.python3 ]; } ''
+            work="$(mktemp -d)"
+            bash ${./tests/broker-battery.sh} ${./bin/broker} ${./bin/taint} ${./bin/audit} \
+              ${./bin/mcp} ${registryJson} "$work"
+            touch $out
+          '';
       };
     };
 }
