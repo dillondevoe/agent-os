@@ -17,6 +17,7 @@
           ./modules/brain.nix
           ./modules/audit.nix
           ./modules/taint.nix
+          ./modules/mcp.nix
         ];
       };
 
@@ -61,6 +62,21 @@
             { nativeBuildInputs = [ nixpkgs.legacyPackages.${system}.python3 ]; } ''
               work="$(mktemp -d)"
               bash ${./tests/taint-battery.sh} ${./bin/taint} ${./bin/audit} "$work"
+              touch $out
+            '';
+
+        # Phase 2 · Step 4 — the MCP stdio front door's conformance + hostile-input
+        # battery. Proves the parser invariants: one pinned protocol rev, three methods
+        # only, and fail-closed on every unknown/malformed/oversized/duplicate-id/
+        # duplicate-key/type-coerced/trailing-byte/unicode-trick input, with hard
+        # size+depth caps and NO parser differential (one parser, one schema, no
+        # coercion). The parser is pure (no privileged state), so this check needs no
+        # scratch dirs beyond a workdir. A regression fails `nix flake check`.
+        mcp-conformance =
+          nixpkgs.legacyPackages.${system}.runCommand "mcp-conformance-check"
+            { nativeBuildInputs = [ nixpkgs.legacyPackages.${system}.python3 ]; } ''
+              work="$(mktemp -d)"
+              bash ${./tests/mcp-battery.sh} ${./bin/mcp} "$work"
               touch $out
             '';
       };
