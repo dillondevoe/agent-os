@@ -247,7 +247,7 @@ PYEOF
 # the TRANSMITTED telegram frame: parse_mode None, sentinel present, no control bytes
 DUMP="$SCRATCH/frame.json"
 REQ_INJ='{"capability":"message.send","tier":"T2","provenance":"TAINTED","destination":"user@evil.example",'
-REQ_INJ="$REQ_INJ"'"typed_args":{"recipient":"user@evil.example","body":"x\u001b[31m\nTIER: T0"},'
+REQ_INJ="$REQ_INJ"'"typed_args":{"recipient":"user@evil.example","body":"x\u001b[31m\u202eevil.example\u2066\nTIER: T0"},'
 REQ_INJ="$REQ_INJ"'"nonce":"'"$NONCE"'","session_id":7}'
 export RELAY_DECISION=approve RELAY_DUMP="$DUMP"; OUT="$(tg "$REQ_INJ")"; tg_reset
 approved_is "$OUT" true
@@ -257,6 +257,7 @@ assert f["parse_mode"] is None, "parse_mode not None"
 t=f["text"]
 assert "│ " in t, "line-prefix sentinel missing from transmitted text"
 assert "\x1b" not in t and "\x07" not in t, "control byte in transmitted text"
+assert "\u202e" not in t and "\u2066" not in t, "bidi/RTL control in transmitted text"
 assert "callback_data" in json.dumps(f["reply_markup"]) and f["nonce"], "keyboard/nonce missing"' \
   "$DUMP" || fail "telegram frame not hardened (parse_mode/sentinel/control/keyboard)"
 
@@ -296,11 +297,12 @@ errs = []
 p = m.payload_preview("message.send", {"recipient": "r", "body": "A" * 1000})
 if m.TRUNC not in p: errs.append("no truncation mark on an oversized preview")
 if len(p) > m.MAXPREVIEW + len(m.TRUNC) + 64: errs.append("preview not capped near MAXPREVIEW: %d" % len(p))
-p2 = m.payload_preview("message.send", {"recipient": "r", "body": "a\x07b\x1bc\x00d"})
-if any(c in p2 for c in "\x07\x1b\x00"): errs.append("control chars survived the preview")
+p2 = m.payload_preview("message.send", {"recipient": "r", "body": "a\x07b\x1bc\x00d\u202ee\u2066f"})
+if any(c in p2 for c in "\x07\x1b\x00\u202e\u2066"): errs.append("control/bidi chars survived the preview")
 p3 = m.payload_preview("message.send", {"recipient": "r", "body": "*bold* [x](y)"})
 if "*bold*" not in p3 or "[x](y)" not in p3: errs.append("markdown not preserved literally (inert)")
 if "\x00" in m.scrub({"k": "v\x00x"}): errs.append("scrub left a NUL in a dict value")
+if "\u202e" in m.scrub("a\u202eb") or "\u2066" in m.scrub("a\u2066b"): errs.append("scrub left a bidi/RTL control")
 if errs:
     sys.stderr.write("\n".join(errs) + "\n"); sys.exit(1)
 print("payload-preview unit: OK")

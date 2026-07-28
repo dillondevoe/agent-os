@@ -40,6 +40,18 @@ GETTY_MAX_RETRIES = 3              # ≤3-retry-then-deny for the 40-bit getty c
 # frame and control bytes anywhere in the frame (the PR#1-B2 lesson, generalized §4.1).
 _CTRL = set(range(0x00, 0x09)) | set(range(0x0b, 0x20)) | {0x7f} | set(range(0x80, 0xa0))
 
+# Bidirectional/RTL format controls (Unicode Cf). They cannot forge an unprefixed trust line —
+# the LINE_PREFIX sentinel already defends frame STRUCTURE — but the human is explicitly asked to
+# verify the recipient/host, and an RTL override can visually reorder a destination into a
+# benign-looking one while the AUTHORIZED bytes differ (Trojan-Source, CVE-2021-42574, applied to
+# an approve-under-deception decision — Fable Step-6 hardening). Strip the full set so what the
+# human reads matches the logical byte order: LRM/RLM, the embedding+override block
+# (LRE/RLE/PDF/LRO/RLO), and the isolates (LRI/RLI/FSI/PDI).
+_BIDI = {0x200e, 0x200f} | set(range(0x202a, 0x202f)) | set(range(0x2066, 0x206a))
+
+# Everything scrub() removes from a model-controlled value before it enters the frame.
+_STRIP = _CTRL | _BIDI
+
 
 def deny(reason):
     """The single fail-closed exit. Print the DENY verdict and leave. Never raises past here."""
@@ -56,14 +68,15 @@ def approve(reason="approved"):
 
 # ── §4.1 model-controlled-value hygiene ──────────────────────────────────────
 def scrub(value):
-    """Control-char-strip (C0/C1 except \\t\\n, plus DEL) then newline-normalize (CR/CRLF/\\v/\\f
-    -> \\n). Total: any object is str()'d first, so a non-string model value can never dodge the
-    scrub. This runs on EVERY model-controlled value before it enters the frame."""
+    """Control-char-strip (C0/C1 except \\t\\n, plus DEL) + bidi/RTL-format-strip (Trojan-Source
+    defense) then newline-normalize (CR/CRLF/\\v/\\f -> \\n). Total: any object is str()'d first,
+    so a non-string model value can never dodge the scrub. This runs on EVERY model-controlled
+    value before it enters the frame."""
     s = value if isinstance(value, str) else json.dumps(value, sort_keys=True, ensure_ascii=False) \
         if isinstance(value, (dict, list)) else str(value)
     # newline-normalize first so \v/\f/CR become \n and line-splitting is well-defined
     s = s.replace("\r\n", "\n").replace("\r", "\n").replace("\v", "\n").replace("\f", "\n")
-    return "".join(ch for ch in s if ord(ch) not in _CTRL)
+    return "".join(ch for ch in s if ord(ch) not in _STRIP)
 
 
 def prefix_lines(scrubbed):
