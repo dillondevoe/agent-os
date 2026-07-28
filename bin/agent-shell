@@ -57,13 +57,33 @@ printf "${DIM}config at /etc/nixos — ask me to change a setting and I rewrite 
 
 # --- hand off to the brain ---------------------------------------------------
 # The brain IS the shell. It can read/write $MEM, run commands, and edit the
-# system's own nix config. If no cloud brain is installed yet, fall back to a
-# minimal memory-aware REPL so the box still boots-and-talks for the demo.
-BRAIN="${BRAIN:-claude}"
+# system's own nix config. Precedence: an explicit $BRAIN always wins; otherwise
+# prefer a cloud brain (Claude Code) when installed, fall to the local Ollama
+# floor when a model is actually reachable, and finally a memory-aware REPL so the
+# box still boots-and-talks with zero deps.
+#
+# The login shell must NEVER exec into a brain that can't talk — that would
+# crash-loop getty's autologin — so the local floor is PROBED (`brain-ollama
+# --check`) before we commit to it. `brain-ollama` may be installed on PATH (nix)
+# or sit beside this script (repo/dev), so resolve both.
+SELF_DIR="$(cd "$(dirname "$0")" && pwd)"
+resolve_brain() { command -v "$1" 2>/dev/null || { [ -x "$SELF_DIR/$1" ] && echo "$SELF_DIR/$1"; }; }
 
-if command -v "$BRAIN" >/dev/null 2>&1; then
+BRAIN="${BRAIN:-}"
+if [ -z "$BRAIN" ]; then
+  if command -v claude >/dev/null 2>&1; then
+    BRAIN=claude                                    # cloud brain: primary
+  else
+    _ob="$(resolve_brain brain-ollama)"
+    if [ -n "$_ob" ] && "$_ob" --check; then
+      BRAIN="$_ob"                                  # local Ollama floor: offline + reachable
+    fi
+  fi
+fi
+
+if [ -n "$BRAIN" ] && _bp="$(resolve_brain "$BRAIN")" && [ -n "$_bp" ]; then
   cd "$HOME"
-  exec "$BRAIN"          # e.g. Claude Code: boot straight into the agent
+  exec "$_bp"           # the brain IS the shell: boot straight into the agent
 else
   printf "${DIM}(no cloud brain installed — run bin/setup-brain.sh. Falling back to memory REPL.)${RST}\n\n"
   # tiny placeholder so the scaffold is demoable with zero deps. It drives the SAME

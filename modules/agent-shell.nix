@@ -7,12 +7,17 @@ let
   # call it); give it an explicit python3 shebang so it runs on the target with no deps.
   memBin = pkgs.writeScriptBin "mem"
     ("#!${pkgs.python3}/bin/python3\n" + builtins.readFile ../bin/mem);
+  # The offline/sovereign brain — a stdlib Ollama chat shim. agent-shell falls to
+  # this (the "local floor") when no cloud brain is installed and a model is
+  # reachable. Same python3-shebang wrapping as mem so it needs no runtime deps.
+  brainOllamaBin = pkgs.writeScriptBin "brain-ollama"
+    ("#!${pkgs.python3}/bin/python3\n" + builtins.readFile ../bin/brain-ollama);
   # The launcher lives in the repo so it's easy to iterate; installed to /run/current-system.
-  # It calls `mem` by bare name (PATH), so memBin must be installed alongside it.
+  # It calls `mem` and `brain-ollama` by bare name (PATH), so both must be installed alongside it.
   agentShell = pkgs.writeShellScriptBin "agent-shell"
     (builtins.readFile ../bin/agent-shell);
 in {
-  environment.systemPackages = [ agentShell memBin ];
+  environment.systemPackages = [ agentShell memBin brainOllamaBin ];
 
   # Autologin the human on tty1...
   services.getty.autologinUser = "dtd";

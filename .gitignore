@@ -4,3 +4,7 @@
 
 # VM disk image created by run-agent-os-vm on first boot
 *.qcow2
+
+# Python bytecode (from local syntax checks of bin/ scripts)
+__pycache__/
+*.pyc
