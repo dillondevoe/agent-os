@@ -20,11 +20,19 @@ let
   # The SAME production audit wrapper audit.nix installs — imported so AUDIT_BIN below pins
   # the exact same store-path binary (no drift, no PATH lookup).
   auditWrapper = import ./audit-pkg.nix { inherit pkgs; };
+  # CF-1c: the SAME confirm client modules/confirm.nix installs + the broker pins. Pinning the
+  # seam HERE — in taint's OWN wrapper, not via inheritable environment.variables — makes the
+  # `taint reset` confirm path authoritative regardless of the operator's launch context (same
+  # discipline as AUDIT_BIN and the broker's AGENT_OS_CONFIRM_SEAM pin). taint's other callers
+  # (the broker's set/recall/stamp/consult) never read it; only the human `reset` path does.
+  confirmPkg = import ./confirm-pkg.nix { inherit pkgs; };
 in
-# Pin the state dir + AUDIT_BIN unconditionally. Both env overrides survive only as TEST
-# affordances via a DIRECT `python3 bin/taint` invocation — exactly how the batteries drive it.
+# Pin the state dir + AUDIT_BIN + confirm seam unconditionally. Every env override survives only
+# as a TEST affordance via a DIRECT `python3 bin/taint` invocation — exactly how the batteries
+# drive it.
 pkgs.writeShellScriptBin "taint" ''
   export AGENT_OS_TAINT_DIR=/var/lib/agent-os/taint
   export AUDIT_BIN=${auditWrapper}/bin/audit
+  export AGENT_OS_CONFIRM_SEAM=${confirmPkg.wrapper}/bin/confirm
   exec ${pkgs.python3}/bin/python3 ${../bin/taint} "$@"
 ''

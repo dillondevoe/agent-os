@@ -321,7 +321,7 @@ export AGENT_OS_TAINT_DIR="$SCRATCH/taint" AGENT_OS_AUDIT_DIR="$SCRATCH/audit"
 export AUDIT_BIN="$AUDIT" TAINT_BIN="$TAINT" AGENT_OS_REGISTRY="$REGREAL"
 mkdir -p "$AGENT_OS_TAINT_DIR" "$AGENT_OS_AUDIT_DIR"
 LOG="$AGENT_OS_AUDIT_DIR/audit.log"
-"$PY" "$TAINT" reset --confirm-human >/dev/null 2>&1 || fail "could not bless a clean session"
+"$PY" "$TAINT" reset --confirm-human --break-glass >/dev/null 2>&1 || fail "could not bless a clean session"
 
 SEAM_INVOKE="$SCRATCH/seam_invoke.py"
 cat > "$SEAM_INVOKE" <<'PYEOF'

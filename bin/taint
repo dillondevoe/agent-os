@@ -10,9 +10,11 @@ the T1-auto-on-trusted optimization instead of leaping to it.
 Two load-bearing invariants it enforces (both persisted where the model can't reach):
 
   1. MONOTONIC per-session taint. The bit can only be SET, never cleared by anything the
-     model does. Only an explicit HUMAN reset (`reset --confirm-human`) starts a new,
-     clean session — and the reset itself is audited. It survives context truncation and
-     summarization because it lives on disk at the broker, not in the prompt.
+     model does. Only an explicit HUMAN reset starts a new, clean session — and the reset
+     itself is audited. The human intent to clear taint is a nonce-bound approval over the
+     confirm channel (CF-1c), with a separately-gated audited break-glass for the case where
+     the channel is down. It survives context truncation and summarization because it lives
+     on disk at the broker, not in the prompt.
 
   2. PERSISTENT mem origin tags — closes cross-session taint laundering. Every mem entry
      the tracker knows carries an immutable origin tag in a store the MODEL CANNOT WRITE
@@ -33,16 +35,22 @@ Commands:
                                         (--json: {"tainted","session_id","reasons","note"}
                                          canonical line — the Step-5 broker consult, GAP-3)
   taint set <reason...>                 SET the bit (untrusted content ingested) — monotonic
-  taint reset --confirm-human           HUMAN-only: begin a new clean session (audited)
+  taint reset                           HUMAN-only: clear taint via a nonce-bound approval
+                                        over the confirm channel (CF-1c) -> clean session
+  taint reset --confirm-human --break-glass
+                                        audited BREAK-GLASS: clear taint WITHOUT the channel
+                                        (two-token operator gate; use iff the channel is down)
   taint stamp <mem-key>                 record a mem entry's origin from the current taint
   taint recall <mem-key>                recall: re-taint iff the entry is UNTRUSTED-origin
   taint boot [--mem-root DIR]           boot-taint iff any loaded mem entry is UNTRUSTED
   taint gate <T0|T1|T2>                 SHADOW: log the taint-gated decision it WOULD make
 
 State dir is $AGENT_OS_TAINT_DIR (default /var/lib/agent-os/taint). The audit binary is
-$AUDIT_BIN (default `audit`). Exit: 0 ok; 2 usage; 3 IO/audit failure (fail-closed);
-4 reset refused (missing --confirm-human). `gate` exits 0 for ANY computed verdict —
-would-block and would-allow alike — because in v1 it gates nothing.
+$AUDIT_BIN (default `audit`); the confirm client is $AGENT_OS_CONFIRM_SEAM (CF-1c reset path).
+Exit: 0 ok; 2 usage; 3 IO/audit failure (fail-closed); 4 reset refused (bad flag combo —
+break-glass without --confirm-human, or a bare --confirm-human without --break-glass); 5 reset
+denied by the confirm channel (fail-closed — taint NOT cleared). `gate` exits 0 for ANY computed
+verdict — would-block and would-allow alike — because in v1 it gates nothing.
 """
 import sys
 import os
@@ -171,6 +179,70 @@ def _emit(record):
     return True
 
 
+def _confirm_timeout_s():
+    """Subprocess backstop for the confirm seam (mirrors bin/broker._confirm_timeout_s). A hung
+    or absent human, or a wedged channel, must never leave `taint reset` blocked forever; the
+    confirm client carries its OWN shorter human-window so its graceful deny normally precedes
+    this hard backstop. Bad/absent value -> the 120s default (never 0/negative = never no-wait)."""
+    try:
+        t = int(os.environ.get("AGENT_OS_CONFIRM_TIMEOUT_S", "120"))
+        return t if t > 0 else 120
+    except (TypeError, ValueError):
+        return 120
+
+
+def _confirm_reset(nonce, old_id, new_id):
+    """Route a `taint.reset` confirm frame through the broker-owned confirm client and return
+    (approved: bool, reason: str). taint MINTS the nonce and TRUSTS only the client's terminal
+    {approved} verdict — the client alone renders the frame to a human, collects the response, and
+    binds it to this nonce (+ epoch + pinned recipient) internally. taint never re-decides.
+
+    Fail-closed exactly like bin/broker.confirm_seam: seam unset / unreachable / non-zero exit /
+    malformed output / timeout all -> (False, <reason>), so a dead channel DENIES (never wedges,
+    never auto-approves) and the operator falls back to the audited break-glass. The seam is pinned
+    in taint's wrapper (modules/taint-pkg.nix) — a stray env override survives only as a TEST
+    affordance via a direct `python3 bin/taint` invocation, same as AUDIT_BIN/AGENT_OS_TAINT_DIR."""
+    seam = os.environ.get("AGENT_OS_CONFIRM_SEAM")
+    if not seam:
+        return False, "confirm-channel-not-wired"
+    req = {
+        "capability": "taint.reset",
+        "tier": "T3",
+        "provenance": TRUSTED,     # operator-initiated; frame's trust region shows it as TRUSTED
+        "typed_args": {"current_session_id": old_id, "new_session_id": new_id},
+        "destination": None,
+        "nonce": nonce,
+        "session_id": old_id,      # the epoch being CLEARED — the client's epoch binding is vs this
+    }
+    argv = [seam]
+    # Same interpreter trick as audit_log: a plain (non-executable) file is the repo's bin/confirm
+    # driven under this interpreter (how the batteries wire it); an installed wrapper is exec'd.
+    if os.path.isfile(seam) and not os.access(seam, os.X_OK):
+        argv = [sys.executable, seam]
+    try:
+        p = subprocess.run(argv, input=json.dumps(req).encode("utf-8"),
+                           stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                           timeout=_confirm_timeout_s())
+    except subprocess.TimeoutExpired:
+        return False, "confirm-timeout"
+    except OSError as e:
+        return False, "confirm-seam-unreachable: %s" % type(e).__name__
+    if p.returncode != 0:
+        return False, "confirm-seam-exit-%d" % p.returncode
+    try:
+        obj = json.loads((p.stdout or b"").decode("utf-8").split("\n", 1)[0] or "{}")
+    except (ValueError, UnicodeDecodeError):
+        return False, "confirm-malformed"
+    if not isinstance(obj, dict):
+        return False, "confirm-malformed"
+    # Strict identity, NOT bool() coercion: only JSON `true` approves. bool() would clear the
+    # monotonic taint bit for ANY truthy value ("false" string, NaN, 1, [1]) — strictly weaker
+    # than the broker on the identical seam boundary (broker: approved is not True -> deny), and
+    # the same fail-open class as the MCP-NaN bug. The primitive must not trust the client: a
+    # partial write / swapped seam / client bug must DENY, never launder a clear. (Fable, CF-1c.)
+    return obj.get("approved") is True, str(obj.get("reason") or "")
+
+
 def cmd_status(argv):
     s, note = load_session()
     if "--json" in argv:
@@ -224,24 +296,72 @@ def cmd_set(argv):
 
 
 def cmd_reset(argv):
-    if "--confirm-human" not in argv:
-        sys.stderr.write("taint reset: HUMAN-only — refusing without --confirm-human "
-                         "(the model can never clear taint)\n")
-        return 4
+    """Clear taint -> begin a new clean session. HUMAN-only, and NEVER model-reachable (CF-1a:
+    reset is not a registry key, so no tool-call can ever reach this path). CF-1c hardens the
+    HUMAN path itself: the default clears taint only on a nonce-bound approval over the confirm
+    channel, so the intent is an integrity-framed human act, not a self-asserted flag.
+
+    Runs under the exclusive flock (CMDS: with_lock), which is HELD across the confirm round-trip
+    on purpose: it serializes the load->approve->write critical section so a `set` racing the reset
+    cannot be silently lost (Fable Step-3 FIX-3). A blocked `set` simply applies to the post-reset
+    session — safe (over-taints at worst), never a dropped bit."""
+    confirm_human = "--confirm-human" in argv
+    break_glass = "--break-glass" in argv
     old, _ = load_session()
     new_id = (old["session_id"] + 1) if old["session_id"] >= 0 else 0
+
+    if break_glass:
+        # Audited BREAK-GLASS — bypasses the confirm channel so a DEAD channel can never strand
+        # taint (the spec §6 bootstrap-inversion guard: reset must not HARD-depend on the channel).
+        # Gated behind BOTH the retained --confirm-human self-assertion AND the explicit
+        # --break-glass operator token, so bypassing the channel is a deliberate, conspicuous,
+        # separately-gated act — not the one-word default it used to be. Retired in the 3rd PR.
+        if not confirm_human:
+            sys.stderr.write("taint reset --break-glass: also requires --confirm-human — the "
+                             "break-glass is the deliberate TWO-token channel bypass\n")
+            return 4
+        via, reason, nonce = "break-glass", "human reset (break-glass: channel bypass)", None
+    else:
+        # A bare --confirm-human no longer clears taint (CF-1c): the self-asserted flag alone is
+        # exactly the weak human path this hardens. Point the operator at the two real paths.
+        if confirm_human:
+            sys.stderr.write("taint reset: --confirm-human ALONE no longer clears taint (CF-1c). "
+                             "Run `taint reset` to approve over the confirm channel, or "
+                             "`taint reset --confirm-human --break-glass` for the audited "
+                             "break-glass if the channel is down\n")
+            return 4
+        # Default: mint a broker-style 128-bit nonce and route a taint.reset confirm frame.
+        nonce = os.urandom(16).hex()
+        approved, creason = _confirm_reset(nonce, old["session_id"], new_id)
+        if not approved:
+            # Fail-closed: NO reset. A refused reset is a security event — audit the deny, then
+            # exit non-zero so the operator can reach for the break-glass if the channel is down.
+            _emit({"src": "taint", "event": "reset-denied", "session_id": old["session_id"],
+                   "tainted": bool(old["tainted"]), "reason": "confirm: %s" % creason,
+                   "nonce": nonce, "shadow": True})
+            sys.stderr.write("taint reset: NOT cleared — confirm channel denied (%s). If the "
+                             "channel is down, use the audited break-glass: "
+                             "taint reset --confirm-human --break-glass\n" % creason)
+            return 5
+        via, reason = "confirm-channel", "human reset (confirm-nonce approved)"
+
     s = {"schema": SCHEMA, "session_id": new_id, "tainted": False,
          "reasons": [], "updated": utc_now()}
-    # Audit the reset BEFORE it takes effect — a human clearing taint is a security event.
-    if not _emit({"src": "taint", "event": "reset", "session_id": new_id,
-                  "tainted": False, "reason": "human reset", "shadow": True}):
+    # Audit the reset BEFORE it takes effect — a human clearing taint is a security event. Record
+    # WHICH path cleared it (via) + the nonce for the channel path, so the ledger distinguishes a
+    # channel-approved reset from a break-glass burn.
+    rec = {"src": "taint", "event": "reset", "session_id": new_id, "tainted": False,
+           "reason": reason, "via": via, "shadow": True}
+    if nonce is not None:
+        rec["nonce"] = nonce
+    if not _emit(rec):
         return 3
     try:
         _atomic_write(session_path(), s)
     except OSError as e:
         sys.stderr.write("taint reset: cannot persist state: %s\n" % e)
         return 3
-    print("taint: RESET by human — new clean session=%s" % new_id)
+    print("taint: RESET by human (%s) — new clean session=%s" % (via, new_id))
     return 0
 
 

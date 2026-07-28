@@ -23,10 +23,20 @@ export AGENT_OS_TAINT_DIR="$SCRATCH/taint"
 export AGENT_OS_AUDIT_DIR="$SCRATCH/audit"
 export AUDIT_BIN="$AUDIT"                 # taint shells out to this to log every decision
 mkdir -p "$AGENT_OS_TAINT_DIR" "$AGENT_OS_AUDIT_DIR"
+# CF-1c: run channel-less by DEFAULT — a leaked operator AGENT_OS_CONFIRM_SEAM must NOT silently
+# wire the confirm path and mask the fail-closed behaviour test 2(a) relies on. Test 2 opts INTO a
+# scripted approve/deny seam explicitly, per-subshell; break-glass (reset_clean) never reads it.
+unset AGENT_OS_CONFIRM_SEAM 2>/dev/null || true
 LOG="$AGENT_OS_AUDIT_DIR/audit.log"
 
 t()  { "$PY" "$TAINT" "$@"; }            # run taint, inherit exit code
 av() { "$PY" "$AUDIT" verify >/dev/null 2>&1; }
+
+# CF-1c: the DEFAULT human reset clears taint via a nonce-bound APPROVAL over the confirm channel
+# (test 2 exercises that + deny + flag-gating directly). For routine test SETUP — "get to a clean
+# session" between phases — use the channel-free audited BREAK-GLASS (two-token operator gate), so
+# setup never needs a live confirm seam. It still emits an audited "event":"reset" (via:break-glass).
+reset_clean() { "$PY" "$TAINT" reset --confirm-human --break-glass; }
 
 # Assert the leading status token. "taint: TAINTED" vs "taint: clean" — matched with the
 # "taint: " prefix so a reason string containing the word "clean" can't false-pass.
@@ -42,11 +52,49 @@ status_is() {  # $1 = TAINTED|clean
 #    disk, the box is TAINTED until a human blesses it. Absence of proof != clean.
 status_is TAINTED
 
-# 2. HUMAN-ONLY reset (§6). The model has no command that clears the bit; only an explicit
-#    human reset does, and it must carry --confirm-human. A bare reset is REFUSED.
-if t reset >/dev/null 2>&1; then fail "reset without --confirm-human succeeded (model could clear taint)"; fi
-status_is TAINTED                                  # refusal left the bit set
-t reset --confirm-human >/dev/null || fail "human reset (--confirm-human) failed"
+# 2. HUMAN + CONFIRM-CHANNEL reset, hardened (CF-1c §6). The model has no command that clears the
+#    bit (reset is not a registry key — CF-1a). CF-1c further hardens the HUMAN path: the DEFAULT
+#    reset clears taint ONLY on a nonce-bound APPROVAL routed through the confirm client — a bare
+#    self-asserted --confirm-human no longer suffices. A separately-gated, audited BREAK-GLASS
+#    (--confirm-human --break-glass) clears WITHOUT the channel so a dead channel can never strand
+#    taint (spec §6 bootstrap-inversion guard). Every path is human-only + audited.
+SEAMDIR="$SCRATCH/reset-seams"; mkdir -p "$SEAMDIR"
+# approve seam: CAPTURES the request frame it was handed (so we can assert its shape), then approves.
+# deny seam: refuses. Both mimic the confirm client's terminal {approved,reason} contract.
+cat > "$SEAMDIR/approve" <<SEAM
+#!/bin/sh
+cat > "$SEAMDIR/req.json"
+printf '{"approved":true,"reason":"operator approved"}'
+SEAM
+cat > "$SEAMDIR/deny" <<'SEAM'
+#!/bin/sh
+cat > /dev/null
+printf '{"approved":false,"reason":"operator denied"}'
+SEAM
+chmod +x "$SEAMDIR/approve" "$SEAMDIR/deny"
+# (a) bare reset with NO confirm channel wired -> fail-closed DENY (exit 5), bit stays TAINTED.
+#     Neither the model nor a channel-less caller can clear taint by merely asking.
+if t reset >/dev/null 2>&1; then fail "bare reset with no confirm channel cleared taint"; fi
+status_is TAINTED
+# (b) --confirm-human ALONE no longer clears taint (CF-1c: self-assertion is not sufficient; exit 4).
+if t reset --confirm-human >/dev/null 2>&1; then fail "--confirm-human alone cleared taint (CF-1c gate missing)"; fi
+status_is TAINTED
+# (c) confirm channel DENIES -> NOT cleared (fail-closed on an explicit refusal; exit 5).
+if ( export AGENT_OS_CONFIRM_SEAM="$SEAMDIR/deny"; t reset >/dev/null 2>&1 ); then fail "reset cleared taint despite a channel DENY"; fi
+status_is TAINTED
+# (d) confirm channel APPROVES -> cleared; the client was handed a taint.reset frame bound to a nonce.
+( export AGENT_OS_CONFIRM_SEAM="$SEAMDIR/approve"; t reset >/dev/null ) || fail "confirm-approved reset failed"
+status_is clean
+grep -F '"capability": "taint.reset"' "$SEAMDIR/req.json" >/dev/null || fail "confirm client was not sent a taint.reset frame"
+grep -F '"nonce"' "$SEAMDIR/req.json" >/dev/null || fail "reset confirm frame carried no nonce"
+# (e) BREAK-GLASS is a deliberate TWO-token operator act. Re-taint, then: --break-glass ALONE is
+#     refused (exit 4, still TAINTED); only the --confirm-human --break-glass pair clears (dead-
+#     channel recovery), and it does so WITHOUT consulting the confirm channel.
+t set "re-taint for break-glass leg" >/dev/null || fail "set before break-glass leg failed"
+status_is TAINTED
+if t reset --break-glass >/dev/null 2>&1; then fail "--break-glass without --confirm-human cleared taint"; fi
+status_is TAINTED
+reset_clean >/dev/null || fail "break-glass (--confirm-human --break-glass) reset failed"
 status_is clean                                    # a blessed session is clean
 
 # 3. MONOTONIC set + PERSISTENCE (§6). set can only RAISE the bit; a fresh process still
@@ -59,7 +107,7 @@ status_is TAINTED                                  # still tainted — monotone,
 # 4. STAMP records a mem entry's origin FROM the session taint (§6). Clean session -> the
 #    entry is TRUSTED; tainted session -> UNTRUSTED, and that tag lives in the taint dir,
 #    a Step-1 protected path the model cannot write.
-t reset --confirm-human >/dev/null || fail "reset before trusted stamp failed"
+reset_clean >/dev/null || fail "reset before trusted stamp failed"
 out="$(t stamp trusted/key1)" || fail "stamp trusted/key1 failed"
 case "$out" in *"origin=TRUSTED"*) : ;; *) fail "clean-session stamp not TRUSTED: $out";; esac
 t set "poisoned page" >/dev/null || fail "set before untrusted stamp failed"
@@ -68,28 +116,28 @@ case "$out" in *"origin=UNTRUSTED"*) : ;; *) fail "tainted-session stamp not UNT
 
 # 5. UNTRUSTED is ABSORBING (§6 "permanently"). Re-stamping an UNTRUSTED entry from a
 #    CLEAN session must NOT downgrade it. Provenance only ratchets toward untrusted.
-t reset --confirm-human >/dev/null || fail "reset before re-stamp failed"
+reset_clean >/dev/null || fail "reset before re-stamp failed"
 out="$(t stamp untrusted/key2)" || fail "re-stamp untrusted/key2 failed"
 case "$out" in *"origin=UNTRUSTED"*) : ;; *) fail "UNTRUSTED downgraded to TRUSTED (laundering!): $out";; esac
 
 # 6. RECALL of an UNTRUSTED entry RE-TAINTS — the headline cross-session anti-laundering
 #    property (§6). key2 was written UNTRUSTED in an earlier (tainted) session; recalling
 #    it in a fresh CLEAN session must re-taint. Poison cannot be washed by a reset.
-t reset --confirm-human >/dev/null || fail "reset before untrusted recall failed"
+reset_clean >/dev/null || fail "reset before untrusted recall failed"
 status_is clean
 out="$(t recall untrusted/key2)" || fail "recall untrusted/key2 failed"
 case "$out" in *"RE-TAINTED"*) : ;; *) fail "recall of UNTRUSTED did not re-taint: $out";; esac
 status_is TAINTED
 
 # 7. RECALL of a TRUSTED entry does NOT taint (no false positives on clean provenance).
-t reset --confirm-human >/dev/null || fail "reset before trusted recall failed"
+reset_clean >/dev/null || fail "reset before trusted recall failed"
 out="$(t recall trusted/key1)" || fail "recall trusted/key1 failed"
 case "$out" in *"no change"*) : ;; *) fail "recall of TRUSTED wrongly re-tainted: $out";; esac
 status_is clean
 
 # 8. RECALL of an UNKNOWN-origin key FAILS CLOSED (§8). No origin record == unknown
 #    provenance == untrusted; recalling it must re-taint, not silently pass.
-t reset --confirm-human >/dev/null || fail "reset before unknown recall failed"
+reset_clean >/dev/null || fail "reset before unknown recall failed"
 out="$(t recall never/stamped)" || fail "recall of unknown key errored"
 case "$out" in *"RE-TAINTED"*) : ;; *) fail "recall of UNKNOWN origin did not fail-closed: $out";; esac
 status_is TAINTED
@@ -98,18 +146,18 @@ status_is TAINTED
 #    taints the boot; (b) an unstamped mem file (unknown provenance) taints the boot;
 #    (c) an empty ledger with no mem loaded boots CLEAN. (b)/(c) use an isolated taint dir
 #    so the shared ledger's UNTRUSTED key2 doesn't mask the mem-root path.
-t reset --confirm-human >/dev/null || fail "reset before boot(a) failed"
+reset_clean >/dev/null || fail "reset before boot(a) failed"
 out="$(t boot)" || fail "boot(a) errored"
 case "$out" in *"BOOT TAINTED"*) : ;; *) fail "boot did not taint on untrusted-origin ledger: $out";; esac
 
 MEMROOT="$SCRATCH/memroot"; mkdir -p "$MEMROOT/domain"
 printf 'body\n' > "$MEMROOT/domain/note.md"
 ( export AGENT_OS_TAINT_DIR="$SCRATCH/taint-iso"; mkdir -p "$AGENT_OS_TAINT_DIR"
-  "$PY" "$TAINT" reset --confirm-human >/dev/null || exit 21
+  reset_clean >/dev/null || exit 21
   # (c) clean ledger, nothing loaded -> clean boot
   o="$("$PY" "$TAINT" boot)" || exit 22
   case "$o" in *"BOOT clean"*) : ;; *) exit 23;; esac
-  "$PY" "$TAINT" reset --confirm-human >/dev/null || exit 24
+  reset_clean >/dev/null || exit 24
   # (b) an unknown-origin mem file present at boot -> tainted
   o="$("$PY" "$TAINT" boot --mem-root "$MEMROOT")" || exit 25
   case "$o" in *"BOOT TAINTED"*) : ;; *) exit 26;; esac
@@ -117,7 +165,7 @@ printf 'body\n' > "$MEMROOT/domain/note.md"
 
 # 10. SHADOW gate — computes a verdict and LOGS it, but GATES NOTHING: every computed
 #     verdict exits 0, would-block and would-allow alike. Only bad usage is non-zero.
-t reset --confirm-human >/dev/null || fail "reset before gate(clean) failed"
+reset_clean >/dev/null || fail "reset before gate(clean) failed"
 out="$(t gate T2)" || fail "shadow gate on clean session must exit 0 (gates nothing)"
 case "$out" in *"WOULD-ALLOW-AUTO"*) : ;; *) fail "clean gate T2 verdict wrong: $out";; esac
 t set "untrusted for gate" >/dev/null || fail "set before gate(tainted) failed"
@@ -146,7 +194,7 @@ done
 #     checked the "WITHOUT mutating state" half.)
 NL="$SCRATCH/taint-nolog"; mkdir -p "$NL"
 ( export AGENT_OS_TAINT_DIR="$NL"                   # setup under the REAL audit
-  "$PY" "$TAINT" reset --confirm-human >/dev/null || exit 41
+  reset_clean >/dev/null || exit 41
   "$PY" "$TAINT" stamp seed/key >/dev/null || exit 42
 ) || fail "test-12 setup (live audit) failed"
 SNAP_S="$(cat "$NL/session.json")"; SNAP_O="$(cat "$NL/origins.json")"
@@ -160,7 +208,7 @@ while IFS= read -r op; do
   [ "$(cat "$NL/origins.json")" = "$SNAP_O" ] || fail "taint '$op' MUTATED origins.json under dead audit"
 done <<'OPS'
 set poison
-reset --confirm-human
+reset --confirm-human --break-glass
 stamp new/key
 recall seed/key
 boot
@@ -178,24 +226,24 @@ case "$o" in *"taint: TAINTED"*) : ;; *) fail "corrupt session.json did not read
 # (b) corrupt origins.json + CLEAN session -> stamp REFUSES and does NOT rewrite the ledger.
 #     Without FIX-2 this stamps launder/key TRUSTED (clean session) and drops all tags.
 ( export AGENT_OS_TAINT_DIR="$CS"
-  "$PY" "$TAINT" reset --confirm-human >/dev/null || exit 51
+  reset_clean >/dev/null || exit 51
   printf '{ broken origins ' > "$CS/origins.json"; BEFORE="$(cat "$CS/origins.json")"
   if "$PY" "$TAINT" stamp launder/key >/dev/null 2>&1; then exit 52; fi  # must FAIL, not stamp TRUSTED
   [ "$(cat "$CS/origins.json")" = "$BEFORE" ] || exit 53                 # must NOT rebuild the ledger
 ) || fail "corrupt origins.json: stamp did not fail-closed without rebuilding (FIX-2 laundering hole)"
 # (c) valid JSON but structurally wrong (tags not a dict) is ALSO corrupt -> stamp refuses.
 ( export AGENT_OS_TAINT_DIR="$CS"
-  "$PY" "$TAINT" reset --confirm-human >/dev/null || exit 54
+  reset_clean >/dev/null || exit 54
   printf '{"tags":"not-a-dict"}' > "$CS/origins.json"
   if "$PY" "$TAINT" stamp x/y >/dev/null 2>&1; then exit 55; fi
 ) || fail "structurally-wrong origins.json: stamp did not fail-closed"
 # (d) corrupt origins.json -> recall fails closed (re-taints) and boot taints.
 ( export AGENT_OS_TAINT_DIR="$CS"
-  "$PY" "$TAINT" reset --confirm-human >/dev/null || exit 56
+  reset_clean >/dev/null || exit 56
   printf '{ broken origins ' > "$CS/origins.json"
   r="$("$PY" "$TAINT" recall anything)" || exit 57
   case "$r" in *"RE-TAINTED"*) : ;; *) exit 58;; esac
-  "$PY" "$TAINT" reset --confirm-human >/dev/null || exit 59
+  reset_clean >/dev/null || exit 59
   printf '{ broken origins ' > "$CS/origins.json"
   b="$("$PY" "$TAINT" boot)" || exit 60
   case "$b" in *"BOOT TAINTED"*) : ;; *) exit 61;; esac
@@ -221,7 +269,7 @@ v=o[k]; sys.stdout.write("true" if v is True else "false" if v is False else str
 }
 
 # (a) clean session: exit 0, valid JSON, EXACTLY the four broker keys, tainted=false, session>=0.
-t reset --confirm-human >/dev/null || fail "reset before json(clean) failed"
+reset_clean >/dev/null || fail "reset before json(clean) failed"
 J="$(t status --json)" || fail "status --json exited non-zero on clean session"
 keys="$(printf '%s' "$J" | "$PY" -c 'import sys,json; print(",".join(sorted(json.load(sys.stdin))))')" \
   || fail "status --json did not emit valid JSON on clean session: $J"
@@ -240,7 +288,7 @@ J="$(t status --json)" || fail "status --json exited non-zero on tainted session
 status_is TAINTED                                  # (c) --json and human line agree: tainted
 
 # (c cont.) after a human reset both read clean again — the two views never disagree on the bit.
-t reset --confirm-human >/dev/null || fail "reset before json(agreement) failed"
+reset_clean >/dev/null || fail "reset before json(agreement) failed"
 J="$(t status --json)" || fail "status --json exited non-zero after reset"
 [ "$(json_field "$J" tainted)" = "false" ] || fail "post-reset json tainted!=false: $J"
 status_is clean
