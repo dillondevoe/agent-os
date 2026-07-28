@@ -147,10 +147,20 @@ def read_capped_lines(stream, cap):
             buf = bytearray()         # drop it; we only need to know it was oversized
 
 
+def _reject_const(tok):
+    """CPython's json.loads accepts the barewords NaN / Infinity / -Infinity by default —
+    they are NOT JSON (RFC 8259). Rejecting them here (as a ValueError -> -32700) keeps two
+    things true: the model can't smuggle a NaN/Inf float into params/arguments (enforce_caps
+    does not bound floats, so it would otherwise reach ok:true), and — the real differential
+    — our OWN verdict line can never contain a non-JSON token that a strict Step-5 reader
+    throws on while a lenient one accepts as float('nan'). One parser, one meaning."""
+    raise ValueError("non-JSON constant: %s" % tok)
+
+
 def parse_json_strict(raw):
     """raw: the bytes of one record (no trailing newline). Return the parsed object, or
     raise: DupKey on a repeated key, ValueError on non-UTF-8 / leading BOM / a JSON
-    syntax error / trailing non-whitespace bytes."""
+    syntax error / trailing non-whitespace bytes / a bareword NaN|Infinity|-Infinity."""
     if raw.startswith(b"\xef\xbb\xbf"):
         raise ValueError("leading UTF-8 BOM")
     try:
@@ -158,8 +168,9 @@ def parse_json_strict(raw):
     except UnicodeDecodeError as e:
         raise ValueError("not valid UTF-8: %s" % e)
     # json.loads is strict by default: it rejects raw (unescaped) control chars inside
-    # strings and rejects any trailing non-whitespace after the top-level value.
-    return json.loads(text, object_pairs_hook=_no_dup_pairs)
+    # strings and rejects any trailing non-whitespace after the top-level value. It is NOT
+    # strict about NaN/Infinity/-Infinity unless we pass parse_constant.
+    return json.loads(text, object_pairs_hook=_no_dup_pairs, parse_constant=_reject_const)
 
 
 def enforce_caps(obj, c):
@@ -295,9 +306,12 @@ def validate(obj, seen_ids):
 def emit(verdict):
     # Canonical compact serialization: sort_keys => deterministic golden output;
     # ensure_ascii keeps it single-line + 7-bit, so no verdict field can forge a second
-    # output line and the goldens are stable across Python builds.
+    # output line and the goldens are stable across Python builds. allow_nan=False is
+    # belt-and-suspenders: parse_constant already bars NaN/Inf at the door, so this can
+    # only fire on a future bug — and if it ever does, it raises rather than writing a
+    # verdict line that isn't valid JSON (fail-closed over parser-differential output).
     sys.stdout.write(json.dumps(verdict, sort_keys=True, separators=(",", ":"),
-                                ensure_ascii=True) + "\n")
+                                ensure_ascii=True, allow_nan=False) + "\n")
 
 
 def cmd_parse(argv):

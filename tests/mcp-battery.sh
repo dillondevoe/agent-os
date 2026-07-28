@@ -73,6 +73,9 @@ expect_deny '{"jsonrpc":"2.0","method":"tools/list","id":null}' -32600 "null-id"
 expect_deny '{"jsonrpc":"2.0","method":"tools/list","id":[1]}' -32600 "container-id"
 expect_deny '[{"jsonrpc":"2.0","method":"tools/list","id":1}]' -32600 "batch-array-denied"
 expect_deny '{"jsonrpc":"2.0","method":"tools/list","method":"initialize","id":1}' -32600 "duplicate-json-key"
+# a string id outside _ID_STR_RE's conservative charset (space/brace/unicode) is denied,
+# not coerced — deliberate narrowing so no exotic id smuggles past Step-5's id-space.
+expect_deny '{"jsonrpc":"2.0","method":"tools/list","id":"a b"}' -32600 "string-id-bad-charset"
 
 # ── 4. Parse-level hostile framing ────────────────────────────────────────────────────
 expect_deny '{"jsonrpc":"2.0","method":"tools/list","id":1} trailing' -32700 "trailing-bytes"
@@ -80,6 +83,12 @@ expect_deny 'not json at all' -32700 "not-json"
 expect_deny '{"jsonrpc":"2.0","method":"tools/list","id":1' -32700 "truncated-json"
 expect_deny_raw '\377\n' -32700 "non-utf8-byte"
 expect_deny_raw '\357\273\277{"jsonrpc":"2.0","method":"tools/list","id":1}\n' -32700 "leading-BOM"
+# bareword NaN/Infinity/-Infinity are NOT JSON (RFC 8259); parse_constant rejects them ->
+# they can neither reach ok:true (enforce_caps doesn't bound floats) nor poison emit()'s
+# own verdict line. This is the one differential Fable found on PR #7 — its regression test.
+expect_deny '{"jsonrpc":"2.0","method":"tools/call","id":1,"params":{"name":"t","arguments":{"x":NaN}}}' -32700 "bareword-NaN"
+expect_deny '{"jsonrpc":"2.0","method":"tools/call","id":1,"params":{"name":"t","arguments":{"x":Infinity}}}' -32700 "bareword-Infinity"
+expect_deny '{"jsonrpc":"2.0","method":"tools/call","id":1,"params":{"name":"t","arguments":{"x":-Infinity}}}' -32700 "bareword-neg-Infinity"
 
 # ── 5. Per-method params schema ───────────────────────────────────────────────────────
 expect_deny '{"jsonrpc":"2.0","method":"initialize","id":1,"params":{"protocolVersion":"1999-01-01","capabilities":{},"clientInfo":{}}}' -32602 "initialize-wrong-rev"
@@ -98,6 +107,9 @@ expect_deny_env 'AGENT_OS_MCP_MAX_ITEMS=6' '{"jsonrpc":"2.0","method":"tools/cal
 expect_deny_env 'AGENT_OS_MCP_MAX_STRING=20' '{"jsonrpc":"2.0","method":"tools/call","id":1,"params":{"name":"t","arguments":{"x":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}}}' -32000 "string-cap"
 # escaped \u0000 decodes to a raw NUL byte -> INV-1 control scrub denies it (-32000)
 expect_deny '{"jsonrpc":"2.0","method":"tools/call","id":1,"params":{"name":"t","arguments":{"x":"\u0000"}}}' -32000 "control-char-in-string"
+# a lone surrogate (\ud800, no low half) is un-encodable UTF-8 -> enforce_caps byte-count
+# encode fails closed at policy; it cannot survive to a downstream arg-check as a valid str.
+expect_deny '{"jsonrpc":"2.0","method":"tools/call","id":1,"params":{"name":"t","arguments":{"x":"\ud800"}}}' -32000 "lone-surrogate"
 
 # ── 7. Stateful within-stream duplicate-id (first accepts, reuse denies) ──────────────
 dup=$(printf '%s\n%s\n' \
