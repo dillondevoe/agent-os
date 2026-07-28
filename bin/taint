@@ -1,0 +1,417 @@
+#!/usr/bin/env python3
+"""taint — the per-session provenance taint tracker for the Djinn broker (SHADOW mode).
+
+Phase 2 · Step 3 (see docs/phase2-threat-model.md §6, §8). This is the anti-laundering
+mechanism. It answers one question — "is this session's context provenance-tainted by
+untrusted content?" — and, in v1, only COMPUTES and LOGS the taint-gated decision it
+WOULD make. It gates NOTHING yet (shadow): the evidence it accrues is what later earns
+the T1-auto-on-trusted optimization instead of leaping to it.
+
+Two load-bearing invariants it enforces (both persisted where the model can't reach):
+
+  1. MONOTONIC per-session taint. The bit can only be SET, never cleared by anything the
+     model does. Only an explicit HUMAN reset (`reset --confirm-human`) starts a new,
+     clean session — and the reset itself is audited. It survives context truncation and
+     summarization because it lives on disk at the broker, not in the prompt.
+
+  2. PERSISTENT mem origin tags — closes cross-session taint laundering. Every mem entry
+     the tracker knows carries an immutable origin tag in a store the MODEL CANNOT WRITE
+     (this taint dir, a Step-1 protected path). Anything stamped while a session is
+     tainted is UNTRUSTED-origin, permanently (UNTRUSTED is absorbing — never downgraded).
+     Recalling an UNTRUSTED-origin entry RE-TAINTS the recalling session, so a poisoned
+     page cannot be written to memory in session A and recalled "clean" in session B.
+
+Fail-closed everywhere: missing/corrupt taint state, or a recall of a mem key with no
+known origin, is treated as UNTRUSTED (tainted). The safe default is "assume poisoned."
+
+Every taint-relevant decision is recorded via the Step-2 audit primitive (`audit append`);
+if that log write fails the op exits non-zero — an unauditable taint decision is a defect
+even in shadow mode (no-log -> the broker cannot trust the shadow evidence).
+
+Commands:
+  taint status                          print the session's taint bit + reasons
+  taint set <reason...>                 SET the bit (untrusted content ingested) — monotonic
+  taint reset --confirm-human           HUMAN-only: begin a new clean session (audited)
+  taint stamp <mem-key>                 record a mem entry's origin from the current taint
+  taint recall <mem-key>                recall: re-taint iff the entry is UNTRUSTED-origin
+  taint boot [--mem-root DIR]           boot-taint iff any loaded mem entry is UNTRUSTED
+  taint gate <T0|T1|T2>                 SHADOW: log the taint-gated decision it WOULD make
+
+State dir is $AGENT_OS_TAINT_DIR (default /var/lib/agent-os/taint). The audit binary is
+$AUDIT_BIN (default `audit`). Exit: 0 ok; 2 usage; 3 IO/audit failure (fail-closed);
+4 reset refused (missing --confirm-human). `gate` exits 0 for ANY computed verdict —
+would-block and would-allow alike — because in v1 it gates nothing.
+"""
+import sys
+import os
+import json
+import time
+import fcntl
+import subprocess
+
+SCHEMA = "taint-shadow-v1"
+UNTRUSTED = "UNTRUSTED"
+TRUSTED = "TRUSTED"
+RUNTIME_TIERS = ("T0", "T1", "T2")
+
+
+def taint_dir():
+    return os.environ.get("AGENT_OS_TAINT_DIR", "/var/lib/agent-os/taint")
+
+
+def session_path():
+    return os.path.join(taint_dir(), "session.json")
+
+
+def origins_path():
+    return os.path.join(taint_dir(), "origins.json")
+
+
+def lock_path():
+    return os.path.join(taint_dir(), "taint.lock")
+
+
+def utc_now():
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+def _atomic_write(path, obj):
+    """Write JSON durably: temp file in the same dir -> fsync -> atomic replace -> dir fsync.
+    A torn state file must never leave the tracker readable-but-wrong (that would fail OPEN)."""
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = path + ".tmp"
+    data = json.dumps(obj, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        n = os.write(fd, data)
+        if n != len(data):
+            raise OSError("short write on taint state: %d of %d" % (n, len(data)))
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    os.replace(tmp, path)
+    dfd = os.open(os.path.dirname(path), os.O_RDONLY)
+    try:
+        os.fsync(dfd)
+    finally:
+        os.close(dfd)
+
+
+# ── The FAIL-CLOSED session read. Missing OR corrupt state == TAINTED, uncertain. A
+#    clean session exists ONLY when a human reset wrote one. session_id is a monotonic
+#    integer bumped per reset (no wall-clock/randomness needed for identity). ──────────
+def load_session():
+    p = session_path()
+    try:
+        with open(p, "r", encoding="utf-8") as f:
+            s = json.load(f)
+        if not isinstance(s, dict) or "tainted" not in s or "session_id" not in s:
+            raise ValueError("session state malformed")
+        s.setdefault("reasons", [])
+        s["tainted"] = bool(s["tainted"])
+        return s, None
+    except FileNotFoundError:
+        return ({"schema": SCHEMA, "session_id": -1, "tainted": True,
+                 "reasons": ["no established clean session — fail-closed tainted"]},
+                "uninitialized")
+    except (ValueError, OSError) as e:
+        return ({"schema": SCHEMA, "session_id": -1, "tainted": True,
+                 "reasons": ["unreadable/corrupt taint state — fail-closed tainted"]},
+                "corrupt: %s" % e)
+
+
+def load_origins():
+    """Return (tags, corrupt). A CORRUPT ledger must be distinguishable from an ABSENT one:
+    returning {} for both (the old bug) let `stamp` re-stamp a formerly-UNTRUSTED key TRUSTED
+    after corruption AND drop every other tag on rewrite — an absorbing-invariant violation.
+    Callers fail closed on corrupt: never rebuild, treat every key as untrusted."""
+    p = origins_path()
+    try:
+        with open(p, "r", encoding="utf-8") as f:
+            o = json.load(f)
+        tags = o.get("tags") if isinstance(o, dict) else None
+        if not isinstance(tags, dict):
+            # Present but structurally wrong == corrupt, not empty. Fail closed.
+            return {}, True
+        return tags, False
+    except FileNotFoundError:
+        return {}, False
+    except (ValueError, OSError):
+        # A corrupt origin ledger cannot be trusted to say "trusted" about anything.
+        return {}, True
+
+
+def audit_log(record):
+    """Record a taint decision through the Step-2 audit primitive. Fail-closed: a
+    non-zero audit exit (or a missing audit binary) means the decision is unauditable."""
+    audit_bin = os.environ.get("AUDIT_BIN", "audit")
+    argv = [audit_bin, "append"]
+    # In tests AUDIT_BIN points at the repo's bin/audit; run it with this interpreter if
+    # it is a plain (non-executable) file, else exec it directly (installed shell wrapper).
+    if os.path.isfile(audit_bin) and not os.access(audit_bin, os.X_OK):
+        argv = [sys.executable, audit_bin, "append"]
+    try:
+        p = subprocess.run(argv, input=json.dumps(record).encode("utf-8"),
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except OSError as e:
+        raise OSError("audit binary unreachable (%s): %s" % (audit_bin, e))
+    if p.returncode != 0:
+        raise OSError("audit append exited %d — taint decision unauditable" % p.returncode)
+
+
+def _emit(record):
+    """Log then surface an error as exit 3 (fail-closed) if the log won't take it."""
+    try:
+        audit_log(record)
+    except OSError as e:
+        sys.stderr.write("taint: %s\n" % e)
+        return False
+    return True
+
+
+def cmd_status(argv):
+    s, note = load_session()
+    tag = "TAINTED" if s["tainted"] else "clean"
+    extra = (" (%s)" % note) if note else ""
+    print("taint: %s  session=%s%s  reasons=%s"
+          % (tag, s["session_id"], extra, "; ".join(s["reasons"]) or "-"))
+    return 0
+
+
+def cmd_set(argv):
+    if not argv:
+        sys.stderr.write("usage: taint set <reason...>\n")
+        return 2
+    reason = " ".join(argv)
+    s, _ = load_session()
+    # Monotonic: SET can only raise the bit. We never write tainted=False here.
+    s["tainted"] = True
+    s["reasons"] = (s.get("reasons") or []) + [reason]
+    s["schema"] = SCHEMA
+    s["updated"] = utc_now()
+    if not _emit({"src": "taint", "event": "set", "session_id": s["session_id"],
+                  "tainted": True, "reason": reason, "shadow": True}):
+        return 3
+    try:
+        _atomic_write(session_path(), s)
+    except OSError as e:
+        sys.stderr.write("taint set: cannot persist state: %s\n" % e)
+        return 3
+    print("taint: SET (tainted) session=%s reason=%s" % (s["session_id"], reason))
+    return 0
+
+
+def cmd_reset(argv):
+    if "--confirm-human" not in argv:
+        sys.stderr.write("taint reset: HUMAN-only — refusing without --confirm-human "
+                         "(the model can never clear taint)\n")
+        return 4
+    old, _ = load_session()
+    new_id = (old["session_id"] + 1) if old["session_id"] >= 0 else 0
+    s = {"schema": SCHEMA, "session_id": new_id, "tainted": False,
+         "reasons": [], "updated": utc_now()}
+    # Audit the reset BEFORE it takes effect — a human clearing taint is a security event.
+    if not _emit({"src": "taint", "event": "reset", "session_id": new_id,
+                  "tainted": False, "reason": "human reset", "shadow": True}):
+        return 3
+    try:
+        _atomic_write(session_path(), s)
+    except OSError as e:
+        sys.stderr.write("taint reset: cannot persist state: %s\n" % e)
+        return 3
+    print("taint: RESET by human — new clean session=%s" % new_id)
+    return 0
+
+
+def cmd_stamp(argv):
+    if not argv:
+        sys.stderr.write("usage: taint stamp <mem-key>\n")
+        return 2
+    key = argv[0]
+    s, _ = load_session()
+    tags, corrupt = load_origins()
+    if corrupt:
+        # A corrupt ledger cannot report a key's prior origin, and rewriting it here would
+        # DROP every existing tag (silent downgrade to unknown) and could stamp a
+        # formerly-UNTRUSTED key TRUSTED. Fail closed: refuse to stamp, never rebuild —
+        # operator recovery required (same posture as audit's torn tail). Record the
+        # refusal so the no-log->no-execute evidence base still sees it (best-effort).
+        _emit({"src": "taint", "event": "stamp", "session_id": s["session_id"], "key": key,
+               "origin": UNTRUSTED, "refused": "corrupt-origins", "shadow": True})
+        sys.stderr.write("taint stamp: corrupt origin ledger — refusing to stamp (would drop "
+                         "tags / launder to TRUSTED); operator recovery required\n")
+        return 3
+    prior = tags.get(key)
+    # UNTRUSTED is absorbing: once untrusted, never downgraded. Otherwise the origin is
+    # UNTRUSTED iff written while the session is tainted, else TRUSTED.
+    origin = UNTRUSTED if (prior == UNTRUSTED or s["tainted"]) else TRUSTED
+    tags[key] = origin
+    if not _emit({"src": "taint", "event": "stamp", "session_id": s["session_id"],
+                  "key": key, "origin": origin, "shadow": True}):
+        return 3
+    try:
+        _atomic_write(origins_path(), {"schema": SCHEMA, "tags": tags})
+    except OSError as e:
+        sys.stderr.write("taint stamp: cannot persist origins: %s\n" % e)
+        return 3
+    print("taint: STAMP %s origin=%s" % (key, origin))
+    return 0
+
+
+def cmd_recall(argv):
+    if not argv:
+        sys.stderr.write("usage: taint recall <mem-key>\n")
+        return 2
+    key = argv[0]
+    tags, corrupt = load_origins()
+    # Unknown origin == UNTRUSTED (fail-closed): recalling a mem entry we cannot vouch
+    # for must not silently wash it clean. A corrupt ledger is unknown for EVERY key.
+    origin = UNTRUSTED if corrupt else tags.get(key, UNTRUSTED)
+    s, _ = load_session()
+    retaint = origin == UNTRUSTED
+    if retaint:
+        why = ("recall over corrupt origin ledger: %s" % key) if corrupt \
+            else ("recall of untrusted-origin mem: %s" % key)
+        s["tainted"] = True
+        s["reasons"] = (s.get("reasons") or []) + [why]
+        s["schema"] = SCHEMA
+        s["updated"] = utc_now()
+    if not _emit({"src": "taint", "event": "recall", "session_id": s["session_id"],
+                  "key": key, "origin": origin, "retainted": retaint, "shadow": True}):
+        return 3
+    if retaint:
+        try:
+            _atomic_write(session_path(), s)
+        except OSError as e:
+            sys.stderr.write("taint recall: cannot persist state: %s\n" % e)
+            return 3
+    print("taint: RECALL %s origin=%s -> %s"
+          % (key, origin, "RE-TAINTED session" if retaint else "no change"))
+    return 0
+
+
+def cmd_boot(argv):
+    mem_root = None
+    if argv:
+        if argv[0] == "--mem-root" and len(argv) >= 2:
+            mem_root = argv[1]
+        else:
+            sys.stderr.write("usage: taint boot [--mem-root DIR]\n")
+            return 2
+    tags, corrupt = load_origins()
+    reasons = []
+    # A corrupt ledger cannot vouch for any provenance -> fail closed, taint the boot even
+    # with no --mem-root (otherwise corrupt + bare boot would falsely read clean).
+    if corrupt:
+        reasons.append("corrupt origin ledger — cannot vouch for any mem provenance")
+    # Any KNOWN untrusted-origin entry taints the boot.
+    untrusted_keys = sorted(k for k, v in tags.items() if v == UNTRUSTED)
+    if untrusted_keys:
+        reasons.append("untrusted-origin mem present: %s" % ", ".join(untrusted_keys[:5]))
+    # Any loaded mem file with NO known origin is unknown provenance == untrusted.
+    if mem_root and os.path.isdir(mem_root):
+        unknown = []
+        for dirpath, _dirs, files in os.walk(mem_root):
+            for fn in files:
+                if not fn.endswith(".md"):
+                    continue
+                key = os.path.relpath(os.path.join(dirpath, fn), mem_root)
+                if key not in tags:
+                    unknown.append(key)
+        if unknown:
+            reasons.append("unknown-origin mem loaded: %d file(s)" % len(unknown))
+    tainted = bool(reasons)
+    s, _ = load_session()
+    if tainted:
+        s["tainted"] = True
+        s["reasons"] = (s.get("reasons") or []) + ["boot: " + " | ".join(reasons)]
+        s["schema"] = SCHEMA
+        s["updated"] = utc_now()
+    if not _emit({"src": "taint", "event": "boot", "session_id": s["session_id"],
+                  "tainted": tainted, "reason": " | ".join(reasons) or "no untrusted mem",
+                  "shadow": True}):
+        return 3
+    if tainted:
+        try:
+            _atomic_write(session_path(), s)
+        except OSError as e:
+            sys.stderr.write("taint boot: cannot persist state: %s\n" % e)
+            return 3
+    print("taint: BOOT %s%s"
+          % ("TAINTED" if tainted else "clean",
+             (" — " + " | ".join(reasons)) if reasons else ""))
+    return 0
+
+
+def cmd_gate(argv):
+    if not argv or argv[0] not in RUNTIME_TIERS:
+        sys.stderr.write("usage: taint gate <T0|T1|T2>\n")
+        return 2
+    tier = argv[0]
+    s, note = load_session()
+    # SHADOW decision. T0 runs even under taint (can't move bytes off-box); anything above
+    # T0 in a tainted session could NOT auto-authorize if this were live. In v1 it gates
+    # nothing — it only logs what it WOULD do.
+    if tier == "T0":
+        would_auto = True
+        verdict = "WOULD-ALLOW-AUTO (T0 runs even under taint)"
+    elif s["tainted"]:
+        would_auto = False
+        verdict = "WOULD-REQUIRE-CONFIRM (tainted; cannot auto-authorize above T0)"
+    else:
+        would_auto = True
+        verdict = "WOULD-ALLOW-AUTO (clean session; tier policy applies separately)"
+    if not _emit({"src": "taint", "event": "gate", "session_id": s["session_id"],
+                  "tier": tier, "tainted": s["tainted"], "would_auto_authorize": would_auto,
+                  "verdict": verdict, "shadow": True}):
+        return 3
+    # SHADOW: exit 0 for EVERY computed verdict — it must never be load-bearing in v1.
+    print("taint: GATE tier=%s SHADOW %s" % (tier, verdict))
+    return 0
+
+
+def with_lock(fn):
+    """Serialize a mutating command's whole load->log->write critical section under an
+    exclusive flock (mirrors bin/audit's flock). Without it a `set` racing a human `reset`
+    can be lost — a silent monotonicity break neither party sees (Fable Step-3 FIX-3).
+    Lost concurrent stamps degrade in the SAFE direction (dropped tag -> unknown -> untrusted).
+    Read-only commands (status/gate) don't take the lock: os.replace makes every write
+    atomic, so a reader sees the old or new file whole, never torn."""
+    def wrapped(argv):
+        try:
+            os.makedirs(taint_dir(), exist_ok=True)
+            lf = open(lock_path(), "w")
+        except OSError as e:
+            sys.stderr.write("taint: cannot open lock: %s\n" % e)
+            return 3
+        try:
+            fcntl.flock(lf, fcntl.LOCK_EX)
+            return fn(argv)
+        finally:
+            try:
+                fcntl.flock(lf, fcntl.LOCK_UN)
+            finally:
+                lf.close()
+    return wrapped
+
+
+CMDS = {
+    "status": cmd_status,
+    "set": with_lock(cmd_set),
+    "reset": with_lock(cmd_reset),
+    "stamp": with_lock(cmd_stamp),
+    "recall": with_lock(cmd_recall),
+    "boot": with_lock(cmd_boot),
+    "gate": cmd_gate,
+}
+
+
+def main(argv):
+    if not argv or argv[0] not in CMDS:
+        sys.stderr.write(__doc__)
+        return 2
+    return CMDS[argv[0]](argv[1:])
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

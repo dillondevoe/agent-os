@@ -15,16 +15,9 @@
 { config, pkgs, lib, ... }:
 
 let
-  # Wrap the Python primitive so `audit` is on PATH with a pinned interpreter.
-  # Pin the ledger unconditionally: a stray $AGENT_OS_AUDIT_DIR in the broker's env
-  # must NOT redirect the PRODUCTION binary to a different log (append would exit 0
-  # writing the WRONG ledger — a no-attacker misconfig that still voids the guarantee).
-  # The env override survives only as a TEST affordance via a DIRECT `python3 bin/audit`
-  # invocation — exactly how tests/audit-battery.sh drives it.
-  audit = pkgs.writeShellScriptBin "audit" ''
-    export AGENT_OS_AUDIT_DIR=/var/lib/agent-os/audit
-    exec ${pkgs.python3}/bin/python3 ${../bin/audit} "$@"
-  '';
+  # The `audit` wrapper (pinned ledger + interpreter) lives in modules/audit-pkg.nix so
+  # modules/taint.nix can pin AUDIT_BIN to the EXACT same binary without drift.
+  audit = import ./audit-pkg.nix { inherit pkgs; };
 in
 {
   environment.systemPackages = [ audit ];

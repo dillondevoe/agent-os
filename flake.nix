@@ -16,6 +16,7 @@
           ./modules/agent-shell.nix
           ./modules/brain.nix
           ./modules/audit.nix
+          ./modules/taint.nix
         ];
       };
 
@@ -46,6 +47,20 @@
             { nativeBuildInputs = [ nixpkgs.legacyPackages.${system}.python3 ]; } ''
               work="$(mktemp -d)"
               bash ${./tests/audit-battery.sh} ${./bin/audit} "$work"
+              touch $out
+            '';
+
+        # Phase 2 · Step 3 — the taint tracker's property battery (SHADOW mode). Proves
+        # the anti-laundering invariants: a monotonic set-only per-session bit, human-only
+        # reset, UNTRUSTED-absorbing mem origin tags stored where the model can't write,
+        # recall-of-untrusted re-taints across sessions, boot-taint on untrusted mem, and
+        # fail-closed audit logging that gates NOTHING in v1. It drives the real audit
+        # primitive, so a regression in either fails `nix flake check`.
+        taint-shadow =
+          nixpkgs.legacyPackages.${system}.runCommand "taint-shadow-check"
+            { nativeBuildInputs = [ nixpkgs.legacyPackages.${system}.python3 ]; } ''
+              work="$(mktemp -d)"
+              bash ${./tests/taint-battery.sh} ${./bin/taint} ${./bin/audit} "$work"
               touch $out
             '';
       };
