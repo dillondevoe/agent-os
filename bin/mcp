@@ -1,0 +1,342 @@
+#!/usr/bin/env python3
+"""mcp — the MCP stdio front door: a hardened JSON-RPC 2.0 parser for the Djinn broker.
+
+Phase 2 · Step 4 (see docs/phase2-threat-model.md §9, §12). This is the WALL'S FRONT
+DOOR. The untrusted local model speaks to the broker ONLY by emitting JSON-RPC 2.0
+messages over stdio; this primitive is the ONE parser that turns those bytes into a
+validated, typed, unambiguous request — or fails closed. Parser *differentials* (two
+readers disagreeing about the same bytes) are how tiny trusted brokers fall, so the
+rule here is: ONE parser, ONE schema, NO coercion; deny anything malformed / ambiguous
+/ oversized / duplicate-id / duplicate-key / unknown.
+
+Scope boundary (why this is NOT the broker): Step 4 guarantees only STRUCTURE — a
+message is well-formed JSON-RPC 2.0, uses one of the three pinned methods, carries a
+non-ambiguous id, and every field is within hard size/depth caps with no duplicate keys
+and no type coercion. It does NOT classify tiers, consult taint, check a tool's
+arguments against the capability registry's arg-schema, or execute anything. Step 5 (the
+broker) consumes the normalized request this emits and does all of that. Keeping
+per-capability schema-checking OUT of the parser is what keeps the parser small enough
+to read in one sitting. This primitive is PURE: no filesystem, no network, no audit
+dependency, no privileged state — so unlike audit/taint it needs no state dir and cannot
+fail for I/O reasons.
+
+Wire (pinned to ONE rev — MCP stdio transport):
+  * one JSON-RPC 2.0 message per line, newline-delimited; an embedded newline is
+    impossible in a valid message (json escapes it), so a hostile string value can never
+    forge a second frame — the same single-line-safety the audit log relies on.
+  * top-level MUST be a JSON object. BATCHES (a top-level array) are DENIED — a batch is
+    a parser-differential surface and this rev has none.
+  * methods: initialize | tools/list | tools/call ONLY. Anything else -> method-not-
+    found, fail closed. `initialize` MUST carry protocolVersion == the pinned rev.
+
+Hardening: hard caps on message bytes, per-string bytes, container nesting depth, and
+container item counts (enforced BEFORE parse for the byte cap, and by a full structural
+walk after); strict UTF-8 with a leading-BOM reject (a decode error fails the message
+closed); duplicate JSON keys at ANY depth are rejected (CPython would silently keep the
+last — an ambiguity/coercion hole); the `jsonrpc` tag must be exactly the string "2.0"
+(not 2.0 the number, not "2"); ids must be a bare string or integer (no bool, no float,
+no null, no container) and are UNIQUE within a stream (a reused id is ambiguous ->
+deny); structural identifiers (method, tool name) must match a conservative charset and
+every string is control-char-scrubbed (INV-1), so a control char / homoglyph / RTL-
+override / embedded NUL cannot smuggle a different capability name past the Step-5
+registry lookup.
+
+Command:
+  mcp parse   < messages.ndjson   for each input line, emit ONE canonical verdict line:
+     accept: {"ok":true,"method":...,"id":...,<normalized request fields>}
+     deny:   {"ok":false,"id":<id|null>,"error":{"code":<int>,"message":<str>}}
+  Verdict codes are JSON-RPC (-32700 parse, -32600 invalid request, -32601 method-not-
+  found, -32602 invalid params) plus -32000 for policy denials (oversized, duplicate id,
+  cap exceeded). `parse` exits 0 after processing the stream — it is a CLASSIFIER, not a
+  gate; Step 5 gates on each message's `ok`. It exits non-zero only if stdin is
+  unreadable (fail closed).
+
+Caps are constants, overridable ONLY for tests via env (AGENT_OS_MCP_MAX_BYTES,
+_MAX_STRING, _MAX_DEPTH, _MAX_ITEMS); modules/mcp.nix pins them to production values so a
+stray env var in the broker's environment cannot weaken the production parser (same
+lesson as the audit AUDIT_BIN / taint TAINT_DIR pins). The protocol rev is a hard pin
+with no env escape.
+"""
+import sys
+import os
+import json
+import re
+
+# The ONE pinned MCP protocol rev. Security property is the PIN + fail-closed mismatch,
+# not the exact value; changing supported revs is a one-constant edit + Fable re-review.
+PROTOCOL_VERSION = "2025-06-18"
+ALLOWED_METHODS = ("initialize", "tools/list", "tools/call")
+
+# Structural identifiers (method + tool name): the exact bytes Step-5 uses to look up a
+# capability. ASCII-only, no control chars -> no homoglyph/RTL/NUL smuggling in the name.
+_NAME_RE = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9._/-]*\Z")
+# A string id must be a bounded, boring token (no control chars, no unicode tricks).
+_ID_STR_RE = re.compile(r"\A[A-Za-z0-9._:-]{1,128}\Z")
+# INV-1 control strip (deliberately allows \x09 TAB and \x0a LF as legitimate content;
+# a raw LF cannot appear inside a single NDJSON record anyway). Applied to EVERY string.
+_CTRL_RE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
+
+# JSON-RPC + policy error codes.
+E_PARSE = -32700       # not JSON / not UTF-8 / trailing bytes / BOM
+E_INVALID = -32600     # not a valid JSON-RPC 2.0 request envelope / duplicate key
+E_METHOD = -32601      # method not in the pinned allow-list
+E_PARAMS = -32602      # params fail the method's structural schema
+E_POLICY = -32000      # oversized / duplicate-id / size-or-depth cap exceeded
+
+
+class DupKey(ValueError):
+    """Raised by the JSON object hook on a repeated key at any depth (ambiguity)."""
+
+
+def _no_dup_pairs(pairs):
+    d = {}
+    for k, v in pairs:
+        if k in d:
+            raise DupKey("duplicate key: %r" % k)
+        d[k] = v
+    return d
+
+
+def _int_env(name, default):
+    v = os.environ.get(name)
+    if v is None:
+        return default
+    try:
+        n = int(v)
+    except ValueError:
+        return default
+    return n if n > 0 else default
+
+
+def caps():
+    # Production values are also pinned by modules/mcp.nix; these are the bare-invocation
+    # fallback. A test may only SHRINK them via a direct `python3 bin/mcp` call.
+    return {
+        "bytes": _int_env("AGENT_OS_MCP_MAX_BYTES", 262144),   # 256 KiB / message
+        "string": _int_env("AGENT_OS_MCP_MAX_STRING", 65536),  # 64 KiB / string
+        "depth": _int_env("AGENT_OS_MCP_MAX_DEPTH", 16),       # container nesting
+        "items": _int_env("AGENT_OS_MCP_MAX_ITEMS", 4096),     # keys/elements per container
+    }
+
+
+def read_capped_lines(stream, cap):
+    """Yield (raw_bytes_without_newline, over_cap) for each newline-delimited record on a
+    BYTE stream, never buffering more than cap bytes of a single record — so an
+    unterminated multi-gigabyte line cannot exhaust memory (a real DoS the byte cap must
+    stop BEFORE parse). over_cap=True means the record exceeded the cap; its bytes are
+    discarded up to the next newline and it is denied without a parse attempt."""
+    buf = bytearray()
+    over = False
+    while True:
+        chunk = stream.read(1)
+        if not chunk:
+            if buf or over:
+                yield (bytes(buf), over)
+            return
+        b = chunk[0]
+        if b == 0x0A:                 # newline terminates the record
+            yield (bytes(buf), over)
+            buf = bytearray()
+            over = False
+            continue
+        if over:
+            continue                  # already over cap — drain to the next newline
+        buf.append(b)
+        if len(buf) > cap:
+            over = True
+            buf = bytearray()         # drop it; we only need to know it was oversized
+
+
+def parse_json_strict(raw):
+    """raw: the bytes of one record (no trailing newline). Return the parsed object, or
+    raise: DupKey on a repeated key, ValueError on non-UTF-8 / leading BOM / a JSON
+    syntax error / trailing non-whitespace bytes."""
+    if raw.startswith(b"\xef\xbb\xbf"):
+        raise ValueError("leading UTF-8 BOM")
+    try:
+        text = raw.decode("utf-8")    # strict: rejects invalid & overlong sequences
+    except UnicodeDecodeError as e:
+        raise ValueError("not valid UTF-8: %s" % e)
+    # json.loads is strict by default: it rejects raw (unescaped) control chars inside
+    # strings and rejects any trailing non-whitespace after the top-level value.
+    return json.loads(text, object_pairs_hook=_no_dup_pairs)
+
+
+def enforce_caps(obj, c):
+    """Walk the whole structure ITERATIVELY (no recursion -> no stack DoS from my own
+    check) and raise ValueError on the first cap violation: nesting depth, per-string
+    bytes, per-container item count, or a control char in ANY string (belt-and-suspenders
+    against \\u00XX-escaped control chars that json.loads DID decode through)."""
+    stack = [(obj, 1)]
+    smax = c["string"]
+    while stack:
+        node, depth = stack.pop()
+        if depth > c["depth"]:
+            raise ValueError("nesting exceeds depth cap %d" % c["depth"])
+        if isinstance(node, str):
+            if len(node.encode("utf-8")) > smax:
+                raise ValueError("string exceeds %d-byte cap" % smax)
+            if _CTRL_RE.search(node):
+                raise ValueError("control character in string")
+        elif isinstance(node, dict):
+            if len(node) > c["items"]:
+                raise ValueError("object exceeds %d-key cap" % c["items"])
+            for k, v in node.items():
+                if (not isinstance(k, str) or _CTRL_RE.search(k)
+                        or len(k.encode("utf-8")) > smax):
+                    raise ValueError("invalid object key")
+                stack.append((v, depth + 1))
+        elif isinstance(node, list):
+            if len(node) > c["items"]:
+                raise ValueError("array exceeds %d-item cap" % c["items"])
+            for v in node:
+                stack.append((v, depth + 1))
+        # int / float / bool / None carry nothing to bound.
+
+
+def deny(rid, code, message):
+    return {"ok": False, "id": rid, "error": {"code": code, "message": message}}
+
+
+def v_initialize(rid, params):
+    if not isinstance(params, dict):
+        return deny(rid, E_PARAMS, "initialize requires a params object")
+    extra = set(params.keys()) - {"protocolVersion", "capabilities", "clientInfo"}
+    if extra:
+        return deny(rid, E_PARAMS, "unexpected initialize params: %s"
+                    % ",".join(sorted(extra)))
+    if params.get("protocolVersion") != PROTOCOL_VERSION:
+        return deny(rid, E_PARAMS, "protocolVersion must be exactly %s" % PROTOCOL_VERSION)
+    cp = params.get("capabilities")
+    if cp is not None and not isinstance(cp, dict):
+        return deny(rid, E_PARAMS, "capabilities must be an object")
+    ci = params.get("clientInfo")
+    if ci is not None and not isinstance(ci, dict):
+        return deny(rid, E_PARAMS, "clientInfo must be an object")
+    return {"ok": True, "method": "initialize", "id": rid,
+            "protocolVersion": PROTOCOL_VERSION}
+
+
+def v_tools_list(rid, params):
+    if params is None:
+        return {"ok": True, "method": "tools/list", "id": rid, "cursor": None}
+    if not isinstance(params, dict):
+        return deny(rid, E_PARAMS, "tools/list params must be an object")
+    extra = set(params.keys()) - {"cursor"}
+    if extra:
+        return deny(rid, E_PARAMS, "unexpected tools/list params: %s"
+                    % ",".join(sorted(extra)))
+    cursor = params.get("cursor")
+    if cursor is not None and not isinstance(cursor, str):
+        return deny(rid, E_PARAMS, "cursor must be a string")
+    return {"ok": True, "method": "tools/list", "id": rid, "cursor": cursor}
+
+
+def v_tools_call(rid, params):
+    if not isinstance(params, dict):
+        return deny(rid, E_PARAMS, "tools/call requires a params object")
+    extra = set(params.keys()) - {"name", "arguments"}
+    if extra:
+        return deny(rid, E_PARAMS, "unexpected tools/call params: %s"
+                    % ",".join(sorted(extra)))
+    name = params.get("name")
+    if not isinstance(name, str) or len(name) > 128 or not _NAME_RE.match(name):
+        return deny(rid, E_PARAMS, "tool name missing or not a safe identifier")
+    args = params.get("arguments")
+    if args is None:
+        args = {}
+    if not isinstance(args, dict):
+        return deny(rid, E_PARAMS, "arguments must be an object")
+    # Per-argument type-checking against the tool's registry arg-schema is STEP 5's job,
+    # NOT the parser's. Step 4 guarantees only that `arguments` is a structurally valid,
+    # capped, dup-free, control-scrubbed object; the broker validates semantics.
+    return {"ok": True, "method": "tools/call", "id": rid, "name": name,
+            "arguments": args}
+
+
+def validate(obj, seen_ids):
+    """obj: the parsed, cap-checked top-level value. Return a verdict dict. Registers the
+    request id in seen_ids the moment it is structurally valid, so ANY reuse (even by a
+    later message that would itself be rejected) is denied as ambiguous — fail closed."""
+    if not isinstance(obj, dict):
+        return deny(None, E_INVALID, "top-level must be a JSON object (batches denied)")
+    extra = set(obj.keys()) - {"jsonrpc", "method", "id", "params"}
+    if extra:
+        return deny(None, E_INVALID, "unexpected top-level field(s): %s"
+                    % ",".join(sorted(extra)))
+    if obj.get("jsonrpc") != "2.0":     # only the exact string "2.0" compares equal
+        return deny(None, E_INVALID, 'jsonrpc must be the string "2.0"')
+    method = obj.get("method")
+    if not isinstance(method, str):
+        return deny(None, E_INVALID, "method must be a string")
+    if "id" not in obj:
+        return deny(None, E_INVALID, "id is required (notifications are not accepted)")
+    rid = obj["id"]
+    # bool is an int subclass in Python — exclude it explicitly, and reject float/None/
+    # container ids. No coercion: "1" and 1 are different ids, both must be bare scalars.
+    if isinstance(rid, bool) or not isinstance(rid, (int, str)):
+        return deny(None, E_INVALID, "id must be a string or integer")
+    if isinstance(rid, str) and not _ID_STR_RE.match(rid):
+        return deny(None, E_INVALID, "id string outside allowed charset/length")
+    key = ("s", rid) if isinstance(rid, str) else ("i", rid)
+    if key in seen_ids:
+        return deny(rid, E_POLICY, "duplicate id within stream")
+    seen_ids.add(key)
+    if method not in ALLOWED_METHODS:
+        return deny(rid, E_METHOD, "unknown method: %s" % method)
+    params = obj.get("params")
+    if method == "initialize":
+        return v_initialize(rid, params)
+    if method == "tools/list":
+        return v_tools_list(rid, params)
+    return v_tools_call(rid, params)
+
+
+def emit(verdict):
+    # Canonical compact serialization: sort_keys => deterministic golden output;
+    # ensure_ascii keeps it single-line + 7-bit, so no verdict field can forge a second
+    # output line and the goldens are stable across Python builds.
+    sys.stdout.write(json.dumps(verdict, sort_keys=True, separators=(",", ":"),
+                                ensure_ascii=True) + "\n")
+
+
+def cmd_parse(argv):
+    c = caps()
+    seen_ids = set()
+    stream = getattr(sys.stdin, "buffer", sys.stdin)
+    for raw, over in read_capped_lines(stream, c["bytes"]):
+        if over:
+            emit(deny(None, E_POLICY, "message exceeds %d-byte cap" % c["bytes"]))
+            continue
+        if not raw:
+            continue                  # blank line — no message
+        try:
+            obj = parse_json_strict(raw)
+        except DupKey:
+            emit(deny(None, E_INVALID, "duplicate JSON key"))
+            continue
+        except (ValueError, RecursionError):
+            emit(deny(None, E_PARSE, "parse error"))
+            continue
+        try:
+            enforce_caps(obj, c)
+        except ValueError as e:
+            emit(deny(None, E_POLICY, str(e)))
+            continue
+        emit(validate(obj, seen_ids))
+    return 0
+
+
+def main(argv):
+    if not argv:
+        sys.stderr.write(__doc__)
+        return 2
+    cmd, rest = argv[0], argv[1:]
+    if cmd == "parse":
+        return cmd_parse(rest)
+    sys.stderr.write("mcp: unknown command '%s' (parse)\n" % cmd)
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
