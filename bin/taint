@@ -235,7 +235,12 @@ def _confirm_reset(nonce, old_id, new_id):
         return False, "confirm-malformed"
     if not isinstance(obj, dict):
         return False, "confirm-malformed"
-    return bool(obj.get("approved")), str(obj.get("reason") or "")
+    # Strict identity, NOT bool() coercion: only JSON `true` approves. bool() would clear the
+    # monotonic taint bit for ANY truthy value ("false" string, NaN, 1, [1]) — strictly weaker
+    # than the broker on the identical seam boundary (broker: approved is not True -> deny), and
+    # the same fail-open class as the MCP-NaN bug. The primitive must not trust the client: a
+    # partial write / swapped seam / client bug must DENY, never launder a clear. (Fable, CF-1c.)
+    return obj.get("approved") is True, str(obj.get("reason") or "")
 
 
 def cmd_status(argv):
