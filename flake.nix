@@ -22,5 +22,17 @@
       #   nix build .#vm && ./result/bin/run-*-vm
       packages.${system}.vm =
         self.nixosConfigurations.agentos.config.system.build.vm;
+
+      # Phase 2 · Step 1 — evaluating the capability registry FORCES its invariant
+      # assertions (mechanism 3 + INV-2 + schema). Any violation throws during eval,
+      # so `nix flake check` fails to build this. That failure IS the test — a
+      # configuration that breaks a security invariant does not evaluate.
+      checks.${system}.capability-registry =
+        let reg = import ./modules/capability-registry.nix { lib = nixpkgs.lib; };
+        in nixpkgs.legacyPackages.${system}.runCommand "capability-registry-check" { } ''
+          echo "capability registry invariants hold (ok=${builtins.toJSON reg.ok})"
+          echo "capabilities: ${nixpkgs.lib.concatStringsSep " " reg.capabilityNames}"
+          touch $out
+        '';
     };
 }
