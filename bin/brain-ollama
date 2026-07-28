@@ -1,0 +1,81 @@
+#!/usr/bin/env python3
+"""brain-ollama — the offline/sovereign BRAIN for Agent OS.
+
+A minimal, dependency-free chat client for a *local* Ollama server. agent-shell
+execs whatever `$BRAIN` names; point BRAIN at this to make the login shell talk
+to a model running on the machine itself — no cloud, no API key, works grid-down.
+
+  OLLAMA_HOST=http://127.0.0.1:11434 OLLAMA_MODEL=qwen2.5:7b brain-ollama
+
+v0 is deliberately CHAT-ONLY: it does not run shell commands and does not yet
+read/write `mem`. Command-execution (the agentic Djinn) is a later, security-
+reviewed step — a login shell that can exec arbitrary commands from model output
+is the prompt-injection surface, so it goes branch->PR->Fable, not here.
+
+stdlib only (urllib) so it runs anywhere Python does, incl. the built VM.
+"""
+import json, os, sys, urllib.request, urllib.error
+
+HOST  = os.environ.get("OLLAMA_HOST", "http://127.0.0.1:11434").rstrip("/")
+MODEL = os.environ.get("OLLAMA_MODEL", "qwen2.5:7b")
+SYSTEM = os.environ.get(
+    "BRAIN_SYSTEM",
+    "You are the resident agent of this computer (Agent OS). You run locally on "
+    "the user's own hardware — no cloud. Be concise, direct, and honest about what "
+    "you can and cannot do. You have no tools yet; you can only talk.")
+
+C_YOU = "\033[38;5;179m"; C_AI = "\033[38;5;79m"; C_DIM = "\033[38;5;244m"; C0 = "\033[0m"
+
+def _post(path, payload):
+    req = urllib.request.Request(
+        HOST + path, data=json.dumps(payload).encode(),
+        headers={"Content-Type": "application/json"}, method="POST")
+    return urllib.request.urlopen(req, timeout=120)
+
+def chat(history):
+    """Stream one assistant turn from /api/chat; return the full text (or None on error)."""
+    try:
+        resp = _post("/api/chat", {"model": MODEL, "messages": history, "stream": True})
+    except urllib.error.URLError as e:
+        sys.stderr.write(f"\n[brain-ollama] cannot reach Ollama at {HOST}: {e}\n")
+        return None
+    out = []
+    sys.stdout.write(C_AI)
+    for raw in resp:
+        raw = raw.strip()
+        if not raw:
+            continue
+        try: obj = json.loads(raw)
+        except json.JSONDecodeError: continue
+        tok = obj.get("message", {}).get("content", "")
+        if tok:
+            out.append(tok); sys.stdout.write(tok); sys.stdout.flush()
+        if obj.get("done"):
+            break
+    sys.stdout.write(C0 + "\n"); sys.stdout.flush()
+    return "".join(out)
+
+def main():
+    sys.stdout.write(f"{C_DIM}brain: {MODEL} @ {HOST} (local — no cloud){C0}\n")
+    history = [{"role": "system", "content": SYSTEM}]
+    while True:
+        sys.stdout.write(f"{C_YOU}you ›{C0} "); sys.stdout.flush()
+        line = sys.stdin.readline()
+        if not line:            # EOF (piped input exhausted / Ctrl-D)
+            sys.stdout.write("\n"); break
+        msg = line.strip()
+        if msg in ("exit", "quit", ":q", ""):
+            if msg == "":       # blank line: reprompt, don't send an empty turn
+                continue
+            break
+        history.append({"role": "user", "content": msg})
+        reply = chat(history)
+        if reply is None:       # server unreachable — don't spin
+            break
+        history.append({"role": "assistant", "content": reply})
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        sys.stdout.write("\n")
