@@ -24,9 +24,33 @@ EOF
 EOF
 fi
 
-# --- boot banner -------------------------------------------------------------
+# --- boot art + banner -------------------------------------------------------
+# Old-school scrolling ASCII wordmark — the login is an EVENT, not a logo you click
+# past. Reveals line-by-line (the "scroll"), then a demoscene-ish shimmer sweep, then
+# settles. Skips animation on a non-tty or when AGENT_OS_NOANIM is set.
 clear || true
+boot_art() {
+  local art=(
+    ""
+    "   ▄▀█ █▀▀ █▀▀ █▄░█ ▀█▀   █▀█ █▀"
+    "   █▀█ █▄█ ██▄ █░▀█ ░█░   █▄█ ▄█"
+    "        the computer you talk to"
+    ""
+  )
+  local animate=1
+  [ -t 1 ] && [ -z "${AGENT_OS_NOANIM:-}" ] || animate=0
+  for line in "${art[@]}"; do
+    printf "${BANNER}%s${RST}\n" "$line"
+    [ "$animate" = 1 ] && sleep 0.12
+  done
+  # shimmer sweep: one pass brightening the wordmark (cheap demoscene nod)
+  if [ "$animate" = 1 ]; then
+    for _ in 1 2 3; do printf "\033[5A"; sleep 0.05; printf "\033[5B"; sleep 0.05; done
+  fi
+}
+boot_art
 printf "${BANNER}agent-os${RST} ${DIM}v0.1${RST}\n"
+# memory count ticks in — a machine that already knows you
 printf "${TEAL}memory mounted${RST} ${DIM}· %s facts · path = meaning${RST}\n" \
   "$(find "$MEM" -name '*.md' | wc -l | tr -d ' ')"
 printf "${DIM}config at /etc/nixos — ask me to change a setting and I rewrite it.${RST}\n\n"
