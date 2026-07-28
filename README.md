@@ -76,7 +76,8 @@ reboot
 First boot lands in the agent shell → **memory-REPL** (no model yet; the login floor never
 crash-loops). Then pull the local brain over the provisioning window and seal the box:
 ```sh
-setup-brain.sh        # pulls the local model (qwen2.5:7b-instruct) during provisioning
+ollama pull qwen2.5:7b-instruct   # pulls the local model during provisioning (setup-brain.sh is NOT on PATH)
+brain-ollama --check              # optional: prove the floor end-to-end (>=1 model reachable)
 sudo nixos-rebuild switch --flake github:dillondevoe/agent-os#agentos-sealed
 reboot                # sealed: egress is nixpkgs-only (+ timesyncd); the local model IS the shell
 ```
