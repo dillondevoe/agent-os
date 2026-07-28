@@ -55,12 +55,18 @@ if "$PY" "$AUDIT" verify >/dev/null 2>&1; then fail "verify PASSED after deletin
 cp "$LOG.bak" "$LOG"
 
 # 6. no-log -> no-execute: an unwritable log -> append exits non-zero.
-RO="$SCRATCH/ro/audit"; mkdir -p "$RO"; : > "$RO/audit.log"
-chmod 0444 "$RO/audit.log"; chmod 0555 "$RO"
-if AGENT_OS_AUDIT_DIR="$RO" bash -c "echo '{\"cap\":\"x\"}' | \"$PY\" \"$AUDIT\" append" >/dev/null 2>&1; then
-  chmod -R u+w "$SCRATCH/ro"; fail "append SUCCEEDED on an unwritable log (no-log->no-execute violated)"
+#    Guarded against root: chmod does not bind uid 0, so this leg is only meaningful
+#    as an unprivileged user (per feedback_guards_need_their_own_coverage).
+if [ "$(id -u)" != 0 ]; then
+  RO="$SCRATCH/ro/audit"; mkdir -p "$RO"; : > "$RO/audit.log"
+  chmod 0444 "$RO/audit.log"; chmod 0555 "$RO"
+  if AGENT_OS_AUDIT_DIR="$RO" bash -c "echo '{\"cap\":\"x\"}' | \"$PY\" \"$AUDIT\" append" >/dev/null 2>&1; then
+    chmod -R u+w "$SCRATCH/ro"; fail "append SUCCEEDED on an unwritable log (no-log->no-execute violated)"
+  fi
+  chmod -R u+w "$SCRATCH/ro"
+else
+  echo "audit-battery: test-6 (unwritable-log) skipped under root — chmod is unenforced for uid 0" >&2
 fi
-chmod -R u+w "$SCRATCH/ro"
 
 # 7. fail-closed on malformed input.
 if echo 'not json'  | "$PY" "$AUDIT" append >/dev/null 2>&1; then fail "append accepted non-JSON"; fi
@@ -71,5 +77,71 @@ if printf ''        | "$PY" "$AUDIT" append >/dev/null 2>&1; then fail "append a
 echo '{"cap":"x","seq":999,"prev":"deadbeef","ts":"1999","hash":"x"}' | "$PY" "$AUDIT" append >/dev/null \
   || fail "append with reserved fields exited non-zero"
 "$PY" "$AUDIT" verify >/dev/null || fail "verify failed after a reserved-field record (forgery not stripped)"
+
+# 9. torn-tail (FIX 2): an unterminated last line must be REFUSED, not chained onto.
+#    Reproduces a crash between os.write and the newline landing by dropping the final byte.
+TT="$SCRATCH/torn/audit"; mkdir -p "$TT"
+( export AGENT_OS_AUDIT_DIR="$TT"
+  for i in 1 2 3; do echo "{\"cap\":\"c\",\"n\":$i}" | "$PY" "$AUDIT" append >/dev/null || exit 7; done
+  sz=$(wc -c < "$TT/audit.log"); truncate -s $((sz - 1)) "$TT/audit.log"   # drop final newline
+  if echo '{"cap":"c","n":4}' | "$PY" "$AUDIT" append >/dev/null 2>&1; then exit 8; fi   # must refuse
+) || fail "torn-tail was not refused (FIX 2 — silent chain corruption)"
+
+# 10. tail-truncation is a KNOWN, documented gap: the chain ALONE cannot detect a
+#     dropped tail, so verify PASSES on the valid prefix (Step-7 chattr +a + broker
+#     head-anchoring are what close it; see the docstring corrected in FIX 3).
+TR="$SCRATCH/trunc/audit"; mkdir -p "$TR"
+( export AGENT_OS_AUDIT_DIR="$TR"
+  for i in 1 2 3; do echo "{\"cap\":\"c\",\"n\":$i}" | "$PY" "$AUDIT" append >/dev/null || exit 7; done
+  sed -i '3d' "$TR/audit.log"                         # drop the LAST record entirely
+  "$PY" "$AUDIT" verify >/dev/null 2>&1 || exit 8     # a valid prefix still verifies OK
+) || fail "verify should PASS on a truncated valid prefix (documents the tail-truncation gap)"
+
+# 11. concurrency (flock): parallel appends must not interleave the seq/chain.
+CC="$SCRATCH/conc/audit"; mkdir -p "$CC"
+( export AGENT_OS_AUDIT_DIR="$CC"
+  for i in $(seq 1 12); do echo "{\"cap\":\"c\",\"n\":$i}" | "$PY" "$AUDIT" append >/dev/null & done
+  wait
+  [ "$(grep -c . "$CC/audit.log")" = "12" ] || exit 8
+  "$PY" "$AUDIT" verify >/dev/null 2>&1 || exit 9    # chain intact + seq dense 0..11
+) || fail "concurrent appends dropped records or broke the chain (flock)"
+
+# 12. durability (FIX 1 + fsync-both): a real ENOSPC needs a privileged loop-mount the
+#     nix sandbox can't do, so inject the same POSIX property portably — monkeypatch os
+#     to (a) prove a clean append fsyncs BOTH the file fd and the dir fd, and (b) prove a
+#     SHORT write (partial count, no exception) fails closed instead of exiting 0.
+DUR="$SCRATCH/dur/audit"; mkdir -p "$DUR"
+"$PY" - "$AUDIT" "$DUR" <<'PYEOF' || fail "durability leg failed (FIX 1 short-write and/or fsync-both)"
+import sys, os, io, stat, importlib.util, importlib.machinery
+audit_path, adir = sys.argv[1], sys.argv[2]
+os.environ["AGENT_OS_AUDIT_DIR"] = adir
+# bin/audit is extensionless, so spec_from_file_location infers no loader — name one.
+loader = importlib.machinery.SourceFileLoader("auditmod", audit_path)
+spec = importlib.util.spec_from_loader("auditmod", loader)
+m = importlib.util.module_from_spec(spec); loader.exec_module(m)
+
+# (a) a clean append must fsync BOTH a regular file and a directory.
+targets = []
+real_fsync = os.fsync
+def spy_fsync(fd):
+    targets.append(stat.S_ISDIR(os.fstat(fd).st_mode)); return real_fsync(fd)
+os.fsync = spy_fsync
+sys.stdin = io.StringIO('{"cap":"file.read","n":1}')
+rc = m.cmd_append([])
+os.fsync = real_fsync
+assert rc == 0, "clean append did not exit 0 (rc=%r)" % rc
+assert (True in targets) and (False in targets), "must fsync BOTH file and dir, saw %r" % targets
+
+# (b) a SHORT write (1 byte durable, rest silently dropped) must fail closed.
+real_write = os.write
+def short_write(fd, data):
+    real_write(fd, data[:1]); return 1
+os.write = short_write
+sys.stdin = io.StringIO('{"cap":"file.read","n":2}')
+rc2 = m.cmd_append([])
+os.write = real_write
+assert rc2 != 0, "short write exited 0 — no-log->no-execute breach (FIX 1)"
+print("durability OK")
+PYEOF
 
 echo "audit-battery: ALL PROPERTIES HOLD"

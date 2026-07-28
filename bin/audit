@@ -4,10 +4,15 @@
 Phase 2 · Step 2 (see docs/phase2-threat-model.md §8, §12). The SMALLEST privileged
 primitive: every capability the broker runs is recorded here FIRST, and if the record
 cannot be durably written the action does not run — no-log -> no-execute. The log is
-append-only NDJSON with a SHA-256 hash chain, so any truncation, reorder, or in-place
-edit of a past record is detectable by `audit verify` even by an actor who can write
-the file. That is tamper-EVIDENCE; OS-level append-only (chattr +a) + directory
-ownership are the primary write controls and are the module's / Step-7's job.
+append-only NDJSON with a SHA-256 hash chain, so any NON-RECOMPUTING tampering of a
+past record — an in-place edit, a reorder, or a mid-chain deletion — is detectable by
+`audit verify` even by an actor who can write the file. What the chain ALONE does NOT
+catch: tail-truncation and suffix-rewrite (an actor drops the tail and re-fabricates a
+valid canonical chained suffix — there is no secret in the chain to prevent it). Those
+are closed by (a) Step-7 OS-level append-only (chattr +a) + directory ownership, the
+primary write controls, and (b) the broker anchoring each head hash (echoed on stdout
+by `append`) OUTSIDE the audit dir, which makes a suffix-rewrite detectable before
+Step 7 lands. So this is tamper-EVIDENCE, not tamper-prevention.
 
 Trust boundary: this runs as the broker (the trusted layer), NEVER as a capability
 impl. The log directory (/var/lib/agent-os/audit) is a Step-1 PROTECTED path — no impl
@@ -67,6 +72,19 @@ def read_head(path):
     return (int(rec["seq"]), line_hash(last))
 
 
+def last_byte(path):
+    """Last byte of the log, or None if empty/absent. Used to detect a torn tail."""
+    try:
+        with open(path, "rb") as f:
+            try:
+                f.seek(-1, os.SEEK_END)
+            except OSError:
+                return None            # zero-length file
+            return f.read(1)
+    except FileNotFoundError:
+        return None
+
+
 def utc_now():
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
@@ -103,6 +121,16 @@ def cmd_append(argv):
         return 3
     try:
         fcntl.flock(lf, fcntl.LOCK_EX)
+        # Torn tail: a crash between os.write and the newline durably landing leaves a
+        # last line with no trailing "\n". read_head would chain onto that partial /
+        # unterminated record, and the next os.write (O_APPEND at EOF) would concatenate
+        # two records into ONE physical line — verify breaks forever while append keeps
+        # exiting 0. Refuse instead: convert silent corruption into fail-closed.
+        tail = last_byte(path)
+        if tail is not None and tail != b"\n":
+            sys.stderr.write("audit append: torn tail — last record lacks a trailing "
+                             "newline; operator recovery required (refusing to append)\n")
+            return 4
         seq, prev = read_head(path)
         rec = dict(payload)
         rec["seq"] = seq + 1
@@ -115,7 +143,16 @@ def cmd_append(argv):
         # survived a crash — durability is what makes no-log->no-execute meaningful.
         fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
         try:
-            os.write(fd, (line + "\n").encode("utf-8"))
+            data = (line + "\n").encode("utf-8")
+            n = os.write(fd, data)
+            # POSIX write(2) may return a SHORT count WITHOUT raising (classic ENOSPC
+            # mid-record). A partial line is both an un-audited action and a corrupt
+            # chain, so a short write is a durability failure — raise into the OSError
+            # handler below and fail closed. Silently returning 0 here is THE breach
+            # no-log->no-execute exists to prevent.
+            if n != len(data):
+                raise OSError("short write: %d of %d bytes durable — record not written"
+                              % (n, len(data)))
             os.fsync(fd)
         finally:
             os.close(fd)
@@ -131,6 +168,10 @@ def cmd_append(argv):
     finally:
         fcntl.flock(lf, fcntl.LOCK_UN)
         lf.close()
+    # The broker receives this head hash on stdout. Per Fable Step-2 FIX-3: the broker
+    # (Step 5) MUST anchor it OUTSIDE the audit dir (e.g. broker state), so a
+    # suffix-rewrite of the log — which the chain alone cannot detect — becomes
+    # detectable before Step-7 `chattr +a` lands. Zero protocol cost; noted here.
     sys.stdout.write(h + "\n")
     return 0
 
