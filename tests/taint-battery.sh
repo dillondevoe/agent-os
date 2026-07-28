@@ -96,6 +96,27 @@ if t reset --break-glass >/dev/null 2>&1; then fail "--break-glass without --con
 status_is TAINTED
 reset_clean >/dev/null || fail "break-glass (--confirm-human --break-glass) reset failed"
 status_is clean                                    # a blessed session is clean
+# (f) STRICT-APPROVAL regression (Fable ruling, CF-1c a522af9). _confirm_reset accepts ONLY a JSON
+#     `true`. A seam emitting a TRUTHY-NON-TRUE approval ("false" string, 1, [1], NaN) must fail-
+#     closed DENY (exit 5) with the bit still TAINTED. `bool()`-coercion (the pre-a522af9 bug) would
+#     launder EVERY one of these into a CLEAR on the single field that clears the monotonic taint bit
+#     — same class as the MCP-NaN bug — leaving taint strictly weaker than the broker (approved is
+#     not True -> deny) on the identical seam. This pins the fix against a silent refactor to bool().
+t set "re-taint for strict-approval regression" >/dev/null || fail "set before strict-approval leg failed"
+status_is TAINTED
+for bad in '"false"' '1' '[1]' 'NaN'; do
+  cat > "$SEAMDIR/truthy" <<SEAM
+#!/bin/sh
+cat > /dev/null
+printf '{"approved":$bad,"reason":"truthy-non-true must NOT clear taint"}'
+SEAM
+  chmod +x "$SEAMDIR/truthy"
+  ( export AGENT_OS_CONFIRM_SEAM="$SEAMDIR/truthy"; t reset >/dev/null 2>&1 ); rc=$?
+  [ "$rc" -eq 5 ] || fail "truthy-non-true approval $bad: expected fail-closed DENY exit 5, got $rc (bool()-coercion fail-open regressed)"
+  status_is TAINTED
+done
+reset_clean >/dev/null || fail "reset after strict-approval regression failed"
+status_is clean                                    # restored: block is state-neutral for later phases
 
 # 3. MONOTONIC set + PERSISTENCE (§6). set can only RAISE the bit; a fresh process still
 #    sees it (on-disk, survives truncation/summarization). Nothing but reset clears it.

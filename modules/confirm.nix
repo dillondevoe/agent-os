@@ -39,6 +39,11 @@ let
   # Each is {cond, msg}; `confirmSandboxOk` forces them all and throws the first violated
   # message. A violating pin therefore does not evaluate -> `nix build .#vm` fails. That build
   # failure IS the sandbox test, exactly like the registry's `assert ok`.
+  # The INTRINSIC seam invariants (single pinned endpoint + valid addr/port, INV-1 tty separation,
+  # §5 timing ordering) now live in confirm-pkg.nix as `cpkg.checksOk`, so broker.nix and
+  # taint-pkg.nix — which PIN the same store-path but do NOT import this module — force them too
+  # (Fable Step-6 follow-up; single source, no drift). Kept HERE: the INSTALL-context checks that
+  # only matter because THIS module provisions the confirm client's writable scope + seen-store.
   checks =
     [ { cond = confirmWritable == [ cpkg.confirmDir ];
         msg  = "confirm: the client's writable scope must be EXACTLY [\"${cpkg.confirmDir}\"] and nothing else."; } ]
@@ -47,19 +52,12 @@ let
          msg  = "confirm: writable path '${w}' overlaps protected path '${p}' — the confirm client must not write broker/registry/audit/taint/weights/trusted-mem.";
        }) reg.protectedPaths) confirmWritable
     ++ [
-      { cond = builtins.length cpkg.relayEndpoints == 1;
-        msg  = "confirm: egress allowance must be EXACTLY one pinned endpoint (addr+port, NO fallback list) — Fable ruling Q1; more than one and it can become a general exfil channel."; }
-      { cond = lib.all (e: builtins.isString e.addr && e.addr != ""
-                          && builtins.isInt e.port && e.port > 0 && e.port < 65536) cpkg.relayEndpoints;
-        msg  = "confirm: the pinned relay endpoint must be a non-empty addr + a 1..65535 int port."; }
-      { cond = cpkg.gettyTty != cpkg.modelTty;
-        msg  = "confirm: the second-getty console '${cpkg.gettyTty}' must NEVER be the model's login tty '${cpkg.modelTty}' (INV-1: the model's tty carries zero authorization)."; }
       { cond = lib.any (rp: pathConflicts rp cpkg.relaySecretFile) reg.protectedReadPaths;
         msg  = "confirm: the broker<->relay secret '${cpkg.relaySecretFile}' must live under a protected-READ path so the model can never open it (it is T3 config, §7)."; }
-      { cond = cpkg.humanWindow + cpkg.roundTrip <= cpkg.brokerTimeout;
-        msg  = "confirm: human window (${toString cpkg.humanWindow}s) + one relay round-trip (${toString cpkg.roundTrip}s) must be <= the broker backstop (${toString cpkg.brokerTimeout}s) so the client's graceful deny precedes the SIGKILL backstop (§5 ordering constraint)."; }
     ];
-  confirmSandboxOk = lib.all (c: lib.asserts.assertMsg c.cond c.msg) checks;
+  # `cpkg.checksOk` forces the intrinsic invariants; the local list adds the install-context ones.
+  # Both must hold — a violating pin does not evaluate, so `nix build .#vm` fails (§8).
+  confirmSandboxOk = cpkg.checksOk && lib.all (c: lib.asserts.assertMsg c.cond c.msg) checks;
 in
 {
   # Gate the installed package behind the sandbox assertions: a violating pin does not evaluate,

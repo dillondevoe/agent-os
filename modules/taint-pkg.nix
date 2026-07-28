@@ -26,6 +26,12 @@ let
   # discipline as AUDIT_BIN and the broker's AGENT_OS_CONFIRM_SEAM pin). taint's other callers
   # (the broker's set/recall/stamp/consult) never read it; only the human `reset` path does.
   confirmPkg = import ./confirm-pkg.nix { inherit pkgs; };
+  # Couple the seam pin to confirm-pkg's sandbox invariants (Fable Step-6 follow-up): `assert
+  # confirmPkg.checksOk` forces the intrinsic §7 checks at taint's OWN wrapper build, so taint's
+  # `reset` confirm-seam pin stays sandbox-validated even if modules/confirm.nix is ever dropped
+  # from the system imports — the same refactor-proofing broker.nix now carries. CF-1c made taint a
+  # THIRD consumer of the confirm-pkg wrapper pin, so this coupling closes that surface too.
+  confirmSeam = assert confirmPkg.checksOk; "${confirmPkg.wrapper}/bin/confirm";
 in
 # Pin the state dir + AUDIT_BIN + confirm seam unconditionally. Every env override survives only
 # as a TEST affordance via a DIRECT `python3 bin/taint` invocation — exactly how the batteries
@@ -33,6 +39,6 @@ in
 pkgs.writeShellScriptBin "taint" ''
   export AGENT_OS_TAINT_DIR=/var/lib/agent-os/taint
   export AUDIT_BIN=${auditWrapper}/bin/audit
-  export AGENT_OS_CONFIRM_SEAM=${confirmPkg.wrapper}/bin/confirm
+  export AGENT_OS_CONFIRM_SEAM=${confirmSeam}
   exec ${pkgs.python3}/bin/python3 ${../bin/taint} "$@"
 ''

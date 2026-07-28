@@ -45,9 +45,10 @@ _CTRL = set(range(0x00, 0x09)) | set(range(0x0b, 0x20)) | {0x7f} | set(range(0x8
 # verify the recipient/host, and an RTL override can visually reorder a destination into a
 # benign-looking one while the AUTHORIZED bytes differ (Trojan-Source, CVE-2021-42574, applied to
 # an approve-under-deception decision — Fable Step-6 hardening). Strip the full set so what the
-# human reads matches the logical byte order: LRM/RLM, the embedding+override block
-# (LRE/RLE/PDF/LRO/RLO), and the isolates (LRI/RLI/FSI/PDI).
-_BIDI = {0x200e, 0x200f} | set(range(0x202a, 0x202f)) | set(range(0x2066, 0x206a))
+# human reads matches the logical byte order: the Arabic letter mark (ALM), LRM/RLM, the
+# embedding+override block (LRE/RLE/PDF/LRO/RLO), and the isolates (LRI/RLI/FSI/PDI) — the complete
+# Unicode Bidi_Control set (all 12 code points; U+061C was the one previously missing).
+_BIDI = {0x061c, 0x200e, 0x200f} | set(range(0x202a, 0x202f)) | set(range(0x2066, 0x206a))
 
 # Everything scrub() removes from a model-controlled value before it enters the frame.
 _STRIP = _CTRL | _BIDI
