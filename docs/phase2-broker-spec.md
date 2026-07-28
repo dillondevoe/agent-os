@@ -30,15 +30,17 @@ impls (Step 7). Concretely:
   impls.
 
 This keeps Step 5 to *decision + audit + dispatch*, fully testable now, with two well-typed
-seams. If review finds even this too large, the next cut is to lift the **arg-schema
-validator** (§4.3) into `bin/broker-argcheck` as its own reviewed unit; the pipeline stays.
-Nothing else in the pipeline is separable without splitting a fail-closed decision across
-a trust boundary, which would *add* surface. I do not think that further cut is needed —
-flagging it as the pre-identified relief valve.
+seams. Fable reviewed the decomposition and confirmed the **arg-schema validator stays IN**
+the broker (~100 lines; splitting it across a process boundary would *add* surface, not
+reduce it). The pre-identified relief valve stays unfired — Step 5 is the whole pipeline
+minus the two downstream seams, nothing more lifted out.
 
-**Step 5 executes nothing on its own** (impls are Step 7, confirm is Step 6). Its testable
-surface is the *routing decision + the audit trail + the fail-closed behavior of both
-seams*. That is the whole point: prove the wall's logic in isolation before wiring effects.
+**Step 5 invokes no capability of its own.** Its only effects are the **monotonic,
+fail-safe state effects the wall itself owns — `audit` appends and `taint` set/stamp/recall**
+(all set-only or append-only, all fail-closed). It never executes a T0/T1/T2 impl (Step 7)
+and never runs the confirm channel (Step 6). Its testable surface is the *routing decision +
+the audit trail + the taint side-effects + the fail-closed behavior of both seams*. That is
+the whole point: prove the wall's logic in isolation before wiring effects.
 
 ---
 
@@ -63,6 +65,13 @@ seams*. That is the whole point: prove the wall's logic in isolation before wiri
 - Wiring: in production the broker runs `bin/mcp parse` as a child over the stdio stream
   and reads verdict lines; test harnesses feed verdict lines directly. Either way the
   broker's input contract is *the verdict dict*, not bytes.
+- **Single-flight, serial processing.** The broker resolves **one request completely**
+  (through the return in §3 stage 10) before it reads the next verdict line. No overlap,
+  no concurrency. This makes the taint consult→decision→taint-side-effect sequence
+  **TOCTOU-free**: the tainted bit cannot change under a request between its consult and its
+  effect, because nothing else is in flight. A **malformed verdict line from the mcp child**
+  (not standard JSON — which Step 4 guarantees can't happen for accepted input, so it means
+  the child died or was tampered) → deny and **shut the stream**, fail-closed.
 - **Output to the model:** a typed MCP result or a typed error — always structured, never
   free bytes that could be re-read as instructions (§4.9 DATA fence).
 
@@ -98,8 +107,19 @@ For a `tools/call` verdict, in this exact order — the first failing stage deni
    fails, **deny** (no-log → no-execute).
 8. **Effect** — `ALLOW-AUTO` → `invoke_seam`; `REQUIRE-CONFIRM` → `confirm_seam`, and only
    on `APPROVE` → `invoke_seam`. Any seam failure/denial → deny, audited.
-9. **Return** — wrap the result/error in the typed envelope (§4.9); taint-set on untrusted
-   ingest.
+9. **Provenance side-effects — BEFORE any content leaves (MUST-FIX #1 ordering).** Derive
+   the result's origin from **broker policy** (§4.5a — never the impl's self-report).
+   Then, depending on the capability, a taint effect **must commit first**:
+   - result `origin:UNTRUSTED` (e.g. a `net.fetch` body, success *or* error) → `taint set`;
+   - `mem.recall` → `taint recall <key>` (re-taints if the stored entry is UNTRUSTED-origin);
+   - `mem.remember` invoke-success → `taint stamp <key>` (**MUST-FIX #2** — the Step-7 impl
+     *cannot* stamp; `/var/lib/agent-os/taint` is a protected path no impl sandbox may write,
+     so the **broker** owns the stamp).
+   **If the required taint effect fails → withhold the content, return a typed error, audit
+   the failure.** Content is released *only after* the taint bit/stamp that covers it has
+   committed. Returning untrusted bytes into a session whose taint state does not yet cover
+   them is the exact laundering window the whole design exists to close.
+10. **Return** — wrap the now-taint-covered result in the typed `data` envelope (§4.9).
 
 Every `deny` is `{ok:false, error:{code,message}}` back to the model and an audit line.
 Unknown-anything, uncertain-anything → deny. The safe default is "do nothing."
@@ -140,18 +160,27 @@ control-scrubbed object. The broker checks **semantics** against `cap.args` (a
     rule: leading `/`, no empty/`.`/`..` segment, no trailing `/`) **and confined** under
     one of the cap's own `sandbox.readWritePaths`/`readOnlyPaths` roots. This is
     defense-in-depth over the Step-7 systemd sandbox — the broker refuses an out-of-root
-    path before the impl ever runs. Symlink-escape is still Step-7's OS job (noted in §6).
-  - `namespace` — `str` matching `^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$` and confined to the
-    cap's allowlisted mem roots; no `/`, no `..`.
-  - `recipient` — `str` matching a conservative recipient charset (no control, no
-    whitespace, length-bounded); the **value** is never trusted for authorization — it is a
-    T2 "destination" surfaced verbatim in the confirm frame (§7 of the model, first-time
+    path before the impl ever runs. **The broker's Python canonicality check and the Nix
+    `pathIsCanonical` are two readers of one rule → any differential is a bypass; pin both to
+    shared golden vectors in the battery (§7).** Symlink-escape is still Step-7's OS job (§6).
+  - `namespace` — `str` matching `^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$` (no `/`, no `..`), and it
+    must resolve **strictly UNDER** the cap's mem root as `<root>/<ns>` — **never as a sibling
+    of `session/`** or any other protected sub-path. Confinement is checked on the *resolved*
+    path, not the raw string.
+  - `recipient` — `str`, **printable-ASCII only** (`0x20`–`0x7e`), length-bounded; no control,
+    no whitespace, no non-ASCII (a confusable/homoglyph destination = approve-under-deception
+    in the confirm frame). The **value** is never trusted for authorization — it is a T2
+    "destination" surfaced verbatim in the confirm frame (§7 of the model, first-time
     highlight). The broker does not resolve/act on it at this stage.
   - `url` — parse with `urllib.parse`; require `scheme ∈ {http,https}` and a non-empty host.
-    **INV-2 belt-and-suspenders:** if the host is an IP literal in the egress deny-list
-    (loopback/RFC1918/CGNAT/link-local/ULA), **deny at the broker** rather than relying only
-    on the Step-7 `IPAddressDeny`. A hostname that *resolves* to a denied range is caught by
-    the systemd layer at fetch time (the broker does not do DNS in v1 — flagged, not hidden).
+    **INV-2, evasion-hardened (Fable):** a literal string deny-list is bypassable —
+    `2130706433`, `0x7f000001`, `0177.0.0.1`, `::ffff:127.0.0.1`, `0.0.0.0` all reach
+    loopback/unspecified. So: **reject outright any host in all-digit / `0x`-hex /
+    `0`-leading-octal form** (only ever obfuscated IPs), and for every host that parses as
+    an IP, run `ipaddress.ip_address`, **unwrap `.ipv4_mapped`**, and deny if
+    `is_loopback | is_private | is_link_local | is_reserved | is_unspecified | is_multicast`.
+    A hostname that *resolves* to a denied range is caught by the Step-7 systemd
+    `IPAddressDeny` at fetch time (the broker does not do DNS in v1 — flagged, not hidden).
 - All validators are total and fail-closed: unknown type → deny (should be impossible; the
   registry assert already restricts types, but the broker does not assume it).
 
@@ -182,6 +211,20 @@ routing in v1 — it is logged (shadow) and it **will** change routing in v2. Th
 still consults it now so the wiring, the fail-closed path, and the evidence are all real.
 T2 is confirm **regardless of provenance, always** — never auto, ever, even clean.
 
+### 4.5a Origin derivation — broker/registry POLICY, never impl self-report (Fable)
+A result's `origin` (TRUSTED | UNTRUSTED) decides whether it taints the session (§4.9), so
+it is a **security decision and must not come from the impl's own output.** An impl that
+(buggily or maliciously) reported `TRUSTED` for a fetched web page would be **fail-OPEN** —
+the laundering the wall exists to stop. The broker **derives origin from the capability**,
+from a fixed table it owns:
+- `net.fetch` → **UNTRUSTED** (network body is attacker-controlled);
+- `file.read` → **TRUSTED** (operator-curated, sandbox-confined path);
+- `mem.recall` → **the stored entry's taint tag** (via `taint recall`, §4.9);
+- **anything missing / unknown / unmapped → UNTRUSTED** (fail-closed default).
+
+The impl seam returns *content and a completion status only*; the broker never reads an
+`origin` field off the impl. This corrects the earlier §4.7 interface (below).
+
 ### 4.6 Confirm seam (→ Step 6; Step-5 stub = DENY)
 - Interface: `confirm_seam(confirm_request) -> {approved: bool, reason: str}` where
   `confirm_request = {capability, tier, typed_args, provenance: TRUSTED|TAINTED,
@@ -189,17 +232,21 @@ T2 is confirm **regardless of provenance, always** — never auto, ever, even cl
   builds this record; Step 6 renders/relays it.
 - Step-5 default stub returns `{approved:false, reason:"confirm-channel-not-wired"}` →
   every >T0 request denies. This is correct v1 fail-closed behavior until Step 6 lands.
-- **Nonce (CF-1b):** the broker mints a per-request nonce the model can't know; approval
-  must echo it; replay/guess → deny. In Step 5 the broker *mints and records* the nonce
-  (so the audit trail and the interface are real); Step 6 owns the echo-verification and
-  the channel integrity. Reset-of-taint should eventually be a **confirm-nonce action, not
-  a self-asserted `--confirm-human` flag** (CF-1c) — a Step-6 follow-up, flagged not built.
+- **Nonce (CF-1b):** the broker mints a per-request nonce the model can't know — **`os.urandom`,
+  ≥128 bits** — and **records the current `session_id` alongside it**. Approval must echo the
+  nonce AND arrive under the **same** session_id; a replay/guess, or an approval whose current
+  session_id differs from the one recorded at mint time (a taint reset / new epoch happened in
+  between), **denies**. In Step 5 the broker *mints and records* the nonce+session_id (so the
+  audit trail and the interface are real); Step 6 owns the echo-verification and the channel
+  integrity. Reset-of-taint should eventually be a **confirm-nonce action, not a self-asserted
+  `--confirm-human` flag** (CF-1c) — a Step-6 follow-up, flagged not built.
 
 ### 4.7 Invoke seam (→ Step 7; Step-5 stub = not-implemented)
-- Interface: `invoke_seam(cap, validated_args) -> {ok:bool, content, origin:
-  TRUSTED|UNTRUSTED, meta}`. `origin` tells the broker whether the *result* is untrusted
-  (a `net.fetch` page is UNTRUSTED; a `file.read` of a safe path is TRUSTED) — this drives
-  §4.9.
+- Interface: `invoke_seam(cap, validated_args) -> {ok:bool, content, meta}` — **content and a
+  completion status only. No `origin` field.** Origin is the broker's decision (§4.5a),
+  derived from the capability, never read off the impl (reading it would be fail-open). Both
+  a success body and an **error body carry attacker bytes** (a network-cap error message can
+  embed a fetched fragment), so **both** flow through the §4.9 origin/taint path.
 - Step-5 default stub returns `{ok:false, reason:"impl-not-wired"}` — a fail-closed error,
   **never a fabricated success**. Step 7 supplies the real sandboxed impls whose sandboxes
   are *derived from the same registry declarations* the broker validated against.
@@ -214,21 +261,32 @@ T2 is confirm **regardless of provenance, always** — never auto, ever, even cl
   An executed or routed action is therefore always already on the log. If any of these
   `audit append` calls fails, the broker denies and does not proceed to the effect.
 
-### 4.9 The DATA-channel fence on the return path (CF-8, §6)
-The one bypass the model itself can attempt is **laundering data into instructions**. The
-broker owns the separation:
-- Every capability **result** returns to the model as a typed MCP result with an explicit
-  **`content_type: "data"`** envelope — never concatenated into the instruction stream,
-  never returned as bare text the model could read as a new directive.
-- **Untrusted ingest sets taint.** If `invoke_seam` reports `origin: UNTRUSTED` (e.g. a
-  `net.fetch` body, or a `mem.recall` the taint tracker re-taints), the broker calls
-  `taint set "<why>"` so the monotonic bit rises for the rest of the session. Any
-  subsequent `mem.remember` of that content is therefore stamped **UNTRUSTED-origin** by
-  the taint tool (storage-persistent, §6) — closing cross-session laundering.
-- `mem.recall` (T0) routes through `taint recall <key>` so an UNTRUSTED-origin entry
-  re-taints the session on read (already Step-3 behavior; the broker must call it, not skip
-  it because the tier is T0). T0 "runs even under taint" refers to *authorization*, not to
-  *skipping the provenance side effects*.
+### 4.9 The return path — taint first (load-bearing), DATA envelope second (advisory) (CF-8, §6)
+The one bypass the model itself can attempt is **laundering data into instructions.** Two
+mechanisms, in strict priority order:
+
+1. **Taint + the T2 floor are LOAD-BEARING — this is what actually holds.** Origin is derived
+   by broker policy (§4.5a). Before any content is returned (§3 stage 9), the required taint
+   effect must commit first:
+   - `origin: UNTRUSTED` (success OR error body) → `taint set "<why>"` — the monotonic bit
+     rises for the rest of the session;
+   - `mem.recall` → `taint recall <key>` — an UNTRUSTED-origin stored entry re-taints on read
+     (already Step-3 behavior; the broker MUST call it — T0 "runs even under taint" means
+     *authorization* runs, NOT that the provenance side-effect is skipped);
+   - `mem.remember` success → `taint stamp <key>` — the **broker** records the write's origin
+     (the Step-7 impl can't: the taint dir is a protected path no impl sandbox may write), so
+     a **later-session `mem.recall` of it re-taints** — this is what closes cross-session
+     laundering. taint's recall-of-unknown→UNTRUSTED covers a missing stamp only *by
+     accident*; the explicit stamp pins it.
+   **Any of these taint effects failing → withhold content, typed error, audit** (§3 stage 9).
+   Because taint gates authorization and the T2 floor (net.fetch / message.send) is
+   always-human-confirm *regardless of the taint bit*, untrusted content **cannot** drive an
+   off-box capability without an explicit human in the loop — bit or no bit.
+2. **The `content_type:"data"` envelope is ADVISORY.** Every result is returned wrapped as a
+   typed MCP `data` content item, structurally distinct from the instruction stream, so a
+   *cooperating* model keeps them apart. But an untrusted/compromised model can simply ignore
+   the wrapper — so the envelope is **defense-in-depth, never the guarantee.** The guarantee
+   is (1). We ship the envelope because it costs nothing and helps the honest case.
 
 ---
 
@@ -245,7 +303,7 @@ broker owns the separation:
 | CF-5 | corrupt-session reset reuses session_id=0 → bump-from-max-seen or refuse | Step 3 | taint-additive | GAP-5: `cmd_reset` over a corrupt/uninit session sets id 0, colliding with a prior epoch. Bump from max-seen or refuse. Additive taint PR. |
 | CF-6 | consume normalized verdict only; ok:false = deny, no byte fall-through | Step 4 | broker | §2, §4.1 — core input contract. |
 | CF-7 | registry arg-schema check per tool | Step 4 | broker | §4.3 — full per-type validator set. |
-| CF-8 | DATA-channel fence for untrusted content | Step 4 | broker | §4.9 — typed data envelope + taint-set-on-untrusted-ingest. |
+| CF-8 | DATA-channel fence for untrusted content | Step 4 | broker | §4.9 — taint-first (set/recall/stamp **commit before** content returns), advisory data envelope; broker-derived origin (§4.5a). |
 
 ### New gaps found this pass (each its own additive PR, flagged not silently absorbed)
 - **GAP-1 — registry enum/allowed-values.** `net.fetch.method` is typed `enum` but the
@@ -278,8 +336,18 @@ handled fail-closed. The broker PR should depend on the GAP-3 PR merging first.
 | audit append non-zero | deny (no-log→no-execute) |
 | confirm seam down (Step-5 stub) | deny (`confirm-channel-not-wired`) |
 | confirm nonce mismatch/replay | deny |
+| confirm approval under a different current `session_id` | deny (epoch changed since mint) |
 | invoke seam not wired (Step-5 stub) | deny (`impl-not-wired`), never fake success |
-| impl reports UNTRUSTED result | `taint set`; return under `data` envelope |
+| result `origin:UNTRUSTED` (broker-derived) | `taint set` **must commit before** content returns |
+| `taint set` fails on an UNTRUSTED result | **withhold content**, typed error, audit |
+| `taint recall` fails on `mem.recall` | **withhold the entry**, typed error, audit |
+| `taint stamp` fails on `mem.remember` success | **request fails**, typed error, audit |
+| result origin missing / unmapped capability | default **UNTRUSTED** (fail-closed) |
+| network-cap **error body** (carries attacker bytes) | origin **UNTRUSTED** → `taint set` |
+| 2nd `initialize` on an open session | deny (handshake is once) |
+| `tools/list` unknown/stale cursor | start a **fresh** enumeration (never trust the cursor) |
+| malformed verdict line from the mcp child | deny **and shut the stream** (child died/tampered) |
+| broker restart with a pending confirm | **no replay** — pending requests do not survive restart |
 
 Symlink-escape of a validated `path` is **out of broker scope** — it is a Step-7 OS
 obligation (`ProtectSystem`, protected paths as `InaccessiblePaths`). The broker's path
@@ -293,19 +361,39 @@ Property + hostile battery, same bar as Steps 1–4, driven by a flake `broker-c
 - **Routing matrix:** every (tier × clean/tainted) cell → the §4.5 decision, asserted.
 - **T3 non-expressibility:** `tools/call name=reset|taint.modify|registry.modify|…` → deny
   `unknown-capability` (never routed, never confirmed).
-- **Arg-schema:** unknown key, missing key, wrong type per arg-type; `path`/`namespace`
-  escape (`..`, non-canonical, out-of-root) → deny; INV-2 `url` literal (127.0.0.1, 10./
-  172.16./192.168./100.64./169.254./::1/fc00::/fe80::) → deny; `enum` pre-GAP-1 → deny.
+- **Arg-schema:** unknown key, missing key, wrong type per arg-type; `enum` pre-GAP-1 → deny.
+- **`path` golden vectors:** a shared vector file exercised by BOTH the Python canonicality
+  check and the Nix `pathIsCanonical` — same accept/reject on every vector (`..`, `.`, empty
+  segment, trailing `/`, non-absolute, out-of-root) → deny; the two readers must never differ.
+- **`namespace`:** `..`/`/`/charset violations → deny; a `namespace` that would resolve
+  *beside* `session/` (sibling escape) → deny; only `<root>/<ns>` accepted.
+- **`url` evasion battery (all deny):** `127.0.0.1`, `10.x`, `172.16.x`, `192.168.x`,
+  `100.64.x`, `169.254.x`, `::1`, `fc00::`, `fe80::`, `0.0.0.0`, **and the obfuscations**
+  `2130706433`, `0x7f000001`, `0177.0.0.1`, `::ffff:127.0.0.1`; plus all-digit / `0x` / `0`-
+  octal hostnames rejected outright; a public host (`93.184.216.34`, `example.com`) → pass.
+- **`recipient`:** non-ASCII / control / whitespace / homoglyph → deny; printable-ASCII → pass.
 - **Verdict passthrough:** a `bin/mcp` deny line (each error code) → broker denies, audits,
-  does not re-parse.
+  does not re-parse; a **malformed** verdict line from the child → deny + stream shut.
 - **no-log→no-execute:** point `AUDIT_BIN` at a failing stub → every route/effect denies
   and the seam is never called (assert seam-not-invoked, mirroring taint's Step-3 test).
 - **Fail-closed seams:** confirm stub → all >T0 deny; invoke stub → T0 returns
   `impl-not-wired`, never a fabricated success.
-- **DATA fence:** an UNTRUSTED invoke result → broker emits `taint set` (assert the audit
-  event) and wraps the return under `content_type:"data"`.
+- **Return-path ordering (the anti-laundering core):** an UNTRUSTED result with `taint set`
+  pointed at a failing stub → **content withheld**, typed error, `taint set` attempted
+  *before* any content emit (assert emit-not-reached); same for `taint recall` fail on
+  `mem.recall` and `taint stamp` fail on `mem.remember`.
+- **Origin is broker-derived, not impl-reported:** an invoke stub that *claims* `TRUSTED`
+  for `net.fetch` → broker still taints (origin from policy, §4.5a); unmapped cap → UNTRUSTED.
+- **`mem.remember` stamps:** on success the broker calls `taint stamp <key>` (assert the
+  audit event) — the impl never does.
+- **DATA envelope:** results wrapped `content_type:"data"` (advisory; assert present, but the
+  taint assertions above are the load-bearing ones).
 - **Taint consult:** with `taint status --json` reporting tainted/clean/corrupt →
   correct live decision; corrupt/unreachable → tainted; shadow `gate` exit ignored.
+- **Single-flight:** two verdict lines fed back-to-back → the second is not read until the
+  first fully resolves (assert serial ordering; no interleaved taint consult).
+- **Nonce:** ≥128-bit `os.urandom`, unique per request, records session_id; approval echoing
+  a stale nonce, or under a bumped session_id, → deny; `2nd initialize` → deny.
 - **Golden verdicts** for the routing decisions (canonical serialization, deterministic).
 
 Green under `nix build .#checks.x86_64-linux.broker-core`, plus no regression on
@@ -330,10 +418,14 @@ realizes with the new `modules/broker.nix`.
 ## 9. Summary for review
 The broker is a **fail-closed decision pipeline** with two stubbed effect seams. It consumes
 only Step-4 verdicts, classifies against the Step-1 registry (T3 unexpressible for free),
-validates args by type, consults the Step-3 taint bit through one structured owner, confirms
-everything above T0 in v1, audits before every effect (no-log→no-execute), and fences
-untrusted results into a DATA channel that re-taints the session. All eight carry-forwards
-are dispositioned above; five small additive PRs (GAP-1..5, of which only GAP-3 is a hard
+validates args by type (evasion-hardened `url`/`path`/`namespace`/`recipient`), consults the
+Step-3 taint bit through one structured owner, confirms everything above T0 in v1, processes
+requests **single-flight**, and audits before every effect (no-log→no-execute). On the return
+path — the anti-laundering core — origin is **broker-derived, not impl-reported**, and the
+required `taint set`/`recall`/`stamp` **commits before any content is released**; a taint
+failure withholds the content. The `content_type:"data"` envelope is advisory; taint plus the
+T2 human-confirm floor are what actually hold. All eight carry-forwards are dispositioned
+above; five small additive PRs (GAP-1..5, of which only GAP-3 `taint status --json` is a hard
 prerequisite) are flagged rather than folded silently. The one-sitting bar is met by keeping
-confirm (Step 6) and impls (Step 7) behind narrow seams, with the arg-checker as the
-pre-identified further cut if review wants it.
+confirm (Step 6) and impls (Step 7) behind narrow seams; per Fable the arg-checker stays IN
+(the relief valve is not fired).
