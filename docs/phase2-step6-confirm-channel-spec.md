@@ -1,6 +1,6 @@
 # Phase 2 · Step 6 — the real confirm channel (the wall's mouth)
 
-Status: **SPEC for review** (spec → PR → Fable(code) → merge, THEN code → PR → Fable(code) → merge).
+Status: **SPEC — Fable amendments 1–4 folded (2026-07-28), awaiting Rabbot verify → merge PR#11** (spec → PR → Fable(code) → merge, THEN code → PR → Fable(code) → merge).
 Anchor: `docs/phase2-threat-model.md` §3 (INV-1), §7 (confirm channel), §10 (exfil case);
 `docs/phase2-broker-spec.md` §4.5 (authorize), §4.6 (confirm seam), §4.8 (audit ordering).
 Owner: Augur (DVo). Security surface — **branch → PR → Fable, never self-merge, never direct-push.**
@@ -36,8 +36,9 @@ polish.
 - The **one broker-code change** it requires: a `timeout=` on the confirm-seam subprocess call +
   the fail-closed-on-timeout deny path (§5, follow-up #2). Also bundles the two cheap
   broker-touching follow-ups (§9).
-- CF-1c: **reset-as-confirm-nonce** — taint reset routed through this same channel as a
-  confirm-nonce action, retiring the self-asserted `--confirm-human` flag (§6).
+- CF-1c: **reset-as-confirm-nonce** — SPEC'D HERE (§6) but shipped as an **immediate follow-up PR**,
+  NOT in this Step-6 PR (Fable ruling Q3); `--confirm-human` stays as an audited break-glass for one
+  burn-in period, retired in a 3rd trivial PR once the channel has lived.
 - `modules/confirm.nix` — installs the client, pins its env, provisions its protected state dir,
   and adds the sandbox assertions (§7).
 - `tests/confirm-battery.sh` + a flake check (§8).
@@ -95,24 +96,37 @@ is the timeout (§5).
   broker  ◀──{"approved":bool,"reason":str} on stdout──────────────  bin/confirm
 ```
 
-### 3.1 Primary — Telegram relay via Rabbot
+### 3.1 Primary — Telegram relay via a deterministic Rabbot-namespace daemon
 - The agent-os box has no Telegram credentials of its own (they would be a T3 secret on a box
-  whose whole point is an untrusted resident model). Instead the confirm client POSTs the
-  **structured frame** to a **pinned, authenticated Rabbot relay endpoint** on mini; Rabbot renders
-  it to Dillon's Telegram and returns the human's decision.
-- **This relay path is a TCB channel, NOT capability egress.** It is a single hard-pinned
-  destination (Rabbot's Tailscale address + port), mutually authenticated (shared broker↔Rabbot
-  secret provisioned as a T3 config value the model never sees; see §7), and integrity-framed. It
-  is therefore **exempt from INV-2 by construction** — INV-2 governs *capability-impl* egress
-  sandboxes (T2 `net.fetch`), which are a different, model-driven surface. The confirm client's
-  own sandbox allows **exactly** this one endpoint and nothing else (§7). *Flag for Fable: this is
-  the one place a TCB component reaches a CGNAT (Tailscale) address; I argue it's legitimate and
-  categorically distinct from model egress, but it deserves an explicit ruling.*
-- **Frame integrity in transit:** the client signs the outbound frame (broker↔Rabbot secret,
-  HMAC over the canonical frame incl. nonce+session_id); Rabbot must not be able to silently alter
-  tier/destination (Rabbot is TCB but the channel still gets integrity so a compromise of the hop
-  is contained). The inbound decision is authenticated the same way and **must carry the nonce**
-  (§4.2).
+  whose whole point is an untrusted resident model). Instead the confirm **client composes the final
+  Telegram message bytes + inline keyboard itself** (§4.1) and hands that finished frame to a
+  **pinned, authenticated relay** on mini, which **transmits it VERBATIM** to Dillon's Telegram and
+  relays the human's decision back.
+- **NO LLM sits in the confirm path.** The relay is a **deterministic daemon**
+  (`telegram_send.py`-style: a fixed program that forwards the client-composed bytes to the Bot API
+  and returns the callback — no model, no rendering decisions, no rephrasing). The **Rabbot Claude
+  session is explicitly OUT of the confirm path**: "Rabbot endpoint" means a dumb relay daemon living
+  in Rabbot's namespace on mini, **not** the Rabbot LLM. An LLM anywhere in the path that decides
+  *what Dillon sees when approving* is **DISQUALIFYING** — rendering-honesty *is* the approve-under-
+  deception surface, so the thing that renders MUST be deterministic and broker/client-authored. The
+  client owns every byte of the rendered frame; the relay owns none of its content.
+- **The relay daemon is TCB, and its compromise is OUT OF SCOPE for this step** (equivalent to a
+  malicious operator / a compromised mini): a subverted daemon can show Dillon anything, and no
+  confirm-channel mechanism defends that. **HMAC does NOT contain a compromised relay** — it only
+  detects a *modifying hop* between two honest endpoints. We claim exactly that and no more.
+- **This relay path is a TCB control channel, NOT capability egress.** It is a single hard-pinned
+  destination (the relay daemon's Tailscale address + port — **one endpoint, NO fallback list**),
+  mutually authenticated (shared broker↔relay secret provisioned as a T3 config value the model never
+  sees; see §7), and integrity-framed. It is therefore **exempt from INV-2 by construction** (Fable
+  ruling Q1) — INV-2 governs *capability-impl* egress sandboxes (T2 `net.fetch`), a different,
+  model-driven surface. The confirm client's own sandbox allows **exactly** this one addr+port and
+  nothing else, enforced by the §7 single-pinned-endpoint build assertion.
+- **Frame integrity in transit (detects a modifying hop; does not contain a compromised relay):** the
+  MACs are **domain-separated** (§4.2) so the broker's own signed request bytes can never be reflected
+  back as an approval — the request is MAC'd over `{dir:"req", frame}` (canonical frame incl.
+  nonce+session_id) and the inbound decision over `{dir:"resp", nonce, session_id, decision}`, both
+  constant-time-compared. A hop that flips tier/destination on an *honest* relay is detected; a
+  *subverted* relay is out-of-scope per above.
 - If the relay is unreachable / unauthenticated / times out → **client prints
   `{"approved":false,"reason":"confirm-relay-unreachable"}`** → broker denies. Fail-closed.
 
@@ -146,17 +160,27 @@ This is the load-bearing anti-deception surface. Five requirements, made concret
   and are the one place attacker bytes enter the frame.
 - **Rendering rule (the PR#1-B2 lesson, generalized):** before any model-controlled value
   (`destination`, each `typed_args` value, the payload preview) is placed in the frame, it is
-  **control-char-scrubbed and channel-neutralized**:
+  **control-char-scrubbed, newline-normalized, and line-prefixed**:
   - strip C0/C1 (`[\x00-\x08\x0b-\x1f\x7f-\x9f]`, keep `\t\n`) so it can't inject terminal escape
     sequences into the getty frame;
-  - escape the channel's metacharacters (Telegram: send as **plain text, no Markdown/HTML parse
-    mode**, or fully escape; getty: the control-strip above suffices) so it can't forge Markdown
-    that spoofs a structured field;
-  - render every model-controlled value **quoted and clearly labeled as untrusted input**, and
-    render the **trust-critical broker-derived fields (tier, capability, provenance, first-time
-    flag) in a fixed, visually-distinct region model values cannot reach** — so a `destination` of
-    `"x\nTIER: T0"` cannot make the human read a forged tier line. Field labels are fixed template
-    literals; values can never introduce a new label.
+  - **normalize newlines** (CR/CRLF/`\v`/`\f` → `\n`) so line-splitting is well-defined, then
+    **prefix EVERY line of the value with a fixed line-prefix sentinel `│ `** (applied *after* the
+    scrub + newline-normalization). **Trust-region labels are NEVER prefixed.** This is the fix for
+    the field-confusion attack (Amendment 2): a `typed_args` body that legitimately contains `\n` and
+    injects `\nTIER: T0\nSTATUS: pre-approved` now renders as `│ TIER: T0` / `│ STATUS: pre-approved`
+    — visibly value-continuation lines, structurally distinct from the unprefixed fixed template. The
+    human can never mistake an injected line for a broker-authored field.
+  - **Telegram: NO `parse_mode` at all** — send **raw text** with a **broker/client-authored inline
+    keyboard**. Raw text (no Markdown/HTML parser) plus a keyboard the client alone composes makes
+    markup-forgery **structurally impossible**; there is nothing to escape because nothing is parsed.
+    (getty: the C0/C1 control-strip above suffices — a dumb terminal parses no markup.)
+  - **destination URLs render the host as its punycode A-label only** (e.g. `xn--80ak6aa92e.com`,
+    never the Unicode look-alike) so an IDN homograph cannot masquerade as a seen host.
+  - render every model-controlled value **quoted, line-prefixed (per above), and clearly labeled as
+    untrusted input**, and render the **trust-critical broker-derived fields (tier, capability,
+    provenance, first-time flag) in a fixed, visually-distinct, NEVER-prefixed region model values
+    cannot reach** — so a `destination` of `"x\nTIER: T0"` cannot make the human read a forged tier
+    line. Field labels are fixed template literals; values can never introduce a new label.
 - Rationale: §7 warns "the model cannot author a single character the human reads as authorization
   context." Scrubbing + fixed-template + region-separation is how we enforce that against a
   model that puts control/markup bytes in its own args.
@@ -165,15 +189,29 @@ This is the load-bearing anti-deception surface. Five requirements, made concret
 - The broker mints the 128-bit nonce and **never lets it reach any channel the model can read**
   (the confirm channel is tty-free; the model's stream is suspended, §4.3). Secrecy-from-the-model
   is what makes replay/guess infeasible; the **echo binds the approval to *this* request.**
+- **Domain-separated MACs (anti-reflection, Amendment 3):** the transport MAC covers a **direction
+  tag**, so the broker's own signed *request* bytes can never be replayed back as an *approval*. The
+  request is MAC'd over `{dir:"req", frame}`; the response over `{dir:"resp", nonce, session_id,
+  decision}` with the **decision INSIDE the MAC**. Both sides **constant-time compare**. Without the
+  `dir` separation a hop attacker could reflect the request MAC as a valid-looking response; with it,
+  a `req`-tagged MAC never verifies as a `resp`.
 - **Telegram:** the outbound frame carries **inline-keyboard buttons whose `callback_data` embeds
   the nonce** (`approve:<nonce>` / `deny:<nonce>`). The human taps Approve; the callback returns the
   exact nonce with zero retyping (no confirm-fatigue). The client verifies the returned nonce
-  **equals** the outstanding one; mismatch/absent → deny.
-- **Getty:** the frame prints a short **human-verifiable confirm code derived from the nonce** (or
-  the nonce prefix); the human types `approve <code>`. The client verifies against the outstanding
-  nonce. (Full 32-hex retyping is a fatigue trap; a 6–8 char code over a channel the model can't
-  observe keeps guess-probability negligible for a single outstanding request — *flag for Fable:
-  code length vs. usability; I lean an 8-char base32 slice of the nonce, single-use, single-flight.*)
+  **equals** the outstanding one (**constant-time**); mismatch/absent → deny.
+- **Callback authenticity (Telegram does NOT authenticate `callback_data` for you, Amendment 3):**
+  the relay daemon **MUST verify `callback_query.from.id == the pinned Dillon user-id`** — not merely
+  the `chat_id` — and **MUST correlate the `message_id`** to the outstanding request before returning
+  any decision to the client. A tap from any other user in the chat, or a callback that doesn't match
+  the outstanding message, is dropped. (The from-id + message-id pin is a build/config value the model
+  never sees; see §7.)
+- **Getty (Fable ruling Q2 — ACCEPTED at 40 bits):** the frame prints a short **human-verifiable
+  confirm code sliced from the broker's nonce** — an **8-char base32 slice (40 bits)** of the 128-bit
+  nonce; the human types `approve <code>`. The client **constant-time**-compares against the
+  outstanding slice and allows **≤3 retries then denies** (bounding online guessing to ≤3/2⁴⁰ for a
+  single outstanding, single-flight request). The code is **sliced from the broker nonce, never
+  independently minted** by the client, so it inherits the broker's secrecy-from-the-model. (There is
+  no model write-path to tty2, so 40 bits is ample against an off-channel guesser.)
 - Replay defense: because the client only ever has **one** outstanding nonce (single-flight) and it
   is discarded on decision/timeout, a replayed old approval carries a stale nonce → mismatch → deny.
   The broker's **session_id re-check** (§2) additionally kills any approval that straddles an epoch.
@@ -220,30 +258,46 @@ broker (never fails OPEN, but it hangs)."* Fix, in `bin/broker`:
 - This is the **only** decision-pipeline change; it is fail-closed and composes with the existing
   `seam-exit-N`/`not-wired` handling. A battery row asserts a sleeping confirm seam → deny within
   the bound + child reaped.
-- The **client** also carries its **own human-decision-window** timeout (it should give up waiting
-  for the human *before* the broker's subprocess timeout, and return
-  `{"approved":false,"reason":"confirm-human-timeout"}` cleanly) so the normal no-answer case is a
-  graceful deny rather than a killed child. The broker timeout is the backstop for a truly wedged
-  client.
+- **Socket-level read timeouts on ALL relay/getty I/O (Amendment 4):** every blocking read the
+  client does — the HTTP(S) call to the relay, the long-poll for the callback, the getty line-read —
+  carries an explicit **socket read timeout**, not just a wall-clock guard between blocking reads. A
+  half-open TCP to the relay would otherwise wedge the client indefinitely (a wall-clock check never
+  fires while `recv()` blocks). A socket timeout converts the wedge into a clean deny.
+- The **client** also carries its **own human-decision-window** timeout and returns
+  `{"approved":false,"reason":"confirm-human-timeout"}` cleanly when it elapses.
+- **Ordering constraint (must hold, Amendment 4):**
+  `client_human_window  <  AGENT_OS_CONFIRM_TIMEOUT_S − one_relay_round_trip`. The client must give
+  up and emit a graceful deny strictly *before* the broker's subprocess backstop could fire, leaving
+  room for one relay round-trip to carry that deny back. This makes **graceful deny the normal
+  no-answer path** and the broker's `SIGKILL`-the-child backstop the **exceptional** path (a truly
+  wedged client), not the routine one. Socket timeouts on every leg are what let the client honor
+  this bound.
 
 ---
 
-## 6. CF-1c — reset-as-confirm-nonce
+## 6. CF-1c — reset-as-confirm-nonce (SPEC'D HERE, shipped as an immediate FOLLOW-UP PR)
 
-Today taint reset is a human-only, audited `taint reset --confirm-human` flag (CF-1a makes reset
-unreachable from any tool-call by construction — it is not a registry key). CF-1c hardens the
-*human* path: a reset should be a **confirm-nonce action through this same channel**, not a
-self-asserted flag, so the intent to clear taint is itself a nonce-bound, integrity-framed human
-approval.
-- Design: `taint reset` (still T3, still not model-reachable) mints a broker-style nonce and routes
-  a **reset confirm frame** (`capability="taint.reset"`, tier shown, a prominent *"this clears the
-  untrusted-session bit"* banner) through the confirm client; only a nonce-echoed approval performs
-  the reset. The `--confirm-human` flag is retired (or kept only as a break-glass, audited, behind
-  a separate operator gate — *flag for Fable*).
-- **Scope call for Fable:** CF-1c can land **in this Step-6 PR** (the channel exists) or as an
-  **additive follow-up** right after. I lean *in-PR* since the nonce+frame machinery is right here
-  and leaving the flag is the weaker posture Fable already flagged — but it touches `bin/taint`
-  (another security-surface file), so I defer to the reviewer on bundling vs. splitting.
+**Fable ruling Q3: CF-1c does NOT land in this Step-6 PR.** It touches `bin/taint` (a separate
+security surface) and it introduces a **bootstrap inversion** — if `taint reset` *depends on* the
+confirm channel, then a **dead channel makes taint un-resettable** (you could not clear the bit to
+recover). So it ships as its own reviewed follow-up once the channel has demonstrably lived, and the
+self-asserted flag stays available as break-glass in the meantime.
+
+Today taint reset is a human-only, audited `taint reset --confirm-human` flag (CF-1a already makes
+reset unreachable from any tool-call by construction — it is not a registry key). CF-1c will harden
+the *human* path so the intent to clear taint is itself a nonce-bound, integrity-framed human
+approval rather than a self-asserted flag.
+
+**Sequencing (three PRs; this spec fixes the shape now):**
+1. **This PR (Step 6):** ship the channel. `--confirm-human` is unchanged.
+2. **Follow-up PR (immediately after):** add CF-1c — `taint reset` (still T3, still not
+   model-reachable) mints a broker-style nonce and routes a **reset confirm frame**
+   (`capability="taint.reset"`, tier shown, a prominent *"this clears the untrusted-session bit"*
+   banner) through the confirm client; only a nonce-echoed approval performs the reset.
+   **`--confirm-human` is RETAINED as an audited break-glass behind a separate operator gate** (so a
+   dead channel can never strand taint) for **one burn-in period**.
+3. **3rd trivial PR (after the channel has lived a burn-in):** retire the `--confirm-human`
+   break-glass, leaving the confirm-nonce path as the sole human reset.
 
 ---
 
@@ -251,8 +305,9 @@ approval.
 
 - Installs `bin/confirm` on PATH; pins `AGENT_OS_CONFIRM_SEAM` to the store-path client in the
   broker's env (same discipline as `TAINT_BIN`/`AUDIT_BIN`); pins `AGENT_OS_CONFIRM_CHANNELS`,
-  `AGENT_OS_CONFIRM_TIMEOUT_S`, and the relay endpoint + the broker↔Rabbot secret **as T3 config the
-  model never sees** (a protected-read path per Step-1 `protectedReadPaths`).
+  `AGENT_OS_CONFIRM_TIMEOUT_S`, the relay endpoint (single addr+port), the broker↔relay secret, and
+  the **pinned Dillon Telegram user-id** (§4.2) **as T3 config the model never sees** (a
+  protected-read path per Step-1 `protectedReadPaths`).
 - Provisions `/var/lib/agent-os/confirm/` **0700 root** (tmpfiles), the seen-destinations store.
 - **Sandbox assertions (build-fails-on-violation, extending Step-1 mechanism-3):**
   - the confirm client's writable scope may include **only** `/var/lib/agent-os/confirm/`; it may
@@ -260,8 +315,9 @@ approval.
   - the confirm client's **egress allowance is exactly the pinned relay endpoint** (Telegram path)
     and nothing else — it is **not** a capability impl, so it is not bound by the T2-only-network
     assertion, but it **is** bound by a new *confirm-client-egress-is-single-pinned-endpoint*
-    assertion so it can't become a general exfil channel. *(This is the §3.1 INV-2 exemption made
-    into a build-checked, narrowly-scoped allowance — flag for Fable.)*
+    assertion (**addr + port, NO fallback list** — Fable ruling Q1) so it can't become a general
+    exfil channel. This is the §3.1 INV-2 exemption made into a build-checked, narrowly-scoped
+    allowance.
   - the second-getty service is broker-owned and bound to a console that is **never** the model's
     login tty (assert tty index ≠ the agent-shell autologin tty).
 
@@ -273,14 +329,20 @@ Property tests (each hostile input = exactly one fail-closed outcome):
 1. **Seam contract:** valid request → client prints well-formed `{approved,reason}`; malformed
    request on stdin → deny, no crash.
 2. **Fail-closed channels:** relay unreachable → deny; no channel live → deny; getty absent → deny.
-3. **Nonce echo:** approval with the correct nonce → approve; wrong/absent/replayed nonce → deny;
-   stale nonce from a prior request → deny.
-4. **Timeout:** human-window elapses → clean `confirm-human-timeout` deny; **broker-side:** a
-   sleeping confirm seam → broker denies within `AGENT_OS_CONFIRM_TIMEOUT_S`, child reaped (this
-   leg lives in `broker-battery.sh` since it's a broker edit).
-5. **Field-confusion / injection:** `destination`/`typed_args` containing C0/C1 escapes, Telegram
-   markdown, fake `TIER:`/`DESTINATION:` lines → rendered frame is scrubbed, structured fields
-   unforgeable, trust-region intact (assert on the rendered bytes).
+3. **Nonce echo + MAC auth:** approval with the correct nonce → approve; wrong/absent/replayed
+   nonce → deny; stale nonce from a prior request → deny. **Reflection (Amendment 3):** the broker's
+   own `dir:"req"` MAC replayed as a response → deny (domain separation). **Callback authenticity:** a
+   callback whose `from.id` ≠ pinned Dillon user-id, or whose `message_id` doesn't correlate → deny.
+4. **Timeout:** human-window elapses → clean `confirm-human-timeout` deny, emitted strictly *before*
+   the broker backstop (ordering constraint §5). **Half-open TCP** to the relay → the client's socket
+   read timeout fires → clean deny (never an indefinite wedge). **Broker-side:** a sleeping confirm
+   seam → broker denies within `AGENT_OS_CONFIRM_TIMEOUT_S`, child reaped (this leg lives in
+   `broker-battery.sh` since it's a broker edit).
+5. **Field-confusion / injection (Amendment 2):** `destination`/`typed_args` containing C0/C1
+   escapes, Telegram markdown, and a fake `\nTIER: T0\nSTATUS: pre-approved` line → rendered frame is
+   scrubbed, newline-normalized, and **every value line carries the `│ ` sentinel** while the trust
+   region is unprefixed and intact; the Telegram frame is sent with **no `parse_mode`**; an IDN host
+   renders as its punycode A-label. Assert on the exact rendered bytes.
 6. **First-time-destination:** novel destination → highlighted; previously-approved → not; the
    seen-set is refused writes from a non-root/impl identity (mirrors audit/taint dir tests).
 7. **Payload preview:** truncation at the cap + `…(truncated)`; control-chars stripped; no markup
@@ -303,28 +365,35 @@ Fable follow-up #3 (non-dict `arguments` → `AttributeError`): since the Step-6
 `bin/broker` (the timeout), bundle the `isinstance(arguments, dict)` deny + battery row here. (The
 GAP-1 url-`127.1` fix is **not** here — it rides GAP-1's own PR, as its hard prerequisite.)
 
-## 10. Open questions for Fable (spec-review)
+## 10. Fable spec-review rulings (2026-07-28) — all resolved, folded above
 
-1. **Telegram-relay INV-2 exemption (§3.1/§7):** is a single hard-pinned, mutually-authenticated,
-   HMAC-framed TCB relay to Rabbot's Tailscale address the right model, and is the
-   *single-pinned-endpoint* build assertion the right way to keep it from becoming general egress?
-2. **Getty nonce echo (§4.2):** 8-char base32 slice of the 128-bit nonce, single-use/single-flight —
-   acceptable, or require full-length?
-3. **CF-1c bundling (§6):** in this PR (touches `bin/taint`) or an immediate additive follow-up?
-4. **Timeout defaults (§5):** `AGENT_OS_CONFIRM_TIMEOUT_S` ~120s broker backstop with a shorter
-   client human-window — reasonable starting values?
-5. **broker↔Rabbot auth mechanism:** shared-secret HMAC (simple, stdlib) vs. anything stronger for
-   v1? I lean HMAC-SHA256 over the canonical frame; the secret is T3, model-invisible.
+1. **TG-relay INV-2 exemption — YES.** Categorical TCB control channel; the single-pinned-endpoint
+   build assertion covers **addr+port with no fallback list** (§3.1, §7). Reinforced by Amendment 1
+   (deterministic relay, no LLM).
+2. **Getty nonce echo — ACCEPTED at 40 bits.** 8-char base32 slice of the broker nonce, constant-time
+   compare, **≤3-retry-then-deny**, code sliced from the broker nonce (never independently minted).
+   No model write-path to tty2 (§4.2).
+3. **CF-1c — IMMEDIATE FOLLOW-UP PR, not this one** (§6). `bin/taint` is a separate surface + a
+   bootstrap inversion (reset depending on the channel would make a dead channel un-resettable);
+   `--confirm-human` kept as audited break-glass for one burn-in, retired in a 3rd trivial PR.
+4. **Timeouts — reasonable**, plus the socket-level read timeouts and the ordering constraint of
+   Amendment 4 (§5).
+5. **broker↔relay auth — HMAC is enough for v1** with the §2/§4 domain-separation + callback-authn
+   fixes (Amendment 3). HMAC-SHA256 over the canonical, domain-separated frame; the secret is T3,
+   model-invisible.
 
 ---
 
 ## 11. Build order
 
 1. **This spec → PR → Fable(code) → merge** (prose anchor + interface lock, like Step 5's spec).
-2. Then **code PR:** `bin/confirm` + `modules/confirm.nix` + `tests/confirm-battery.sh` + flake
-   check + the `bin/broker` timeout edit + the bundled non-dict-args deny → PR → Fable(code) →
-   merge. Will NOT self-merge either.
-3. Then **Step 7** (sandboxed impls) replaces the invoke stub; **Step 8** end-to-end acceptance
+2. Then **code PR:** `bin/confirm` (deterministic frame composer, per Amendment 1) +
+   `modules/confirm.nix` + `tests/confirm-battery.sh` + flake check + the `bin/broker` timeout edit +
+   the bundled non-dict-args deny → PR → Fable(code) → merge. Will NOT self-merge either.
+3. **CF-1c follow-up PR** (immediately after the channel lands): reset-as-confirm-nonce in
+   `bin/taint`; `--confirm-human` retained as audited break-glass (§6).
+4. **3rd trivial PR** (after a burn-in period): retire the `--confirm-human` break-glass.
+5. Then **Step 7** (sandboxed impls) replaces the invoke stub; **Step 8** end-to-end acceptance
    (exfil-deny, cross-session taint-laundering deny, loopback-egress deny, nonce-replay deny,
    build-fails-on-invariant). GAP-1/2/4/5 additive.
 
