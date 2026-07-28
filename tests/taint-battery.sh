@@ -329,6 +329,29 @@ status_is clean
   [ "$ts" = "True -1" ] || exit 74
 ) || fail "status --json on corrupt session.json did not fail-closed to tainted/-1"
 
+# 6. CF-5 / GAP-5: EPOCH HIGH-WATER. A reset over a LOST or CORRUPT session.json must NOT roll the
+#    epoch back to a colliding low session_id. The broker binds every confirm-nonce to session_id
+#    and denies on a changed epoch, so a reused id is a nonce/epoch replay surface (spec §Nonce).
+#    Pre-fix `new_id = old+1 if old>=0 else 0` minted 0 whenever load_session() returned the -1
+#    sentinel (missing OR corrupt) — colliding with the very first epoch. The fix mints
+#    max(old, high_water)+1 from a DURABLE mark in the protected taint dir, and REFUSES (exit 6) if
+#    that mark is itself corrupt (won't mint an id it can't prove collision-free). Isolated dir so
+#    the epoch walk here can't perturb the shared session; audit still lands in the shared chain.
+( export AGENT_OS_TAINT_DIR="$SCRATCH/taint-cf5-hwm"; mkdir -p "$AGENT_OS_TAINT_DIR"
+  sid() { "$PY" "$TAINT" status --json | "$PY" -c 'import sys,json; print(json.load(sys.stdin)["session_id"])'; }
+  reset_clean >/dev/null || exit 61                    # advance the epoch well above 0 so a
+  reset_clean >/dev/null || exit 62                    # rollback-to-0 is unmistakable:
+  reset_clean >/dev/null || exit 63                    # fresh dir walks 0 -> 1 -> 2
+  before="$(sid)"; [ "$before" -ge 2 ] || exit 64
+  rm -f "$AGENT_OS_TAINT_DIR/session.json"             # LOSE the session -> the -1 rollback trigger
+  reset_clean >/dev/null || exit 65
+  after="$(sid)"
+  [ "$after" -gt "$before" ] || exit 66                # bumped from the high-water, NOT reset to 0
+  printf 'not json{' > "$AGENT_OS_TAINT_DIR/epoch-hwm.json"   # CORRUPT the high-water mark
+  "$PY" "$TAINT" reset --confirm-human --break-glass >/dev/null 2>&1; rc=$?
+  [ "$rc" -eq 6 ] || exit 67                            # corrupt hwm must REFUSE, not mint a low id
+) || fail "CF-5 epoch high-water: reset rolled the epoch back to a colliding id, or a corrupt high-water did not fail closed (exit 6)"
+
 # Final: the corrupt/no-log sections logged only via the real audit (or not at all); the
 # real chain must STILL verify end-to-end.
 av || fail "audit chain broken after the no-log / corrupt-state sections"
