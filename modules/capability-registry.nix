@@ -47,6 +47,17 @@ let
     "/var/lib/agent-os/mem/trusted" # trusted-origin mem namespaces
   ];
 
+  # ── Protected READ paths — no capability impl may hold ANY of these in its
+  #    readable scope (read-only OR writable). Reading broker config / a credentials
+  #    store is functionally `credentials.read` (a T3 forbidden op), so a cap like
+  #    `config.inspect` with readOnlyPaths=["/etc/agent-os/broker"] must fail the
+  #    build. NOTE: /var/lib/agent-os/mem/trusted is deliberately NOT here —
+  #    recall-of-trusted by `mem.recall` is by design; re-tainting is the broker's job.
+  protectedReadPaths = [
+    "/etc/agent-os/broker"        # broker binary + config (holds cloud creds per §13)
+    "/etc/agent-os/credentials"   # any separate secrets store
+  ];
+
   # ── INV-2 — egress deny-list. Any network-capable (T2) impl must deny at least
   #    these; a specific host is reachable only via an operator-config allowlist
   #    entry (which is itself T3 to change). Loopback is on the list on purpose:
@@ -76,7 +87,9 @@ let
   };
 
   # ── The v1 registry (matches docs/phase2-threat-model.md §5) ─────────────────
-  registry = {
+  # Bound as `rawRegistry`: it is UNvalidated here. No consumer may read it directly —
+  # the output `registry` gates it behind `assert ok` so the invariants throw first.
+  rawRegistry = {
     # T0 — read-only, side-effect-free, reversible, local. Runs even under taint.
     "mem.recall" = mkCap {
       tier = "T0"; impl = "cap-mem-recall";
@@ -128,11 +141,38 @@ let
   # ── Invariant checks. Each is {cond, msg}; `ok` forces them all and throws the
   #    first violated message. A violation therefore fails evaluation → fails the
   #    flake check. This is the executable form of the threat model.
-  caps = mapAttrsToList (name: c: { inherit name; inherit (c) tier impl sandbox args; }) registry;
+  caps = mapAttrsToList (name: c: { inherit name; inherit (c) tier impl sandbox args; }) rawRegistry;
 
-  # writable path w conflicts with protected path p if either contains the other.
-  pathConflicts = w: p: (w == p) || (hasPrefix (w + "/") p) || (hasPrefix (p + "/") w);
+  # Canonical absolute path: leading "/", and no empty / "." / ".." segment (which
+  # rules out "//", "/./", "/../", trailing "/", relative paths, and "/" itself).
+  # Non-canonical paths bypass the textual overlap check but systemd canonicalizes
+  # them at unit-load, so a declared "/mem/session/../trusted" WOULD grant trusted
+  # writes — reject at eval instead. (Symlink aliasing can't be caught here; that is
+  # a Step-7 obligation — ProtectSystem + protected paths as InaccessiblePaths.)
+  pathIsCanonical = p:
+    let parts = lib.splitString "/" p;
+    in (builtins.head parts == "")            # leading slash present
+       && (length parts >= 2)
+       && (all (seg: seg != "" && seg != "." && seg != "..") (builtins.tail parts));
+
+  # w conflicts with protected path p if either contains the other. "/" (root) is
+  # special-cased to conflict with everything (belt-and-suspenders; canonical check
+  # already rejects a bare "/").
+  pathConflicts = w: p:
+    (w == "/") || (p == "/")
+    || (w == p) || (hasPrefix (w + "/") p) || (hasPrefix (p + "/") w);
   capTouchesProtected = c: lib.any (w: lib.any (p: pathConflicts w p) protectedPaths) c.sandbox.readWritePaths;
+
+  # A cap must not READ a protected-read path via readOnly OR writable scope.
+  capReadsProtected = c:
+    lib.any (rp: lib.any (p: pathConflicts rp p) protectedReadPaths)
+      (c.sandbox.readOnlyPaths ++ c.sandbox.readWritePaths);
+
+  allDeclaredPaths = c: c.sandbox.readWritePaths ++ c.sandbox.readOnlyPaths;
+
+  # Merged sandbox must not carry keys outside the schema (a typo like `newtork=true`
+  # would silently default network=false — safe here, but unvalidated for Step 7).
+  sandboxKeysKnown = c: all (k: lib.elem k (lib.attrNames defaultSandbox)) (lib.attrNames c.sandbox);
 
   denyCovers = c: all (cidr: lib.elem cidr c.sandbox.egressDeny) egressDenyList;
 
@@ -155,6 +195,22 @@ let
       msg  = "capability-registry: '${c.name}' has a writable path overlapping a protected path (broker/registry/audit/taint/weights/trusted-mem). Poisoned-state persistence — build denied.";
     }) caps)
     ++
+    # (3b) mechanism 3 — no impl may READ a protected-read path (broker config /
+    #      credentials store); reading those is credentials.read, a T3 forbidden op.
+    (map (c: {
+      cond = !(capReadsProtected c);
+      msg  = "capability-registry: '${c.name}' has a readable path overlapping a protected-read path (broker config / credentials) — that is credentials.read (T3). Build denied.";
+    }) caps)
+    ++
+    # (3c) every declared path (writable OR read-only) must be canonical-absolute, so
+    #      the textual overlap checks above cannot be bypassed by ../ // or trailing /.
+    (lib.concatMap (c:
+      map (p: {
+        cond = pathIsCanonical p;
+        msg  = "capability-registry: '${c.name}' declares non-canonical path '${p}' — must be absolute with no empty, '.' or '..' segment and no trailing '/'.";
+      }) (allDeclaredPaths c)
+    ) caps)
+    ++
     # (4) mechanism 3 — only T2 impls may have network. A T0/T1 with network is an
     #     exfil channel bypassing the T2 always-confirm floor.
     (map (c: {
@@ -166,6 +222,19 @@ let
     (map (c: {
       cond = (!c.sandbox.network) || (denyCovers c);
       msg  = "capability-registry: '${c.name}' has network but its egress deny-list does not cover the full INV-2 set (loopback/RFC1918/link-local/ULA).";
+    }) caps)
+    ++
+    # (5b) egressAllow is operator-config-only — the registry must never ship a host
+    #      allowlist entry (that would be a config change smuggled into declarations).
+    (map (c: {
+      cond = c.sandbox.egressAllow == [ ];
+      msg  = "capability-registry: '${c.name}' declares a non-empty egressAllow — allowlist entries live in operator config, never the registry.";
+    }) caps)
+    ++
+    # (5c) reject unknown sandbox keys (a typo would silently mis-default a control).
+    (map (c: {
+      cond = sandboxKeysKnown c;
+      msg  = "capability-registry: '${c.name}' sandbox has an unknown key (allowed: ${concatStringsSep "," (lib.attrNames defaultSandbox)}). A typo would silently default a security control.";
     }) caps)
     ++
     # (6) impls are non-empty and unique.
@@ -185,10 +254,12 @@ let
   ok = all (c: lib.asserts.assertMsg c.cond c.msg) checks;
 
 in {
-  inherit registry runtimeTiers forbiddenT3 protectedPaths egressDenyList argTypes;
-  # `ok` is true only if every invariant holds; forcing it (the flake check does)
-  # throws the first violation's message. Downstream (Step 7) reads `registry`
-  # only after this module has evaluated, i.e. only after `ok` is proven.
+  inherit runtimeTiers forbiddenT3 protectedPaths protectedReadPaths egressDenyList argTypes;
+  # Nix is LAZY: reading `registry` does not force `ok`. So the DATA is gated behind
+  # `assert ok` — no consumer (incl. Step 7's sandbox derivation) can obtain a
+  # capability without every mechanism-3 invariant throwing first. Same for the name
+  # list. `ok` remains available standalone (its own assert forces the checks).
+  registry = assert ok; rawRegistry;
+  capabilityNames = assert ok; map (c: c.name) caps;
   ok = assert ok; true;
-  capabilityNames = map (c: c.name) caps;
 }
