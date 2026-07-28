@@ -14,9 +14,11 @@ is the prompt-injection surface, so it goes branch->PR->Fable, not here.
 
 stdlib only (urllib) so it runs anywhere Python does, incl. the built VM.
 """
-import json, os, sys, urllib.request, urllib.error
+import json, os, re, sys, urllib.request, urllib.error, http.client
 
 HOST  = os.environ.get("OLLAMA_HOST", "http://127.0.0.1:11434").rstrip("/")
+if not HOST.startswith(("http://", "https://")):     # env-sourced, not model — but harden as knobs multiply
+    sys.stderr.write(f"[brain-ollama] refusing non-http(s) OLLAMA_HOST: {HOST!r}\n"); sys.exit(2)
 MODEL = os.environ.get("OLLAMA_MODEL", "qwen2.5:7b")
 SYSTEM = os.environ.get(
     "BRAIN_SYSTEM",
@@ -26,32 +28,60 @@ SYSTEM = os.environ.get(
 
 C_YOU = "\033[38;5;179m"; C_AI = "\033[38;5;79m"; C_DIM = "\033[38;5;244m"; C0 = "\033[0m"
 
+MAX_TURNS = 24                                        # bound history re-sent each turn over a long session
+_CTRL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f\x9b]")   # C0/C1 controls incl. ESC (\x1b); keeps \t and \n
+def _clean(s):
+    """Strip terminal control/escape bytes from model- or server-controlled text before
+    it reaches the login tty (ESC/CSI/OSC injection defense). Keeps \\t and \\n."""
+    return _CTRL.sub("", s)
+
 def _post(path, payload):
     req = urllib.request.Request(
         HOST + path, data=json.dumps(payload).encode(),
         headers={"Content-Type": "application/json"}, method="POST")
     return urllib.request.urlopen(req, timeout=120)
 
+def check():
+    """Preflight for agent-shell: exit 0 iff Ollama is reachable AND advertises at
+    least one model, else non-zero. Lets the login shell decide whether to hand off
+    to this brain or fall back to the mem REPL — so we never exec into a brain that
+    cannot talk (which would crash-loop getty's autologin). Short timeout so a
+    down server barely delays login."""
+    try:
+        resp = urllib.request.urlopen(HOST + "/api/tags", timeout=4)
+        data = json.loads(resp.read(1_000_000))   # bound: a hostile /api/tags must not balloon login preflight
+    except Exception:
+        return 1
+    return 0 if data.get("models") else 1
+
 def chat(history):
     """Stream one assistant turn from /api/chat; return the full text (or None on error)."""
     try:
         resp = _post("/api/chat", {"model": MODEL, "messages": history, "stream": True})
     except urllib.error.URLError as e:
-        sys.stderr.write(f"\n[brain-ollama] cannot reach Ollama at {HOST}: {e}\n")
+        sys.stderr.write(_clean(f"\n[brain-ollama] cannot reach Ollama at {HOST}: {e}") + "\n")
         return None
     out = []
     sys.stdout.write(C_AI)
-    for raw in resp:
-        raw = raw.strip()
-        if not raw:
-            continue
-        try: obj = json.loads(raw)
-        except json.JSONDecodeError: continue
-        tok = obj.get("message", {}).get("content", "")
-        if tok:
-            out.append(tok); sys.stdout.write(tok); sys.stdout.flush()
-        if obj.get("done"):
-            break
+    try:
+        for raw in resp:
+            raw = raw.strip()
+            if not raw:
+                continue
+            try: obj = json.loads(raw)
+            except json.JSONDecodeError: continue
+            tok = _clean(obj.get("message", {}).get("content", ""))
+            if tok:
+                out.append(tok); sys.stdout.write(tok); sys.stdout.flush()
+            if obj.get("done"):
+                break
+    except (OSError, http.client.HTTPException) as e:
+        # A mid-stream read failure (timeout / reset / incomplete read) must NOT tear
+        # down the session — this brain is exec'd AS the login program. Show a dim
+        # notice and return whatever streamed so far (like the unreachable case).
+        sys.stdout.write(f"{C0}\n{C_DIM}[brain-ollama] stream interrupted: {_clean(str(e))}{C0}\n")
+        sys.stdout.flush()
+        return "".join(out)
     sys.stdout.write(C0 + "\n"); sys.stdout.flush()
     return "".join(out)
 
@@ -73,8 +103,12 @@ def main():
         if reply is None:       # server unreachable — don't spin
             break
         history.append({"role": "assistant", "content": reply})
+        if len(history) > 1 + 2 * MAX_TURNS:        # keep system + last MAX_TURNS exchanges
+            history[:] = history[:1] + history[-2 * MAX_TURNS:]
 
 if __name__ == "__main__":
+    if "--check" in sys.argv[1:]:
+        sys.exit(check())
     try:
         main()
     except KeyboardInterrupt:
