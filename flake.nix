@@ -6,27 +6,40 @@
   outputs = { self, nixpkgs }:
     let
       system = "x86_64-linux";  # Dell Latitude = Intel x86_64
+      # One module list, two machines: `agentos` ships UNSEALED (provisioning — the model
+      # can still be pulled); `agentos-sealed` is the SAME machine with the clean-room
+      # egress wall sealed to nixpkgs-only. The on-device seal is therefore a single
+      # `nixos-rebuild switch --flake ...#agentos-sealed` AFTER the model pull — no local
+      # file editing, no git push.
+      baseModules = [
+        ./configuration.nix
+        ./modules/agent-shell.nix
+        ./modules/brain.nix
+        ./modules/clean-room.nix
+        ./modules/audit.nix
+        ./modules/taint.nix
+        ./modules/mcp.nix
+        ./modules/broker.nix
+        ./modules/confirm.nix
+      ];
+      mkSystem = extraModules: nixpkgs.lib.nixosSystem {
+        inherit system;
+        modules = baseModules ++ extraModules;
+      };
     in {
       # The whole machine. `agent-shell.nix` is the part that makes it Agent OS;
       # `configuration.nix` is boring base plumbing (bootloader, user, network).
-      nixosConfigurations.agentos = nixpkgs.lib.nixosSystem {
-        inherit system;
-        modules = [
-          ./configuration.nix
-          ./modules/agent-shell.nix
-          ./modules/brain.nix
-          ./modules/audit.nix
-          ./modules/taint.nix
-          ./modules/mcp.nix
-          ./modules/broker.nix
-          ./modules/confirm.nix
-        ];
-      };
+      nixosConfigurations.agentos = mkSystem [ ];
+      # Same machine, egress wall sealed — the post-model-pull `switch` target.
+      nixosConfigurations.agentos-sealed = mkSystem [ { agentos.cleanRoom.sealed = true; } ];
 
       # Prove boot-and-talk in a VM BEFORE it ever touches the Dell:
-      #   nix build .#vm && ./result/bin/run-*-vm
-      packages.${system}.vm =
-        self.nixosConfigurations.agentos.config.system.build.vm;
+      #   nix build .#vm && ./result/bin/run-*-vm       (unsealed: can pull a model)
+      #   nix build .#vm-sealed                          (sealed: nixpkgs-only egress)
+      packages.${system} = {
+        vm        = self.nixosConfigurations.agentos.config.system.build.vm;
+        vm-sealed = self.nixosConfigurations.agentos-sealed.config.system.build.vm;
+      };
 
       checks.${system} = {
         # Phase 2 · Step 1 — evaluating the capability registry FORCES its invariant
