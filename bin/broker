@@ -221,8 +221,10 @@ def path_confined(p, roots):
 
 def _obfuscated_ip_host(host):
     """Reject host forms that ONLY ever encode an obfuscated IP: all-digit (decimal int like
-    2130706433), 0x-hex (0x7f000001), or a dotted label with a leading-zero octal octet
-    (0177.0.0.1). A literal deny-list misses all of these; rejecting the FORM closes them."""
+    2130706433), 0x-hex (0x7f000001), a dotted label with a leading-zero octal octet
+    (0177.0.0.1), or a short-form / non-canonical dotted-decimal (127.1, 10.1, 192.168.257)
+    that inet_aton would still expand to a real IP. A literal deny-list misses all of these;
+    rejecting the FORM closes them."""
     h = host.lower()
     if host.isdigit():
         return True
@@ -230,6 +232,15 @@ def _obfuscated_ip_host(host):
         return True
     for label in host.split("."):
         if len(label) > 1 and label[0] == "0" and label.isdigit():
+            return True
+    # Digits-and-dots that does NOT parse as a canonical IP (127.1 -> inet_aton 127.0.0.1,
+    # 10.1, 192.168.257, 1.2.3.4.5). A canonical dotted-quad DOES parse and is handled by the
+    # is_loopback/is_private checks in validate_url; a real hostname carries non-digit chars
+    # and is untouched here.
+    if host and all(c in "0123456789." for c in host):
+        try:
+            ipaddress.ip_address(host)
+        except ValueError:
             return True
     return False
 
@@ -297,7 +308,7 @@ def validate_namespace(v, cap):
     return True, None
 
 
-def validate_value(argtype, v, cap):
+def validate_value(argtype, v, cap, name=None):
     """Per-type value validator. Total and fail-closed: an unknown type denies (the registry
     assert already restricts types, but the broker does not ASSUME it)."""
     if argtype == "string":
@@ -309,10 +320,17 @@ def validate_value(argtype, v, cap):
             return False, "bytes-exceeds-cap"
         return True, None
     if argtype == "enum":
-        # GAP-1: the registry declares no member set, so the broker cannot validate an enum
-        # -> deny (fail-closed). net.fetch.method is thus unusable in v1 (net.fetch is T2/
-        # confirm-gated anyway). Lands when the additive Step-1 `argEnums` field ships.
-        return False, "enum-no-member-set (GAP-1, fail-closed)"
+        # GAP-1: validate against the cap's declared member set (registry `argEnums[name]`).
+        # Fail-closed if the set is absent/empty (the registry build-assert also forbids that,
+        # so this is belt-and-suspenders) or the value is not an exact string member.
+        members = (cap.get("argEnums") or {}).get(name)
+        if not isinstance(members, list) or not members:
+            return False, "enum-no-member-set (GAP-1, fail-closed)"
+        if not isinstance(v, str):
+            return False, "enum-not-a-string"
+        if v not in members:
+            return False, "enum-not-in-set"
+        return True, None
     if argtype == "path":
         if not path_is_canonical(v):
             return False, "path-not-canonical"
@@ -343,7 +361,7 @@ def check_args(cap, arguments):
     if missing:
         return False, "arg-schema: missing required arg(s): %s" % ",".join(sorted(missing))
     for name in sorted(declared_keys):
-        ok, why = validate_value(declared[name], arguments[name], cap)
+        ok, why = validate_value(declared[name], arguments[name], cap, name)
         if not ok:
             return False, "arg-schema: arg '%s': %s" % (name, why)
     return True, None
