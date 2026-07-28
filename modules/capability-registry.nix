@@ -82,8 +82,8 @@ let
     egressAllow    = [ ];   # operator-config exceptions (config-only to change)
   };
 
-  mkCap = { tier, summary, args ? { }, impl, sandbox ? { } }: {
-    inherit tier summary args impl;
+  mkCap = { tier, summary, args ? { }, argEnums ? { }, impl, sandbox ? { } }: {
+    inherit tier summary args impl argEnums;
     sandbox = defaultSandbox // sandbox;
   };
 
@@ -129,6 +129,10 @@ let
       tier = "T2"; impl = "cap-net-fetch";
       summary = "Fetch a URL (egress; obeys INV-2 deny-list).";
       args = { url = "url"; method = "enum"; };
+      # GAP-1: the member set for the `method` enum. Least-privilege for a *fetch* —
+      # read-only-on-remote verbs only (GET body, HEAD metadata probe). State-changing
+      # verbs (POST/PUT/DELETE/PATCH) are out of scope for v1 net.fetch.
+      argEnums = { method = [ "GET" "HEAD" ]; };
       sandbox = { network = true; egressDeny = egressDenyList; };
     };
     "message.send" = mkCap {
@@ -142,7 +146,7 @@ let
   # ── Invariant checks. Each is {cond, msg}; `ok` forces them all and throws the
   #    first violated message. A violation therefore fails evaluation → fails the
   #    flake check. This is the executable form of the threat model.
-  caps = mapAttrsToList (name: c: { inherit name; inherit (c) tier impl sandbox args; }) rawRegistry;
+  caps = mapAttrsToList (name: c: { inherit name; inherit (c) tier impl sandbox args argEnums; }) rawRegistry;
 
   # Canonical absolute path: leading "/", and no empty / "." / ".." segment (which
   # rules out "//", "/./", "/../", trailing "/", relative paths, and "/" itself).
@@ -267,6 +271,29 @@ let
         cond = lib.elem at argTypes;
         msg  = "capability-registry: '${c.name}' arg '${an}' has unknown type '${at}' (allowed: ${concatStringsSep "," argTypes}).";
       }) c.args
+    ) caps)
+    ++
+    # (7b) GAP-1 — every `enum`-typed arg MUST carry a non-empty string member set in
+    #      argEnums. An enum with no members fail-closes in the broker (unusable), so a
+    #      forgotten member set is a BUILD error here, not a silent runtime deny.
+    (lib.concatMap (c:
+      mapAttrsToList (an: at: {
+        cond = at != "enum"
+               || ((c.argEnums ? ${an})
+                   && lib.isList c.argEnums.${an}
+                   && c.argEnums.${an} != [ ]
+                   && (all lib.isString c.argEnums.${an}));
+        msg  = "capability-registry: '${c.name}' arg '${an}' is type 'enum' but argEnums.${an} is missing/empty/non-string — declare argEnums.${an} = [ \"...\" ] (an enum with no member set fail-closes and is unusable).";
+      }) c.args
+    ) caps)
+    ++
+    # (7c) GAP-1 — no argEnums entry for an arg that is not typed `enum` (dead, never-consulted
+    #      config; reject it so declarations stay honest).
+    (lib.concatMap (c:
+      mapAttrsToList (an: _members: {
+        cond = (c.args ? ${an}) && c.args.${an} == "enum";
+        msg  = "capability-registry: '${c.name}' declares argEnums.${an} but arg '${an}' is not type 'enum' — a member set on a non-enum arg is dead config.";
+      }) c.argEnums
     ) caps);
 
   ok = all (c: lib.asserts.assertMsg c.cond c.msg) checks;

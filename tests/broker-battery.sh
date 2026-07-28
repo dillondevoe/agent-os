@@ -14,12 +14,12 @@
 #
 # TWO registries are used on purpose:
 #   * the REAL materialized registry (arg $5) — routing matrix, T3 non-expressibility,
-#     enum-denies-pre-GAP-1, real arg types. This is the production contract.
+#     enum membership (GAP-1), real arg types. This is the production contract.
 #   * a TEST registry ($SCRATCH/testreg.json) written below — a fixture that makes net.fetch
-#     reachable to the invoke stage (the real net.fetch is enum-blocked in v1, so the
-#     UNTRUSTED-origin return path can only be exercised against a fixture). The broker's
+#     reachable to the invoke stage (net.fetch is T2/confirm-gated, so the UNTRUSTED-origin
+#     return path is exercised against a fixture wired past the confirm seam). The broker's
 #     origin policy is keyed on the capability NAME, so net.fetch is still UNTRUSTED here —
-#     the code path under test is identical; only the enum roadblock is removed.
+#     the code path under test is identical.
 set -u
 
 BROKER="${1:?path to bin/broker required}"
@@ -141,9 +141,12 @@ case "$OUT" in *"unknown arg"*) : ;; *) fail "unknown arg not denied: $OUT";; es
 # (b) missing required arg
 OUT="$(one '{"ok":true,"method":"tools/call","id":4,"name":"file.read","arguments":{}}')"
 case "$OUT" in *"missing required arg"*) : ;; *) fail "missing arg not denied: $OUT";; esac
-# (c) enum-denies-pre-GAP-1 — real net.fetch has method:enum, so it CANNOT pass arg-schema
+# (c) enum membership (GAP-1) — real net.fetch.method now carries a member set. A valid member
+#     passes arg-schema (then T2 meets the unwired confirm stub); an out-of-set value denies.
 OUT="$(one '{"ok":true,"method":"tools/call","id":4,"name":"net.fetch","arguments":{"url":"https://example.com/","method":"GET"}}')"
-case "$OUT" in *"enum-no-member-set"*) : ;; *) fail "enum arg did not fail-closed (GAP-1): $OUT";; esac
+case "$OUT" in *"confirm-channel-not-wired"*) : ;; *) fail "net.fetch valid enum did not reach confirm (GAP-1): $OUT";; esac
+OUT="$(one '{"ok":true,"method":"tools/call","id":4,"name":"net.fetch","arguments":{"url":"https://example.com/","method":"TRACE"}}')"
+case "$OUT" in *"enum-not-in-set"*) : ;; *) fail "net.fetch out-of-set enum not denied: $OUT";; esac
 # (d) path confinement — canonical but outside the cap root
 OUT="$(one '{"ok":true,"method":"tools/call","id":4,"name":"file.read","arguments":{"path":"/etc/passwd"}}')"
 case "$OUT" in *"arg-confinement"*) : ;; *) fail "path outside cap root not confined: $OUT";; esac
@@ -290,6 +293,9 @@ url_deny = ["http://127.0.0.1/", "http://10.0.0.1/", "http://192.168.1.1/",
             "http://172.16.0.1/", "http://169.254.169.254/", "http://2130706433/",
             "http://0x7f000001/", "http://0177.0.0.1/", "http://[::1]/",
             "http://[::ffff:127.0.0.1]/", "http://0.0.0.0/", "http://224.0.0.1/",
+            "http://127.1/", "http://10.1/", "http://192.168.257/",
+            "http://127.0x1/", "http://10.0x0.0.1/",              # per-octet hex (Fable PR#12 fix)
+            "http://１２７.0.0.1/",                   # fullwidth-digit 127 (NFKC-caught)
             "ftp://example.com/", "http:///nohost", "file:///etc/passwd"]
 for u in url_deny:
     ok, _ = m.validate_url(u)
