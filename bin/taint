@@ -77,6 +77,10 @@ def origins_path():
     return os.path.join(taint_dir(), "origins.json")
 
 
+def hwm_path():
+    return os.path.join(taint_dir(), "epoch-hwm.json")
+
+
 def lock_path():
     return os.path.join(taint_dir(), "taint.lock")
 
@@ -149,6 +153,28 @@ def load_origins():
     except (ValueError, OSError):
         # A corrupt origin ledger cannot be trusted to say "trusted" about anything.
         return {}, True
+
+
+def load_hwm():
+    """Durable high-water mark of the MAX session_id ever minted, kept in the protected taint dir
+    (model-unwritable, §8). It outlives session.json: a reset reads the floor even when the session
+    file was lost or corrupted, so a new epoch can never reuse a prior epoch's id (CF-5/GAP-5).
+    Returns (max_id, corrupt). ABSENT -> (-1, False): a genuine first reset mints epoch 0.
+    Present-but-unparseable, or a non-int / bool / negative value -> (-1, True): the caller REFUSES
+    rather than mint an id it cannot prove collision-free. `bool` is guarded explicitly — `True` is
+    an `int` in Python, the same truthy-coercion class as the CF-1c fail-open."""
+    p = hwm_path()
+    try:
+        with open(p, "r", encoding="utf-8") as f:
+            o = json.load(f)
+        v = o.get("max_session_id") if isinstance(o, dict) else None
+        if isinstance(v, bool) or not isinstance(v, int) or v < 0:
+            return -1, True
+        return v, False
+    except FileNotFoundError:
+        return -1, False
+    except (ValueError, OSError):
+        return -1, True
 
 
 def audit_log(record):
@@ -308,7 +334,21 @@ def cmd_reset(argv):
     confirm_human = "--confirm-human" in argv
     break_glass = "--break-glass" in argv
     old, _ = load_session()
-    new_id = (old["session_id"] + 1) if old["session_id"] >= 0 else 0
+    # CF-5 / GAP-5: mint the new epoch id from a DURABLE high-water mark, not `old + 1`. The old
+    # formula fell back to 0 whenever load_session() returned the -1 sentinel (missing OR corrupt
+    # state) — so a reset over a lost/corrupt session rolled the epoch back to 0, colliding with a
+    # prior epoch. The broker binds every confirm-nonce to session_id and denies on a changed epoch
+    # (spec §Nonce), so a reused id is a nonce/epoch replay surface. The high-water mark lives in the
+    # protected taint dir and is written AHEAD of the session (below), so it stays >= every id ever
+    # minted even across session.json loss. max(old, hwm)+1 is strictly monotone; a CORRUPT hwm
+    # fails closed — we refuse rather than risk a colliding low id.
+    hwm_max, hwm_corrupt = load_hwm()
+    if hwm_corrupt:
+        sys.stderr.write("taint reset: NOT cleared — epoch high-water mark is corrupt; refusing to "
+                         "mint a session_id that cannot be proven collision-free. Inspect/restore "
+                         "%s (a human can rewrite it; the model cannot)\n" % hwm_path())
+        return 6
+    new_id = max(old["session_id"], hwm_max) + 1
 
     if break_glass:
         # Audited BREAK-GLASS — bypasses the confirm channel so a DEAD channel can never strand
@@ -347,6 +387,18 @@ def cmd_reset(argv):
 
     s = {"schema": SCHEMA, "session_id": new_id, "tainted": False,
          "reasons": [], "updated": utc_now()}
+    # CF-5 write-ahead: durably RESERVE new_id in the high-water mark BEFORE writing the session (and
+    # before the audit), so any crash — or a later session.json loss — can only SKIP an id, never
+    # REUSE one. Ordering is load-bearing: were the session written first and the box crashed before
+    # this, a subsequent session.json loss would let the next reset re-mint the just-committed id.
+    # Writing the floor first means the worst case is a harmless gap in the id sequence, never a
+    # collision. A failed hwm write aborts the reset (return 3) with new_id un-minted — the bit stays
+    # as it was, and the reserved id is simply skipped by the next attempt.
+    try:
+        _atomic_write(hwm_path(), {"schema": SCHEMA, "max_session_id": new_id})
+    except OSError as e:
+        sys.stderr.write("taint reset: cannot persist epoch high-water: %s\n" % e)
+        return 3
     # Audit the reset BEFORE it takes effect — a human clearing taint is a security event. Record
     # WHICH path cleared it (via) + the nonce for the channel path, so the ledger distinguishes a
     # channel-approved reset from a break-glass burn.
