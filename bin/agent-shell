@@ -46,9 +46,13 @@ else
   # `mem` memory layer the real brain uses — so the memory model is real even here.
   MEM_BIN="$(dirname "$0")/mem"; [ -x "$MEM_BIN" ] || MEM_BIN="mem"
   export MEM_ROOT="$MEM"
+  # A usage-error exit from mem must NOT kill the login shell — getty would autologin-
+  # respawn into an untypeable crash loop. Drop -e and disable globbing for the REPL
+  # (recall/remember want word-splitting, never filename expansion).
+  set +e; set -f
   while true; do
     printf "${BANNER}you ›${RST} "
-    read -r line || { echo; break; }
+    IFS= read -r line || { echo; break; }
     case "$line" in
       "") : ;;
       exit|quit) break ;;

@@ -10,8 +10,10 @@
   # own disk/boot. These are placeholders so `configuration.nix` reads cleanly.
   boot.loader.systemd-boot.enable = lib.mkDefault true;
   boot.loader.efi.canTouchEfiVariables = lib.mkDefault true;
-  # fileSystems."/" is provided by hardware-configuration.nix on real hardware
-  # and by the VM builder in the flake's `vm` output.
+  # A root fs must be declared or `nix flake check` / non-VM eval fails the NixOS
+  # "no root filesystem" assertion. mkDefault lets the real hardware-configuration.nix
+  # (generated on the Dell) override it; the VM builder overrides it too.
+  fileSystems."/" = lib.mkDefault { device = "/dev/disk/by-label/nixos"; fsType = "ext4"; };
 
   # 5440-specific enablement (safe to set blind — standard for 13th-gen Intel laptops):
   hardware.enableRedistributableFirmware = true;   # Intel AX2xx wifi/bt firmware
@@ -45,7 +47,9 @@
   environment.systemPackages = with pkgs; [
     git curl jq ripgrep fd bat            # the agent's hands
     neovim                                 # text-editing capability
-    chromium                               # the "GUI guest" it can summon for visual tasks
+    python3                                # mem's interpreter + a general agent tool
+    # chromium (the "GUI guest") is deferred to the compositor module — with no X/wayland
+    # session it can't launch, so it'd be ~500MB of dead closure. Comes with cage/weston.
     # NOTE: the brain (Claude Code CLI, or a local-model runner) is installed by
     # bin/setup-brain.sh at first boot — it isn't in nixpkgs yet. Phase 1.5 swaps in
     # a local model (llama.cpp / ollama) as the offline floor.

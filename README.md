@@ -21,6 +21,10 @@ cd ~/agent-os
 nix build .#vm
 ./result/bin/run-agent-os-vm      # boots into the agent shell in a window
 ```
+> **Flakes only see git-tracked files** — after editing any file, `git add` it or `nix build`
+> silently uses the old version. On WSL2: the VM window needs WSLg, and `/dev/kvm` makes it
+> fast (without KVM it runs under TCG emulation — works, just slow). `nix flake check` needs
+> neither and validates the whole config first.
 The VM comes up, autologins tty1, seeds `~/memory`, and drops into the brain
 (or the placeholder memory-REPL if no brain is installed yet).
 
