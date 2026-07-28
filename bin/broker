@@ -85,16 +85,27 @@ def _argv(binpath, *args):
     return a
 
 
-def _run(binpath, args, stdin_bytes=None, capture=False):
+_SEAM_TIMEOUT = object()   # distinct returncode sentinel: a confirm-seam child that ran past its
+                           # deadline (fail-closed DENY, child killed+reaped), never a real exit.
+
+
+def _run(binpath, args, stdin_bytes=None, capture=False, timeout=None):
     """Run a child; return (returncode, stdout_bytes). OSError -> (-1, b'') (fail-closed:
-    an unreachable primitive is a denial, never a silent success)."""
+    an unreachable primitive is a denial, never a silent success). A `timeout=` (used ONLY on the
+    confirm seam, §5) that elapses -> subprocess.run KILLS and reaps the child, and we return the
+    _SEAM_TIMEOUT sentinel so the caller denies with a specific `confirm-timeout` reason. The
+    sentinel is not 0 and not an int, so every existing `rc != 0` caller still fails closed; only
+    the confirm seam passes a timeout, so no other caller can ever observe it."""
     try:
         p = subprocess.run(
             _argv(binpath, *args),
             input=stdin_bytes,
             stdout=(subprocess.PIPE if capture else subprocess.DEVNULL),
             stderr=subprocess.DEVNULL,
+            timeout=timeout,
         )
+    except subprocess.TimeoutExpired:
+        return _SEAM_TIMEOUT, b""
     except OSError:
         return -1, b""
     return p.returncode, (p.stdout or b"")
@@ -146,15 +157,18 @@ def audit_append(record):
 
 
 # ── Injected effect seams (fail-closed stubs by default) ─────────────────────
-def _run_seam(env_var, request_obj):
+def _run_seam(env_var, request_obj, timeout=None):
     """Exec an injected seam program with request JSON on stdin, parse its JSON stdout.
-    Return (obj, None) or (None, reason). Unset env -> (None, 'not-wired')."""
+    Return (obj, None) or (None, reason). Unset env -> (None, 'not-wired'). A `timeout=` that
+    elapses -> (None, 'seam-timeout') with the child killed+reaped (fail-closed, never OPEN)."""
     prog = os.environ.get(env_var)
     if not prog:
         return None, "not-wired"
     payload = json.dumps(request_obj, sort_keys=True, separators=(",", ":"),
                          ensure_ascii=True).encode("utf-8")
-    rc, out = _run(prog, [], stdin_bytes=payload, capture=True)
+    rc, out = _run(prog, [], stdin_bytes=payload, capture=True, timeout=timeout)
+    if rc is _SEAM_TIMEOUT:
+        return None, "seam-timeout"
     if rc != 0:
         return None, "seam-exit-%d" % rc
     try:
@@ -163,13 +177,28 @@ def _run_seam(env_var, request_obj):
         return None, "seam-bad-json: %s" % e
 
 
+def _confirm_timeout_s():
+    """The confirm-seam subprocess backstop (§5, Fable follow-up #2). A hung/absent human can
+    never stall the single-flight broker: on TimeoutExpired the child is killed and the seam call
+    is a DENY, never an OPEN. Fail-closed default on a missing/bad AGENT_OS_CONFIRM_TIMEOUT_S. The
+    client carries its OWN shorter human-window so a graceful `confirm-human-timeout` deny is the
+    normal no-answer path and this SIGKILL backstop stays exceptional."""
+    try:
+        t = int(os.environ.get("AGENT_OS_CONFIRM_TIMEOUT_S", "120"))
+        return t if t > 0 else 120
+    except (ValueError, TypeError):
+        return 120
+
+
 def confirm_seam(confirm_request):
     """Step-5 default = DENY ('confirm-channel-not-wired'). Any configured seam that fails,
-    errors, or returns a non-approving/malformed answer ALSO denies (fail-closed). Only an
-    explicit {approved:true} approves."""
-    obj, err = _run_seam("AGENT_OS_CONFIRM_SEAM", confirm_request)
+    errors, times out, or returns a non-approving/malformed answer ALSO denies (fail-closed). Only
+    an explicit {approved:true} approves. The seam call is subprocess-timeout'd (§5): a child that
+    runs past AGENT_OS_CONFIRM_TIMEOUT_S is killed and denied as 'confirm-timeout'."""
+    obj, err = _run_seam("AGENT_OS_CONFIRM_SEAM", confirm_request, timeout=_confirm_timeout_s())
     if err is not None:
-        return {"approved": False, "reason": "confirm-channel-not-wired"}
+        reason = "confirm-timeout" if err == "seam-timeout" else "confirm-channel-not-wired"
+        return {"approved": False, "reason": reason}
     if not isinstance(obj, dict) or obj.get("approved") is not True:
         reason = obj.get("reason") if isinstance(obj, dict) else "confirm-malformed"
         return {"approved": False, "reason": str(reason or "denied")}
@@ -461,6 +490,13 @@ class Broker:
         rid = v.get("id")
         name = v.get("name")
         arguments = v.get("arguments") or {}
+        # Fable follow-up #3: a non-dict `arguments` (list/str/number) would AttributeError in
+        # check_args' `.keys()`. Deny it up front — a malformed args container is fail-closed, and
+        # the model can never smuggle a non-object past the arg-schema by shape. (`v.get(...) or {}`
+        # already maps a falsy [] / "" / 0 to {}; this catches the truthy non-dicts.)
+        if not isinstance(arguments, dict):
+            self._audit("deny", rid, capability=name, reason="arguments-not-object")
+            return deny(rid, "arguments must be a JSON object")
 
         # Stage 2 — registry lookup. reset/taint.modify/... are simply NOT keys -> denied
         # here; T3 non-expressibility is automatic (CF-1a), no special case.

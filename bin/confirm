@@ -1,0 +1,504 @@
+#!/usr/bin/env python3
+# Phase 2 · Step 6 — bin/confirm, the wall's mouth (the broker-owned confirm client).
+#
+# The broker (Step 5, merged) routes everything above T0 to REQUIRE-CONFIRM and execs
+# $AGENT_OS_CONFIRM_SEAM with the confirm request as canonical JSON on stdin. This program IS
+# that seam. It is a PURE renderer/relayer/collector (spec §2): it does NOT re-decide, re-audit,
+# or touch taint — the broker already minted the nonce, bound the epoch, and audited `route`
+# before calling us and `approve`/`deny` after. Our only job: render the broker's structured
+# request to a human over a tty-FREE, integrity-checked channel, collect an approve/deny bound to
+# the broker-minted nonce, and print {"approved":bool,"reason":str} on stdout. Exit 0 always;
+# the answer is in the JSON. EVERY failure is a fail-closed DENY — we can never fail OPEN, only
+# fail to approve (§2). The broker enforces every other fail-closed property around us.
+#
+# Two backends behind one hardened path (spec §3): telegram-relay (primary) and second-getty
+# (fallback). Channel order is operator-pinned via env (AGENT_OS_CONFIRM_CHANNELS); the first
+# reachable+authenticated one handles the request; if none is live -> deny. Selection never
+# "falls through to allow."
+#
+# Security surface (the confirm channel + injection wall): branch -> PR -> Fable(code) -> merge.
+# Never direct-push, never self-merge.
+#
+# Trust model (spec §3.1): the relay daemon is TCB and its compromise is OUT OF SCOPE (malicious
+# operator). The domain-separated HMAC DETECTS a modifying hop between two honest endpoints; it
+# does NOT contain a subverted relay. No LLM is in the confirm path — the client composes every
+# rendered byte; the relay transmits verbatim.
+import sys, os, json, hmac, hashlib, base64, socket, select, unicodedata
+from urllib.parse import urlsplit, urlunsplit
+
+# ── Fixed rendering vocabulary (spec §4.1) ───────────────────────────────────
+# The line-prefix sentinel prepended to EVERY line of a model-controlled value, applied AFTER
+# scrub + newline-normalization. Trust-region labels are NEVER prefixed, so a value's injected
+# "\nTIER: T0" renders as a visibly value-continuation line, structurally distinct from the fixed
+# unprefixed template. This is the field-confusion defense (Amendment 2).
+LINE_PREFIX = "│ "            # "│ "
+MAXPREVIEW = 512                    # hard cap on any single previewed value (§4.5)
+TRUNC = "…(truncated)"        # "…(truncated)"
+GETTY_MAX_RETRIES = 3              # ≤3-retry-then-deny for the 40-bit getty code (§4.2, Q2)
+
+# C0 (except \t\n) + DEL + C1. Scrubbing these stops terminal-escape injection into the getty
+# frame and control bytes anywhere in the frame (the PR#1-B2 lesson, generalized §4.1).
+_CTRL = set(range(0x00, 0x09)) | set(range(0x0b, 0x20)) | {0x7f} | set(range(0x80, 0xa0))
+
+
+def deny(reason):
+    """The single fail-closed exit. Print the DENY verdict and leave. Never raises past here."""
+    sys.stdout.write(json.dumps({"approved": False, "reason": str(reason)}))
+    sys.stdout.flush()
+    sys.exit(0)
+
+
+def approve(reason="approved"):
+    sys.stdout.write(json.dumps({"approved": True, "reason": str(reason)}))
+    sys.stdout.flush()
+    sys.exit(0)
+
+
+# ── §4.1 model-controlled-value hygiene ──────────────────────────────────────
+def scrub(value):
+    """Control-char-strip (C0/C1 except \\t\\n, plus DEL) then newline-normalize (CR/CRLF/\\v/\\f
+    -> \\n). Total: any object is str()'d first, so a non-string model value can never dodge the
+    scrub. This runs on EVERY model-controlled value before it enters the frame."""
+    s = value if isinstance(value, str) else json.dumps(value, sort_keys=True, ensure_ascii=False) \
+        if isinstance(value, (dict, list)) else str(value)
+    # newline-normalize first so \v/\f/CR become \n and line-splitting is well-defined
+    s = s.replace("\r\n", "\n").replace("\r", "\n").replace("\v", "\n").replace("\f", "\n")
+    return "".join(ch for ch in s if ord(ch) not in _CTRL)
+
+
+def prefix_lines(scrubbed):
+    """Prefix EVERY line of an already-scrubbed value with the sentinel. Empty string -> one
+    empty prefixed line, so a blank value is still visibly a value line, not a gap the eye skips."""
+    lines = scrubbed.split("\n")
+    return "\n".join(LINE_PREFIX + ln for ln in lines)
+
+
+def punycode_host(url):
+    """Render a URL destination with its host as the punycode A-label ONLY (§4.1) so an IDN
+    homograph cannot masquerade as a seen host. Non-URL / unparseable -> return input unchanged
+    (it will still be scrubbed by the caller). IDNA is applied per-label; a label that won't
+    encode falls back to its raw (already-scrubbed) form rather than dropping the destination."""
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return url
+    host = parts.hostname
+    if not host:
+        return url
+    labels = []
+    for lab in host.split("."):
+        try:
+            labels.append(lab.encode("idna").decode("ascii") if lab else lab)
+        except (UnicodeError, ValueError):
+            labels.append(lab)
+    netloc = ".".join(labels)
+    if parts.port is not None:
+        netloc = "%s:%d" % (netloc, parts.port)
+    if parts.username:                       # keep userinfo visible but on the A-label host
+        cred = parts.username + (":" + parts.password if parts.password else "")
+        netloc = cred + "@" + netloc
+    try:
+        return urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment))
+    except ValueError:
+        return url
+
+
+def normalize_dest(dest):
+    """Canonical form for the seen-destinations compare (§4.4): NFKC, lowercase scheme+host,
+    punycode host, strip a trailing dot, drop default ports. A normalization MISS is a highlight
+    miss (fail-noisy: we'd show the never-seen banner on a seen host), never a fail-open, so this
+    is best-effort, not load-bearing for authorization."""
+    if not isinstance(dest, str):
+        return ""
+    d = unicodedata.normalize("NFKC", dest).strip()
+    try:
+        parts = urlsplit(d)
+    except ValueError:
+        return d.lower()
+    if parts.scheme and parts.hostname:
+        host = parts.hostname.rstrip(".").lower()
+        try:
+            host = ".".join((lab.encode("idna").decode("ascii") if lab else lab)
+                            for lab in host.split("."))
+        except (UnicodeError, ValueError):
+            pass
+        netloc = host
+        if parts.port is not None and parts.port not in (80, 443):
+            netloc = "%s:%d" % (host, parts.port)
+        return urlunsplit((parts.scheme.lower(), netloc, parts.path.rstrip("/") or "/",
+                           parts.query, "")).lower()
+    return d.lower()
+
+
+# ── §4.4 seen-destinations set (broker-protected state dir) ──────────────────
+def _seen_path():
+    return os.path.join(os.environ.get("AGENT_OS_CONFIRM_DIR", "/var/lib/agent-os/confirm"),
+                        "seen-destinations")
+
+
+def is_first_time(dest):
+    """True iff `dest` (normalized) is NOT in the seen set. ANY read error -> True (fail-noisy:
+    we highlight; the model cannot pre-seed the set to suppress the banner because the dir is
+    0700 root and outside every capability-impl writable scope, asserted in modules/confirm.nix)."""
+    if not dest:
+        return True
+    key = normalize_dest(dest)
+    try:
+        with open(_seen_path(), "r", encoding="utf-8") as fh:
+            for line in fh:
+                if line.rstrip("\n") == key:
+                    return False
+    except OSError:
+        return True
+    return True
+
+
+def mark_seen(dest):
+    """Add a destination to the seen set — ONLY called on an APPROVED action (§4.4). Best-effort;
+    a write failure just means the next same-destination confirm re-highlights (fail-noisy)."""
+    if not dest:
+        return
+    key = normalize_dest(dest)
+    try:
+        d = os.path.dirname(_seen_path())
+        if d and not os.path.isdir(d):
+            os.makedirs(d, mode=0o700, exist_ok=True)
+        with open(_seen_path(), "a", encoding="utf-8") as fh:
+            fh.write(key + "\n")
+    except OSError:
+        pass
+
+
+# ── §4.5 payload preview ─────────────────────────────────────────────────────
+def _cap(value):
+    """Scrub + hard-cap a single previewed value at MAXPREVIEW with an explicit truncation mark."""
+    s = scrub(value)
+    if len(s) > MAXPREVIEW:
+        s = s[:MAXPREVIEW] + TRUNC
+    return s
+
+
+def payload_preview(capability, typed_args):
+    """What actually MOVES, built from model-controlled typed_args (so §4.1 scrubbing applies).
+    Named shapes for the v1 caps; a generic sorted key=value fallback for anything else. Never
+    executes/renders markup — it is plain scrubbed text."""
+    ta = typed_args if isinstance(typed_args, dict) else {}
+    rows = []
+    if capability == "message.send":
+        rows.append(("to", ta.get("recipient")))
+        rows.append(("body", ta.get("body") if "body" in ta else ta.get("content")))
+    elif capability == "net.fetch":
+        u = ta.get("url") or ""
+        try:
+            p = urlsplit(u)
+            rows.append(("method", ta.get("method", "GET")))
+            rows.append(("host", punycode_host(u).split("//")[-1].split("/")[0] if p.hostname else u))
+            rows.append(("path", p.path or "/"))
+        except ValueError:
+            rows.append(("url", u))
+    elif capability == "mem.remember":
+        rows.append(("key", ta.get("namespace") if "namespace" in ta else ta.get("key")))
+        rows.append(("value", ta.get("content") if "content" in ta else ta.get("value")))
+    if not rows:                              # generic fallback: every declared arg, sorted
+        rows = [(k, ta[k]) for k in sorted(ta.keys())]
+    return "\n".join("%s=%s" % (k, _cap(v if v is not None else "")) for k, v in rows)
+
+
+# ── The integrity frame (spec §4) ────────────────────────────────────────────
+def render_frame(req, first_time, for_getty, confirm_code=None):
+    """Compose the EXACT bytes the human reads. Trust region (capability/tier/provenance/first-
+    time) is fixed-template + NEVER prefixed. The untrusted region (destination, payload, args)
+    is scrubbed, newline-normalized, and every line carries the `│ ` sentinel. No model free text
+    ever appears; labels are fixed literals a value can never introduce."""
+    cap = scrub(req.get("capability"))        # capability name is broker-registry-derived, but
+    tier = scrub(req.get("tier"))             # scrub defensively — cheap, and never wrong
+    prov = scrub(req.get("provenance"))
+    dest_raw = req.get("destination")
+    # destination host -> punycode A-label BEFORE scrub (so the A-label, not the look-alike, shows)
+    dest_shown = punycode_host(dest_raw) if isinstance(dest_raw, str) and "://" in dest_raw \
+        else (dest_raw if dest_raw is not None else "(none)")
+    preview = payload_preview(req.get("capability"), req.get("typed_args"))
+    args = req.get("typed_args") if isinstance(req.get("typed_args"), dict) else {}
+    args_txt = "\n".join("%s=%s" % (scrub(k), _cap(args[k])) for k in sorted(args.keys())) or "(none)"
+
+    L = []
+    L.append("=== agent-os confirmation required ===")
+    L.append("CAPABILITY: " + cap)
+    L.append("TIER: " + tier)
+    L.append("PROVENANCE: " + prov)
+    if first_time:
+        L.append("*** NEVER-SEEN-DESTINATION *** (verify the recipient/host below)")
+    L.append("--- untrusted model input (verify carefully) ---")
+    L.append("DESTINATION:")
+    L.append(prefix_lines(scrub(dest_shown)))
+    L.append("PAYLOAD:")
+    L.append(prefix_lines(scrub(preview)))
+    L.append("ARGS:")
+    L.append(prefix_lines(scrub(args_txt)))
+    L.append("=======================================")
+    if for_getty and confirm_code is not None:
+        L.append("to approve, type:  approve " + confirm_code)
+        L.append("to deny, type:     deny")
+    return "\n".join(L) + "\n"
+
+
+# ── crypto helpers ───────────────────────────────────────────────────────────
+def _canon(obj):
+    return json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
+
+
+def mac(secret, dir_tag, obj):
+    """Domain-separated HMAC-SHA256 (§4.2, Amendment 3). The `dir` tag is INSIDE the MAC'd bytes
+    so the broker's own signed request can never verify as an approval response and vice-versa."""
+    payload = _canon({"dir": dir_tag, "body": obj})
+    return hmac.new(secret, payload, hashlib.sha256).hexdigest()
+
+
+def ct_eq(a, b):
+    """Constant-time string compare (never short-circuits on the first differing byte)."""
+    try:
+        return hmac.compare_digest(str(a), str(b))
+    except (TypeError, ValueError):
+        return False
+
+
+def getty_code(nonce_hex):
+    """An 8-char base32 slice (40 bits) of the 128-bit broker nonce (§4.2, Q2). SLICED from the
+    broker nonce, never independently minted, so it inherits the broker's secrecy-from-the-model."""
+    try:
+        raw = bytes.fromhex(nonce_hex)
+    except (ValueError, TypeError):
+        return None
+    return base64.b32encode(raw).decode("ascii")[:8]
+
+
+def _read_secret():
+    """The broker<->relay HMAC key, read from a protected-read FILE path (T3 config, §7) so it
+    never rides argv/env dumps. Absent/empty -> None (telegram channel fails closed)."""
+    p = os.environ.get("AGENT_OS_CONFIRM_RELAY_SECRET_FILE")
+    if not p:
+        return None
+    try:
+        with open(p, "rb") as fh:
+            s = fh.read().strip()
+        return s or None
+    except OSError:
+        return None
+
+
+# Backend status: one of "approve" (handled, approved), "deny" (handled, denied),
+# "unreachable" (could not reach/authenticate THIS channel — try the next one). Only
+# "unreachable" falls through; "deny" is terminal (a reached-but-refused channel never shops).
+def telegram_confirm(req):
+    """Primary backend (§3.1). Compose the final Telegram frame + inline keyboard here, hand the
+    finished bytes to the single hard-pinned relay (addr+port, NO fallback list), collect the
+    human's callback. Domain-separated MAC on both legs; the client re-verifies nonce (ct),
+    callback from-id == pinned Dillon (ct), and message correlation. Every socket read carries an
+    explicit timeout (Amendment 4) so a half-open TCP becomes a clean deny, not a wedge."""
+    addr = os.environ.get("AGENT_OS_CONFIRM_RELAY_ADDR")
+    port = os.environ.get("AGENT_OS_CONFIRM_RELAY_PORT")
+    secret = _read_secret()
+    dillon = os.environ.get("AGENT_OS_CONFIRM_DILLON_USER_ID")
+    if not (addr and port and secret and dillon):
+        return "unreachable", "confirm-relay-unconfigured"
+    try:
+        port = int(port)
+    except ValueError:
+        return "unreachable", "confirm-relay-badport"
+
+    nonce = str(req.get("nonce") or "")
+    session_id = req.get("session_id")
+    first = is_first_time(req.get("destination"))
+    text = render_frame(req, first, for_getty=False)
+    # The client alone composes the keyboard; callback_data embeds the nonce (§4.2). Raw text,
+    # NO parse_mode -> markup-forgery is structurally impossible (§4.1).
+    frame = {
+        "chat_kind": "confirm", "text": text, "parse_mode": None,
+        "reply_markup": {"inline_keyboard": [[
+            {"text": "Approve", "callback_data": "approve:" + nonce},
+            {"text": "Deny", "callback_data": "deny:" + nonce}]]},
+        "nonce": nonce, "session_id": session_id,
+        "expect_from_id": str(dillon),
+    }
+    req_msg = {"frame": frame, "mac": mac(secret, "req", frame)}
+
+    window = human_window_s()
+    sock = None
+    try:
+        sock = socket.create_connection((addr, port), timeout=min(window, 30))
+    except OSError:
+        return "unreachable", "confirm-relay-unreachable"
+    try:
+        sock.settimeout(window)                # human-decision long-poll bound on EVERY recv
+        sock.sendall(_canon(req_msg) + b"\n")
+        buf = b""
+        while b"\n" not in buf:
+            chunk = sock.recv(65536)           # socket read timeout fires on half-open TCP
+            if not chunk:
+                return "deny", "confirm-relay-eof"
+            buf += chunk
+            if len(buf) > 1 << 20:
+                return "deny", "confirm-relay-oversized"
+    except socket.timeout:
+        return "deny", "confirm-human-timeout"
+    except OSError:
+        return "deny", "confirm-relay-ioerror"
+    finally:
+        try:
+            sock.close()
+        except OSError:
+            pass
+
+    try:
+        resp = json.loads(buf.split(b"\n", 1)[0].decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        return "deny", "confirm-relay-badjson"
+    if not isinstance(resp, dict):
+        return "deny", "confirm-relay-nonobject"
+    decision = resp.get("decision")
+    body = {"nonce": resp.get("nonce"), "session_id": resp.get("session_id"),
+            "decision": decision}
+    # response MAC over the domain-separated {dir:"resp", ...} — reflection of the req MAC fails
+    if not ct_eq(resp.get("mac"), mac(secret, "resp", body)):
+        return "deny", "confirm-relay-badmac"
+    if not ct_eq(resp.get("nonce"), nonce):                 # binds approval to THIS request
+        return "deny", "confirm-nonce-mismatch"
+    if not ct_eq(str(resp.get("from_id")), str(dillon)):     # callback authenticity (Amendment 3)
+        return "deny", "confirm-wrong-user"
+    if resp.get("session_id") != session_id:
+        return "deny", "confirm-session-mismatch"
+    if decision == "approve":
+        return "approve", "telegram-approved"
+    return "deny", "telegram-denied"
+
+
+def _open_getty():
+    """Return (read_fd, write_stream) for the second console, or (None, None) if unavailable.
+    Test affordance: AGENT_OS_CONFIRM_GETTY_IN/OUT redirect the I/O to scriptable paths; in
+    production these are unset and the pinned tty (never the model's login tty, §3.2) is used."""
+    tin = os.environ.get("AGENT_OS_CONFIRM_GETTY_IN")
+    tout = os.environ.get("AGENT_OS_CONFIRM_GETTY_OUT")
+    tty = os.environ.get("AGENT_OS_CONFIRM_GETTY_TTY", "/dev/tty2")
+    try:
+        rf = os.open(tin if tin else tty, os.O_RDONLY | os.O_NONBLOCK)
+        wf = open(tout if tout else tty, "w", encoding="utf-8")
+        return rf, wf
+    except OSError:
+        return None, None
+
+
+def getty_confirm(req):
+    """Fallback backend (§3.2) for a standalone/un-meshed box. Render to a broker-owned console
+    (NEVER the model's tty1 -> INV-1), print the 40-bit code, read `approve <code>`/`deny`,
+    constant-time compare, ≤3 retries then deny. The read is select()-bounded by the human
+    window so a silent console can never wedge the client."""
+    nonce = str(req.get("nonce") or "")
+    code = getty_code(nonce)
+    if code is None:
+        return "deny", "confirm-getty-badnonce"
+    rf, wf = _open_getty()
+    if rf is None:
+        return "unreachable", "confirm-console-unavailable"
+    try:
+        first = is_first_time(req.get("destination"))
+        wf.write(render_frame(req, first, for_getty=True, confirm_code=code))
+        wf.flush()
+        deadline_reads = 0
+        remaining = human_window_s()
+        import time as _t                       # local: only the getty leg needs a monotonic clock
+        end = _t.monotonic() + remaining
+        pending = b""
+        while deadline_reads < GETTY_MAX_RETRIES:
+            timeout = end - _t.monotonic()
+            if timeout <= 0:
+                return "deny", "confirm-human-timeout"
+            r, _, _ = select.select([rf], [], [], timeout)
+            if not r:
+                return "deny", "confirm-human-timeout"
+            data = os.read(rf, 4096)
+            if not data:
+                return "deny", "confirm-console-eof"
+            pending += data
+            while b"\n" in pending:
+                line, pending = pending.split(b"\n", 1)
+                try:
+                    s = line.decode("utf-8", "replace").strip()
+                except Exception:
+                    s = ""
+                low = s.lower()
+                if low == "deny" or low.startswith("deny "):
+                    return "deny", "getty-denied"
+                if low.startswith("approve"):
+                    parts = s.split(None, 1)
+                    given = parts[1].strip() if len(parts) > 1 else ""
+                    if ct_eq(given, code):
+                        return "approve", "getty-approved"
+                    deadline_reads += 1
+                    wf.write("wrong code (%d/%d) — retype: approve <code>, or deny\n"
+                             % (deadline_reads, GETTY_MAX_RETRIES))
+                    wf.flush()
+                    if deadline_reads >= GETTY_MAX_RETRIES:
+                        return "deny", "getty-code-retries-exhausted"
+                # any other line: ignore, keep waiting within the window
+        return "deny", "getty-code-retries-exhausted"
+    except OSError:
+        return "deny", "confirm-getty-ioerror"
+    finally:
+        try:
+            os.close(rf)
+        except OSError:
+            pass
+        try:
+            wf.close()
+        except OSError:
+            pass
+
+
+def human_window_s():
+    """The client's own human-decision window. MUST be < AGENT_OS_CONFIRM_TIMEOUT_S − one relay
+    round-trip (spec §5 ordering constraint) so graceful deny is the normal no-answer path and
+    the broker's SIGKILL backstop stays exceptional. Fail-closed default on a bad value."""
+    try:
+        w = int(os.environ.get("AGENT_OS_CONFIRM_HUMAN_WINDOW_S", "90"))
+        return w if w > 0 else 90
+    except ValueError:
+        return 90
+
+
+def main():
+    raw = sys.stdin.buffer.read()
+    try:
+        req = json.loads(raw.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        deny("confirm-malformed-request")
+    if not isinstance(req, dict) or not req.get("nonce"):
+        deny("confirm-malformed-request")
+
+    channels = [c.strip() for c in os.environ.get("AGENT_OS_CONFIRM_CHANNELS", "").split(",")
+                if c.strip()]
+    if not channels:
+        deny("confirm-no-channel-configured")
+
+    last = "confirm-no-channel"
+    for ch in channels:
+        if ch == "telegram":
+            status, reason = telegram_confirm(req)
+        elif ch == "getty":
+            status, reason = getty_confirm(req)
+        else:
+            continue                            # unknown channel name -> skip, never allow
+        if status == "unreachable":
+            last = reason
+            continue                            # try the next configured channel
+        if status == "approve":
+            mark_seen(req.get("destination"))   # seen-set grows ONLY on an approved action (§4.4)
+            approve(reason)
+        deny(reason)                            # reached-but-refused is terminal (fail-closed)
+    deny(last)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception as e:                       # last-resort fail-closed: ANY unhandled error denies
+        deny("confirm-internal-error: %s" % type(e).__name__)

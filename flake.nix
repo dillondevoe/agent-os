@@ -19,6 +19,7 @@
           ./modules/taint.nix
           ./modules/mcp.nix
           ./modules/broker.nix
+          ./modules/confirm.nix
         ];
       };
 
@@ -101,6 +102,29 @@
             work="$(mktemp -d)"
             bash ${./tests/broker-battery.sh} ${./bin/broker} ${./bin/taint} ${./bin/audit} \
               ${./bin/mcp} ${registryJson} "$work"
+            touch $out
+          '';
+
+        # Phase 2 · Step 6 — the confirm channel ("the wall's mouth") property battery. Proves the
+        # broker-owned confirm client (bin/confirm) is a fail-closed renderer/relayer/collector:
+        # seam contract on both backends, no-channel/unreachable/unknown-name all deny (never
+        # allow), nonce echo + domain-separated-HMAC auth (reflection/badmac/wrong-user/epoch each
+        # caught), human-window + EOF timeouts, field-confusion/injection scrubbing with the `│ `
+        # sentinel on every model-controlled value line while the trust region stays intact,
+        # parse_mode-None transmitted frames, first-time-destination highlighting, preview
+        # truncation, single-flight non-multiplexing, and a REAL-broker integration leg
+        # (route->confirm->approve->invoke / route->confirm->deny->withhold) whose audit chain
+        # still verifies and carries the nonce. It drives the real broker/taint/audit as children,
+        # so a regression in any of them fails `nix flake check` here.
+        confirm-channel =
+          let
+            reg = import ./modules/capability-registry.nix { lib = nixpkgs.lib; };
+            pkgs = nixpkgs.legacyPackages.${system};
+            registryJson = pkgs.writeText "registry.json" (builtins.toJSON reg.registry);
+          in pkgs.runCommand "confirm-channel-check" { nativeBuildInputs = [ pkgs.python3 ]; } ''
+            work="$(mktemp -d)"
+            bash ${./tests/confirm-battery.sh} ${./bin/confirm} ${./bin/broker} ${./bin/taint} \
+              ${./bin/audit} ${registryJson} "$work"
             touch $out
           '';
       };
