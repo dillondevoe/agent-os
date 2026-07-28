@@ -7,9 +7,10 @@
 # (services.ollama @ 127.0.0.1, see modules/brain.nix), so a default-DROP output chain
 # costs the agent nothing and denies exfiltration by construction.
 #
-# The ONE surviving off-box channel once sealed is the nixpkgs binary cache
-# (root / nix-daemon), so the box can still rebuild ITSELF from nixpkgs — "nixpkgs-only."
-# Everything else is dropped.
+# Two channels survive once sealed: the nixpkgs binary cache (root / nix-daemon), so the
+# box can still rebuild ITSELF from nixpkgs — "nixpkgs-only" — and outbound NTP (udp/123,
+# advisory B) so the clock can't drift the cache's TLS validity window shut. Everything
+# else is dropped.
 #
 # Ordering ("seal AFTER the model pull"): `ollama pull` needs the network at provision
 # time, so the wall ships UNSEALED (cfg.sealed = false) — a provisioning window that also
@@ -67,9 +68,18 @@ in {
           # on-box IPC: the local brain (127.0.0.1:11434), mem, everything loopback
           oifname "lo" accept
 
-          # nixpkgs-only survivor: nix-daemon substituter fetches + fwupd + timesync,
-          # all root-initiated. THE only off-box channel once sealed.
+          # nixpkgs-only survivor: nix-daemon substituter fetches + fwupd, both
+          # root-initiated. THE only general off-box channel once sealed.
           meta skuid 0 accept
+
+          # NTP — advisory B (PR#19 Fable). systemd-timesyncd runs as a DynamicUser
+          # (systemd-timesync), NOT root, so `skuid 0` above does NOT cover it; a sealed
+          # box would drop udp/123 and slowly clock-drift until the nixpkgs binary cache's
+          # TLS validity window breaks (a real sovereign-box headache). DynamicUser uids
+          # aren't known at ruleset-load time, so a reliable skuid-scope is impossible —
+          # protocol-scope the allow to udp/123 instead. Permanent survivor: kept even when
+          # sealed, since drift accrues most on a long-sealed box.
+          udp dport 123 accept
         ${lib.optionalString (!cfg.sealed) ''
           # PROVISIONING (unsealed) — removed by `sealed = true` + rebuild. Lets
           # setup-brain.sh resolve + fetch the model weights (and, transiently, lets the
@@ -78,6 +88,14 @@ in {
           tcp dport 53 accept
           tcp dport { 80, 443 } accept
         ''}
+          # IPv6 note — advisory C (PR#19 Fable). This default-drop also drops outbound
+          # ICMPv6 NDP (neighbor/router solicitation), so IPv6 neighbor discovery — and
+          # thus all IPv6 egress — is dead once sealed. INTENDED: v0.1 is IPv4 (the skuid-0
+          # nixpkgs fetches + udp/123 NTP both work over v4). A future "why is v6 dead?" is
+          # THIS line, not a reason to loosen the wall — if v6 is ever needed, scope a
+          # link-local-only NDP allow (icmpv6 type { nd-neighbor-solicit,
+          # nd-neighbor-advert } accept), never a blanket v6 accept.
+
           # the agent, the local model, and any capability => dropped (INV-2 egress)
         }
       '';
