@@ -53,7 +53,9 @@ import os
 import json
 import re
 import ipaddress
+import socket
 import subprocess
+import unicodedata
 from urllib.parse import urlsplit
 
 # ── Constants ────────────────────────────────────────────────────────────────
@@ -219,36 +221,34 @@ def path_confined(p, roots):
     return False
 
 
-def _obfuscated_ip_host(host):
-    """Reject host forms that ONLY ever encode an obfuscated IP: all-digit (decimal int like
-    2130706433), 0x-hex (0x7f000001), a dotted label with a leading-zero octal octet
-    (0177.0.0.1), or a short-form / non-canonical dotted-decimal (127.1, 10.1, 192.168.257)
-    that inet_aton would still expand to a real IP. A literal deny-list misses all of these;
-    rejecting the FORM closes them."""
-    h = host.lower()
-    if host.isdigit():
-        return True
-    if h.startswith("0x"):
-        return True
-    for label in host.split("."):
-        if len(label) > 1 and label[0] == "0" and label.isdigit():
-            return True
-    # Digits-and-dots that does NOT parse as a canonical IP (127.1 -> inet_aton 127.0.0.1,
-    # 10.1, 192.168.257, 1.2.3.4.5). A canonical dotted-quad DOES parse and is handled by the
-    # is_loopback/is_private checks in validate_url; a real hostname carries non-digit chars
-    # and is untouched here.
-    if host and all(c in "0123456789." for c in host):
-        try:
-            ipaddress.ip_address(host)
-        except ValueError:
-            return True
-    return False
+def _host_as_ip(host):
+    """Return the canonical `ip_address` for `host` if it denotes ANY IP literal; a real
+    hostname -> None. `socket.inet_aton` is the IPv4 ORACLE: it accepts every obfuscated form
+    libc/curl expand — decimal-int (2130706433), 0x-hex including PER-OCTET hex (0x7f000001,
+    127.0x1), leading-zero octal (0177.0.0.1), and short-form dotted (127.1, 10.1, 192.168.257) —
+    and rejects real hostnames (example.com -> OSError). This UNIFIES the four evasion vectors the
+    old piecemeal branches handled AND closes the per-octet-hex hole the `startswith('0x')` check
+    missed (127.0x1 slipped: not all-digit, contained 'x', ipaddress couldn't parse -> allowed).
+    IPv6 (incl. ::ffff: mapped) goes through `ipaddress`. Host is NFKC-normalized first so a
+    fullwidth-digit host (１２７.0.0.1), which IDNA/UTS-46 maps to ASCII before curl connects, can't
+    slip the ASCII-only numeric parse. The canonical IP flows to validate_url's range-check, so a
+    PUBLIC IP literal (however written) still ALLOWs; only the denied ranges are rejected."""
+    host = unicodedata.normalize("NFKC", host)
+    try:
+        return ipaddress.ip_address(host)            # canonical dotted-quad + all IPv6 forms
+    except ValueError:
+        pass
+    try:
+        return ipaddress.IPv4Address(socket.inet_aton(host))   # every obfuscated IPv4 form
+    except (OSError, ValueError, UnicodeError):
+        return None
 
 
 def validate_url(v):
-    """INV-2, evasion-hardened (§4.3). http/https + non-empty host; reject obfuscated-IP host
-    forms outright; for any host that parses as an IP, unwrap ipv4_mapped and deny the whole
-    private/loopback/link-local/reserved/unspecified/multicast space. A hostname that RESOLVES
+    """INV-2, evasion-hardened (§4.3). http/https + non-empty host; normalize the host to its
+    canonical IP via `_host_as_ip` (the inet_aton oracle catches every obfuscated IPv4 form),
+    unwrap ipv4_mapped, and deny the whole private/loopback/link-local/reserved/unspecified/
+    multicast space. A public IP literal (however written) ALLOWs. A real hostname that RESOLVES
     into a denied range is caught by Step-7 systemd IPAddressDeny (no DNS in the broker, v1)."""
     if not isinstance(v, str):
         return False, "url-not-string"
@@ -261,12 +261,7 @@ def validate_url(v):
     host = parts.hostname
     if not host:
         return False, "url-no-host"
-    if _obfuscated_ip_host(host):
-        return False, "egress-denied (obfuscated-ip host form)"
-    try:
-        ip = ipaddress.ip_address(host)
-    except ValueError:
-        ip = None
+    ip = _host_as_ip(host)
     if ip is not None:
         if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
             ip = ip.ipv4_mapped            # unwrap ::ffff:127.0.0.1 -> 127.0.0.1

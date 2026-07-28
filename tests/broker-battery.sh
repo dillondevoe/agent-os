@@ -294,6 +294,8 @@ url_deny = ["http://127.0.0.1/", "http://10.0.0.1/", "http://192.168.1.1/",
             "http://0x7f000001/", "http://0177.0.0.1/", "http://[::1]/",
             "http://[::ffff:127.0.0.1]/", "http://0.0.0.0/", "http://224.0.0.1/",
             "http://127.1/", "http://10.1/", "http://192.168.257/",
+            "http://127.0x1/", "http://10.0x0.0.1/",              # per-octet hex (Fable PR#12 fix)
+            "http://１２７.0.0.1/",                   # fullwidth-digit 127 (NFKC-caught)
             "ftp://example.com/", "http:///nohost", "file:///etc/passwd"]
 for u in url_deny:
     ok, _ = m.validate_url(u)
