@@ -10,10 +10,19 @@
   # own disk/boot. These are placeholders so `configuration.nix` reads cleanly.
   boot.loader.systemd-boot.enable = lib.mkDefault true;
   boot.loader.efi.canTouchEfiVariables = lib.mkDefault true;
-  # A root fs must be declared or `nix flake check` / non-VM eval fails the NixOS
-  # "no root filesystem" assertion. mkDefault lets the real hardware-configuration.nix
-  # (generated on the Dell) override it; the VM builder overrides it too.
-  fileSystems."/" = lib.mkDefault { device = "/dev/disk/by-label/nixos"; fsType = "ext4"; };
+  # Bare-metal boot, label-based (PR2 companion). This makes
+  # `nixos-install --flake github:…#agentos` boot on the real Dell with NO generated
+  # hardware-configuration.nix and NO editing — the installer just labels two
+  # partitions: `nixos` (ext4 root) + `BOOT` (vfat ESP). mkDefault lets a real
+  # hardware-configuration.nix override if one is ever generated; the VM builder
+  # replaces the whole fileSystems set via mkVMOverride (priority 10 > mkDefault), so
+  # `.#vm` ignores both mounts and supplies its own disk.
+  fileSystems."/"     = lib.mkDefault { device = "/dev/disk/by-label/nixos"; fsType = "ext4"; };
+  fileSystems."/boot" = lib.mkDefault { device = "/dev/disk/by-label/BOOT";  fsType = "vfat";  };
+  # initrd must carry the modules to reach root on real hardware: NVMe controller +
+  # the USB/Thunderbolt path used to boot the installer. The VM uses virtio and needs
+  # none of these (and drops them with the fileSystems above).
+  boot.initrd.availableKernelModules = [ "nvme" "xhci_pci" "thunderbolt" "usb_storage" "sd_mod" ];
 
   # 5440-specific enablement (safe to set blind — standard for 13th-gen Intel laptops):
   hardware.enableRedistributableFirmware = true;   # Intel AX2xx wifi/bt firmware

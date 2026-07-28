@@ -19,7 +19,7 @@ EOF
 # This machine
 - os: Agent OS v0.1 (NixOS base)
 - config: /etc/nixos (the agent may rewrite this and \`nixos-rebuild switch\`)
-- brain: ${BRAIN:-claude} (cloud). Local-model floor = phase 1.5.
+- brain: ${BRAIN:-auto-detect} — local Ollama floor (v0.1 is sovereign; no cloud brain on the image).
 - first_boot: $(date -u +%FT%TZ)
 EOF
 fi
@@ -81,9 +81,23 @@ if [ -z "$BRAIN" ]; then
   fi
 fi
 
+# Commit to the chosen brain — but the local Ollama floor must pass its own --check
+# even when it was PINNED via $BRAIN (not only when auto-probed above). A pinned
+# BRAIN=brain-ollama on a box whose model isn't pulled yet (first boot, before
+# setup-brain.sh) would otherwise exec a brain that can't talk and crash-loop getty's
+# autologin — the exact failure the auto-path probe guards against. Cloud `claude` and
+# the already-probed auto-ollama commit straight through; a failed probe falls to the
+# memory REPL below.
+_commit=""
 if [ -n "$BRAIN" ] && _bp="$(resolve_brain "$BRAIN")" && [ -n "$_bp" ]; then
+  case "$BRAIN" in
+    *brain-ollama) if "$_bp" --check >/dev/null 2>&1; then _commit="$_bp"; fi ;;
+    *)             _commit="$_bp" ;;
+  esac
+fi
+if [ -n "$_commit" ]; then
   cd "$HOME"
-  exec "$_bp"           # the brain IS the shell: boot straight into the agent
+  exec "$_commit"      # the brain IS the shell: boot straight into the agent
 else
   printf "${DIM}(no cloud brain installed — run bin/setup-brain.sh. Falling back to memory REPL.)${RST}\n\n"
   # tiny placeholder so the scaffold is demoable with zero deps. It drives the SAME

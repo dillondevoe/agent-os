@@ -29,23 +29,61 @@ The VM comes up, autologins tty1, seeds `~/memory`, and drops into the brain
 (or the placeholder memory-REPL if no brain is installed yet).
 
 ## Brain
-- **v0.1 (now):** cloud — Claude Code as the login program. Fastest path to
-  "burn it, boot it, talk to it." `BRAIN=claude` (default).
-- **Phase 1.5:** local-model floor (ollama / llama.cpp) so it thinks offline —
-  ties into the grid-down resilient-mesh goal. `setup-brain.sh` will install it.
+- **v0.1 (now):** local + sovereign — a quantized Qwen 2.5 (ollama, loopback-only)
+  IS the login program. No cloud brain on the image; `BRAIN=brain-ollama` (default,
+  set in `modules/brain.nix`). On first boot, before `setup-brain.sh` pulls the
+  model, the login floor is a zero-deps memory-REPL — never a crash loop.
+- **Phase 1.5+:** a larger judgment-lane model (14B) is pullable on the 32GB Dell.
+  `setup-brain.sh` installs/pulls the weights during the provisioning window.
 
 ## Then, onto the Dell Latitude 5440 (32GB, 13th-gen Intel, Iris Xe)
 Confirmed target 2026-07-27. Well-supported hardware; 32GB makes the local-model floor real.
-1. **Back up anything off the Windows 11 install first — the wipe is destructive.**
-2. Boot NixOS installer USB on the Latitude.
-3. `nixos-generate-config` → commit its `hardware-configuration.nix` here.
-4. `nixos-install --flake .#agentos` → reboot → it comes up talking.
-The 5440-specific enablement (Intel microcode, Iris Xe, wifi firmware, thermald) is already in
-`configuration.nix` — the generated hardware-configuration.nix just adds the disk/partition layout.
+The 5440-specific enablement (Intel microcode, Iris Xe, wifi firmware, thermald) **and** the boot
+layout (label-based `fileSystems` + initrd nvme/xhci/thunderbolt modules) are already in
+`configuration.nix` — so there is **no `nixos-generate-config` and no per-machine edit**. The
+installer just creates two labeled partitions (`nixos` ext4 root + `BOOT` vfat ESP) and installs
+the flake; `configuration.nix` mounts them by label.
+
+> ⚠️ **The block below ERASES the target disk.** Back up anything off the Windows 11 install
+> first. The `lsblk` gate is there so you confirm the exact device before anything destructive
+> runs — do not skip it. The partition **labels are load-bearing** (the by-label mounts depend
+> on them): type `BOOT` and `nixos` exactly, case-sensitive.
+
+```sh
+# ── 0. SEE THE DISK. Confirm the target before anything destructive. ──
+lsblk -o NAME,SIZE,TYPE,MODEL,MOUNTPOINT
+# Expect ONE internal NVMe (Dell/SK-Hynix/Micron SSD) as nvme0n1, plus the USB you booted from.
+# CONFIRM the internal SSD is /dev/nvme0n1 and that erasing it is OK.
+# If the internal disk is NOT nvme0n1, STOP.
+DISK=/dev/nvme0n1     # ← from lsblk above; change ONLY if lsblk shows otherwise
+
+# ── 1. Partition: GPT · 512MB ESP (label BOOT) · rest ext4 root (label nixos) ──
+parted -s "$DISK" -- mklabel gpt \
+  mkpart ESP fat32 1MiB 513MiB set 1 esp on \
+  mkpart primary 513MiB 100%
+P="${DISK}p"                       # nvme → nvme0n1p1 / p2 (a SATA disk would be sda1/2, no "p")
+mkfs.fat -F32 -n BOOT "${P}1"      # label MUST be exactly BOOT   (case-sensitive)
+mkfs.ext4 -L nixos   "${P}2"       # label MUST be exactly nixos  (case-sensitive)
+
+# ── 2. Mount + install straight from the flake (no clone, no hw-config, no edit) ──
+mount "${P}2" /mnt && mkdir -p /mnt/boot && mount "${P}1" /mnt/boot
+nixos-install --no-root-passwd --flake github:dillondevoe/agent-os#agentos
+
+# ── 3. Reboot into Agent OS ──
+reboot
+```
+
+First boot lands in the agent shell → **memory-REPL** (no model yet; the login floor never
+crash-loops). Then pull the local brain over the provisioning window and seal the box:
+```sh
+setup-brain.sh        # pulls the local model (qwen2.5:7b-instruct) during provisioning
+sudo nixos-rebuild switch --flake github:dillondevoe/agent-os#agentos-sealed
+reboot                # sealed: egress is nixpkgs-only (+ timesyncd); the local model IS the shell
+```
 
 ## Honest status
-This is a **v0 skeleton**, not flash-ready. It needs: the Dell's
-hardware-configuration.nix, a VM smoke-test pass, and the brain installer.
-Built spec-independent first so the moment Dillon reports the model + RAM we
-finalize and test. The security-kernel hardening (autonomous agent + root =
-the real work) is roadmap, not v0.1 — v0.1 is single-user demo box.
+v0.1 is a **single-user sovereign demo box**: local brain, default-deny egress
+(the clean-room seal), label-based bare-metal boot — no per-machine hardware-config.
+The security-kernel hardening (autonomous agent + passwordless root = the real work;
+e.g. `sudo` still defeats the egress seal today) is roadmap, tracked as Phase-2 gates,
+NOT v0.1.

@@ -7,9 +7,10 @@
 # (services.ollama @ 127.0.0.1, see modules/brain.nix), so a default-DROP output chain
 # costs the agent nothing and denies exfiltration by construction.
 #
-# The ONE surviving off-box channel once sealed is the nixpkgs binary cache
-# (root / nix-daemon), so the box can still rebuild ITSELF from nixpkgs — "nixpkgs-only."
-# Everything else is dropped.
+# Two channels survive once sealed: the nixpkgs binary cache (root / nix-daemon), so the
+# box can still rebuild ITSELF from nixpkgs — "nixpkgs-only" — and system time sync scoped
+# to systemd-timesyncd ALONE (uid 154, its DNS + NTP, advisory B) so the clock can't drift
+# the cache's TLS validity window shut. Everything else is dropped.
 #
 # Ordering ("seal AFTER the model pull"): `ollama pull` needs the network at provision
 # time, so the wall ships UNSEALED (cfg.sealed = false) — a provisioning window that also
@@ -67,9 +68,23 @@ in {
           # on-box IPC: the local brain (127.0.0.1:11434), mem, everything loopback
           oifname "lo" accept
 
-          # nixpkgs-only survivor: nix-daemon substituter fetches + fwupd + timesync,
-          # all root-initiated. THE only off-box channel once sealed.
+          # nixpkgs-only survivor: nix-daemon substituter fetches + fwupd, both
+          # root-initiated. THE only general off-box channel once sealed.
           meta skuid 0 accept
+
+          # time sync — advisory B (PR#19/#20 Fable). systemd-timesyncd runs as the STATIC
+          # user systemd-timesync (uid ${toString config.ids.uids.systemd-timesync}, pinned
+          # in nixpkgs ids.nix), NOT a DynamicUser and NOT root — so `skuid 0` above does not
+          # cover it, but a numeric skuid-scope IS reliable (the numeric uid sidesteps
+          # passwd/ruleset-load ordering). It must egress BOTH to resolve the pool hostnames
+          # (there is no systemd-resolved — NetworkManager DNS — so timesyncd resolves via
+          # glibc → udp/53) AND to speak NTP (udp/123); a udp/123-only allow silently fails
+          # sealed (DNS dropped → resolution fails → NTP never happens → clock STILL drifts).
+          # Scoping BOTH ports to uid 154 keeps the clock honest — so the nixpkgs cache's TLS
+          # validity window can't drift shut — while every other process (the agent, the
+          # model, any capability) stays zero-egress. Permanent survivor: kept even sealed,
+          # since drift accrues most on a long-sealed box.
+          meta skuid ${toString config.ids.uids.systemd-timesync} udp dport { 53, 123 } accept
         ${lib.optionalString (!cfg.sealed) ''
           # PROVISIONING (unsealed) — removed by `sealed = true` + rebuild. Lets
           # setup-brain.sh resolve + fetch the model weights (and, transiently, lets the
@@ -78,6 +93,14 @@ in {
           tcp dport 53 accept
           tcp dport { 80, 443 } accept
         ''}
+          # IPv6 note — advisory C (PR#19 Fable). This default-drop also drops outbound
+          # ICMPv6 NDP (neighbor/router solicitation), so IPv6 neighbor discovery — and
+          # thus all IPv6 egress — is dead once sealed. INTENDED: v0.1 is IPv4 (the skuid-0
+          # nixpkgs fetches + udp/123 NTP both work over v4). A future "why is v6 dead?" is
+          # THIS line, not a reason to loosen the wall — if v6 is ever needed, scope a
+          # link-local-only NDP allow (icmpv6 type { nd-neighbor-solicit,
+          # nd-neighbor-advert } accept), never a blanket v6 accept.
+
           # the agent, the local model, and any capability => dropped (INV-2 egress)
         }
       '';
