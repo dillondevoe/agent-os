@@ -1,0 +1,108 @@
+#!/usr/bin/env python3
+"""mem — the memory-as-filesystem layer for Agent OS.
+
+The whole thesis in one tool: files are markdown memories where the PATH is the
+meaning. Both the human and the agent use this. No database, no app — just text
+organized by what things ARE.
+
+  mem remember "people/jane" "Jane runs ops at Acme. Prefers email over calls."
+  mem recall jane acme            # search paths + content, ranked
+  mem tree                        # the memory, by domain, with fact counts
+  mem cap add screenshot "grim -g \\$(slurp) ~/shots/$(date +%s).png"
+  mem cap list                    # capabilities the agent can invoke (also just memories)
+
+MEM_ROOT env overrides the home (~/memory). stdlib only — runs anywhere Python does.
+"""
+import os, re, sys, datetime
+from pathlib import Path
+
+ROOT = Path(os.environ.get("MEM_ROOT", str(Path.home() / "memory")))
+
+def _slug(s):
+    return re.sub(r"[^a-z0-9]+", "-", s.lower()).strip("-") or "note"
+
+def _now():
+    # Agent OS runs headless/looped — a real stamp, never a guessed one.
+    return datetime.datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+
+def ensure_root():
+    for d in ("people", "projects", "system", "system/capabilities", "inbox"):
+        (ROOT / d).mkdir(parents=True, exist_ok=True)
+    readme = ROOT / "README.md"
+    if not readme.exists():
+        readme.write_text(
+            "# This folder is the machine's memory.\n"
+            "The **path is the meaning**. `people/jane.md` is a fact the agent knows,\n"
+            "not just a location. Organize by what things ARE. It's all text — edit freely.\n")
+
+def cmd_remember(args):
+    if len(args) < 2:
+        sys.exit("usage: mem remember <domain/title> <body...>")
+    key, body = args[0], " ".join(args[1:])
+    domain, _, title = key.partition("/")
+    if not title:
+        domain, title = "inbox", key
+    p = ROOT / domain / f"{_slug(title)}.md"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(f"---\ntitle: {title}\ncreated: {_now()}\n---\n\n{body}\n")
+    print(f"↳ remembered → {p.relative_to(ROOT)}")
+
+def _score(path, text, terms):
+    hay = (str(path).lower() + "\n" + text.lower())
+    return sum(hay.count(t.lower()) + (3 if t.lower() in path.name.lower() else 0) for t in terms)
+
+def cmd_recall(args):
+    if not args:
+        sys.exit("usage: mem recall <terms...>")
+    hits = []
+    for p in ROOT.rglob("*.md"):
+        try: text = p.read_text()
+        except Exception: continue
+        s = _score(p, text, args)
+        if s: hits.append((s, p, text))
+    if not hits:
+        print("(nothing in memory matches)"); return
+    for s, p, text in sorted(hits, reverse=True)[:8]:
+        body = re.sub(r"^---.*?---\s*", "", text, flags=re.S).strip().replace("\n", " ")
+        print(f"\n\033[38;5;179m{p.relative_to(ROOT)}\033[0m  (score {s})\n  {body[:160]}")
+
+def cmd_tree(args):
+    if not ROOT.exists(): print("(no memory yet)"); return
+    domains = {}
+    for p in ROOT.rglob("*.md"):
+        if p.name == "README.md": continue
+        d = p.relative_to(ROOT).parts[0]
+        domains[d] = domains.get(d, 0) + 1
+    total = sum(domains.values())
+    print(f"\033[38;5;79mmemory\033[0m — {total} facts · path = meaning")
+    for d in sorted(domains):
+        print(f"  {d}/  \033[38;5;244m{domains[d]}\033[0m")
+
+def cmd_cap(args):
+    caps = ROOT / "system" / "capabilities"
+    caps.mkdir(parents=True, exist_ok=True)
+    if args and args[0] == "add" and len(args) >= 3:
+        name, cmd = args[1], " ".join(args[2:])
+        (caps / f"{_slug(name)}.md").write_text(
+            f"---\ncapability: {name}\nadded: {_now()}\n---\n\n"
+            f"When asked to **{name}**, run:\n\n```sh\n{cmd}\n```\n")
+        print(f"↳ capability '{name}' added (it's a memory the agent reads before acting)")
+    elif args and args[0] == "list":
+        found = sorted(caps.glob("*.md"))
+        if not found: print("(no capabilities yet — mem cap add <name> <command>)"); return
+        for c in found:
+            m = re.search(r"```sh\n(.*?)\n```", c.read_text(), re.S)
+            print(f"  \033[38;5;179m{c.stem}\033[0m → {(m.group(1) if m else '?')[:70]}")
+    else:
+        sys.exit("usage: mem cap add <name> <command>   |   mem cap list")
+
+CMDS = {"remember": cmd_remember, "recall": cmd_recall, "tree": cmd_tree, "cap": cmd_cap}
+
+def main():
+    ensure_root()
+    if len(sys.argv) < 2 or sys.argv[1] not in CMDS:
+        print(__doc__); sys.exit(0 if len(sys.argv) < 2 else 1)
+    CMDS[sys.argv[1]](sys.argv[2:])
+
+if __name__ == "__main__":
+    main()

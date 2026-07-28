@@ -42,16 +42,20 @@ if command -v "$BRAIN" >/dev/null 2>&1; then
   exec "$BRAIN"          # e.g. Claude Code: boot straight into the agent
 else
   printf "${DIM}(no cloud brain installed — run bin/setup-brain.sh. Falling back to memory REPL.)${RST}\n\n"
-  # tiny placeholder so the scaffold is demoable with zero deps
+  # tiny placeholder so the scaffold is demoable with zero deps. It drives the SAME
+  # `mem` memory layer the real brain uses — so the memory model is real even here.
+  MEM_BIN="$(dirname "$0")/mem"; [ -x "$MEM_BIN" ] || MEM_BIN="mem"
+  export MEM_ROOT="$MEM"
   while true; do
     printf "${BANNER}you ›${RST} "
     read -r line || { echo; break; }
     case "$line" in
       "") : ;;
       exit|quit) break ;;
-      "recall "*) grep -ril "${line#recall }" "$MEM" || echo "  (nothing in memory)";;
-      "remember "*) f="$MEM/inbox/$(date +%s).md"; echo "${line#remember }" > "$f"; echo "  ↳ $f";;
-      *) echo "  (placeholder brain: try 'remember <fact>', 'recall <term>', or install the real brain)";;
+      "recall "*)   "$MEM_BIN" recall ${line#recall } ;;
+      "remember "*) "$MEM_BIN" remember ${line#remember } ;;
+      "tree")       "$MEM_BIN" tree ;;
+      *) echo "  (placeholder brain — memory works: 'remember <domain/title> <fact>', 'recall <term>', 'tree'. Install the real brain for the rest.)";;
     esac
   done
 fi
