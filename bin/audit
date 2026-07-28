@@ -1,0 +1,252 @@
+#!/usr/bin/env python3
+"""audit — the append-only, tamper-evident audit log for the Djinn broker.
+
+Phase 2 · Step 2 (see docs/phase2-threat-model.md §8, §12). The SMALLEST privileged
+primitive: every capability the broker runs is recorded here FIRST, and if the record
+cannot be durably written the action does not run — no-log -> no-execute. The log is
+append-only NDJSON with a SHA-256 hash chain, so any NON-RECOMPUTING tampering of a
+past record — an in-place edit, a reorder, or a mid-chain deletion — is detectable by
+`audit verify` even by an actor who can write the file. What the chain ALONE does NOT
+catch: tail-truncation and suffix-rewrite (an actor drops the tail and re-fabricates a
+valid canonical chained suffix — there is no secret in the chain to prevent it). Those
+are closed by (a) Step-7 OS-level append-only (chattr +a) + directory ownership, the
+primary write controls, and (b) the broker anchoring each head hash (echoed on stdout
+by `append`) OUTSIDE the audit dir, which makes a suffix-rewrite detectable before
+Step 7 lands. So this is tamper-EVIDENCE, not tamper-prevention.
+
+Trust boundary: this runs as the broker (the trusted layer), NEVER as a capability
+impl. The log directory (/var/lib/agent-os/audit) is a Step-1 PROTECTED path — no impl
+sandbox may write it (asserted in modules/capability-registry.nix). The primitive
+assumes a single trusted writer and additionally takes an exclusive lock so concurrent
+writers cannot interleave the sequence/chain.
+
+Commands:
+  audit append   < record.json     stamp seq+prev+ts, append one line, fsync, echo hash
+  audit verify                      walk the chain; exit 0 iff intact, else report break
+  audit tail [N]                    read-only: last N records (default 20)
+
+Directory is $AGENT_OS_AUDIT_DIR (default /var/lib/agent-os/audit).
+Exit codes: 0 ok; NON-ZERO on ANY failure (fail-closed). The broker MUST gate
+execution on `append` returning 0 — a non-zero exit means the action must not run.
+"""
+import sys
+import os
+import json
+import hashlib
+import time
+import fcntl
+
+GENESIS = "0" * 64          # prev-hash of the first record
+RESERVED = ("seq", "prev", "ts", "hash")   # broker-stamped; never caller-supplied
+
+
+def log_path():
+    d = os.environ.get("AGENT_OS_AUDIT_DIR", "/var/lib/agent-os/audit")
+    return os.path.join(d, "audit.log")
+
+
+def line_hash(line):
+    return hashlib.sha256(line.encode("utf-8")).hexdigest()
+
+
+def canonical(rec):
+    # One record = exactly one physical line. sort_keys => deterministic hashing;
+    # ensure_ascii keeps it single-line + 7-bit; json escapes any embedded newline,
+    # so a hostile string value cannot forge a second log line.
+    return json.dumps(rec, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+
+
+def read_head(path):
+    """Return (last_seq, last_line_hash) to chain onto; (-1, GENESIS) if empty/absent."""
+    if not os.path.exists(path):
+        return (-1, GENESIS)
+    last = None
+    with open(path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.rstrip("\n")
+            if line:
+                last = line
+    if last is None:
+        return (-1, GENESIS)
+    rec = json.loads(last)
+    return (int(rec["seq"]), line_hash(last))
+
+
+def last_byte(path):
+    """Last byte of the log, or None if empty/absent. Used to detect a torn tail."""
+    try:
+        with open(path, "rb") as f:
+            try:
+                f.seek(-1, os.SEEK_END)
+            except OSError:
+                return None            # zero-length file
+            return f.read(1)
+    except FileNotFoundError:
+        return None
+
+
+def utc_now():
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+def cmd_append(argv):
+    raw = sys.stdin.read()
+    if not raw.strip():
+        sys.stderr.write("audit append: empty record on stdin\n")
+        return 2
+    try:
+        payload = json.loads(raw)
+    except ValueError as e:
+        sys.stderr.write("audit append: record is not valid JSON: %s\n" % e)
+        return 2
+    if not isinstance(payload, dict):
+        sys.stderr.write("audit append: record must be a JSON object\n")
+        return 2
+    # Strip broker-reserved fields: a caller cannot forge seq/prev/ts/hash.
+    for k in RESERVED:
+        payload.pop(k, None)
+
+    path = log_path()
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+    except OSError as e:
+        sys.stderr.write("audit append: cannot create audit dir: %s\n" % e)
+        return 3
+
+    lockp = path + ".lock"
+    try:
+        lf = open(lockp, "w")
+    except OSError as e:
+        sys.stderr.write("audit append: cannot open lock: %s\n" % e)
+        return 3
+    try:
+        fcntl.flock(lf, fcntl.LOCK_EX)
+        # Torn tail: a crash between os.write and the newline durably landing leaves a
+        # last line with no trailing "\n". read_head would chain onto that partial /
+        # unterminated record, and the next os.write (O_APPEND at EOF) would concatenate
+        # two records into ONE physical line — verify breaks forever while append keeps
+        # exiting 0. Refuse instead: convert silent corruption into fail-closed.
+        tail = last_byte(path)
+        if tail is not None and tail != b"\n":
+            sys.stderr.write("audit append: torn tail — last record lacks a trailing "
+                             "newline; operator recovery required (refusing to append)\n")
+            return 4
+        seq, prev = read_head(path)
+        rec = dict(payload)
+        rec["seq"] = seq + 1
+        rec["prev"] = prev
+        rec["ts"] = utc_now()
+        line = canonical(rec)
+        h = line_hash(line)
+        # O_APPEND: kernel positions each write at EOF atomically; never O_TRUNC, never
+        # seek+write. fsync file AND directory so a returned success means the record
+        # survived a crash — durability is what makes no-log->no-execute meaningful.
+        fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+        try:
+            data = (line + "\n").encode("utf-8")
+            n = os.write(fd, data)
+            # POSIX write(2) may return a SHORT count WITHOUT raising (classic ENOSPC
+            # mid-record). A partial line is both an un-audited action and a corrupt
+            # chain, so a short write is a durability failure — raise into the OSError
+            # handler below and fail closed. Silently returning 0 here is THE breach
+            # no-log->no-execute exists to prevent.
+            if n != len(data):
+                raise OSError("short write: %d of %d bytes durable — record not written"
+                              % (n, len(data)))
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        dfd = os.open(os.path.dirname(path), os.O_RDONLY)
+        try:
+            os.fsync(dfd)
+        finally:
+            os.close(dfd)
+    except OSError as e:
+        # Any write/fsync failure => the action is UNAUDITABLE => fail closed.
+        sys.stderr.write("audit append: write failed (no-log->no-execute): %s\n" % e)
+        return 3
+    finally:
+        fcntl.flock(lf, fcntl.LOCK_UN)
+        lf.close()
+    # The broker receives this head hash on stdout. Per Fable Step-2 FIX-3: the broker
+    # (Step 5) MUST anchor it OUTSIDE the audit dir (e.g. broker state), so a
+    # suffix-rewrite of the log — which the chain alone cannot detect — becomes
+    # detectable before Step-7 `chattr +a` lands. Zero protocol cost; noted here.
+    sys.stdout.write(h + "\n")
+    return 0
+
+
+def cmd_verify(argv):
+    path = log_path()
+    if not os.path.exists(path):
+        # An absent log is a VALID empty chain — nothing has run yet.
+        print("audit verify: empty (no log yet) — OK")
+        return 0
+    prev = GENESIS
+    expect_seq = 0
+    n = 0
+    with open(path, "r", encoding="utf-8") as f:
+        for lineno, raw in enumerate(f, 1):
+            line = raw.rstrip("\n")
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+            except ValueError as e:
+                sys.stderr.write("audit verify: line %d not JSON: %s\n" % (lineno, e))
+                return 1
+            if rec.get("prev") != prev:
+                sys.stderr.write("audit verify: BROKEN CHAIN at line %d (seq %s): prev mismatch — truncation/reorder\n"
+                                 % (lineno, rec.get("seq")))
+                return 1
+            if rec.get("seq") != expect_seq:
+                sys.stderr.write("audit verify: BROKEN SEQUENCE at line %d: got %s, expected %d\n"
+                                 % (lineno, rec.get("seq"), expect_seq))
+                return 1
+            # Re-serialize canonically: confirms the on-disk bytes are the canonical
+            # form, so an in-place edit (even one keeping seq/prev) is caught here.
+            if canonical(rec) != line:
+                sys.stderr.write("audit verify: line %d is not canonical form — edited\n" % lineno)
+                return 1
+            prev = line_hash(line)
+            expect_seq += 1
+            n += 1
+    print("audit verify: OK — %d records, chain intact" % n)
+    return 0
+
+
+def cmd_tail(argv):
+    n = 20
+    if argv:
+        try:
+            n = int(argv[0])
+        except ValueError:
+            sys.stderr.write("audit tail: N must be an integer\n")
+            return 2
+    path = log_path()
+    if not os.path.exists(path):
+        return 0
+    with open(path, "r", encoding="utf-8") as f:
+        lines = [ln.rstrip("\n") for ln in f if ln.strip()]
+    for ln in lines[-n:]:
+        print(ln)
+    return 0
+
+
+def main(argv):
+    if not argv:
+        sys.stderr.write(__doc__)
+        return 2
+    cmd, rest = argv[0], argv[1:]
+    if cmd == "append":
+        return cmd_append(rest)
+    if cmd == "verify":
+        return cmd_verify(rest)
+    if cmd == "tail":
+        return cmd_tail(rest)
+    sys.stderr.write("audit: unknown command '%s' (append|verify|tail)\n" % cmd)
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
