@@ -8,9 +8,9 @@
 # costs the agent nothing and denies exfiltration by construction.
 #
 # Two channels survive once sealed: the nixpkgs binary cache (root / nix-daemon), so the
-# box can still rebuild ITSELF from nixpkgs — "nixpkgs-only" — and outbound NTP (udp/123,
-# advisory B) so the clock can't drift the cache's TLS validity window shut. Everything
-# else is dropped.
+# box can still rebuild ITSELF from nixpkgs — "nixpkgs-only" — and system time sync scoped
+# to systemd-timesyncd ALONE (uid 154, its DNS + NTP, advisory B) so the clock can't drift
+# the cache's TLS validity window shut. Everything else is dropped.
 #
 # Ordering ("seal AFTER the model pull"): `ollama pull` needs the network at provision
 # time, so the wall ships UNSEALED (cfg.sealed = false) — a provisioning window that also
@@ -72,14 +72,19 @@ in {
           # root-initiated. THE only general off-box channel once sealed.
           meta skuid 0 accept
 
-          # NTP — advisory B (PR#19 Fable). systemd-timesyncd runs as a DynamicUser
-          # (systemd-timesync), NOT root, so `skuid 0` above does NOT cover it; a sealed
-          # box would drop udp/123 and slowly clock-drift until the nixpkgs binary cache's
-          # TLS validity window breaks (a real sovereign-box headache). DynamicUser uids
-          # aren't known at ruleset-load time, so a reliable skuid-scope is impossible —
-          # protocol-scope the allow to udp/123 instead. Permanent survivor: kept even when
-          # sealed, since drift accrues most on a long-sealed box.
-          udp dport 123 accept
+          # time sync — advisory B (PR#19/#20 Fable). systemd-timesyncd runs as the STATIC
+          # user systemd-timesync (uid ${toString config.ids.uids.systemd-timesync}, pinned
+          # in nixpkgs ids.nix), NOT a DynamicUser and NOT root — so `skuid 0` above does not
+          # cover it, but a numeric skuid-scope IS reliable (the numeric uid sidesteps
+          # passwd/ruleset-load ordering). It must egress BOTH to resolve the pool hostnames
+          # (there is no systemd-resolved — NetworkManager DNS — so timesyncd resolves via
+          # glibc → udp/53) AND to speak NTP (udp/123); a udp/123-only allow silently fails
+          # sealed (DNS dropped → resolution fails → NTP never happens → clock STILL drifts).
+          # Scoping BOTH ports to uid 154 keeps the clock honest — so the nixpkgs cache's TLS
+          # validity window can't drift shut — while every other process (the agent, the
+          # model, any capability) stays zero-egress. Permanent survivor: kept even sealed,
+          # since drift accrues most on a long-sealed box.
+          meta skuid ${toString config.ids.uids.systemd-timesync} udp dport { 53, 123 } accept
         ${lib.optionalString (!cfg.sealed) ''
           # PROVISIONING (unsealed) — removed by `sealed = true` + rebuild. Lets
           # setup-brain.sh resolve + fetch the model weights (and, transiently, lets the
