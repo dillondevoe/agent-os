@@ -130,18 +130,79 @@ if t gate NOPE >/dev/null 2>&1; then fail "gate accepted an invalid tier"; fi
 # 11. AUDIT INTEGRATION — every decision above was recorded via the Step-2 audit primitive,
 #     and the chain still verifies. This is what "computes + logs via the audit log" means.
 av || fail "audit chain does not verify after taint decisions (taint corrupted the log)"
-grep -q taint "$LOG" || fail "no taint records in the audit log (decisions were not logged)"
+# EXACT field greps — the audit record serializes compact (separators=(",", ":")), so an
+# event is '"event":"set"' with no spaces. Substring greps false-pass when a reason string
+# happens to contain "reset"/"boot"/etc.
+grep -q '"src":"taint"' "$LOG" || fail "no taint records in the audit log (decisions were not logged)"
 for ev in set reset stamp recall boot gate; do
-  grep -q "$ev" "$LOG" || fail "audit log missing a '$ev' taint decision"
+  grep -q "\"event\":\"$ev\"" "$LOG" || fail "audit log missing a '$ev' taint decision"
 done
 
 # 12. NO-LOG -> NO-EXECUTE for taint (§8, matches the audit contract). If the audit binary
-#     is unreachable, a mutating taint op is unauditable and must fail closed (non-zero),
-#     WITHOUT mutating state. Point AUDIT_BIN at nothing and confirm set refuses.
-( export AUDIT_BIN="$SCRATCH/nonexistent-audit"; export AGENT_OS_TAINT_DIR="$SCRATCH/taint-nolog"
-  mkdir -p "$AGENT_OS_TAINT_DIR"
-  "$PY" "$TAINT" reset --confirm-human >/dev/null 2>&1 && exit 31   # reset also logs -> must fail
-  exit 0
-) || fail "taint op SUCCEEDED with an unreachable audit log (no-log->no-execute violated)"
+#     is unreachable, EVERY mutating taint op is unauditable and must fail closed (non-zero)
+#     WITHOUT mutating state. Establish a known state with a LIVE audit, snapshot it, then
+#     prove each op (set/reset/stamp/recall/boot) fails AND leaves session.json + origins.json
+#     byte-identical under a DEAD audit. (The old battery only exercised `reset`, and never
+#     checked the "WITHOUT mutating state" half.)
+NL="$SCRATCH/taint-nolog"; mkdir -p "$NL"
+( export AGENT_OS_TAINT_DIR="$NL"                   # setup under the REAL audit
+  "$PY" "$TAINT" reset --confirm-human >/dev/null || exit 41
+  "$PY" "$TAINT" stamp seed/key >/dev/null || exit 42
+) || fail "test-12 setup (live audit) failed"
+SNAP_S="$(cat "$NL/session.json")"; SNAP_O="$(cat "$NL/origins.json")"
+# Every mutating op under a DEAD audit: must fail closed AND leave state byte-identical.
+while IFS= read -r op; do
+  [ -n "$op" ] || continue
+  ( export AUDIT_BIN="$SCRATCH/nonexistent-audit"; export AGENT_OS_TAINT_DIR="$NL"
+    "$PY" "$TAINT" $op >/dev/null 2>&1 ) \
+    && fail "taint '$op' SUCCEEDED under unreachable audit (no-log->no-execute violated)"
+  [ "$(cat "$NL/session.json")" = "$SNAP_S" ] || fail "taint '$op' MUTATED session.json under dead audit"
+  [ "$(cat "$NL/origins.json")" = "$SNAP_O" ] || fail "taint '$op' MUTATED origins.json under dead audit"
+done <<'OPS'
+set poison
+reset --confirm-human
+stamp new/key
+recall seed/key
+boot
+OPS
+
+# 13. CORRUPT STATE fails closed (§8) — the tests that would have caught FIX-2. Garbage in
+#     session.json must read TAINTED. Garbage in origins.json must make `stamp` REFUSE
+#     (never rebuild the ledger / launder a formerly-UNTRUSTED key to TRUSTED) and make
+#     `recall`/`boot` fail-closed to tainted.
+CS="$SCRATCH/taint-corrupt"; mkdir -p "$CS"
+# (a) corrupt session.json -> TAINTED (not a crash, not clean).
+printf 'not json at all }{' > "$CS/session.json"
+o="$(AGENT_OS_TAINT_DIR="$CS" "$PY" "$TAINT" status)" || fail "status errored on corrupt session.json"
+case "$o" in *"taint: TAINTED"*) : ;; *) fail "corrupt session.json did not read TAINTED: $o";; esac
+# (b) corrupt origins.json + CLEAN session -> stamp REFUSES and does NOT rewrite the ledger.
+#     Without FIX-2 this stamps launder/key TRUSTED (clean session) and drops all tags.
+( export AGENT_OS_TAINT_DIR="$CS"
+  "$PY" "$TAINT" reset --confirm-human >/dev/null || exit 51
+  printf '{ broken origins ' > "$CS/origins.json"; BEFORE="$(cat "$CS/origins.json")"
+  if "$PY" "$TAINT" stamp launder/key >/dev/null 2>&1; then exit 52; fi  # must FAIL, not stamp TRUSTED
+  [ "$(cat "$CS/origins.json")" = "$BEFORE" ] || exit 53                 # must NOT rebuild the ledger
+) || fail "corrupt origins.json: stamp did not fail-closed without rebuilding (FIX-2 laundering hole)"
+# (c) valid JSON but structurally wrong (tags not a dict) is ALSO corrupt -> stamp refuses.
+( export AGENT_OS_TAINT_DIR="$CS"
+  "$PY" "$TAINT" reset --confirm-human >/dev/null || exit 54
+  printf '{"tags":"not-a-dict"}' > "$CS/origins.json"
+  if "$PY" "$TAINT" stamp x/y >/dev/null 2>&1; then exit 55; fi
+) || fail "structurally-wrong origins.json: stamp did not fail-closed"
+# (d) corrupt origins.json -> recall fails closed (re-taints) and boot taints.
+( export AGENT_OS_TAINT_DIR="$CS"
+  "$PY" "$TAINT" reset --confirm-human >/dev/null || exit 56
+  printf '{ broken origins ' > "$CS/origins.json"
+  r="$("$PY" "$TAINT" recall anything)" || exit 57
+  case "$r" in *"RE-TAINTED"*) : ;; *) exit 58;; esac
+  "$PY" "$TAINT" reset --confirm-human >/dev/null || exit 59
+  printf '{ broken origins ' > "$CS/origins.json"
+  b="$("$PY" "$TAINT" boot)" || exit 60
+  case "$b" in *"BOOT TAINTED"*) : ;; *) exit 61;; esac
+) || fail "corrupt origins.json: recall/boot did not fail-closed to tainted"
+
+# Final: the corrupt/no-log sections logged only via the real audit (or not at all); the
+# real chain must STILL verify end-to-end.
+av || fail "audit chain broken after the no-log / corrupt-state sections"
 
 echo "taint-battery: ALL PROPERTIES HOLD"

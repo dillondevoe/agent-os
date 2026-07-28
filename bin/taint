@@ -46,6 +46,7 @@ import sys
 import os
 import json
 import time
+import fcntl
 import subprocess
 
 SCHEMA = "taint-shadow-v1"
@@ -64,6 +65,10 @@ def session_path():
 
 def origins_path():
     return os.path.join(taint_dir(), "origins.json")
+
+
+def lock_path():
+    return os.path.join(taint_dir(), "taint.lock")
 
 
 def utc_now():
@@ -116,18 +121,24 @@ def load_session():
 
 
 def load_origins():
+    """Return (tags, corrupt). A CORRUPT ledger must be distinguishable from an ABSENT one:
+    returning {} for both (the old bug) let `stamp` re-stamp a formerly-UNTRUSTED key TRUSTED
+    after corruption AND drop every other tag on rewrite — an absorbing-invariant violation.
+    Callers fail closed on corrupt: never rebuild, treat every key as untrusted."""
     p = origins_path()
     try:
         with open(p, "r", encoding="utf-8") as f:
             o = json.load(f)
         tags = o.get("tags") if isinstance(o, dict) else None
-        return tags if isinstance(tags, dict) else {}
+        if not isinstance(tags, dict):
+            # Present but structurally wrong == corrupt, not empty. Fail closed.
+            return {}, True
+        return tags, False
     except FileNotFoundError:
-        return {}
+        return {}, False
     except (ValueError, OSError):
         # A corrupt origin ledger cannot be trusted to say "trusted" about anything.
-        # Return empty; unknown keys then default to UNTRUSTED at recall (fail-closed).
-        return {}
+        return {}, True
 
 
 def audit_log(record):
@@ -218,7 +229,18 @@ def cmd_stamp(argv):
         return 2
     key = argv[0]
     s, _ = load_session()
-    tags = load_origins()
+    tags, corrupt = load_origins()
+    if corrupt:
+        # A corrupt ledger cannot report a key's prior origin, and rewriting it here would
+        # DROP every existing tag (silent downgrade to unknown) and could stamp a
+        # formerly-UNTRUSTED key TRUSTED. Fail closed: refuse to stamp, never rebuild —
+        # operator recovery required (same posture as audit's torn tail). Record the
+        # refusal so the no-log->no-execute evidence base still sees it (best-effort).
+        _emit({"src": "taint", "event": "stamp", "session_id": s["session_id"], "key": key,
+               "origin": UNTRUSTED, "refused": "corrupt-origins", "shadow": True})
+        sys.stderr.write("taint stamp: corrupt origin ledger — refusing to stamp (would drop "
+                         "tags / launder to TRUSTED); operator recovery required\n")
+        return 3
     prior = tags.get(key)
     # UNTRUSTED is absorbing: once untrusted, never downgraded. Otherwise the origin is
     # UNTRUSTED iff written while the session is tainted, else TRUSTED.
@@ -241,15 +263,17 @@ def cmd_recall(argv):
         sys.stderr.write("usage: taint recall <mem-key>\n")
         return 2
     key = argv[0]
-    tags = load_origins()
+    tags, corrupt = load_origins()
     # Unknown origin == UNTRUSTED (fail-closed): recalling a mem entry we cannot vouch
-    # for must not silently wash it clean.
-    origin = tags.get(key, UNTRUSTED)
+    # for must not silently wash it clean. A corrupt ledger is unknown for EVERY key.
+    origin = UNTRUSTED if corrupt else tags.get(key, UNTRUSTED)
     s, _ = load_session()
     retaint = origin == UNTRUSTED
     if retaint:
+        why = ("recall over corrupt origin ledger: %s" % key) if corrupt \
+            else ("recall of untrusted-origin mem: %s" % key)
         s["tainted"] = True
-        s["reasons"] = (s.get("reasons") or []) + ["recall of untrusted-origin mem: %s" % key]
+        s["reasons"] = (s.get("reasons") or []) + [why]
         s["schema"] = SCHEMA
         s["updated"] = utc_now()
     if not _emit({"src": "taint", "event": "recall", "session_id": s["session_id"],
@@ -274,8 +298,12 @@ def cmd_boot(argv):
         else:
             sys.stderr.write("usage: taint boot [--mem-root DIR]\n")
             return 2
-    tags = load_origins()
+    tags, corrupt = load_origins()
     reasons = []
+    # A corrupt ledger cannot vouch for any provenance -> fail closed, taint the boot even
+    # with no --mem-root (otherwise corrupt + bare boot would falsely read clean).
+    if corrupt:
+        reasons.append("corrupt origin ledger — cannot vouch for any mem provenance")
     # Any KNOWN untrusted-origin entry taints the boot.
     untrusted_keys = sorted(k for k, v in tags.items() if v == UNTRUSTED)
     if untrusted_keys:
@@ -342,9 +370,39 @@ def cmd_gate(argv):
     return 0
 
 
+def with_lock(fn):
+    """Serialize a mutating command's whole load->log->write critical section under an
+    exclusive flock (mirrors bin/audit's flock). Without it a `set` racing a human `reset`
+    can be lost — a silent monotonicity break neither party sees (Fable Step-3 FIX-3).
+    Lost concurrent stamps degrade in the SAFE direction (dropped tag -> unknown -> untrusted).
+    Read-only commands (status/gate) don't take the lock: os.replace makes every write
+    atomic, so a reader sees the old or new file whole, never torn."""
+    def wrapped(argv):
+        try:
+            os.makedirs(taint_dir(), exist_ok=True)
+            lf = open(lock_path(), "w")
+        except OSError as e:
+            sys.stderr.write("taint: cannot open lock: %s\n" % e)
+            return 3
+        try:
+            fcntl.flock(lf, fcntl.LOCK_EX)
+            return fn(argv)
+        finally:
+            try:
+                fcntl.flock(lf, fcntl.LOCK_UN)
+            finally:
+                lf.close()
+    return wrapped
+
+
 CMDS = {
-    "status": cmd_status, "set": cmd_set, "reset": cmd_reset, "stamp": cmd_stamp,
-    "recall": cmd_recall, "boot": cmd_boot, "gate": cmd_gate,
+    "status": cmd_status,
+    "set": with_lock(cmd_set),
+    "reset": with_lock(cmd_reset),
+    "stamp": with_lock(cmd_stamp),
+    "recall": with_lock(cmd_recall),
+    "boot": with_lock(cmd_boot),
+    "gate": cmd_gate,
 }
 
 

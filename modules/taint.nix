@@ -19,16 +19,24 @@
 { config, pkgs, lib, ... }:
 
 let
+  # The SAME production audit wrapper audit.nix installs — imported so AUDIT_BIN below
+  # pins the exact same store-path binary (no drift, no PATH lookup).
+  auditWrapper = import ./audit-pkg.nix { inherit pkgs; };
+
   # Wrap the Python primitive so `taint` is on PATH with a pinned interpreter.
   # Pin the state dir unconditionally (same lesson as the audit wrapper): a stray
   # $AGENT_OS_TAINT_DIR in the broker's env must NOT redirect the PRODUCTION binary to a
   # different taint store — that would silently read a clean bit from the wrong place and
-  # void the monotonicity guarantee. AUDIT_BIN is left unset so taint calls the production
-  # `audit` wrapper on PATH, which in turn pins the production audit ledger.
-  # The env override survives only as a TEST affordance via a DIRECT `python3 bin/taint`
+  # void the monotonicity guarantee.
+  # Pin AUDIT_BIN to the store-path audit wrapper (Fable Step-3 FIX-1): leaving it unset
+  # would let a stray $AUDIT_BIN=/bin/true, or any PATH-shadow of `audit`, make every
+  # `audit append` silently "succeed" — taint decisions would go UNLOGGED while ops
+  # proceed, voiding no-log->no-execute and the entire shadow-evidence base.
+  # Both env overrides survive only as TEST affordances via a DIRECT `python3 bin/taint`
   # invocation — exactly how tests/taint-battery.sh drives it.
   taint = pkgs.writeShellScriptBin "taint" ''
     export AGENT_OS_TAINT_DIR=/var/lib/agent-os/taint
+    export AUDIT_BIN=${auditWrapper}/bin/audit
     exec ${pkgs.python3}/bin/python3 ${../bin/taint} "$@"
   '';
 in
