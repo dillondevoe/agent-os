@@ -29,7 +29,9 @@ if that log write fails the op exits non-zero — an unauditable taint decision 
 even in shadow mode (no-log -> the broker cannot trust the shadow evidence).
 
 Commands:
-  taint status                          print the session's taint bit + reasons
+  taint status [--json]                 print the session's taint bit + reasons
+                                        (--json: {"tainted","session_id","reasons","note"}
+                                         canonical line — the Step-5 broker consult, GAP-3)
   taint set <reason...>                 SET the bit (untrusted content ingested) — monotonic
   taint reset --confirm-human           HUMAN-only: begin a new clean session (audited)
   taint stamp <mem-key>                 record a mem entry's origin from the current taint
@@ -171,6 +173,26 @@ def _emit(record):
 
 def cmd_status(argv):
     s, note = load_session()
+    if "--json" in argv:
+        # GAP-3 (Step-5 broker consult). The broker derives its LIVE decision from
+        # the `tainted` bit in THIS structured line — never from `gate`'s exit code
+        # (which is always 0 in shadow). load_session is the single fail-closed owner
+        # of the read: missing/corrupt state already surfaces here as tainted=true,
+        # session_id=-1. If this line is non-zero-exit or unparseable, the broker's
+        # own consult-failure rule fails it closed (treats as tainted) — defense on
+        # both sides. Canonical compact serialization (matches bin/mcp / bin/audit).
+        out = {"tainted": bool(s["tainted"]),
+               "session_id": int(s["session_id"]),
+               "reasons": list(s.get("reasons", [])),
+               "note": note}
+        try:
+            sys.stdout.write(json.dumps(out, sort_keys=True,
+                                        separators=(",", ":"),
+                                        ensure_ascii=True) + "\n")
+        except OSError as e:
+            sys.stderr.write("taint: cannot write status json: %s\n" % e)
+            return 3
+        return 0
     tag = "TAINTED" if s["tainted"] else "clean"
     extra = (" (%s)" % note) if note else ""
     print("taint: %s  session=%s%s  reasons=%s"
