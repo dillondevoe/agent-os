@@ -74,7 +74,7 @@ if [ -z "$BRAIN" ]; then
   if command -v claude >/dev/null 2>&1; then
     BRAIN=claude                                    # cloud brain: primary
   else
-    _ob="$(resolve_brain brain-ollama)"
+    _ob="$(resolve_brain brain-ollama)" || true      # set -e: a missing brain must fall through to the REPL, not kill login
     if [ -n "$_ob" ] && "$_ob" --check; then
       BRAIN="$_ob"                                  # local Ollama floor: offline + reachable
     fi
