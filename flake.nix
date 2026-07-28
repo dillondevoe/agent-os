@@ -14,6 +14,7 @@
         modules = [
           ./configuration.nix
           ./modules/agent-shell.nix
+          ./modules/brain.nix
         ];
       };
 
