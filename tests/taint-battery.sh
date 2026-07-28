@@ -48,6 +48,17 @@ status_is() {  # $1 = TAINTED|clean
   esac
 }
 
+# sha256 as 'sha256:<hex>' — byte-identical to the broker's _content_hash(content) and to bin/taint
+# boot's INDEPENDENT _hash_file(). `sha` hashes a literal string's bytes (no trailing newline); it is
+# how we thread --content-hash through the stamp/recall legs so a TRUSTED tag is honored on recall
+# only when the presented hash matches the stamped one (GAP-4 content-hash binding). `file_hash`
+# hashes a real file's raw octets — the SAME layer boot re-hashes — so the GAP-4 canary proves the
+# stamp / recall / boot canonicalization all agree rather than hand-feeding an identical literal.
+sha()       { printf '%s' "$1" | "$PY" -c 'import sys,hashlib
+sys.stdout.write("sha256:"+hashlib.sha256(sys.stdin.buffer.read()).hexdigest())'; }
+file_hash() { "$PY" -c 'import sys,hashlib
+sys.stdout.write("sha256:"+hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' "$1"; }
+
 # 1. FAIL-CLOSED uninitialized (§8 "uncertain -> untrusted"). With no session state on
 #    disk, the box is TAINTED until a human blesses it. Absence of proof != clean.
 status_is TAINTED
@@ -129,7 +140,9 @@ status_is TAINTED                                  # still tainted — monotone,
 #    entry is TRUSTED; tainted session -> UNTRUSTED, and that tag lives in the taint dir,
 #    a Step-1 protected path the model cannot write.
 reset_clean >/dev/null || fail "reset before trusted stamp failed"
-out="$(t stamp trusted/key1)" || fail "stamp trusted/key1 failed"
+# GAP-4: bind key1's tag to a content-hash (H1) so a later same-hash recall (test 7) can honor it.
+H1="$(sha 'key1 blessed body')"
+out="$(t stamp trusted/key1 --content-hash "$H1")" || fail "stamp trusted/key1 failed"
 case "$out" in *"origin=TRUSTED"*) : ;; *) fail "clean-session stamp not TRUSTED: $out";; esac
 t set "poisoned page" >/dev/null || fail "set before untrusted stamp failed"
 out="$(t stamp untrusted/key2)" || fail "stamp untrusted/key2 failed"
@@ -150,10 +163,11 @@ out="$(t recall untrusted/key2)" || fail "recall untrusted/key2 failed"
 case "$out" in *"RE-TAINTED"*) : ;; *) fail "recall of UNTRUSTED did not re-taint: $out";; esac
 status_is TAINTED
 
-# 7. RECALL of a TRUSTED entry does NOT taint (no false positives on clean provenance).
+# 7. RECALL of a TRUSTED entry whose content-hash STILL MATCHES does NOT taint (no false positives
+#    on clean, unswapped provenance). The matching H1 is the GAP-4 no-swap honor path.
 reset_clean >/dev/null || fail "reset before trusted recall failed"
-out="$(t recall trusted/key1)" || fail "recall trusted/key1 failed"
-case "$out" in *"no change"*) : ;; *) fail "recall of TRUSTED wrongly re-tainted: $out";; esac
+out="$(t recall trusted/key1 --content-hash "$H1")" || fail "recall trusted/key1 failed"
+case "$out" in *"no change"*) : ;; *) fail "recall of TRUSTED (hash match) wrongly re-tainted: $out";; esac
 status_is clean
 
 # 8. RECALL of an UNKNOWN-origin key FAILS CLOSED (§8). No origin record == unknown
@@ -351,6 +365,71 @@ status_is clean
   "$PY" "$TAINT" reset --confirm-human --break-glass >/dev/null 2>&1; rc=$?
   [ "$rc" -eq 6 ] || exit 67                            # corrupt hwm must REFUSE, not mint a low id
 ) || fail "CF-5 epoch high-water: reset rolled the epoch back to a colliding id, or a corrupt high-water did not fail closed (exit 6)"
+
+# 15. GAP-4 / CF-4 — CONTENT-HASH ORIGIN TAGS close the name-keyed laundering residual. A TRUSTED
+#     tag vouches for the KEY, not the bytes; content swapped under a blessed key by a stamp-BYPASSING
+#     path used to recall "clean". Now the tag binds a content-hash: TRUSTED is honored on recall/boot
+#     ONLY while the bytes still match, and a DETECTED swap latches the key UNTRUSTED PERMANENTLY
+#     (absorbing) so swapping the original bytes back cannot re-honor it. Isolated dir + a REAL on-disk
+#     mem file so stamp/recall (the broker's content-hash) and boot (its INDEPENDENT _hash_file) hash
+#     the SAME octet layer — the canonicalization canary Rabbot required (not a hand-fed literal).
+G4="$SCRATCH/taint-gap4"; mkdir -p "$G4"
+G4MEM="$SCRATCH/gap4-memroot"; mkdir -p "$G4MEM/domain"
+G4FILE="$G4MEM/domain/note.md"                      # relpath 'domain/note.md' == the stamp key (seam)
+printf -- '---\ntitle: note\n---\n\nblessed original body\n' > "$G4FILE"
+H_ORIG="$(file_hash "$G4FILE")"
+( export AGENT_OS_TAINT_DIR="$G4"
+  reset_clean >/dev/null || exit 81
+  # (a) CANARY — clean stamp binds the file's octet hash; a SAME-hash recall honors TRUSTED with NO
+  #     re-taint, and a boot over the SAME bytes is clean. Proves stamp==recall==boot canonicalization.
+  o="$("$PY" "$TAINT" stamp domain/note.md --content-hash "$H_ORIG")" || exit 82
+  case "$o" in *"origin=TRUSTED"*) : ;; *) exit 83;; esac
+  o="$("$PY" "$TAINT" recall domain/note.md --content-hash "$H_ORIG")" || exit 84
+  case "$o" in *"no change"*) : ;; *) exit 85;; esac
+  case "$("$PY" "$TAINT" status)" in *"taint: clean"*) : ;; *) exit 86;; esac
+  o="$("$PY" "$TAINT" boot --mem-root "$G4MEM")" || exit 87
+  case "$o" in *"BOOT clean"*) : ;; *) exit 88;; esac
+  # (b) SWAP-AFTER-TRUST — swap the bytes out-of-band (no re-stamp) and recall with the NEW hash:
+  #     mismatch -> UNTRUSTED -> RE-TAINTED (the GAP-4 catch).
+  printf -- '---\ntitle: note\n---\n\nPOISON injected body\n' > "$G4FILE"
+  H_POISON="$(file_hash "$G4FILE")"
+  [ "$H_POISON" != "$H_ORIG" ] || exit 89
+  o="$("$PY" "$TAINT" recall domain/note.md --content-hash "$H_POISON")" || exit 90
+  case "$o" in *"RE-TAINTED"*) : ;; *) exit 91;; esac
+  case "$("$PY" "$TAINT" status)" in *"taint: TAINTED"*) : ;; *) exit 92;; esac
+  # (c) SWAP-BACK-EVASION — the STRONGER latch: revert to the ORIGINAL bytes AND start a fresh CLEAN
+  #     session; recalling with the ORIGINAL (once-blessed) hash must STILL RE-TAINT. The detected swap
+  #     latched K UNTRUSTED permanently, so the tripwire survives revert + reset. (Minimal session-only
+  #     re-taint would re-honor here — this leg is what proves we took the STRONGER path.)
+  printf -- '---\ntitle: note\n---\n\nblessed original body\n' > "$G4FILE"
+  [ "$(file_hash "$G4FILE")" = "$H_ORIG" ] || exit 93   # byte-for-byte the blessed original again
+  reset_clean >/dev/null || exit 94                      # fresh CLEAN session (latch lives in the ledger)
+  case "$("$PY" "$TAINT" status)" in *"taint: clean"*) : ;; *) exit 95;; esac
+  o="$("$PY" "$TAINT" recall domain/note.md --content-hash "$H_ORIG")" || exit 96
+  case "$o" in *"RE-TAINTED"*) : ;; *) exit 97;; esac    # swap-back does NOT re-honor -> absorbing
+  # boot over the reverted-to-original bytes is STILL tainted (the UNTRUSTED latch lives in the ledger).
+  reset_clean >/dev/null || exit 98
+  o="$("$PY" "$TAINT" boot --mem-root "$G4MEM")" || exit 99
+  case "$o" in *"BOOT TAINTED"*) : ;; *) exit 100;; esac
+) || fail "GAP-4 content-hash tag binding failed (canary/swap/swap-back-evasion) — rc $?"
+# (d) the detected swap was AUDITED as a security event (recall-poisoned, content-hash-mismatch).
+grep -q '"event":"recall-poisoned"' "$LOG" || fail "GAP-4 swap not audited as recall-poisoned"
+grep -q '"reason":"content-hash-mismatch"' "$LOG" || fail "recall-poisoned missing content-hash-mismatch reason"
+
+# (e) BOOT hash-mismatch on a TRUSTED tag that was NEVER recalled — boot's INDEPENDENT re-hash catches
+#     an out-of-band swap on its own (distinct from the recall-latch path in (b)/(c)). Separate dir.
+G4B="$SCRATCH/taint-gap4-boot"; mkdir -p "$G4B"
+G4BMEM="$SCRATCH/gap4-boot-memroot"; mkdir -p "$G4BMEM/domain"
+printf 'clean body\n' > "$G4BMEM/domain/n2.md"
+( export AGENT_OS_TAINT_DIR="$G4B"
+  reset_clean >/dev/null || exit 111
+  "$PY" "$TAINT" stamp domain/n2.md --content-hash "$(file_hash "$G4BMEM/domain/n2.md")" >/dev/null || exit 112
+  o="$("$PY" "$TAINT" boot --mem-root "$G4BMEM")" || exit 113
+  case "$o" in *"BOOT clean"*) : ;; *) exit 114;; esac    # matching bytes -> clean
+  printf 'SWAPPED body\n' > "$G4BMEM/domain/n2.md"          # out-of-band swap, no re-stamp
+  o="$("$PY" "$TAINT" boot --mem-root "$G4BMEM")" || exit 115
+  case "$o" in *"content-hash mismatch on trusted mem"*) : ;; *) exit 116;; esac
+) || fail "GAP-4 boot hash-mismatch on a never-recalled TRUSTED tag not caught — rc $?"
 
 # Final: the corrupt/no-log sections logged only via the real audit (or not at all); the
 # real chain must STILL verify end-to-end.
