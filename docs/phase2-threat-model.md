@@ -131,6 +131,23 @@ provenance-aware inference wrapper for v1. The strength is in the lifecycle, not
   entry **re-taints** the recalling session. A poisoned page therefore cannot be "washed" by
   writing it to memory in session A and recalling it clean in session B — the taint rides the
   storage. Origin tags live where the model can't write them (§8 sandbox invariants).
+  - **Content-hash binding (GAP-4/CF-4).** A name-keyed origin tag vouches for the *key*, not the
+    *bytes* — so content swapped under a TRUSTED key by a **stamp-bypassing** path (an out-of-band
+    edit) would recall "clean." Each tag therefore also binds a **sha256 of the stamped octets**
+    (computed by the broker, which holds the exact committed/released bytes — atomic-with-write, no
+    TOCTOU; `taint boot` re-hashes the files independently). A TRUSTED verdict is honored on
+    recall/boot **only while the content-hash still matches**; a detected swap **latches the key
+    UNTRUSTED permanently (absorbing)**, so reverting the original bytes cannot re-honor it. The
+    hash strictly *adds* untrust — it can never launder. A missing/legacy hash is unverifiable →
+    UNTRUSTED (fail-closed, self-heals on the next stamp).
+- **Reset epoch high-water (GAP-5/CF-5) — residual, accepted.** Each human reset mints a strictly
+  increasing `session_id` from a durable high-water mark in the protected taint dir, so a lost or
+  corrupt `session.json` cannot roll the epoch back to a colliding id (which would replay a
+  confirm-nonce bound to that id). A corrupt high-water mark **refuses the reset (exit 6)** rather
+  than mint an id it can't prove collision-free. **Residual:** if *both* `session.json` **and** the
+  high-water file are lost simultaneously, the epoch can only re-mint from 0 — accepted, as it
+  requires losing two protected-dir files at once, and every downstream confirm still fails closed
+  on any epoch mismatch.
 - **Enforcement point.** A request made while the session is tainted **cannot auto-authorize above
   T0.** In v1 that is every request above T0 anyway, so the taint tracker runs in **shadow mode** —
   it computes and logs the taint-gated decision it *would* make without gating on it — giving

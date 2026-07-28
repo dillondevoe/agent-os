@@ -57,6 +57,13 @@ sys.stdout.write("true" if v is True else "false" if v is False else "None" if v
 taint_is() { local o; o="$("$PY" "$TAINT" status)" || fail "taint status errored"
   case "$o" in *"taint: $1"*) : ;; *) fail "taint expected '$1', got: $o";; esac; }
 
+# sha256 of the LITERAL bytes of $1 (no trailing newline) as 'sha256:<hex>' — byte-identical to the
+# broker's _content_hash(content)=sha256(content.encode('utf-8')). Used to thread --content-hash
+# through the direct `taint stamp/recall` legs that stand in for what the broker passes on the seam
+# (GAP-4 content-hash tags: a TRUSTED tag is honored on recall only if the presented hash matches).
+sha() { printf '%s' "$1" | "$PY" -c 'import sys,hashlib
+sys.stdout.write("sha256:"+hashlib.sha256(sys.stdin.buffer.read()).hexdigest())'; }
+
 # The two injectable seams (env-driven; each leg sets the CONFIRM_*/INVOKE_* knobs it needs).
 SEAM_CONFIRM="$SCRATCH/seam_confirm.py"
 SEAM_INVOKE="$SCRATCH/seam_invoke.py"
@@ -229,23 +236,27 @@ case "$OUT" in *LEAKME*) fail "content LEAKED despite the taint effect failing t
 "$PY" "$TAINT" set "seed untrusted" >/dev/null || fail "set before untrusted stamp"
 "$PY" "$TAINT" stamp untrusted/k >/dev/null || fail "stamp untrusted/k"      # tagged UNTRUSTED
 "$PY" "$TAINT" reset --confirm-human --break-glass >/dev/null || fail "reset after seeding"
-"$PY" "$TAINT" stamp trusted/k >/dev/null || fail "stamp trusted/k"          # clean session -> TRUSTED
+# stamp trusted/k bound to the SAME bytes the recall will present (sha of "recalled") — GAP-4: a
+# TRUSTED tag now honors recall only on a content-hash match, so the seed must carry that hash.
+"$PY" "$TAINT" stamp trusted/k --content-hash "$(sha recalled)" >/dev/null || fail "stamp trusted/k"
 VREC='{"ok":true,"method":"tools/call","id":31,"name":"mem.recall","arguments":{"namespace":"session","query":"q"}}'
 OUT="$( INVOKE_KEY="untrusted/k" INVOKE_CONTENT="recalled" AGENT_OS_INVOKE_SEAM="$SEAM_INVOKE" one "$VREC" )"
 [ "$(jf "$OUT" 'o["result"]["content_type"]')" = "data" ] || fail "recall result not DATA: $OUT"
-taint_is TAINTED   # recalling the UNTRUSTED-origin entry re-tainted the fresh session
+taint_is TAINTED   # recalling the UNTRUSTED-origin entry re-tainted the fresh session (absorbing)
 "$PY" "$TAINT" reset --confirm-human --break-glass >/dev/null || fail "reset before trusted recall"
 OUT="$( INVOKE_KEY="trusted/k" INVOKE_CONTENT="recalled" AGENT_OS_INVOKE_SEAM="$SEAM_INVOKE" one "$VREC" )"
-taint_is clean     # recalling a TRUSTED entry does NOT taint
+taint_is clean     # broker passes sha("recalled") == stored hash -> TRUSTED honored, no re-taint
 
 # ── 13. mem.remember — the BROKER owns the stamp (§4.9). A stamped key recalls as "no change"
 #        (proof it was tagged); a missing key withholds; a stamp that can't commit withholds.
 "$PY" "$TAINT" reset --confirm-human --break-glass >/dev/null || fail "reset before stamp leg"
+# pin INVOKE_CONTENT so the stamped bytes are deterministic; the broker stamps session/n1 bound to
+# sha("remembered-bytes"). A same-hash recall then proves the stamp committed WITH a content-hash.
 OUT="$( CONFIRM_APPROVE=1 AGENT_OS_CONFIRM_SEAM="$SEAM_CONFIRM" \
-        INVOKE_KEY="session/n1" AGENT_OS_INVOKE_SEAM="$SEAM_INVOKE" one "$V_REMEMBER" )"
+        INVOKE_KEY="session/n1" INVOKE_CONTENT="remembered-bytes" AGENT_OS_INVOKE_SEAM="$SEAM_INVOKE" one "$V_REMEMBER" )"
 [ "$(jf "$OUT" 'o["result"]["content_type"]')" = "data" ] || fail "remember result not DATA: $OUT"
-R="$("$PY" "$TAINT" recall session/n1)" || fail "recall of the stamped key errored"
-case "$R" in *"no change"*) : ;; *) fail "broker did not stamp session/n1 (recall re-tainted it): $R";; esac
+R="$("$PY" "$TAINT" recall session/n1 --content-hash "$(sha remembered-bytes)")" || fail "recall of the stamped key errored"
+case "$R" in *"no change"*) : ;; *) fail "broker did not stamp session/n1 w/ hash (recall re-tainted it): $R";; esac
 # no key to stamp -> withhold (a write whose provenance can't be pinned is a laundering hole)
 OUT="$( CONFIRM_APPROVE=1 AGENT_OS_CONFIRM_SEAM="$SEAM_CONFIRM" AGENT_OS_INVOKE_SEAM="$SEAM_INVOKE" one "$V_REMEMBER" )"
 case "$OUT" in *"content-withheld"*) : ;; *) fail "remember with no stamp key did not withhold: $OUT";; esac
