@@ -1,0 +1,70 @@
+#!/usr/bin/env python3
+# cap-capabilities-list — Phase 2 · Step 7 impl for the T0 `capabilities.list` capability.
+#
+# Security surface: branch -> PR -> Fable -> merge. Never direct-push.
+#
+# Tier T0 (AUTO — runs even under taint). It is the most benign capability the wall offers:
+# it enumerates what the agent is ALLOWED to ask for. It has NO arguments, touches NO filesystem
+# beyond the world-readable materialized registry (AGENT_OS_REGISTRY — operator-authored, immutable,
+# broker-owned data), opens NO network, and writes NOTHING. So its Step-1 sandbox decl is empty and
+# it needs no OS confinement.
+#
+# Seam contract (invoked by cap-invoke, the AGENT_OS_INVOKE_SEAM dispatcher):
+#   stdin  : {"capability":"capabilities.list","arguments":{}}   (read + ignored — no args)
+#   stdout : {"ok":true, "content":<json string>, "meta":{}}     on success, exit 0
+#   stdout : {"ok":false,"content":null,"meta":{}}               + exit 3 if the registry, which
+#            the dispatcher already read to route here, cannot be re-read (infra failure, not
+#            attacker content — the dispatcher then withholds, fail-closed).
+#
+# `content` is a JSON object {"capabilities":[{name,tier,summary}...]} sorted by name for
+# determinism. It exposes ONLY name/tier/summary — never the sandbox internals (paths, egress
+# lists), which are operator posture the model has no need to see.
+#
+# meta is EMPTY: capabilities.list has no provenance identity (no mem key). Its content is
+# broker-owned, so once the seam is wired live the broker must map it TRUSTED in ORIGIN_BY_CAP
+# (it is unmapped today and would otherwise taint the session on every list — flagged for the
+# go-live PR; this impl carries no such policy itself).
+
+import json
+import os
+import sys
+
+
+def main():
+    # Drain stdin so a piping dispatcher never sees SIGPIPE; the request carries no args we use.
+    try:
+        sys.stdin.buffer.read()
+    except OSError:
+        pass
+
+    path = os.environ.get("AGENT_OS_REGISTRY", "/etc/agent-os/registry/registry.json")
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            reg = json.load(f)
+        if not isinstance(reg, dict):
+            raise ValueError("registry is not an object")
+    except (OSError, ValueError) as e:
+        # Infra failure -> {ok:false} + nonzero so the dispatcher fails closed. No attacker bytes.
+        sys.stderr.write("cap-capabilities-list: registry unreadable (%s)\n" % e)
+        sys.stdout.write(json.dumps({"ok": False, "content": None, "meta": {}},
+                                    sort_keys=True, separators=(",", ":"), ensure_ascii=True))
+        sys.exit(3)
+
+    caps = []
+    for name in sorted(reg):
+        c = reg[name]
+        if not isinstance(c, dict):
+            continue
+        caps.append({"name": name,
+                     "tier": c.get("tier") if isinstance(c.get("tier"), str) else "",
+                     "summary": c.get("summary") if isinstance(c.get("summary"), str) else ""})
+    content = json.dumps({"capabilities": caps}, sort_keys=True,
+                         separators=(",", ":"), ensure_ascii=True)
+
+    sys.stdout.write(json.dumps({"ok": True, "content": content, "meta": {}},
+                                sort_keys=True, separators=(",", ":"), ensure_ascii=True))
+    sys.exit(0)
+
+
+if __name__ == "__main__":
+    main()

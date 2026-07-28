@@ -170,6 +170,26 @@
               bash ${./tests/agent-loop-battery.sh} ${./bin/agent-loop} ${./tests/ollama-stub.py} "$work"
               touch $out
             '';
+
+        # Phase 2 · Step 7 — the capability seam's property battery. Proves the invoke-seam
+        # DISPATCHER (bin/cap-invoke) is a thin, fail-closed resolver against the REAL materialized
+        # registry: capability->impl resolution, the {ok,content,meta:{key}} contract, the
+        # exit-code bright line (impl exit 0 + valid object forwarded — incl. ok:false error bodies
+        # that must reach the taint fence; impl crash / garbage / cap-bin-dir-unset / path-escaping
+        # impl name all fail closed with no forwarded bytes), and normalization that strips any
+        # impl-reported origin / extra meta down to identity. It also drives the first impl
+        # (bin/cap-capabilities-list, T0). A regression in either fails `nix flake check`.
+        capabilities =
+          let
+            reg = import ./modules/capability-registry.nix { lib = nixpkgs.lib; };
+            pkgs = nixpkgs.legacyPackages.${system};
+            registryJson = pkgs.writeText "registry.json" (builtins.toJSON reg.registry);
+          in pkgs.runCommand "capabilities-check" { nativeBuildInputs = [ pkgs.python3 ]; } ''
+            work="$(mktemp -d)"
+            bash ${./tests/cap-battery.sh} ${./bin/cap-invoke} ${./bin/cap-capabilities-list} \
+              ${registryJson} "$work"
+            touch $out
+          '';
       };
     };
 }
