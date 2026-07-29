@@ -36,16 +36,18 @@ partprobe "$DISK" 2>/dev/null || true
 sleep 2
 
 echo ">>> Formatting (pulling mkfs tools via nix-shell)..."
+wipefs -a "${P}1" "${P}2" 2>/dev/null || true   # kill stale per-partition signatures (FAT leftovers)
 nix-shell -p dosfstools e2fsprogs --run "
   set -e
   mkfs.fat -F32 -n BOOT ${P}1
   mkfs.ext4 -F -L nixos  ${P}2
 "
+udevadm settle 2>/dev/null || true
 
-echo ">>> Mounting..."
-mount "${P}2" /mnt
+echo ">>> Mounting (explicit fs types — auto-detect can trip on stale FAT sigs)..."
+mount -t ext4 "${P}2" /mnt
 mkdir -p /mnt/boot
-mount "${P}1" /mnt/boot
+mount -t vfat "${P}1" /mnt/boot
 
 echo ">>> Installing Agent OS from $FLAKE (fetch + build, a few minutes)..."
 nixos-install --no-root-passwd --flake "$FLAKE"
