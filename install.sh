@@ -23,6 +23,11 @@ read -r CONFIRM < /dev/tty
 # Partition suffix: nvme0n1 -> nvme0n1p1/p2 ; sda -> sda1/2
 case "$DISK" in *nvme*|*mmcblk*) P="${DISK}p" ;; *) P="$DISK" ;; esac
 
+echo ">>> Clearing any leftover mounts/partitions from a prior attempt..."
+umount -R /mnt 2>/dev/null || true
+umount "${DISK}"* 2>/dev/null || true
+wipefs -a "$DISK" 2>/dev/null || true
+
 echo ">>> Partitioning $DISK (GPT: 512M ESP 'BOOT' + rest ext4 'nixos')..."
 parted -s "$DISK" -- mklabel gpt \
   mkpart ESP fat32 1MiB 512MiB set 1 esp on \
