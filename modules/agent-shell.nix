@@ -20,13 +20,13 @@ in {
   environment.systemPackages = [ agentShell memBin brainOllamaBin ];
 
   # Autologin the human on tty1...
-  services.getty.autologinUser = "dtd";
+  services.getty.autologinUser = "agent";
 
   # ...and make the agent their login program. Setting the user's shell to the
   # launcher means the FIRST thing that exists on boot is the conversation.
   # (We keep bash as a real shell underneath so the agent can spawn subshells to
   #  run commands — the agent is the *interface*, not a jail.)
-  users.users.dtd.shell = pkgs.bash;
+  users.users.agent.shell = pkgs.bash;
   environment.loginShellInit = ''
     # Only take over the primary console — other ttys stay plain for rescue.
     if [ "$(tty)" = "/dev/tty1" ] && [ -z "$AGENT_OS_ACTIVE" ]; then

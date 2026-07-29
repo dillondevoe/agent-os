@@ -50,9 +50,10 @@
   time.timeZone = "America/Chicago";
 
   # The human. Autologin into the agent shell is wired in agent-shell.nix.
-  users.users.dtd = {
+  # Generic username so every install is `agent@agent-os`, not the author's initials.
+  users.users.agent = {
     isNormalUser = true;
-    description = "Dillon";
+    description = "Agent OS";
     extraGroups = [ "wheel" "networkmanager" ];
     # Agent OS thesis: the login shell IS the agent (see agent-shell.nix).
   };
