@@ -1,90 +1,97 @@
-# Agent OS — v0.1 scaffold
+# Agent OS
 
-A computer whose shell is an agent, not a desktop. Boot → autologin → you're
-talking to it. Files are markdown memories (path = meaning). The agent can
-rewrite the machine's own config and rebuild.
+**A computer whose shell is an AI, not a desktop.** Boot the machine and you're
+talking to it — a model running *locally*, offline-capable, with no telemetry and
+no cloud dependency. Your files are markdown memories the agent reads and writes.
+You change a setting by asking. By default nothing leaves the machine.
 
-Vision + spec: `~/jarvis-sync/VISION-agent-os-2026-07-27.md`.
+Built by a musician, out loud, one piece a week. This is **v0.1** — rough on purpose.
 
-## What's here (spec-independent scaffold — started 2026-07-27)
-```
-flake.nix                 the whole machine + a `vm` output to test before hardware
-configuration.nix         boring base: user, network, toolbox, flakes on, no desktop
-modules/agent-shell.nix   THE module — autologin tty1 → exec the agent, no bash prompt
-bin/agent-shell           login program: seeds memory tree, boot banner, hands off to brain
-home/memory/              seed of the markdown-memory home tree
-```
+---
 
-## Prove it boots-and-talks (in a VM, no Dell needed yet)
-```sh
-cd ~/agent-os
-nix build .#vm
-./result/bin/run-agent-os-vm      # boots into the agent shell in a window
-```
-> **Flakes only see git-tracked files** — after editing any file, `git add` it or `nix build`
-> silently uses the old version. On WSL2: the VM window needs WSLg, and `/dev/kvm` makes it
-> fast (without KVM it runs under TCG emulation — works, just slow). `nix flake check` needs
-> neither and validates the whole config first.
-The VM comes up, autologins tty1, seeds `~/memory`, and drops into the brain
-(or the placeholder memory-REPL if no brain is installed yet).
+## Install (one line)
 
-## Brain
-- **v0.1 (now):** local + sovereign — a quantized Qwen 2.5 (ollama, loopback-only)
-  IS the login program. No cloud brain on the image; `BRAIN=brain-ollama` (default,
-  set in `modules/brain.nix`). On first boot, before `setup-brain.sh` pulls the
-  model, the login floor is a zero-deps memory-REPL — never a crash loop.
-- **Phase 1.5+:** a larger judgment-lane model (14B) is pullable on the 32GB Dell.
-  `setup-brain.sh` installs/pulls the weights during the provisioning window.
-
-## Then, onto the Dell Latitude 5440 (32GB, 13th-gen Intel, Iris Xe)
-Confirmed target 2026-07-27. Well-supported hardware; 32GB makes the local-model floor real.
-The 5440-specific enablement (Intel microcode, Iris Xe, wifi firmware, thermald) **and** the boot
-layout (label-based `fileSystems` + initrd nvme/xhci/thunderbolt modules) are already in
-`configuration.nix` — so there is **no `nixos-generate-config` and no per-machine edit**. The
-installer just creates two labeled partitions (`nixos` ext4 root + `BOOT` vfat ESP) and installs
-the flake; `configuration.nix` mounts them by label.
-
-> ⚠️ **The block below ERASES the target disk.** Back up anything off the Windows 11 install
-> first. The `lsblk` gate is there so you confirm the exact device before anything destructive
-> runs — do not skip it. The partition **labels are load-bearing** (the by-label mounts depend
-> on them): type `BOOT` and `nixos` exactly, case-sensitive.
+On a spare machine, boot the [NixOS minimal installer](https://nixos.org/download#nixos-iso),
+connect to the internet (`nmtui`), then:
 
 ```sh
-# ── 0. SEE THE DISK. Confirm the target before anything destructive. ──
-lsblk -o NAME,SIZE,TYPE,MODEL,MOUNTPOINT
-# Expect ONE internal NVMe (Dell/SK-Hynix/Micron SSD) as nvme0n1, plus the USB you booted from.
-# CONFIRM the internal SSD is /dev/nvme0n1 and that erasing it is OK.
-# If the internal disk is NOT nvme0n1, STOP.
-DISK=/dev/nvme0n1     # ← from lsblk above; change ONLY if lsblk shows otherwise
-
-# ── 1. Partition: GPT · 512MB ESP (label BOOT) · rest ext4 root (label nixos) ──
-parted -s "$DISK" -- mklabel gpt \
-  mkpart ESP fat32 1MiB 513MiB set 1 esp on \
-  mkpart primary 513MiB 100%
-P="${DISK}p"                       # nvme → nvme0n1p1 / p2 (a SATA disk would be sda1/2, no "p")
-mkfs.fat -F32 -n BOOT "${P}1"      # label MUST be exactly BOOT   (case-sensitive)
-mkfs.ext4 -L nixos   "${P}2"       # label MUST be exactly nixos  (case-sensitive)
-
-# ── 2. Mount + install straight from the flake (no clone, no hw-config, no edit) ──
-mount "${P}2" /mnt && mkdir -p /mnt/boot && mount "${P}1" /mnt/boot
-nixos-install --no-root-passwd --flake github:dillondevoe/agent-os#agentos
-
-# ── 3. Reboot into Agent OS ──
-reboot
+curl -sL https://raw.githubusercontent.com/dillondevoe/agent-os/main/install.sh | sudo bash
 ```
 
-First boot lands in the agent shell → **memory-REPL** (no model yet; the login floor never
-crash-loops). Then pull the local brain over the provisioning window and seal the box:
+> ⚠️ **This ERASES the target disk.** Use a machine you don't need. The installer shows you
+> the disk and makes you type `YES` before it touches anything.
+
+It partitions, installs, and on first boot pulls a local model (Qwen 2.5 7B, ~4.7GB).
+One more reboot and you're talking to a fully local AI — unplug the ethernet and it still works.
+
+**Just want to see it first?** Boot it in a VM, no hardware or wipe needed:
+
 ```sh
-ollama pull qwen2.5:7b-instruct   # pulls the local model during provisioning (setup-brain.sh is NOT on PATH)
-brain-ollama --check              # optional: prove the floor end-to-end (>=1 model reachable)
-sudo nixos-rebuild switch --flake github:dillondevoe/agent-os#agentos-sealed
-reboot                # sealed: egress is nixpkgs-only (+ timesyncd); the local model IS the shell
+git clone https://github.com/dillondevoe/agent-os && cd agent-os
+nix build .#vm && ./result/bin/run-agent-os-vm
 ```
 
-## Honest status
-v0.1 is a **single-user sovereign demo box**: local brain, default-deny egress
-(the clean-room seal), label-based bare-metal boot — no per-machine hardware-config.
-The security-kernel hardening (autonomous agent + passwordless root = the real work;
-e.g. `sudo` still defeats the egress seal today) is roadmap, tracked as Phase-2 gates,
-NOT v0.1.
+---
+
+## The idea
+
+Three moves, each a deliberate inversion of how computers work now:
+
+1. **The interface is a colleague, not a desktop.** No icons, no windows. The first thing that
+   exists on boot is a conversation. The agent is your file manager, launcher, and settings panel.
+2. **Memory is the filesystem.** Facts live as markdown at `~/memory/<domain>/<thing>.md` — *path
+   is meaning*. What the agent knows, you can read, edit, and grep. No opaque vector store.
+3. **Sovereign by default.** The brain is a model on *your* machine (works with the internet
+   unplugged). The firewall drops all outbound traffic except what you explicitly allow — so it
+   *can't* phone home. No account, no analytics, no surveillance. Us, the machine, and the OS.
+
+Why: as AI makes surveillance cheaper, "free software for your whole life" gets to be a worse
+trade. Agent OS is a bet that you can have an AI that's powerful **and** yours — owned, auditable,
+offline. Open source isn't a nice-to-have here; for a sovereignty tool it's the only version
+anyone should trust.
+
+---
+
+## Status (v0.1)
+
+**Works:** bootable sovereign NixOS · autologin → agent shell · local Qwen brain (auto-pulled on
+first boot) · markdown memory (`remember` / `recall` / `tree`) · clean-room egress wall (nftables
+default-DROP outbound, sealable to nixpkgs-only) · no cloud path, no telemetry · graceful
+memory-REPL floor when no model is present (never crash-loops).
+
+**Not yet:** the capability broker — the safety layer that gates what the agent can *do* — is
+designed and being integrated, but not wired in v0.1, so **treat the agent as trusted-but-unsandboxed
+for now** (`sudo` still defeats the egress seal). Also coming: richer agent tooling, a GUI-guest for
+the rare things that need a screen, polished onboarding. It's a foundation, not a finished product.
+
+Tested on a Dell Latitude 5440 (13th-gen Intel, 32GB, CPU inference). Modern Dells hide the NVMe
+behind Intel VMD — if boot times out looking for the disk, set **BIOS → SATA Operation → AHCI**
+(the initrd also carries the `vmd` driver, so leaving VMD on works too).
+
+---
+
+## How it's built
+
+Declarative NixOS — the machine is a reproducible expression, and the agent can rewrite its own
+`/etc/nixos` and rebuild.
+
+```
+flake.nix                 the whole machine (+ a `vm` output to boot before hardware)
+configuration.nix         base system: user, network, bootloader, disk layout, no desktop
+install.sh                the one-line installer (partition → install → first-boot model pull)
+modules/agent-shell.nix   THE module — autologin tty1 → exec the agent (no bash prompt)
+modules/brain.nix         local Ollama daemon + first-boot model bootstrap
+modules/clean-room.nix    the egress wall (default-DROP outbound; sealed = nixpkgs-only)
+bin/agent-shell           login program: seeds the memory tree, boot banner, hands to the brain
+bin/mem                   the markdown-memory tool (path = meaning)
+bin/brain-ollama          the local-model chat shim (stdlib, no deps)
+```
+
+> Flakes only see git-tracked files — `git add` after editing, or `nix build` silently uses the old
+> version. `nix flake check` validates the whole config without hardware.
+
+---
+
+## License
+
+MIT — see [LICENSE](LICENSE). Take it, fork it, build your own. That's the point.
