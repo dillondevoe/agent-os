@@ -23,6 +23,13 @@
   # the USB/Thunderbolt path used to boot the installer. The VM uses virtio and needs
   # none of these (and drops them with the fileSystems above).
   boot.initrd.availableKernelModules = [ "nvme" "xhci_pci" "thunderbolt" "usb_storage" "sd_mod" ];
+  # FORCE-load nvme at initrd start (not just available-on-demand): on the real 5440,
+  # udev coldplug did not auto-load nvme in time → "timed out waiting for
+  # /dev/disk/by-label/nixos" → emergency mode (live 2026-07-28; label was correct,
+  # disk just wasn't enumerated). Force-loading guarantees the NVMe root appears.
+  # (The VM-proof could NOT catch this: mkVMOverride gives the VM its own virtio disk,
+  # so the by-label NVMe boot path is never runtime-exercised — only eval'd.)
+  boot.initrd.kernelModules = [ "nvme" ];
 
   # 5440-specific enablement (safe to set blind — standard for 13th-gen Intel laptops):
   hardware.enableRedistributableFirmware = true;   # Intel AX2xx wifi/bt firmware
