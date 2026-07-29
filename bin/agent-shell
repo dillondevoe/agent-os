@@ -99,7 +99,29 @@ if [ -n "$_commit" ]; then
   cd "$HOME"
   exec "$_commit"      # the brain IS the shell: boot straight into the agent
 else
-  printf "${DIM}(no cloud brain installed — run bin/setup-brain.sh. Falling back to memory REPL.)${RST}\n\n"
+  # ── First-boot network setup ────────────────────────────────────────────────
+  # We're about to fall to the memory floor. On a fresh box the usual reason is
+  # NO NETWORK, so the local model never pulled. Offer to connect right here — this
+  # is how a blank machine gets online from the OS ITSELF, no installer-carry needed.
+  # FULLY GUARDED: every step is optional + `|| true`'d; any failure just proceeds to
+  # the memory REPL below. The login shell must never crash-loop (that scar is real).
+  _net_ok() { ping -c1 -W2 1.1.1.1 >/dev/null 2>&1; }
+  if command -v nmtui >/dev/null 2>&1 && ! _net_ok; then
+    printf "\n${BANNER}Let's get you online.${RST} No network yet — I need it to install my brain.\n"
+    printf "Open the wifi picker? [Y/n] "
+    IFS= read -r _ans < /dev/tty 2>/dev/null || _ans=n
+    case "$_ans" in ""|y|Y|yes|YES) nmtui || true ;; *) : ;; esac
+  fi
+  if command -v systemctl >/dev/null 2>&1 && _net_ok; then
+    # Online but no brain yet → pull it now (reuses the first-boot service, correct paths).
+    printf "\n${DIM}Online. Installing the local brain (~4.7GB, one time — a few minutes, hang tight)...${RST}\n"
+    sudo systemctl start agent-os-pull-model >/dev/null 2>&1 || true
+    _ob2="$(resolve_brain brain-ollama)" || true
+    if [ -n "$_ob2" ] && "$_ob2" --check >/dev/null 2>&1; then
+      cd "$HOME"; printf "${DIM}Brain ready — starting it. Talk to it below.${RST}\n\n"; exec "$_ob2"
+    fi
+  fi
+  printf "${DIM}(memory floor — brain not installed yet. 'remember / recall / tree' work now. Get online + reboot to finish.)${RST}\n\n"
   # tiny placeholder so the scaffold is demoable with zero deps. It drives the SAME
   # `mem` memory layer the real brain uses — so the memory model is real even here.
   MEM_BIN="$(dirname "$0")/mem"; [ -x "$MEM_BIN" ] || MEM_BIN="mem"
