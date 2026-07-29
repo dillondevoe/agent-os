@@ -52,6 +52,24 @@ mount -t vfat "${P}1" /mnt/boot
 echo ">>> Installing Agent OS from $FLAKE (fetch + build, a few minutes)..."
 nixos-install --no-root-passwd --flake "$FLAKE"
 
+# Carry the wifi you connected in the installer INTO the installed system, so it has
+# network on first boot and the local model can auto-pull. Without this, a wifi user
+# boots with no network → the brain can't download → stuck at the memory floor.
+# (Ethernet auto-connects via DHCP and needs none of this; this is the wifi path.)
+echo ">>> Carrying your network connection into the install..."
+NM_SRC=/etc/NetworkManager/system-connections
+NM_DST=/mnt/etc/NetworkManager/system-connections
+if compgen -G "$NM_SRC/*" >/dev/null 2>&1; then
+  mkdir -p "$NM_DST"
+  cp -a "$NM_SRC"/* "$NM_DST"/ 2>/dev/null || true
+  chmod 700 "$NM_DST" 2>/dev/null || true
+  chmod 600 "$NM_DST"/* 2>/dev/null || true
+  echo "    ✓ network connection(s) copied — Agent OS will be online on first boot."
+else
+  echo "    (no saved connections found. On wifi? connect with 'nmtui' BEFORE this, then re-run."
+  echo "     On ethernet? you're fine — DHCP auto-connects, no carry needed.)"
+fi
+
 echo "=============================================================="
 echo " ✅ DONE. Run:  reboot"
 echo " Then boot the INTERNAL disk (F12 → Linux Boot Manager / SK hynix,"
