@@ -22,14 +22,17 @@
   # initrd must carry the modules to reach root on real hardware: NVMe controller +
   # the USB/Thunderbolt path used to boot the installer. The VM uses virtio and needs
   # none of these (and drops them with the fileSystems above).
-  boot.initrd.availableKernelModules = [ "nvme" "xhci_pci" "thunderbolt" "usb_storage" "sd_mod" ];
-  # FORCE-load nvme at initrd start (not just available-on-demand): on the real 5440,
-  # udev coldplug did not auto-load nvme in time → "timed out waiting for
-  # /dev/disk/by-label/nixos" → emergency mode (live 2026-07-28; label was correct,
-  # disk just wasn't enumerated). Force-loading guarantees the NVMe root appears.
-  # (The VM-proof could NOT catch this: mkVMOverride gives the VM its own virtio disk,
-  # so the by-label NVMe boot path is never runtime-exercised — only eval'd.)
-  boot.initrd.kernelModules = [ "nvme" ];
+  boot.initrd.availableKernelModules = [ "vmd" "nvme" "xhci_pci" "thunderbolt" "usb_storage" "sd_mod" ];
+  # FORCE-load vmd + nvme at initrd start. On the real 5440 (Intel 13th-gen), the NVMe
+  # sits behind Intel VMD (Volume Management Device) — the STOCK installer's fat initrd
+  # has `vmd` so it sees /dev/nvme0n1 fine, but our slim initrd (nvme-only, fb5b20b) did
+  # NOT → the disk stays hidden behind the VMD controller → "timed out waiting for
+  # /dev/disk/by-label/nixos" + "ahci probe failed -12" → emergency mode (live 2026-07-29).
+  # `vmd` binds the VMD controller so the NVMe underneath enumerates; nvme then attaches.
+  # (Alternative: disable VMD in BIOS → SATA Operation = AHCI. This module keeps VMD on.)
+  # (VM-proof can't catch this: mkVMOverride gives the VM its own virtio disk — the real
+  # by-label/VMD/NVMe boot path is only eval'd, never runtime-exercised.)
+  boot.initrd.kernelModules = [ "vmd" "nvme" ];
 
   # 5440-specific enablement (safe to set blind — standard for 13th-gen Intel laptops):
   hardware.enableRedistributableFirmware = true;   # Intel AX2xx wifi/bt firmware
