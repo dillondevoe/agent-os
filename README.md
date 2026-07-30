@@ -1,4 +1,15 @@
+```text
+   ▄▀█ █▀▀ █▀▀ █▄░█ ▀█▀   █▀█ █▀
+   █▀█ █▄█ ██▄ █░▀█ ░█░   █▄█ ▄█
+        the computer you talk to
+```
+
 # Agent OS
+
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+&nbsp;![Built on NixOS](https://img.shields.io/badge/built%20on-NixOS-5277C3?logo=nixos&logoColor=white)
+&nbsp;![Status: v0.1](https://img.shields.io/badge/status-v0.1%20%C2%B7%20rough%20on%20purpose-e8a33d)
+&nbsp;![Local-first](https://img.shields.io/badge/local--first-no%20telemetry-2ea44f)
 
 **A computer whose shell is an AI, not a desktop.** Boot the machine and you're
 talking to it — a model running *locally*, offline-capable, with no telemetry and
@@ -56,13 +67,17 @@ anyone should trust.
 
 **Works:** bootable sovereign NixOS · autologin → agent shell · local Qwen brain (auto-pulled on
 first boot) · markdown memory (`remember` / `recall` / `tree`) · clean-room egress wall (nftables
-default-DROP outbound, sealable to nixpkgs-only) · no cloud path, no telemetry · graceful
+default-DROP outbound, sealable to nixpkgs-only) · **fail-loud egress seal** — if the wall ever fails
+to load on a sealed box, the machine drops the network and refuses to hand you the agent rather than
+silently running unsealed (fail-*closed*, not fail-silent) · no cloud path, no telemetry · graceful
 memory-REPL floor when no model is present (never crash-loops).
 
 **Not yet:** the capability broker — the safety layer that gates what the agent can *do* — is
-designed and being integrated, but not wired in v0.1, so **treat the agent as trusted-but-unsandboxed
-for now** (`sudo` still defeats the egress seal). Also coming: richer agent tooling, a GUI-guest for
-the rare things that need a screen, polished onboarding. It's a foundation, not a finished product.
+designed and being integrated, but not fully wired yet, so **treat the agent as trusted-but-unsandboxed
+for now**. The last hole here is passwordless `sudo` defeating the egress seal; the sudo-removal posture
+(agent out of `wheel`, root only via a narrow interactive break-glass door) is in review and landing
+imminently. Also coming: the agent's hands (a tool-use loop through the broker), a GUI-guest for the
+rare things that need a screen, polished onboarding. It's a foundation, not a finished product.
 
 Tested on a Dell Latitude 5440 (13th-gen Intel, 32GB, CPU inference). Modern Dells hide the NVMe
 behind Intel VMD — if boot times out looking for the disk, set **BIOS → SATA Operation → AHCI**
