@@ -72,12 +72,16 @@ to load on a sealed box, the machine drops the network and refuses to hand you t
 silently running unsealed (fail-*closed*, not fail-silent) · no cloud path, no telemetry · graceful
 memory-REPL floor when no model is present (never crash-loops).
 
-**Not yet:** the capability broker — the safety layer that gates what the agent can *do* — is
-designed and being integrated, but not fully wired yet, so **treat the agent as trusted-but-unsandboxed
-for now**. The last hole here is passwordless `sudo` defeating the egress seal; the sudo-removal posture
-(agent out of `wheel`, root only via a narrow interactive break-glass door) is in review and landing
-imminently. Also coming: the agent's hands (a tool-use loop through the broker), a GUI-guest for the
-rare things that need a screen, polished onboarding. It's a foundation, not a finished product.
+**No path to root:** the agent runs as an unprivileged user with **no `sudo`, not in `wheel`, no
+password** — so it cannot climb to uid 0 and cannot `sudo` around the egress seal. Root is reachable
+only by a human at a narrow interactive break-glass door (a password login on a separate tty).
+Together with the fail-loud seal above, that's the sovereignty invariant made real, not just declared.
+
+**Not yet:** the capability *broker* — the fine-grained layer that gates each thing the agent can *do*
+through a tool — is designed and being integrated, but not fully wired, so for now the agent is
+no-root-but-otherwise-unsandboxed: treat it as trusted for what it can already reach. Also coming: the
+agent's hands (a tool-use loop through the broker), a GUI-guest for the rare things that need a screen,
+polished onboarding. It's a foundation, not a finished product.
 
 Tested on a Dell Latitude 5440 (13th-gen Intel, 32GB, CPU inference). Modern Dells hide the NVMe
 behind Intel VMD — if boot times out looking for the disk, set **BIOS → SATA Operation → AHCI**
