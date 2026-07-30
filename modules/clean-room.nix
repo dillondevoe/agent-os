@@ -68,9 +68,19 @@ in {
           # on-box IPC: the local brain (127.0.0.1:11434), mem, everything loopback
           oifname "lo" accept
 
-          # nixpkgs-only survivor: nix-daemon substituter fetches + fwupd, both
-          # root-initiated. THE only general off-box channel once sealed.
-          meta skuid 0 accept
+          # nixpkgs-only survivor: nix-daemon substituter fetches + fwupd, both root-initiated.
+          # SCOPED (PR-A, Fix 1 interim) — was a blanket `meta skuid 0 accept`, which let ANY
+          # skuid-0 process egress anywhere and so defeated the seal from ONE compromised root
+          # process (Advisory A / geist v0.2 ruling — the exact class modules/system-set.nix
+          # exists to bound). nix-daemon needs glibc DNS (udp/tcp 53, per the NetworkManager-DNS
+          # note above) + HTTPS (443) to the substituter; fwupd is the same shape. Ports only —
+          # nftables cannot name hostnames.
+          # HONEST RESIDUAL: HTTPS+DNS root egress remains open, so a compromised root process
+          # could still reach an arbitrary :443. PR-K closes this with a dedicated-uid local
+          # HTTPS fetch-proxy enforcing a hostname allowlist (cache.nixos.org + pinned flake
+          # hosts — which nftables cannot express) and drops uid 0 to default-DROP.
+          meta skuid 0 udp dport 53 accept
+          meta skuid 0 tcp dport { 53, 443 } accept
 
           # time sync — advisory B (PR#19/#20 Fable). systemd-timesyncd runs as the STATIC
           # user systemd-timesync (uid ${toString config.ids.uids.systemd-timesync}, pinned

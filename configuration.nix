@@ -54,14 +54,42 @@
   users.users.agent = {
     isNormalUser = true;
     description = "Agent OS";
-    extraGroups = [ "wheel" "networkmanager" ];
+    # NO `wheel` — the agent holds NO path to uid 0 (PR-A, no-agent-root posture): not in
+    # wheel, no sudoers entry, no password. Privileged OUTCOMES are not a root verb the agent
+    # invokes; the broker triggers fixed, narrow root-side systemd units instead (the
+    # `system.set` executor — scaffolded in modules/system-set.nix — lands in PR-J). See the
+    # geist v0.2 ruling #4. The one interactive root door is the tty3 break-glass
+    # (modules/break-glass.nix): password-gated, console-only.
+    extraGroups = [ "networkmanager" ];
     # Agent OS thesis: the login shell IS the agent (see agent-shell.nix).
   };
 
-  # The agent needs to rewrite the machine's own config and rebuild. This is the
-  # NixOS payoff — "change a setting" = the agent edits a .nix file + nixos-rebuild.
+  # nix-command/flakes stay on: the box rebuilds ITSELF from nixpkgs. But the agent no longer
+  # drives that as root — a "change a setting" request goes agent → broker → the `system.set`
+  # root unit (PR-J), which template-renders + `--offline`-evaluates a BOUNDED option delta.
+  # The agent never authors Nix and never holds sudo (no-agent-root posture, PR-A).
   nix.settings.experimental-features = [ "nix-command" "flakes" ];
-  security.sudo.wheelNeedsPassword = false;  # v0.1 single-user demo box; revisit for security-kernel phase
+  # Even a wheel member must present a password to sudo — defense-in-depth BEHIND `agent ∉
+  # wheel`, against a compromised root-adjacent process (the exact class the system.set
+  # executor exists to bound). Was `false` (v0.1 single-user demo box).
+  security.sudo.wheelNeedsPassword = true;
+
+  # Structural enforcement of the no-agent-root posture: eval FAILS (so `nix flake check` and
+  # every `nixos-rebuild` fail) if a future edit silently re-arms an agent path to root. Same
+  # ethos as clean-room.nix's ollama-loopback assertion — an invariant the config cannot
+  # express a violation of, not a promise in a comment.
+  assertions = [
+    {
+      assertion = !(lib.elem "wheel" config.users.users.agent.extraGroups);
+      message = "no-agent-root (PR-A): user `agent` must NOT be in `wheel`. Privileged "
+        + "outcomes go through the broker → system.set root unit (PR-J), never sudo.";
+    }
+    {
+      assertion = config.security.sudo.wheelNeedsPassword;
+      message = "no-agent-root (PR-A): security.sudo.wheelNeedsPassword must be true "
+        + "(defense-in-depth — even a wheel member cannot sudo without a password).";
+    }
+  ];
 
   # --- the toolbox the agent composes from ------------------------------------
   environment.systemPackages = with pkgs; [
