@@ -1,0 +1,10 @@
+# Keeps the SHA-pinned GitHub Actions in .github/workflows/ from rotting.
+# Dependabot bumps each pinned SHA and rewrites its `# vX.Y.Z` comment on the
+# new release, so a supply-chain pin stays current without going stale-immutable.
+# (Fable fold c on the ci-sandbox-gate PR.)
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
