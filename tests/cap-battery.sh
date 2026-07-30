@@ -64,7 +64,38 @@ sys.stdin.buffer.read()
 sys.stdout.write(json.dumps({"ok": True, "content": "leaked", "meta": {}}))
 sys.exit(3)
 PYEOF
-chmod +x "$BIN/cap-echo-good" "$BIN/cap-decline" "$BIN/cap-garbage" "$BIN/cap-nonzero-json"
+# fake impl: valid JSON, valid content, but 'ok' is a truthy NON-bool (integer 1). The strict-type
+# contract must REJECT it (fail closed) — never truthy-coerce it into a forwarded seam object. This
+# is the {"ok":1} coercion hole (Python True==1==1.0); guards the isinstance(ok,bool) enforcement.
+cat > "$BIN/cap-ok-int" <<'PYEOF'
+#!/usr/bin/env python3
+import sys, json
+sys.stdin.buffer.read()
+sys.stdout.write(json.dumps({"ok": 1, "content": "coerced", "meta": {}}))
+PYEOF
+# fake impl: hangs well past the per-impl wall-clock timeout. The dispatcher must kill+reap it and
+# fail closed — its (post-sleep) stdout must NEVER be forwarded, and a hung impl must not wedge the
+# single-flight broker (which does not itself timeout the invoke seam).
+cat > "$BIN/cap-sleep" <<'PYEOF'
+#!/usr/bin/env python3
+import sys, time
+sys.stdin.buffer.read()
+time.sleep(3)
+sys.stdout.write('{"ok": true, "content": "slept", "meta": {}}')
+PYEOF
+chmod +x "$BIN/cap-echo-good" "$BIN/cap-decline" "$BIN/cap-garbage" "$BIN/cap-nonzero-json" \
+         "$BIN/cap-ok-int" "$BIN/cap-sleep"
+
+# Pin every scratch impl's shebang to the ABSOLUTE python interpreter. The nix build sandbox
+# (sandbox = true) has NO /usr/bin/env, so a `#!/usr/bin/env python3` impl execve()s ENOEXEC and
+# the dispatcher reports it as an impl-spawn failure (exit 3) rather than exercising the contract
+# under test — cell 1 alone would false-fail the whole check under a sandboxed `nix flake check`.
+# The copied real impl (cap-capabilities-list) is a raw source path in this runCommand (nix does
+# not patchShebangs it), so it needs the same pin. Harmless where /usr/bin/env exists (standalone).
+PYBIN="$(command -v "$PY")"
+for f in "$BIN"/*; do
+  [ -f "$f" ] && sed -i "1s|^#!.*|#!$PYBIN|" "$f"
+done
 
 # scratch registry: real capabilities.list + fake caps (incl. a path-escaping impl name).
 TESTREG="$SCRATCH/testreg.json"
@@ -75,6 +106,8 @@ cat > "$TESTREG" <<'JSONEOF'
   "echo.decline":  {"tier": "T0", "impl": "cap-decline",       "summary": "decl", "args": {}, "argEnums": {}, "sandbox": {"network": false, "readOnlyPaths": [], "readWritePaths": [], "egressDeny": [], "egressAllow": []}},
   "echo.garbage":  {"tier": "T0", "impl": "cap-garbage",       "summary": "junk", "args": {}, "argEnums": {}, "sandbox": {"network": false, "readOnlyPaths": [], "readWritePaths": [], "egressDeny": [], "egressAllow": []}},
   "echo.crash":    {"tier": "T0", "impl": "cap-nonzero-json",  "summary": "boom", "args": {}, "argEnums": {}, "sandbox": {"network": false, "readOnlyPaths": [], "readWritePaths": [], "egressDeny": [], "egressAllow": []}},
+  "echo.okint":    {"tier": "T0", "impl": "cap-ok-int",        "summary": "okint","args": {}, "argEnums": {}, "sandbox": {"network": false, "readOnlyPaths": [], "readWritePaths": [], "egressDeny": [], "egressAllow": []}},
+  "echo.sleep":    {"tier": "T0", "impl": "cap-sleep",         "summary": "sleep","args": {}, "argEnums": {}, "sandbox": {"network": false, "readOnlyPaths": [], "readWritePaths": [], "egressDeny": [], "egressAllow": []}},
   "escape.cap":    {"tier": "T0", "impl": "../cap-invoke",     "summary": "esc",  "args": {}, "argEnums": {}, "sandbox": {"network": false, "readOnlyPaths": [], "readWritePaths": [], "egressDeny": [], "egressAllow": []}}
 }
 JSONEOF
@@ -158,6 +191,24 @@ disp '{"capability":"echo.garbage","arguments":{}}' "$TESTREG" "$BIN"
 disp '{"capability":"echo.crash","arguments":{}}' "$TESTREG" "$BIN"
 [ "$RC" != 0 ] || fail "13: crashing impl must exit nonzero"
 case "$OUT" in *leaked*) fail "13: crashed impl stdout was forwarded";; esac
+
+# ── 14. strict bool: impl 'ok' is a truthy NON-bool (1) -> fail closed, never truthy-coerced ──
+# {"ok":1} passed the old `ok in (True, False)` gate (Python True==1==1.0) and got bool()-coerced
+# into a forwarded exit-0 seam object — the CF-1c/MCP coercion class. isinstance(ok,bool) denies it:
+# the dispatcher must exit nonzero and forward NONE of the impl's content.
+disp '{"capability":"echo.okint","arguments":{}}' "$TESTREG" "$BIN"
+[ "$RC" != 0 ] || fail "14: non-bool ok (1) must exit nonzero (no truthy coercion)"
+[ "$(jf "$OUT" 'o["content"]')" = "None" ] || fail "14: coerced-ok content must not be forwarded"
+case "$OUT" in *coerced*) fail "14: non-bool-ok impl content leaked into output";; esac
+
+# ── 15. per-impl wall-clock timeout: a hung impl is killed+reaped, its output withheld ────────
+# AGENT_OS_CAP_TIMEOUT_S=1 vs a 3s-sleeping impl: the dispatcher must TimeoutExpired -> fail closed
+# (exit nonzero), never let the child's post-sleep stdout be forwarded. A hung impl cannot wedge
+# the single-flight broker (the broker does not itself timeout the invoke seam).
+OUT="$(printf '%s' '{"capability":"echo.sleep","arguments":{}}' | env AGENT_OS_REGISTRY="$TESTREG" AGENT_OS_CAP_BIN_DIR="$BIN" AGENT_OS_CAP_TIMEOUT_S=1 "$PY" "$INVOKE" 2>/dev/null)"; RC=$?
+[ "$RC" != 0 ] || fail "15: timed-out impl must exit nonzero"
+[ "$(jf "$OUT" 'o["content"]')" = "None" ] || fail "15: timed-out impl must not leak content"
+case "$OUT" in *slept*) fail "15: timed-out impl stdout was forwarded";; esac
 
 echo "cap-battery: all properties hold"
 exit 0

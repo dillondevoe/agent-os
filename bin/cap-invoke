@@ -68,7 +68,7 @@ def _emit(ok, content, meta, code, reason=None):
     the broker ignores our stdout entirely (it keys on the exit code), but we still emit a clean
     {ok:false,content:null,meta:{}} for standalone/battery use and human diagnostics — NEVER any
     fragment of a failed impl's output."""
-    out = {"ok": bool(ok) if ok in (True, False) else False,
+    out = {"ok": ok if isinstance(ok, bool) else False,
            "content": content if (content is None or isinstance(content, str)) else None,
            "meta": meta if isinstance(meta, dict) else {}}
     if reason is not None:
@@ -177,9 +177,14 @@ def main():
     if not isinstance(obj, dict):
         _fail(EXIT_IMPL, "impl output is not a JSON object")
 
-    # Contract-enforce, no coercion: ok must be a real bool, content must be str|null.
+    # Contract-enforce, no coercion: ok must be a real bool, content must be str|null. Use an
+    # EXACT-type test, not `ok in (True, False)` / a truthiness check: in Python `True == 1 == 1.0`
+    # and `False == 0 == 0.0`, so a membership/`==` gate lets an impl emit `{"ok": 1}` (or 0/1.0)
+    # and have it pass, then get bool()-coerced into a forwarded exit-0 seam object. That is the
+    # CF-1c / MCP type-coercion class this project has been bitten by twice — a fail-closed
+    # dispatcher MUST refuse a non-conforming seam object, never launder it via coercion.
     ok = obj.get("ok")
-    if ok not in (True, False):
+    if not isinstance(ok, bool):
         _fail(EXIT_IMPL, "impl 'ok' is not a boolean")
     content = obj.get("content")
     if not (content is None or isinstance(content, str)):
