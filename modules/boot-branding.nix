@@ -88,6 +88,19 @@ let
       bar.SetZ(10);
     }
     Plymouth.SetBootProgressFunction(on_boot_progress);
+
+    # boot messages — fsck progress, "press a key to skip", stage-1 notices.
+    # Without a display-message handler these are SILENTLY DROPPED under the splash,
+    # so an operator can power-cycle a mid-repair filesystem. Render below the dots.
+    msg = Sprite();
+    fun on_message(text) {
+      mimg = Image.Text(text, dr, dg, db);
+      msg.SetImage(mimg);
+      msg.SetX(cx - mimg.GetWidth() / 2);
+      msg.SetY(cy + 72);
+      msg.SetZ(10);
+    }
+    Plymouth.SetDisplayMessageFunction(on_message);
   '';
 
   agentOsTheme = pkgs.runCommand "agent-os-plymouth-theme" { } ''
@@ -99,13 +112,23 @@ let
 in {
   # #1 — quiet + branded splash
   boot.kernelParams    = [ "quiet" "splash" "rd.udev.log_level=3" ];
-  boot.consoleLogLevel = 0;
+  # consoleLogLevel 3 (KERN_ERR and worse still print), NOT 0: level 0 would hide
+  # the KERN_ERR/KERN_CRIT lines that diagnosed the 2026-07-29 ahci/VMD boot brick.
+  # 3 keeps errors visible while staying quiet for warning/info/debug spam.
+  # mkDefault (not plain): on the real machine nothing else defines this, so 3 applies;
+  # inside a NixOS VM test the driver's test-instrumentation pins a verbose 7 that MUST
+  # win — a plain 3 collides with its plain 7 and the seal-faildown test (which now
+  # includes this module via baseModules) fails to eval. Same yield-to-an-override
+  # discipline as boot.loader.timeout below.
+  boot.consoleLogLevel = lib.mkDefault 3;
   boot.initrd.verbose  = false;
   boot.plymouth.enable = true;
   boot.plymouth.themePackages = [ agentOsTheme ];
   boot.plymouth.theme  = "agent-os";
 
   # #2 — don't linger on the "NixOS" systemd-boot menu. 1s (not 0) keeps the menu
-  # reachable for rescue; 0 hides it entirely (hold a key to reach it).
-  boot.loader.timeout = lib.mkForce 1;
+  # reachable for rescue; 0 hides it entirely (hold a key to reach it). mkDefault
+  # (not mkForce): sets 1 today but YIELDS to a future explicit rescue override
+  # instead of silently stomping it.
+  boot.loader.timeout = lib.mkDefault 1;
 }
