@@ -1,0 +1,206 @@
+#!/usr/bin/env python3
+# cap-invoke — Phase 2 · Step 7 capability-seam DISPATCHER (the AGENT_OS_INVOKE_SEAM program).
+#
+# Security surface (the capability-injection contract): branch -> PR -> Fable -> merge. Never
+# direct-push. This is the program the broker (Step 5) reaches EVERY capability impl through: the
+# broker names it once via AGENT_OS_INVOKE_SEAM and hands it a request on stdin. It is a THIN,
+# fail-closed RESOLVER — deliberately incapable of anything a capability impl could subvert:
+#
+#   stdin  : {"capability": <str>, "arguments": <object>}          (broker-canonical JSON)
+#   stdout : {"ok": <bool>, "content": <str|null>, "meta": {"key": <str>}}   (the seam contract)
+#
+# Four steps, and nothing else:
+#   1. Parse the broker request. Any malformed shape denies (fail-closed).
+#   2. Resolve capability -> impl NAME from the SAME materialized registry the broker routes on
+#      (AGENT_OS_REGISTRY). An unknown capability, an unreadable registry, or a registry entry
+#      with no valid impl name denies. The impl name is charset-confined (no '/','.'/'..') so a
+#      poisoned registry field can never escape the impl dir.
+#   3. Resolve impl name -> impl BINARY strictly under AGENT_OS_CAP_BIN_DIR — NEVER via PATH (a
+#      PATH lookup is an injection channel). Run it with the broker request on its stdin, under a
+#      MINIMAL env (PATH for the interpreter + AGENT_OS_REGISTRY only; no inherited secrets),
+#      capturing stdout only (its stderr is discarded — it could echo attacker bytes). A per-impl
+#      wall-clock timeout (AGENT_OS_CAP_TIMEOUT_S, default 30s) kills+reaps a hung impl so it can
+#      never wedge the single-flight broker (the broker does not itself timeout the invoke seam).
+#   4. NORMALIZE the impl's stdout to EXACTLY {ok, content, meta:{key}} — stripping any
+#      impl-reported `origin` or extra meta. This is defense-in-depth OVER the broker, which
+#      already ignores them: origin is BROKER policy (§4.5a), never impl-reported; meta.key is
+#      identity only, consulted by the broker for taint recall/stamp.
+#
+# EXIT-CODE CONTRACT (load-bearing — mirrors broker `_run_seam`, bin/broker):
+#   * exit 0  iff a capability impl RAN (exit 0) and produced a VALID seam-contract object —
+#     EVEN when its ok=false. An impl's error body carries attacker-influenced bytes and MUST
+#     reach the broker's return path so it flows through the taint fence (§4.9: success AND error
+#     bodies both carry attacker bytes). A nonzero exit here would make the broker discard that
+#     content as an "invoke-failed" INFRASTRUCTURE error and NEVER taint it — a laundering hole.
+#   * exit non-zero (fail-closed, content withheld) on any dispatch-MECHANISM failure where NO
+#     blessed impl bytes exist to launder: bad request (2), unreadable registry / unknown cap /
+#     no-or-invalid impl decl / cap-bin-dir unset / impl binary absent (2), impl spawn error /
+#     impl exit non-zero / impl output absent, unparseable, or non-conforming (3). The broker maps
+#     any nonzero seam exit to "invoke-failed" and withholds — correct, because on these paths
+#     there is genuinely no blessed attacker content in play (a crashed impl's partial stdout is
+#     NEVER forwarded).
+#
+# This dispatcher applies NO OS confinement itself. Per-capability sandboxing (systemd
+# ReadWritePaths / PrivateNetwork / IPAddressDeny, DERIVED from each cap's Step-1 registry
+# `sandbox` decl) is layered at the NixOS-module level and lands with the first capability that
+# needs confinement (file.read/write, net.fetch). capabilities.list — the only impl wired in this
+# PR — reads only the world-readable registry and writes nothing, so it needs none. The seam is
+# NOT yet exported by the broker module in production (broker.nix leaves AGENT_OS_INVOKE_SEAM
+# unset -> every tools/call still fails closed "impl-not-wired"); this PR adds the dispatcher +
+# first impl + battery, exercised by the flake check. Going live is a later, separately reviewed
+# step (and MUST also give capabilities.list a TRUSTED ORIGIN_BY_CAP mapping — it is unmapped
+# today and would otherwise spuriously taint the session on every list).
+
+import json
+import os
+import subprocess
+import sys
+
+# Exit codes (documented above). The broker collapses every nonzero to "seam-exit-N"; the split
+# is for humans + the battery.
+EXIT_OK = 0
+EXIT_REQUEST = 2   # bad request / registry / resolution — no impl was run
+EXIT_IMPL = 3      # impl ran-or-tried but produced no blessed seam object
+
+
+def _emit(ok, content, meta, code, reason=None):
+    """Write the controlled seam object to stdout and exit `code`. On failure paths (code!=0)
+    the broker ignores our stdout entirely (it keys on the exit code), but we still emit a clean
+    {ok:false,content:null,meta:{}} for standalone/battery use and human diagnostics — NEVER any
+    fragment of a failed impl's output."""
+    out = {"ok": ok if isinstance(ok, bool) else False,
+           "content": content if (content is None or isinstance(content, str)) else None,
+           "meta": meta if isinstance(meta, dict) else {}}
+    if reason is not None:
+        sys.stderr.write("cap-invoke: %s\n" % reason)
+    sys.stdout.write(json.dumps(out, sort_keys=True, separators=(",", ":"), ensure_ascii=True))
+    sys.stdout.flush()
+    sys.exit(code)
+
+
+def _fail(code, reason):
+    _emit(False, None, {}, code, reason)
+
+
+def _load_registry():
+    """Read the materialized registry (same path + fail-closed discipline as the broker). A
+    registry that will not read or is not an object -> deny (a missing registry never fails OPEN
+    into 'allow')."""
+    path = os.environ.get("AGENT_OS_REGISTRY", "/etc/agent-os/registry/registry.json")
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            reg = json.load(f)
+    except (OSError, ValueError) as e:
+        _fail(EXIT_REQUEST, "registry unreadable (%s) — deny" % e)
+    if not isinstance(reg, dict):
+        _fail(EXIT_REQUEST, "registry is not an object — deny")
+    return reg, path
+
+
+def _impl_name_ok(name):
+    """A registry impl name must be a bare filename so `os.path.join(bin_dir, name)` cannot escape
+    the impl dir. Reject empty, '.', '..', anything with a slash, or non-portable chars — a
+    poisoned registry field is a confinement bypass, not a review-time note."""
+    if not isinstance(name, str) or name in ("", ".", ".."):
+        return False
+    if "/" in name or "\x00" in name:
+        return False
+    return all(c.isalnum() or c in "._-" for c in name)
+
+
+def main():
+    raw = sys.stdin.buffer.read()
+    try:
+        req = json.loads(raw.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError) as e:
+        _fail(EXIT_REQUEST, "request is not valid JSON (%s)" % e)
+    if not isinstance(req, dict):
+        _fail(EXIT_REQUEST, "request is not a JSON object")
+
+    cap_name = req.get("capability")
+    if not (isinstance(cap_name, str) and cap_name):
+        _fail(EXIT_REQUEST, "request has no 'capability' string")
+    arguments = req.get("arguments")
+    # The broker guarantees a dict here (bin/broker denies arguments-not-object up front); a
+    # non-dict is therefore an internal contract violation, not model input -> fail-closed.
+    if not isinstance(arguments, dict):
+        _fail(EXIT_REQUEST, "'arguments' is not a JSON object")
+
+    reg, reg_path = _load_registry()
+    cap = reg.get(cap_name)
+    if not isinstance(cap, dict):
+        _fail(EXIT_REQUEST, "unknown-capability: %s" % cap_name)
+    impl_name = cap.get("impl")
+    if not _impl_name_ok(impl_name):
+        _fail(EXIT_REQUEST, "capability %s has no valid impl name" % cap_name)
+
+    bin_dir = os.environ.get("AGENT_OS_CAP_BIN_DIR")
+    if not (isinstance(bin_dir, str) and bin_dir):
+        _fail(EXIT_REQUEST, "AGENT_OS_CAP_BIN_DIR unset — cannot resolve impl (fail-closed)")
+    impl_path = os.path.join(bin_dir, impl_name)
+    if not (os.path.isfile(impl_path) and os.access(impl_path, os.X_OK)):
+        _fail(EXIT_REQUEST, "impl binary not found/executable: %s" % impl_path)
+
+    # Minimal, controlled env for the impl: PATH so the interpreter resolves, and the registry
+    # path (capabilities.list needs it; other impls ignore it). No other inherited variables.
+    impl_env = {"PATH": os.environ.get("PATH", "")}
+    if reg_path:
+        impl_env["AGENT_OS_REGISTRY"] = reg_path
+
+    try:
+        timeout_s = int(os.environ.get("AGENT_OS_CAP_TIMEOUT_S", "30"))
+        if timeout_s <= 0:
+            timeout_s = 30
+    except (ValueError, TypeError):
+        timeout_s = 30
+
+    # Pass the FULL broker request on the impl's stdin (canonical) — an impl may consult either
+    # field. No shell; argv is [impl_path] only, so the impl name/args can inject nothing.
+    payload = json.dumps({"capability": cap_name, "arguments": arguments},
+                         sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
+    try:
+        proc = subprocess.run([impl_path], input=payload, stdout=subprocess.PIPE,
+                              stderr=subprocess.DEVNULL, env=impl_env, timeout=timeout_s)
+    except subprocess.TimeoutExpired:
+        _fail(EXIT_IMPL, "impl timed out after %ds (killed) — fail-closed" % timeout_s)
+    except OSError as e:
+        _fail(EXIT_IMPL, "impl could not be executed (%s)" % e)
+
+    # BRIGHT LINE: a nonzero impl exit means the impl crashed; its stdout is NOT a blessed seam
+    # object and is never forwarded (no laundering). Only impl exit 0 + a conforming object flows.
+    if proc.returncode != 0:
+        _fail(EXIT_IMPL, "impl exited %d — output withheld" % proc.returncode)
+    try:
+        obj = json.loads(proc.stdout.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError) as e:
+        _fail(EXIT_IMPL, "impl output is not valid JSON (%s)" % e)
+    if not isinstance(obj, dict):
+        _fail(EXIT_IMPL, "impl output is not a JSON object")
+
+    # Contract-enforce, no coercion: ok must be a real bool, content must be str|null. Use an
+    # EXACT-type test, not `ok in (True, False)` / a truthiness check: in Python `True == 1 == 1.0`
+    # and `False == 0 == 0.0`, so a membership/`==` gate lets an impl emit `{"ok": 1}` (or 0/1.0)
+    # and have it pass, then get bool()-coerced into a forwarded exit-0 seam object. That is the
+    # CF-1c / MCP type-coercion class this project has been bitten by twice — a fail-closed
+    # dispatcher MUST refuse a non-conforming seam object, never launder it via coercion.
+    ok = obj.get("ok")
+    if not isinstance(ok, bool):
+        _fail(EXIT_IMPL, "impl 'ok' is not a boolean")
+    content = obj.get("content")
+    if not (content is None or isinstance(content, str)):
+        _fail(EXIT_IMPL, "impl 'content' is not a string or null")
+
+    # NORMALIZE meta down to identity only. Any impl-reported origin / extra meta is dropped here
+    # (the broker ignores them too — belt and suspenders on the trust boundary).
+    meta_out = {}
+    meta_in = obj.get("meta")
+    if isinstance(meta_in, dict):
+        key = meta_in.get("key")
+        if isinstance(key, str) and key:
+            meta_out["key"] = key
+
+    _emit(ok, content, meta_out, EXIT_OK)
+
+
+if __name__ == "__main__":
+    main()
