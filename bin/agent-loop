@@ -56,7 +56,7 @@ MAX_TOOL_HOPS = 8     # max tool-executing model turns per user message (halts a
 MAX_DENIALS   = 3     # dispatch/broker denials per user turn before we stop tool-calling (Geist §3)
 MAX_RESP_BYTES = 4_000_000   # bound a hostile/huge /api/chat body so one turn can't balloon memory
 
-_CTRL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f\x9b]")   # C0/C1 controls incl. ESC (\x1b); keeps \t and \n
+_CTRL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f\x80-\x9f]")  # C0 + DEL + all C1 (ESC \x1b, CSI \x9b, DCS \x90, OSC \x9d); keeps \t and \n
 def _clean(s):
     """Strip terminal control/escape bytes from model- or server-controlled text before
     it reaches the login tty (ESC/CSI/OSC injection defense). Keeps \\t and \\n."""

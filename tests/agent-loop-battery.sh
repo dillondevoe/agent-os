@@ -123,13 +123,17 @@ has "$OUT" "stopping" "final content should still print"
 pass
 
 # --- 6 : model control bytes scrubbed before the tty ---------------------------------
-# The model injects a red-ESC color (ESC[31m), a BEL (0x07), and a NUL (0x00) -- none of
-# which the loop itself ever emits (its own colors are 38;5;{79,179,244}m + 0m), so their
-# absence in the output is unambiguous. Built via python so the shell source stays plain
-# ASCII (no raw control bytes) and json.dump writes correctly-escaped JSON.
+# The model injects a red-ESC color (ESC[31m), a BEL (0x07), a NUL (0x00), and two 8-bit
+# C1 controls -- DCS (U+0090) and OSC (U+009D) -- none of which the loop itself ever emits
+# (its own colors are 38;5;{79,179,244}m + 0m), so their absence in the output is
+# unambiguous. The C1 pair exercises the widened _CTRL class (C0 + DEL + all C1); a Python
+# str carries U+0090/U+009D as codepoints (not UTF-8 continuation bytes), and if they leaked
+# stdout would encode them as \xc2\x90 / \xc2\x9d -- the \x90/\x9d asserts below catch both
+# bare and UTF-8 forms. Built via python so the shell source stays plain ASCII (no raw
+# control bytes) and json.dump writes correctly-escaped JSON.
 "$PY" - "$WORK/s6.json" <<'PYEOF'
 import json, sys
-content = "start\x1b[31mRED\x07\x00end"
+content = "start\x1b[31mRED\x07\x00\x90\x9dend"
 json.dump([{"role": "assistant", "content": content}], open(sys.argv[1], "w"))
 PYEOF
 start_stub "$WORK/s6.json" /dev/null
@@ -139,6 +143,7 @@ import sys
 d = open(sys.argv[1], "rb").read()
 assert b"\x1b[31m" not in d, "model ESC color leaked to the tty"
 assert b"\x07" not in d and b"\x00" not in d, "BEL/NUL leaked to the tty"
+assert b"\x90" not in d and b"\x9d" not in d, "C1 DCS/OSC leaked to the tty (widened _CTRL class)"
 assert b"RED" in d and b"start[31mREDend" in d, "scrub removed too much (payload/de-ESC'd literal gone)"
 PYEOF
 pass
