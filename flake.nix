@@ -230,9 +230,18 @@
         # comment above). We gate BOTH machines: -sealed (the shipped seal) AND -unsealed (whose
         # provisioning accepts differ, so its ruleset is a distinct nft parse). A re-simplification
         # of any egress rule now fails HERE, in CI — not silently at `nixos-rebuild` on the Dell.
-        # NB: guarded by checkRuleset (default true, asserted on above via both configs); if that
-        # is ever set false the checkPhase goes empty and these would false-PASS — flag at review.
+        # GUARD-OF-THE-GUARD (Fable APPROVE_WITH_CAVEAT, #28): both checks force the module's
+        # rulesScript drv to build, but that drv only actually runs `nft --check` when the module's
+        # `checkRuleset` is true (nixpkgs nftables.nix — checkPhase is `lib.optionalString
+        # cfg.checkRuleset`). If anyone ever set `networking.nftables.checkRuleset = false` the
+        # checkPhase would go EMPTY and both of these would go green-while-unvalidated — the single
+        # way this whole PR can be silently defeated. Default is true and there's no override in-repo,
+        # but for a guard whose entire job is "the wall can't ship red," a comment is weaker than it
+        # deserves — so each check eval-time ASSERTS its config's checkRuleset before building.
         nft-ruleset-sealed =
+          assert nixpkgs.lib.assertMsg
+            self.nixosConfigurations.agentos-sealed.config.networking.nftables.checkRuleset
+            "nft-ruleset-sealed would false-PASS: networking.nftables.checkRuleset is false";
           nixpkgs.legacyPackages.${system}.runCommand "nft-ruleset-sealed-check" { } ''
             echo "agentos-sealed nftables ruleset passed nft --check via: ${
               nixpkgs.lib.concatStringsSep " "
@@ -242,6 +251,9 @@
           '';
 
         nft-ruleset-unsealed =
+          assert nixpkgs.lib.assertMsg
+            self.nixosConfigurations.agentos.config.networking.nftables.checkRuleset
+            "nft-ruleset-unsealed would false-PASS: networking.nftables.checkRuleset is false";
           nixpkgs.legacyPackages.${system}.runCommand "nft-ruleset-unsealed-check" { } ''
             echo "agentos (unsealed) nftables ruleset passed nft --check via: ${
               nixpkgs.lib.concatStringsSep " "
