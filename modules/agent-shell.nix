@@ -12,12 +12,20 @@ let
   # reachable. Same python3-shebang wrapping as mem so it needs no runtime deps.
   brainOllamaBin = pkgs.writeScriptBin "brain-ollama"
     ("#!${pkgs.python3}/bin/python3\n" + builtins.readFile ../bin/brain-ollama);
+  # The tool-calling brain (v0.2) — a stdlib Ollama function-calling loop. agent-shell
+  # PREFERS this over brain-ollama as the local brain because it can ACT (emit tool-calls
+  # the loop dispatches), not only chat. Same python3-shebang wrapping so it needs no
+  # runtime deps. In v0.2 A1 its only wired tool is an inert echo; A2 routes real caps
+  # through the mcp|broker wall. It sits on the UNTRUSTED side and makes no security decisions.
+  agentLoopBin = pkgs.writeScriptBin "agent-loop"
+    ("#!${pkgs.python3}/bin/python3\n" + builtins.readFile ../bin/agent-loop);
   # The launcher lives in the repo so it's easy to iterate; installed to /run/current-system.
-  # It calls `mem` and `brain-ollama` by bare name (PATH), so both must be installed alongside it.
+  # It calls `mem`, `agent-loop`, and `brain-ollama` by bare name (PATH), so all must be
+  # installed alongside it.
   agentShell = pkgs.writeShellScriptBin "agent-shell"
     (builtins.readFile ../bin/agent-shell);
 in {
-  environment.systemPackages = [ agentShell memBin brainOllamaBin ];
+  environment.systemPackages = [ agentShell memBin brainOllamaBin agentLoopBin ];
 
   # Autologin the human on tty1...
   services.getty.autologinUser = "agent";

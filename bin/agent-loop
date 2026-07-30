@@ -1,0 +1,232 @@
+#!/usr/bin/env python3
+"""agent-loop — the tool-calling BRAIN for Agent OS (v0.2 A1: prove the loop).
+
+Wraps the local Qwen in a function-calling loop using Ollama's NATIVE tools API
+(`/api/chat` accepts a `tools` array and returns structured `message.tool_calls`),
+so we never regex ReAct prose out of model text — Ollama does the parse. agent-shell
+execs whatever `$BRAIN` names; point BRAIN here (or let agent-shell prefer it) to
+get a model that can *ask for actions*, not only talk.
+
+WHAT A1 IS (deliberately tiny — Geist v0.2 spec §1/§3, Rabbot A1 tee-up):
+  This proves the LOOP MECHANICS ONLY. The single wired tool is `echo`, an INERT
+  diagnostic that returns text verbatim and touches nothing. There is NO real
+  capability and NO broker wiring here — `dispatch()` is the seam where A2 will
+  route real tool-calls through `mcp parse | broker run` (THE WALL). Until then the
+  model can call `echo`, watch the result feed back, and continue — enough to prove
+  the round-trip end to end.
+
+WHERE THIS SITS (the load-bearing design fact — Geist §1):
+  agent-loop lives on the UNTRUSTED side of the wall. It translates and shuttles
+  bytes; it makes ZERO security decisions and reaches NOTHING outside this process
+  (no filesystem, no network beyond the local Ollama it wraps, no shell, no exec).
+  A bug here can produce a garbage tool request — which, once A2 lands, dies
+  fail-closed at mcp/broker — but can never widen authority. `dispatch()` below is
+  the ONLY place a tool name turns into an effect, and in A1 the only effect is
+  echoing a string.
+
+RELIABILITY (Geist §3): 7B-class function-calling is mediocre under a big tool
+  surface, so the surface is one tool. Malformed/hallucinated/denied calls are
+  DATA, not errors: each comes back to the model as a structured tool result and it
+  may retry. A hard cap (3 denials per user turn) stops an infinite deny-loop from
+  burning the session — the loop then takes one final turn with tools withheld so
+  the model explains, in plain words, what it wanted and why it couldn't.
+
+stdlib only (urllib) so it runs anywhere Python does, incl. the built VM.
+"""
+import json, os, re, sys, urllib.request, urllib.error, http.client
+
+HOST  = os.environ.get("OLLAMA_HOST", "http://127.0.0.1:11434").rstrip("/")
+if not HOST.startswith(("http://", "https://")):     # env-sourced, not model — but harden as knobs multiply
+    sys.stderr.write(f"[agent-loop] refusing non-http(s) OLLAMA_HOST: {HOST!r}\n"); sys.exit(2)
+MODEL = os.environ.get("OLLAMA_MODEL", "qwen2.5:7b")
+SYSTEM = os.environ.get(
+    "BRAIN_SYSTEM",
+    "You are the resident agent of this computer (Agent OS). You run locally on the "
+    "user's own hardware — no cloud. Be concise, direct, and honest about what you can "
+    "and cannot do. You have exactly ONE tool: `echo`, an inert diagnostic that returns "
+    "text verbatim and changes nothing on the machine — it exists only to demonstrate "
+    "that tool-calling works. Real capabilities (reading files, memory, changing "
+    "settings) are not wired yet. If you need something beyond `echo`, say so plainly "
+    "rather than inventing a tool that does not exist.")
+
+C_YOU = "\033[38;5;179m"; C_AI = "\033[38;5;79m"; C_DIM = "\033[38;5;244m"; C0 = "\033[0m"
+
+MAX_TURNS     = 24    # bound history re-sent each turn over a long session
+MAX_TOOL_HOPS = 8     # max tool-executing model turns per user message (halts a happy-path echo spin)
+MAX_DENIALS   = 3     # dispatch/broker denials per user turn before we stop tool-calling (Geist §3)
+MAX_RESP_BYTES = 4_000_000   # bound a hostile/huge /api/chat body so one turn can't balloon memory
+
+_CTRL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f\x9b]")   # C0/C1 controls incl. ESC (\x1b); keeps \t and \n
+def _clean(s):
+    """Strip terminal control/escape bytes from model- or server-controlled text before
+    it reaches the login tty (ESC/CSI/OSC injection defense). Keeps \\t and \\n."""
+    return _CTRL.sub("", s if isinstance(s, str) else str(s))
+
+# ── the tool surface (A1: exactly one, inert) ────────────────────────────────────────
+# Ollama function-tool schema. The registry is the eventual single source of truth for
+# this list (Geist §3 derives `tools` from capabilities.list); A1 hardcodes the one inert
+# tool because no registry/broker path is wired yet. A2 replaces ECHO_TOOL with the
+# registry-derived set and points `dispatch()` at the broker.
+ECHO_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "echo",
+        "description": ("Echo a message back verbatim. INERT diagnostic: performs no "
+                        "action, touches nothing on the system, only returns the text "
+                        "you pass. Use it to confirm tool-calling works."),
+        "parameters": {
+            "type": "object",
+            "properties": {"text": {"type": "string", "description": "the text to echo back"}},
+            "required": ["text"],
+        },
+    },
+}
+TOOLS = [ECHO_TOOL]
+
+def dispatch(name, arguments):
+    """Route a model tool-call to its impl → return (ok: bool, result: dict).
+
+    THE A2 SEAM. In A1 the only wired tool is the inert `echo`; every other name is a
+    structured deny with the SAME shape a broker tier-deny will take in A2, so the
+    model-facing contract (a deny is data — feed it back, count it toward the cap) is
+    proven now against the echo stand-in and does not change when A2 routes real caps
+    through `mcp parse | broker run`. This function makes ZERO security decisions and
+    reaches NOTHING outside this process (no fs, no net, no exec, no shell)."""
+    if name == "echo":
+        text = arguments.get("text", "")
+        if not isinstance(text, str):
+            return False, {"error": "echo: 'text' must be a string"}
+        # content_type:"data" is preserved end to end (Geist §3): the fence that lets an
+        # honest model tell tool-returned DATA from instructions. A2's broker emits the
+        # same envelope; keep the shape identical now so nothing downstream flattens it.
+        return True, {"content_type": "data", "content": _clean(text)}
+    return False, {"error": f"unknown tool: {name!r} (v0.2 A1 wires only: echo)"}
+
+def _post(path, payload):
+    req = urllib.request.Request(
+        HOST + path, data=json.dumps(payload).encode(),
+        headers={"Content-Type": "application/json"}, method="POST")
+    return urllib.request.urlopen(req, timeout=120)
+
+def check():
+    """Preflight for agent-shell: exit 0 iff Ollama is reachable AND advertises at least
+    one model, else non-zero — same contract as brain-ollama --check. Lets the login shell
+    decide whether to hand off here or fall back (brain-ollama floor, then mem REPL) so we
+    never exec into a brain that cannot talk and crash-loop getty's autologin. Short timeout
+    so a down server barely delays login."""
+    try:
+        resp = urllib.request.urlopen(HOST + "/api/tags", timeout=4)
+        data = json.loads(resp.read(1_000_000))   # bound: a hostile /api/tags must not balloon login preflight
+    except Exception:
+        return 1
+    return 0 if data.get("models") else 1
+
+def chat_once(history, tools):
+    """One /api/chat turn, stream=False (we need the structured tool_calls in one piece).
+    Returns the `message` object, or None on any transport/decode failure (caller degrades
+    gracefully — this brain is exec'd AS the login program and must never tear down)."""
+    payload = {"model": MODEL, "messages": history, "stream": False}
+    if tools:
+        payload["tools"] = tools
+    try:
+        resp = _post("/api/chat", payload)
+        data = json.loads(resp.read(MAX_RESP_BYTES))
+    except urllib.error.URLError as e:
+        sys.stderr.write(_clean(f"\n[agent-loop] cannot reach Ollama at {HOST}: {e}") + "\n")
+        return None
+    except (OSError, http.client.HTTPException, json.JSONDecodeError, ValueError) as e:
+        sys.stderr.write(_clean(f"\n[agent-loop] bad response from Ollama: {e}") + "\n")
+        return None
+    return data.get("message", {}) or {}
+
+def _call_name_args(call):
+    """Normalize one Ollama tool_call → (name, args_dict). Ollama usually hands args back as
+    an object, but tolerate the string form some model paths emit; never trust the shape."""
+    fn = call.get("function", {}) or {}
+    name = _clean(fn.get("name", ""))
+    args = fn.get("arguments", {})
+    if isinstance(args, str):
+        try: args = json.loads(args)
+        except Exception: args = {}
+    if not isinstance(args, dict):
+        args = {}
+    return name, args
+
+def _emit(text):
+    if text:
+        sys.stdout.write(f"{C_AI}{text}{C0}\n"); sys.stdout.flush()
+
+def _emit_trace(name, ok):
+    # one dim line per tool hop so the human SEES the hand move (and any deny)
+    sys.stdout.write(f"{C_DIM}  ↳ tool: {_clean(name) or '?'} → {'ok' if ok else 'denied'}{C0}\n")
+    sys.stdout.flush()
+
+def converse(history):
+    """Drive tool-calling turns for one user message until the model gives a final text
+    answer (no tool_calls), or the deny/hop budget is spent. Appends every turn to `history`
+    (so the model keeps context). Returns the final assistant text, or None on transport loss."""
+    denials = 0
+    for _hop in range(MAX_TOOL_HOPS):
+        msg = chat_once(history, TOOLS)
+        if msg is None:
+            return None
+        calls = msg.get("tool_calls") or []
+        text  = _clean(msg.get("content", "") or "")
+        # record the assistant turn WITH its tool_calls so the following tool messages have context
+        history.append({"role": "assistant", "content": text, "tool_calls": calls}
+                       if calls else {"role": "assistant", "content": text})
+        if not calls:
+            _emit(text)
+            return text                       # final answer — done
+        if text:
+            _emit(text)                       # models often narrate before/with a call
+        for call in calls:
+            name, args = _call_name_args(call)
+            ok, result = dispatch(name, args)
+            if not ok:
+                denials += 1
+            # feed the result back as a role:"tool" message; keep the data envelope intact
+            history.append({"role": "tool", "tool_name": name, "content": json.dumps(result)})
+            _emit_trace(name, ok)
+        if denials >= MAX_DENIALS:
+            break                             # stop tool-calling (Geist §3) — explain below
+    # Budget spent (deny cap or hop cap). Take ONE final turn with tools WITHHELD so the model
+    # must answer in prose — and treat it as terminal: any tool_calls it still emits are IGNORED,
+    # never dispatched. That is the structural "the loop stops calling tools" guarantee.
+    final = chat_once(history, None)
+    if final is None:
+        _emit(f"{C_DIM}[agent-loop] stopped after {denials} tool denial(s); couldn't reach the "
+              f"model to explain. Try rephrasing, or ask me without needing a tool.{C0}")
+        return None
+    text = _clean(final.get("content", "") or "")
+    history.append({"role": "assistant", "content": text})
+    _emit(text)
+    return text
+
+def main():
+    sys.stdout.write(f"{C_DIM}brain: {MODEL} @ {HOST} (local — no cloud) · tools: echo (inert){C0}\n")
+    history = [{"role": "system", "content": SYSTEM}]
+    while True:
+        sys.stdout.write(f"{C_YOU}you ›{C0} "); sys.stdout.flush()
+        line = sys.stdin.readline()
+        if not line:                # EOF (piped input exhausted / Ctrl-D)
+            sys.stdout.write("\n"); break
+        msg = line.strip()
+        if msg == "":               # blank line: reprompt, don't send an empty turn
+            continue
+        if msg in ("exit", "quit", ":q"):
+            break
+        history.append({"role": "user", "content": msg})
+        reply = converse(history)
+        if reply is None:           # transport lost — don't spin
+            break
+        if len(history) > 1 + 4 * MAX_TURNS:   # bound history (tool turns inflate it faster than chat)
+            history[:] = history[:1] + history[-4 * MAX_TURNS:]
+
+if __name__ == "__main__":
+    if "--check" in sys.argv[1:]:
+        sys.exit(check())
+    try:
+        main()
+    except KeyboardInterrupt:
+        sys.stdout.write("\n")

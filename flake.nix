@@ -151,6 +151,24 @@
               ${./bin/audit} ${registryJson} "$work"
             touch $out
           '';
+
+        # Phase 4 (v0.2 A1) — the tool-calling loop's property battery. Drives the REAL
+        # bin/agent-loop against a scripted fake Ollama (tests/ollama-stub.py) over the
+        # sandbox loopback and proves the loop MECHANICS: a plain answer skips tools; a valid
+        # echo call round-trips (dispatch -> result fed back as a role:"tool" message that
+        # preserves the content_type:"data" envelope -> final answer); three denials in one
+        # user turn stop tool-calling and the final turn is taken with NO tools offered;
+        # tool_calls emitted on that withheld final turn are NEVER dispatched; and model-
+        # supplied terminal control bytes are scrubbed before the tty. agent-loop lives on the
+        # UNTRUSTED side and makes zero security decisions, so this is loop correctness, not a
+        # wall test. A regression fails `nix flake check`.
+        agent-loop =
+          nixpkgs.legacyPackages.${system}.runCommand "agent-loop-check"
+            { nativeBuildInputs = [ nixpkgs.legacyPackages.${system}.python3 ]; } ''
+              work="$(mktemp -d)"
+              bash ${./tests/agent-loop-battery.sh} ${./bin/agent-loop} ${./tests/ollama-stub.py} "$work"
+              touch $out
+            '';
       };
     };
 }
