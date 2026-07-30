@@ -1,0 +1,47 @@
+# Sandboxed flake check — enforces the invariant that agent-os's property batteries
+# pass under a REAL build sandbox, not just a developer's permissive local nix.
+#
+# WHY: a non-sandboxed `nix flake check` can pass while a *sandboxed* build FAILS — the
+# clean-room has no /usr/bin/env, so patchShebangs becomes load-bearing (the cap-battery
+# ENOEXEC scar; the Step-7 dispatcher PR did not, as first pushed, actually pass sandbox=true).
+# This gate makes every PR prove the sandboxed green that a laptop's non-sandbox check can hide.
+#
+# SCOPE: builds `checks.x86_64-linux` — the fast property batteries (seconds). It does NOT
+# build packages.vm / vm-sealed / test-seal-faildown; those are minutes-long nixosTests kept
+# out of `checks` on purpose. A VM-boot CI job, if ever wanted, is a separate slow lane.
+
+name: flake-check (sandboxed)
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# One in-flight run per ref; a new push cancels the stale one.
+concurrency:
+  group: flake-check-${{ github.ref }}
+  cancel-in-progress: true
+
+# Least privilege: the check reads code and writes nothing.
+permissions:
+  contents: read
+
+jobs:
+  flake-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4   # TODO(pin): SHA-pin before merge — see PR body Q1
+
+      - name: Install Nix (flakes + sandbox)
+        uses: DeterminateSystems/nix-installer-action@main   # TODO(pin): SHA-pin + choose a stable ref before merge — see PR body Q1
+        with:
+          extra-conf: |
+            experimental-features = nix-command flakes
+            sandbox = true
+
+      # `--option sandbox true` is the whole point: it reproduces the clean-room build
+      # (no /usr/bin/env, patchShebangs load-bearing) that a laptop's non-sandbox check hides.
+      # `-L` prints full build logs so a battery failure is legible in the run output.
+      - name: nix flake check (sandbox=true)
+        run: nix flake check --option sandbox true -L
