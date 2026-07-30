@@ -115,7 +115,11 @@ else
   if command -v systemctl >/dev/null 2>&1 && _net_ok; then
     # Online but no brain yet → pull it now (reuses the first-boot service, correct paths).
     printf "\n${DIM}Online. Installing the local brain (~4.7GB, one time — a few minutes, hang tight)...${RST}\n"
-    sudo systemctl start agent-os-pull-model >/dev/null 2>&1 || true
+    # RESTART (not start): the boot-time run may have already fired + given up before wifi
+    # was connected, marking itself "done" — a plain `start` would then be a no-op (the
+    # "wifi picker ate the install" bug). restart forces a fresh run now that we're online.
+    sudo systemctl reset-failed agent-os-pull-model >/dev/null 2>&1 || true
+    sudo systemctl restart agent-os-pull-model >/dev/null 2>&1 || true
     _ob2="$(resolve_brain brain-ollama)" || true
     if [ -n "$_ob2" ] && "$_ob2" --check >/dev/null 2>&1; then
       cd "$HOME"; printf "${DIM}Brain ready — starting it. Talk to it below.${RST}\n\n"; exec "$_ob2"

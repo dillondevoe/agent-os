@@ -54,10 +54,16 @@
       if "$OLLAMA" list 2>/dev/null | grep -q 'qwen2.5:7b-instruct'; then
         echo "agent-os: model already present"; exit 0
       fi
+      # Wait for REAL connectivity — network-online.target can be reached before wifi has
+      # fully associated/DHCP'd, which would fail the pull. Poll up to ~2min.
+      for _i in $(seq 1 24); do
+        ${pkgs.iputils}/bin/ping -c1 -W2 1.1.1.1 >/dev/null 2>&1 && break
+        echo "agent-os: waiting for network... ($_i/24)"; sleep 5
+      done
       echo "agent-os: pulling qwen2.5:7b-instruct (~4.7GB, first boot only)..."
-      "$OLLAMA" pull qwen2.5:7b-instruct || {
-        echo "agent-os: model pull failed (no egress? sealed too early?) — retry after network."; exit 0
-      }
+      # NO `|| exit 0`: a real failure must leave the unit FAILED (retriable via restart /
+      # next reboot), not silently mark itself done and never pull ("wifi ate the install").
+      "$OLLAMA" pull qwen2.5:7b-instruct
     '';
   };
 }
