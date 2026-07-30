@@ -21,6 +21,7 @@
         ./modules/mcp.nix
         ./modules/broker.nix
         ./modules/confirm.nix
+        ./modules/seal-check.nix
       ];
       mkSystem = extraModules: nixpkgs.lib.nixosSystem {
         inherit system;
