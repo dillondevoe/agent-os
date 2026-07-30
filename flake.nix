@@ -40,6 +40,14 @@
       packages.${system} = {
         vm        = self.nixosConfigurations.agentos.config.system.build.vm;
         vm-sealed = self.nixosConfigurations.agentos-sealed.config.system.build.vm;
+
+        # seal-failloud fail-down loop, driven headless (nixosTest). Kept OUT of `checks`
+        # so routine `nix flake check` stays fast — this boots a VM (minutes) vs the 6
+        # property batteries (seconds). Run on demand:  nix build .#test-seal-faildown
+        test-seal-faildown = import ./tests/seal-faildown.nix {
+          pkgs = nixpkgs.legacyPackages.${system};
+          inherit baseModules;
+        };
       };
 
       checks.${system} = {
