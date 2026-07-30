@@ -74,6 +74,12 @@ let
     export AGENT_OS_CONFIRM_TIMEOUT_S=${toString confirmWrapper.brokerTimeout}
     export AGENT_OS_INVOKE_SEAM=${capInvoke.wrapper}/bin/cap-invoke
     export AGENT_OS_CAP_BIN_DIR=${capInvoke.capBinDir}/bin
+    # Fable go-live caveat #2: pin the invoke-seam timeout in the broker's OWN wrapper too, so an
+    # agent-poisoned parent env can't hand the broker an availability-degrading value (a huge timeout
+    # lets a hung impl wedge that agent's single-flight broker; it can NEVER change WHAT execs). 30 ==
+    # bin/cap-invoke's documented default (its os.environ.get fallback, cap-invoke:180) — so this is
+    # behavior-neutral: it only makes the value authoritative, same discipline as the seam vars above.
+    export AGENT_OS_CAP_TIMEOUT_S=30
     exec ${pkgs.python3}/bin/python3 ${../bin/broker} "$@"
   '';
 in
