@@ -82,8 +82,16 @@ in {
           # name hostnames). PR-K closes BOTH with a dedicated-uid local HTTPS fetch-proxy
           # enforcing a hostname allowlist (cache.nixos.org + pinned flake hosts) and dropping
           # uid 0 to default-DROP. (Fable LOW-#5, 2026-07-29 — comment previously named only :443.)
-          meta skuid 0 udp dport 53 accept
-          meta skuid 0 tcp dport { 53, 443 } accept
+          #
+          # nfproto ipv4 PARITY (PR-A residual): every scoped skuid accept below carries
+          # `meta nfproto ipv4` so it is EXPLICITLY v4-only, matching the v4-only doctrine in the
+          # IPv6 note at the bottom of this chain. Today v6 egress is already dead (NDP is
+          # default-dropped), so this changes no live behaviour — but WITHOUT it, the day someone
+          # scopes in a link-local NDP allow per that note, these bare `skuid 0 … accept` rules
+          # would silently start matching v6 too and widen root egress to 443/53/123 over IPv6.
+          # The predicate keeps the accepts pinned to the family they were reasoned about.
+          meta nfproto ipv4 meta skuid 0 udp dport 53 accept
+          meta nfproto ipv4 meta skuid 0 tcp dport { 53, 443 } accept
           # DHCPv4 client (NetworkManager's, uid 0): DISCOVER/REQUEST egress as udp sport 68 →
           # dport 67 (broadcast). The scoped skuid-0 rules above do NOT cover it, so under the
           # default-DROP policy it would be dropped — and on the SEALED box on wifi (the Dell,
@@ -93,7 +101,15 @@ in {
           # accept.) v4-only: v6 SLAAC/DHCPv6 is dead when sealed per the IPv6 note below, and
           # the DHCP *reply* is inbound (input chain), not this egress table.
           # LIVE-VERIFY on HW: sealed box must hold its address across a real lease renewal.
-          meta skuid 0 udp sport 68 dport 67 accept
+          # NB — the `udp` keyword is DELIBERATELY repeated (`udp sport 68 udp dport 67`, not
+          # `udp sport 68 dport 67`). nft 1.0.9 (the sandbox builder's version) rejects a single
+          # `udp` shared across a sport+dport pair with "No symbol type information" at `dport`, in
+          # EITHER order — a parser bug, not a syntax error. Repeating `udp` is the standard
+          # workaround and is semantically identical. Do NOT "simplify" this back to one `udp`: the
+          # nftables `checkRuleset` (`nft -c`) that catches it runs ONLY when the sealed toplevel /
+          # VM is built, NEVER in `nix flake check` (VM/toplevel are out of `checks`) — so a
+          # re-break passes CI green and only surfaces at `nixos-rebuild` on the box.
+          meta nfproto ipv4 meta skuid 0 udp sport 68 udp dport 67 accept
 
           # time sync — advisory B (PR#19/#20 Fable). systemd-timesyncd runs as the STATIC
           # user systemd-timesync (uid ${toString config.ids.uids.systemd-timesync}, pinned
@@ -107,7 +123,7 @@ in {
           # validity window can't drift shut — while every other process (the agent, the
           # model, any capability) stays zero-egress. Permanent survivor: kept even sealed,
           # since drift accrues most on a long-sealed box.
-          meta skuid ${toString config.ids.uids.systemd-timesync} udp dport { 53, 123 } accept
+          meta nfproto ipv4 meta skuid ${toString config.ids.uids.systemd-timesync} udp dport { 53, 123 } accept
         ${lib.optionalString (!cfg.sealed) ''
           # PROVISIONING (unsealed) — removed by `sealed = true` + rebuild. Lets
           # setup-brain.sh resolve + fetch the model weights (and, transiently, lets the

@@ -116,6 +116,25 @@
         + "`agent` user sudo (a NOPASSWD rule here would bypass both wheel and wheelNeedsPassword).";
     }
     {
+      # The GROUP-scoped sibling of the rule above (PR-A residual): `security.sudo.extraRules`
+      # entries also carry a `groups` list, and a rule granting sudo to ANY group the agent is a
+      # member of (its primary group OR an `extraGroups` entry) is a root path that never lists
+      # `agent` in `users` — so assertion 3 alone misses it. Reject any rule whose `groups`
+      # intersect the agent's group set. (`wheel` is already covered by assertions 1-2 +
+      # wheelNeedsPassword, but a NOPASSWD rule on any OTHER agent group would still bypass the
+      # password gate.) Matches by group NAME, mirroring how the rules above match "agent"/"wheel";
+      # a rule naming a group by numeric GID is not parsed here — same free-form residual class as
+      # `extraConfig`, flagged as a Fable-review surface in the sudo comment above.
+      assertion = !(lib.any
+        (r: lib.any
+          (g: lib.elem g ([ config.users.users.agent.group ] ++ config.users.users.agent.extraGroups))
+          (r.groups or [ ]))
+        config.security.sudo.extraRules);
+      message = "no-agent-root (PR-A): no `security.sudo.extraRules` entry may grant sudo to a "
+        + "group the `agent` user belongs to (its primary group or an `extraGroups` entry) — a "
+        + "group-scoped rule is a root path that never names `agent` in `users`.";
+    }
+    {
       assertion = config.security.sudo.wheelNeedsPassword;
       message = "no-agent-root (PR-A): security.sudo.wheelNeedsPassword must be true "
         + "(defense-in-depth — even a wheel member cannot sudo without a password).";
