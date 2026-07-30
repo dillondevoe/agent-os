@@ -24,6 +24,7 @@
         ./modules/seal-check.nix
         ./modules/break-glass.nix   # PR-A: the ONE interactive root door (tty3, password-gated)
         ./modules/system-set.nix    # PR-A: SCAFFOLD for the root-side system.set executor (impl in PR-J)
+        ./modules/boot-branding.nix
       ];
       mkSystem = extraModules: nixpkgs.lib.nixosSystem {
         inherit system;
