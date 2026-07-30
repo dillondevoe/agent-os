@@ -212,6 +212,55 @@
               ${capInvoke.wrapper}/bin/cap-invoke ${capInvoke.capBinDir}/bin ${registryJson} "$work"
             touch $out
           '';
+
+        # PR-A follow-up — the CI-toplevel-build gap ("the real fix"). `nix flake check`
+        # EVALUATES the nixosConfigurations but never BUILDS their `system.build.toplevel`, so
+        # the nftables `checkRuleset` (`nft --check`) — the ONLY thing that catches a bad egress
+        # rule — never ran in CI. That is exactly how the clean-room DHCP rule shipped
+        # `agentos-sealed` RED from #21 to #27 (nft 1.0.9 rejects `udp sport X dport Y`, a single
+        # `udp` shared across a sport+dport pair, with "No symbol type information"; see
+        # modules/clean-room.nix). These two checks close the gap CHEAPLY: each forces the nftables
+        # module's OWN `rulesScript` derivation to build (it is one element of the nftables service
+        # ExecStart), and that drv's checkPhase runs the EXACT lkl-hijacked `nft --check` the box
+        # runs at `nixos-rebuild` (nixpkgs nftables.nix checkPhase, LD_PRELOAD liblkl-hijack). We
+        # reuse the module's own check verbatim — no reconstruction, no drift. Referencing the
+        # ExecStart store paths in the build script pulls in ONLY that drv (nft + lkl + our
+        # ruleset), NOT the whole system toplevel — so `nix flake check` stays fast, matching the
+        # design that deliberately holds the seal-faildown VM out of `checks` (packages.${system}
+        # comment above). We gate BOTH machines: -sealed (the shipped seal) AND -unsealed (whose
+        # provisioning accepts differ, so its ruleset is a distinct nft parse). A re-simplification
+        # of any egress rule now fails HERE, in CI — not silently at `nixos-rebuild` on the Dell.
+        # GUARD-OF-THE-GUARD (Fable APPROVE_WITH_CAVEAT, #28): both checks force the module's
+        # rulesScript drv to build, but that drv only actually runs `nft --check` when the module's
+        # `checkRuleset` is true (nixpkgs nftables.nix — checkPhase is `lib.optionalString
+        # cfg.checkRuleset`). If anyone ever set `networking.nftables.checkRuleset = false` the
+        # checkPhase would go EMPTY and both of these would go green-while-unvalidated — the single
+        # way this whole PR can be silently defeated. Default is true and there's no override in-repo,
+        # but for a guard whose entire job is "the wall can't ship red," a comment is weaker than it
+        # deserves — so each check eval-time ASSERTS its config's checkRuleset before building.
+        nft-ruleset-sealed =
+          assert nixpkgs.lib.assertMsg
+            self.nixosConfigurations.agentos-sealed.config.networking.nftables.checkRuleset
+            "nft-ruleset-sealed would false-PASS: networking.nftables.checkRuleset is false";
+          nixpkgs.legacyPackages.${system}.runCommand "nft-ruleset-sealed-check" { } ''
+            echo "agentos-sealed nftables ruleset passed nft --check via: ${
+              nixpkgs.lib.concatStringsSep " "
+                self.nixosConfigurations.agentos-sealed.config.systemd.services.nftables.serviceConfig.ExecStart
+            }"
+            touch $out
+          '';
+
+        nft-ruleset-unsealed =
+          assert nixpkgs.lib.assertMsg
+            self.nixosConfigurations.agentos.config.networking.nftables.checkRuleset
+            "nft-ruleset-unsealed would false-PASS: networking.nftables.checkRuleset is false";
+          nixpkgs.legacyPackages.${system}.runCommand "nft-ruleset-unsealed-check" { } ''
+            echo "agentos (unsealed) nftables ruleset passed nft --check via: ${
+              nixpkgs.lib.concatStringsSep " "
+                self.nixosConfigurations.agentos.config.systemd.services.nftables.serviceConfig.ExecStart
+            }"
+            touch $out
+          '';
       };
     };
 }

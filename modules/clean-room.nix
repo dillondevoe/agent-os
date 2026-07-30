@@ -128,9 +128,15 @@ in {
           # PROVISIONING (unsealed) — removed by `sealed = true` + rebuild. Lets
           # setup-brain.sh resolve + fetch the model weights (and, transiently, lets the
           # ollama daemon's update-ping out; sealing kills it).
-          udp dport 53 accept
-          tcp dport 53 accept
-          tcp dport { 80, 443 } accept
+          # nfproto ipv4 PARITY (Fable LOW, 2026-07-30): these carry `meta nfproto ipv4` for the
+          # same reason as the scoped skuid accepts above — no live gap today (v6 NDP is
+          # default-dropped, and these are removed by sealing anyway), but if a link-local NDP
+          # allow is ever scoped in per the IPv6 note below, an unprefixed `udp/tcp dport …` would
+          # silently start matching v6 too and widen the provisioning window over IPv6. Pin them
+          # to the family they were reasoned about.
+          meta nfproto ipv4 udp dport 53 accept
+          meta nfproto ipv4 tcp dport 53 accept
+          meta nfproto ipv4 tcp dport { 80, 443 } accept
         ''}
           # IPv6 note — advisory C (PR#19 Fable). This default-drop also drops outbound
           # ICMPv6 NDP (neighbor/router solicitation), so IPv6 neighbor discovery — and
