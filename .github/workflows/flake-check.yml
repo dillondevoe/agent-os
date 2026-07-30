@@ -31,14 +31,23 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4   # TODO(pin): SHA-pin before merge — see PR body Q1
+        # SHA-pinned (Fable fold a): immutable commit of the newest v* release tag.
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
       - name: Install Nix (flakes + sandbox)
-        uses: DeterminateSystems/nix-installer-action@main   # TODO(pin): SHA-pin + choose a stable ref before merge — see PR body Q1
+        # SHA-pinned (Fable fold a): DeterminateSystems kept — it marks the runner user
+        # trusted, which the sandbox enforcement below actually needs. Pinned to newest v*.
+        uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25  # v22
         with:
           extra-conf: |
             experimental-features = nix-command flakes
             sandbox = true
+
+      # Fail-loud sandbox assert (Fable fold b): a runner/installer change that degrades
+      # sandboxing turns THIS step RED instead of quietly hollowing the gate. Belt to the
+      # extra-conf + --option suspenders below (defends installer drift, not redundant).
+      - name: Assert sandbox is enabled
+        run: test "$(nix config show sandbox)" = "true"
 
       # `--option sandbox true` is the whole point: it reproduces the clean-room build
       # (no /usr/bin/env, patchShebangs load-bearing) that a laptop's non-sandbox check hides.
