@@ -58,14 +58,15 @@ printf "${DIM}config at /etc/nixos — ask me to change a setting and I rewrite 
 # --- hand off to the brain ---------------------------------------------------
 # The brain IS the shell. It can read/write $MEM, run commands, and edit the
 # system's own nix config. Precedence: an explicit $BRAIN always wins; otherwise
-# prefer a cloud brain (Claude Code) when installed, fall to the local Ollama
-# floor when a model is actually reachable, and finally a memory-aware REPL so the
-# box still boots-and-talks with zero deps.
+# prefer a cloud brain (Claude Code) when installed, else the local tool-calling
+# loop (agent-loop) when a model is reachable — it can ACT, not only chat — else the
+# plain Ollama chat floor (brain-ollama), and finally a memory-aware REPL so the box
+# still boots-and-talks with zero deps.
 #
 # The login shell must NEVER exec into a brain that can't talk — that would
-# crash-loop getty's autologin — so the local floor is PROBED (`brain-ollama
-# --check`) before we commit to it. `brain-ollama` may be installed on PATH (nix)
-# or sit beside this script (repo/dev), so resolve both.
+# crash-loop getty's autologin — so every local brain is PROBED (`--check`: Ollama up
+# + a model pulled) before we commit to it. `agent-loop`/`brain-ollama` may be
+# installed on PATH (nix) or sit beside this script (repo/dev), so resolve both.
 SELF_DIR="$(cd "$(dirname "$0")" && pwd)"
 resolve_brain() { command -v "$1" 2>/dev/null || { [ -x "$SELF_DIR/$1" ] && echo "$SELF_DIR/$1"; }; }
 
@@ -74,25 +75,35 @@ if [ -z "$BRAIN" ]; then
   if command -v claude >/dev/null 2>&1; then
     BRAIN=claude                                    # cloud brain: primary
   else
-    _ob="$(resolve_brain brain-ollama)" || true      # set -e: a missing brain must fall through to the REPL, not kill login
-    if [ -n "$_ob" ] && "$_ob" --check; then
-      BRAIN="$_ob"                                  # local Ollama floor: offline + reachable
+    # Local precedence (Geist v0.2 §1): the tool-calling loop is the preferred local
+    # brain — probe agent-loop FIRST, then fall to the plain brain-ollama chat floor.
+    # Both share the same --check contract, so a box with a pulled model lands on
+    # agent-loop; if agent-loop is unresolvable, brain-ollama still catches; if neither
+    # talks, the memory REPL does.
+    _al="$(resolve_brain agent-loop)" || true        # set -e: a missing brain must fall through to the REPL, not kill login
+    if [ -n "$_al" ] && "$_al" --check; then
+      BRAIN="$_al"                                  # local tool-calling loop: offline + reachable
+    else
+      _ob="$(resolve_brain brain-ollama)" || true
+      if [ -n "$_ob" ] && "$_ob" --check; then
+        BRAIN="$_ob"                                # plain Ollama chat floor: offline + reachable
+      fi
     fi
   fi
 fi
 
-# Commit to the chosen brain — but the local Ollama floor must pass its own --check
-# even when it was PINNED via $BRAIN (not only when auto-probed above). A pinned
-# BRAIN=brain-ollama on a box whose model isn't pulled yet (first boot, before
-# setup-brain.sh) would otherwise exec a brain that can't talk and crash-loop getty's
-# autologin — the exact failure the auto-path probe guards against. Cloud `claude` and
-# the already-probed auto-ollama commit straight through; a failed probe falls to the
-# memory REPL below.
+# Commit to the chosen brain — but a local brain (agent-loop or brain-ollama) must pass
+# its own --check even when it was PINNED via $BRAIN (not only when auto-probed above). A
+# pinned BRAIN=agent-loop / BRAIN=brain-ollama on a box whose model isn't pulled yet (first
+# boot, before setup-brain.sh) would otherwise exec a brain that can't talk and crash-loop
+# getty's autologin — the exact failure the auto-path probe guards against. Cloud `claude`
+# and the already-probed auto local brain commit straight through; a failed probe falls to
+# the memory REPL below.
 _commit=""
 if [ -n "$BRAIN" ] && _bp="$(resolve_brain "$BRAIN")" && [ -n "$_bp" ]; then
   case "$BRAIN" in
-    *brain-ollama) if "$_bp" --check >/dev/null 2>&1; then _commit="$_bp"; fi ;;
-    *)             _commit="$_bp" ;;
+    *brain-ollama|*agent-loop) if "$_bp" --check >/dev/null 2>&1; then _commit="$_bp"; fi ;;
+    *)                         _commit="$_bp" ;;
   esac
 fi
 if [ -n "$_commit" ]; then
