@@ -76,11 +76,24 @@ in {
           # note above) + HTTPS (443) to the substituter; fwupd is the same shape. Ports only —
           # nftables cannot name hostnames.
           # HONEST RESIDUAL: HTTPS+DNS root egress remains open, so a compromised root process
-          # could still reach an arbitrary :443. PR-K closes this with a dedicated-uid local
-          # HTTPS fetch-proxy enforcing a hostname allowlist (cache.nixos.org + pinned flake
-          # hosts — which nftables cannot express) and drops uid 0 to default-DROP.
+          # could still exfiltrate TWO ways — (a) an arbitrary :443, HTTPS to any host; and
+          # (b) DNS tunnelling over the open udp/tcp 53 to an attacker-run resolver (payload
+          # smuggled in QNAMEs — no :443 needed at all). nftables can gate neither (it cannot
+          # name hostnames). PR-K closes BOTH with a dedicated-uid local HTTPS fetch-proxy
+          # enforcing a hostname allowlist (cache.nixos.org + pinned flake hosts) and dropping
+          # uid 0 to default-DROP. (Fable LOW-#5, 2026-07-29 — comment previously named only :443.)
           meta skuid 0 udp dport 53 accept
           meta skuid 0 tcp dport { 53, 443 } accept
+          # DHCPv4 client (NetworkManager's, uid 0): DISCOVER/REQUEST egress as udp sport 68 →
+          # dport 67 (broadcast). The scoped skuid-0 rules above do NOT cover it, so under the
+          # default-DROP policy it would be dropped — and on the SEALED box on wifi (the Dell,
+          # always DHCP) a boot or lease-renewal would then lose the lease entirely: no address,
+          # no route, no nixpkgs rebuild channel, and no way to rebuild out except the tty3
+          # break-glass. (Fable HIGH, 2026-07-29 — regression from scoping the old blanket root
+          # accept.) v4-only: v6 SLAAC/DHCPv6 is dead when sealed per the IPv6 note below, and
+          # the DHCP *reply* is inbound (input chain), not this egress table.
+          # LIVE-VERIFY on HW: sealed box must hold its address across a real lease renewal.
+          meta skuid 0 udp sport 68 dport 67 accept
 
           # time sync — advisory B (PR#19/#20 Fable). systemd-timesyncd runs as the STATIC
           # user systemd-timesync (uid ${toString config.ids.uids.systemd-timesync}, pinned

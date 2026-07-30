@@ -64,6 +64,18 @@
     # Agent OS thesis: the login shell IS the agent (see agent-shell.nix).
   };
 
+  # Users are DECLARATIVE-only — this config is the SOLE source of truth for every account and
+  # credential; runtime mutation does not survive a rebuild. Two invariants depend on this
+  # (Fable MED, 2026-07-29): (1) it makes the break-glass fail-safe (modules/break-glass.nix)
+  # actually hold — with mutable users a missing /etc/agent-os/break-glass.hash would only WARN
+  # and root would keep whatever shadow entry the installer left; here root has NO password
+  # unless that file exists (absent ⇒ root locked). (2) it hardens no-agent-root — a runtime
+  # `usermod -aG wheel agent` no longer persists (the next rebuild reverts it; the eval
+  # assertions below only catch DECLARED drift, this catches runtime drift). Tradeoff: losing
+  # the hash means installer-media-only recovery (boot USB → mount → set a new hash), by design
+  # for a sovereign box.
+  users.mutableUsers = false;
+
   # nix-command/flakes stay on: the box rebuilds ITSELF from nixpkgs. But the agent no longer
   # drives that as root — a "change a setting" request goes agent → broker → the `system.set`
   # root unit (PR-J), which template-renders + `--offline`-evaluates a BOUNDED option delta.
@@ -71,7 +83,9 @@
   nix.settings.experimental-features = [ "nix-command" "flakes" ];
   # Even a wheel member must present a password to sudo — defense-in-depth BEHIND `agent ∉
   # wheel`, against a compromised root-adjacent process (the exact class the system.set
-  # executor exists to bound). Was `false` (v0.1 single-user demo box).
+  # executor exists to bound). Was `false` (v0.1 single-user demo box). NOTE: `security.sudo.
+  # extraConfig` is free-form sudoers text an assertion cannot parse — treat any addition to it
+  # as a security-surface change that must clear Fable, same as touching extraRules below.
   security.sudo.wheelNeedsPassword = true;
 
   # Structural enforcement of the no-agent-root posture: eval FAILS (so `nix flake check` and
@@ -81,8 +95,25 @@
   assertions = [
     {
       assertion = !(lib.elem "wheel" config.users.users.agent.extraGroups);
-      message = "no-agent-root (PR-A): user `agent` must NOT be in `wheel`. Privileged "
-        + "outcomes go through the broker → system.set root unit (PR-J), never sudo.";
+      message = "no-agent-root (PR-A): user `agent` must NOT be in `wheel` (via extraGroups). "
+        + "Privileged outcomes go through the broker → system.set root unit (PR-J), never sudo.";
+    }
+    {
+      # The OTHER declarative way into wheel: listing the user on the group instead of the
+      # group on the user. Fable LOW-#4 (2026-07-29) — assertion 1 alone missed this path.
+      assertion = !(lib.elem "agent" (config.users.groups.wheel.members or [ ]));
+      message = "no-agent-root (PR-A): user `agent` must NOT be listed in "
+        + "`users.groups.wheel.members` — same root path as extraGroups, other direction.";
+    }
+    {
+      # The DANGEROUS uncaught case (Fable LOW-#4): a sudoers RULE naming `agent` — especially
+      # NOPASSWD — grants root REGARDLESS of wheel membership or wheelNeedsPassword. Reject any
+      # structured sudo rule whose `users` list mentions the agent. (`extraConfig` is free-form
+      # text an assertion cannot parse — it is flagged as a Fable-review surface in the sudo
+      # comment above, not asserted here.)
+      assertion = !(lib.any (r: lib.elem "agent" (r.users or [ ])) config.security.sudo.extraRules);
+      message = "no-agent-root (PR-A): no `security.sudo.extraRules` entry may grant the "
+        + "`agent` user sudo (a NOPASSWD rule here would bypass both wheel and wheelNeedsPassword).";
     }
     {
       assertion = config.security.sudo.wheelNeedsPassword;
