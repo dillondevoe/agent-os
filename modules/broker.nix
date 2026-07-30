@@ -36,6 +36,26 @@ let
   # (the store-path identity is by-construction; this makes its SAFETY refactor-proof too).
   confirmSeam = assert confirmWrapper.checksOk; "${confirmWrapper.wrapper}/bin/confirm";
 
+  # Step 7 (go-live): the invoke seam. capInvoke.wrapper is the store-pinned cap-invoke DISPATCHER
+  # (AGENT_OS_INVOKE_SEAM); capInvoke.capBinDir is the patchShebangs'd cap-impl dir the dispatcher
+  # resolves impls under (AGENT_OS_CAP_BIN_DIR). Pinning BOTH here — in the broker's OWN wrapper,
+  # not via inheritable environment.variables — makes them authoritative regardless of launch
+  # context (same discipline as TAINT_BIN/AUDIT_BIN/AGENT_OS_CONFIRM_SEAM). cap-invoke reads
+  # AGENT_OS_REGISTRY, already exported below, and inherits the broker's env (bin/broker `_run`
+  # spawns the seam with NO env= override).
+  #
+  # ── GATE #5 (task-279): OS confinement is a HARD PREREQUISITE before any CHILD-SPAWNING impl ──
+  # cap-invoke's per-impl wall-clock timeout (AGENT_OS_CAP_TIMEOUT_S) kills+reaps only the DIRECT
+  # child. The ONLY impl wired at go-live — capabilities.list — is exec-only: it reads the
+  # world-readable registry and spawns NO subprocess, so the direct-child reap fully bounds it and
+  # no per-cap cgroup is needed YET. Before ANY impl that can fork (file.read/write, net.fetch, and
+  # every T1/T2 capability) is wired, this module MUST first grow: (a) systemd per-cap cgroup
+  # confinement DERIVED from each cap's Step-1 registry `sandbox` decl (ReadWritePaths /
+  # PrivateNetwork / IPAddressDeny), and (b) killpg / start_new_session in the dispatcher so the
+  # timeout reaps the whole process GROUP, not an orphan-leaking direct child. Wiring a spawning
+  # impl without both is a fail-open regression. Tracked as a known deferral in the go-live PR body.
+  capInvoke = import ./cap-invoke-pkg.nix { inherit pkgs; };
+
   # Materialize the registry to JSON. Reading `reg.registry` FORCES the Step-1 `assert ok`,
   # so a registry that violates a mechanism-3 invariant fails THIS module's build too — the
   # broker can never be built against an unvalidated registry. The store path is globally
@@ -52,6 +72,8 @@ let
     export AGENT_OS_BROKER_DIR=/var/lib/agent-os/broker
     export AGENT_OS_CONFIRM_SEAM=${confirmSeam}
     export AGENT_OS_CONFIRM_TIMEOUT_S=${toString confirmWrapper.brokerTimeout}
+    export AGENT_OS_INVOKE_SEAM=${capInvoke.wrapper}/bin/cap-invoke
+    export AGENT_OS_CAP_BIN_DIR=${capInvoke.capBinDir}/bin
     exec ${pkgs.python3}/bin/python3 ${../bin/broker} "$@"
   '';
 in

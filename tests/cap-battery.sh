@@ -94,7 +94,9 @@ chmod +x "$BIN/cap-echo-good" "$BIN/cap-decline" "$BIN/cap-garbage" "$BIN/cap-no
 # not patchShebangs it), so it needs the same pin. Harmless where /usr/bin/env exists (standalone).
 PYBIN="$(command -v "$PY")"
 for f in "$BIN"/*; do
-  [ -f "$f" ] && sed -i "1s|^#!.*|#!$PYBIN|" "$f"
+  # sed -i.bak … && rm -f "$f.bak" is portable to BOTH GNU sed (bare -i) and BSD/macOS sed
+  # (which requires a suffix arg after -i); the standalone runner may be on either.
+  [ -f "$f" ] && sed -i.bak "1s|^#!.*|#!$PYBIN|" "$f" && rm -f "$f.bak"
 done
 
 # scratch registry: real capabilities.list + fake caps (incl. a path-escaping impl name).

@@ -190,6 +190,28 @@
               ${registryJson} "$work"
             touch $out
           '';
+
+        # Phase 2 · Step 7 (go-live) — the WIRED invoke-seam END-TO-END regression guard. Drives the
+        # REAL broker through the REAL store-pinned cap-invoke DISPATCHER + the patchShebangs'd
+        # capabilities.list impl (the EXACT artifacts modules/broker.nix now pins into production via
+        # cap-invoke-pkg.nix) and asserts a real `tools/call capabilities.list` returns blessed,
+        # DATA-fenced content AND leaves the session taint CLEAN — i.e. ORIGIN_BY_CAP[capabilities.
+        # list] = TRUSTED holds END-TO-END (go-live gate #1). Neither broker-core (scripted fake seam,
+        # UNTRUSTED caps only) nor capabilities (dispatcher driven directly, no broker) exercises this
+        # path — this is the ONLY check that proves the wired seam does not spuriously taint a list.
+        # A regression fails `nix flake check` (verify under `--option sandbox true`).
+        seam-live =
+          let
+            reg = import ./modules/capability-registry.nix { lib = nixpkgs.lib; };
+            pkgs = nixpkgs.legacyPackages.${system};
+            registryJson = pkgs.writeText "registry.json" (builtins.toJSON reg.registry);
+            capInvoke = import ./modules/cap-invoke-pkg.nix { inherit pkgs; };
+          in pkgs.runCommand "seam-live-check" { nativeBuildInputs = [ pkgs.python3 ]; } ''
+            work="$(mktemp -d)"
+            bash ${./tests/seam-live-battery.sh} ${./bin/broker} ${./bin/taint} ${./bin/audit} \
+              ${capInvoke.wrapper}/bin/cap-invoke ${capInvoke.capBinDir}/bin ${registryJson} "$work"
+            touch $out
+          '';
       };
     };
 }
