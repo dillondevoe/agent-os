@@ -69,8 +69,12 @@ MAX_RECIPIENT = 256             # `recipient`-typed arg length bound
 # Origin is a SECURITY decision derived from the capability by BROKER POLICY — never read
 # off the impl's output (§4.5a: an impl reporting TRUSTED for a fetched page is fail-OPEN).
 # net.fetch body is attacker-controlled; file.read is operator-curated + sandbox-confined;
-# mem.recall consults the stored tag via `taint recall`; anything else defaults UNTRUSTED.
-ORIGIN_BY_CAP = {"net.fetch": UNTRUSTED, "file.read": TRUSTED}
+# capabilities.list emits ONLY broker-owned registry data (name/tier/summary — no attacker
+# bytes), so it is TRUSTED (go-live gate #1). Without this mapping the unmapped-default branch
+# in _commit_provenance would `taint set` on EVERY list, tainting the session spuriously the
+# moment the seam goes live. mem.recall consults the stored tag via `taint recall`; anything
+# else defaults UNTRUSTED.
+ORIGIN_BY_CAP = {"net.fetch": UNTRUSTED, "file.read": TRUSTED, "capabilities.list": TRUSTED}
 
 # namespace charset: no "/", no "..", bounded — so <root>/<ns> is confined by construction.
 _NS_RE = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")

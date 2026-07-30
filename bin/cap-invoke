@@ -43,13 +43,16 @@
 # This dispatcher applies NO OS confinement itself. Per-capability sandboxing (systemd
 # ReadWritePaths / PrivateNetwork / IPAddressDeny, DERIVED from each cap's Step-1 registry
 # `sandbox` decl) is layered at the NixOS-module level and lands with the first capability that
-# needs confinement (file.read/write, net.fetch). capabilities.list — the only impl wired in this
-# PR — reads only the world-readable registry and writes nothing, so it needs none. The seam is
-# NOT yet exported by the broker module in production (broker.nix leaves AGENT_OS_INVOKE_SEAM
-# unset -> every tools/call still fails closed "impl-not-wired"); this PR adds the dispatcher +
-# first impl + battery, exercised by the flake check. Going live is a later, separately reviewed
-# step (and MUST also give capabilities.list a TRUSTED ORIGIN_BY_CAP mapping — it is unmapped
-# today and would otherwise spuriously taint the session on every list).
+# needs confinement (file.read/write, net.fetch). capabilities.list — the only impl wired at
+# go-live — reads only the world-readable registry and writes nothing, so it needs none. THIS
+# go-live PR EXPORTS the seam from the broker module (broker.nix now sets AGENT_OS_INVOKE_SEAM to
+# the store-pinned cap-invoke wrapper + AGENT_OS_CAP_BIN_DIR to the patchShebangs'd impl dir), so
+# `tools/call capabilities.list` runs end-to-end for the first time; bin/broker also gives
+# capabilities.list a TRUSTED ORIGIN_BY_CAP mapping so a list does not spuriously taint the session.
+# STILL a HARD PREREQUISITE before any CHILD-SPAWNING impl (file.read/write, net.fetch) is wired:
+# systemd per-cap cgroup confinement + killpg/start_new_session, so this seam's timeout reaps the
+# whole process group, not just the direct child. The one live impl (capabilities.list) spawns no
+# children, so the direct-child timeout here suffices today.
 
 import json
 import os
@@ -100,12 +103,38 @@ def _load_registry():
 def _impl_name_ok(name):
     """A registry impl name must be a bare filename so `os.path.join(bin_dir, name)` cannot escape
     the impl dir. Reject empty, '.', '..', anything with a slash, or non-portable chars — a
-    poisoned registry field is a confinement bypass, not a review-time note."""
+    poisoned registry field is a confinement bypass, not a review-time note. The charset is
+    ASCII-tightened (go-live gate #4): str.isalnum() is Unicode-aware, so `café`/`٣`/full-width
+    digits would pass an isalnum()-only gate; require c.isascii() alongside it so an impl filename
+    is plain ASCII [A-Za-z0-9._-] — no confinement escape today (join stays in-dir), but keep the
+    claim ('bare ASCII filename') and the bytes in lockstep before more impls are wired."""
     if not isinstance(name, str) or name in ("", ".", ".."):
         return False
     if "/" in name or "\x00" in name:
         return False
-    return all(c.isalnum() or c in "._-" for c in name)
+    return all((c.isascii() and c.isalnum()) or c in "._-" for c in name)
+
+
+def _meta_key_ok(key):
+    """meta.key is the ONLY meta field that survives normalization: it is IDENTITY the BROKER later
+    hands to `taint recall` / `taint stamp` as the tag / namespace under which a result's provenance
+    is bound (bin/broker `_commit_provenance`). A hostile impl must not be able to smuggle a
+    traversal / control-char / colliding / oversized tag through the seam, so charset-confine it HERE
+    (go-live gate #2 — the dispatcher is the sanctioned confinement point: 'charset-confine key in
+    the dispatcher OR pin broker-side'). Confine CONSERVATIVELY — reject dangerous forms, do NOT
+    dictate the not-yet-final mem.* key grammar. A key that fails is DROPPED (meta_out stays {}),
+    which is fail-closed downstream: the broker treats an unidentified recall as untrusted and a
+    keyless remember as a denied request. At go-live the only wired cap (capabilities.list) emits no
+    meta.key, so this is pure forward-safe defense-in-depth — zero live-path change, hole closed
+    before any key-consuming (mem.*) cap lands."""
+    if not (isinstance(key, str) and key) or len(key) > 256:
+        return False
+    if key in (".", "..") or ".." in key or "/" in key:
+        return False
+    # no NUL / control chars (C0 range + DEL): a tag identity must be a clean single printable
+    # token. (Scoped to C0+DEL deliberately — do NOT reject general non-ASCII here; the mem.* key
+    # grammar isn't final and may legitimately allow UTF-8. This closes the dangerous forms only.)
+    return all(ord(c) >= 0x20 and ord(c) != 0x7f for c in key)
 
 
 def main():
@@ -191,12 +220,15 @@ def main():
         _fail(EXIT_IMPL, "impl 'content' is not a string or null")
 
     # NORMALIZE meta down to identity only. Any impl-reported origin / extra meta is dropped here
-    # (the broker ignores them too — belt and suspenders on the trust boundary).
+    # (the broker ignores them too — belt and suspenders on the trust boundary). meta.key is the
+    # ONLY surviving field and it is charset-confined (go-live gate #2): a key the broker would
+    # later use as a `taint recall` / `stamp` tag must not carry traversal / control / oversized
+    # bytes. A key that fails the gate is DROPPED (meta_out stays {}), fail-closed downstream.
     meta_out = {}
     meta_in = obj.get("meta")
     if isinstance(meta_in, dict):
         key = meta_in.get("key")
-        if isinstance(key, str) and key:
+        if _meta_key_ok(key):
             meta_out["key"] = key
 
     _emit(ok, content, meta_out, EXIT_OK)
