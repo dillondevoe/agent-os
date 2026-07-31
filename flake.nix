@@ -349,6 +349,8 @@
           in
             assert lib.assertMsg (hasPkg "agos-cal")
               "agentos-open-imports: calendar-open.nix is NOT imported — agos-cal missing from systemPackages (dropped imports block? see #42/#44).";
+            assert lib.assertMsg (hasPkg "gnome-calendar" && cfg.services.radicale.enable)
+              "agentos-open-imports: calendar-open.nix GUI half is missing — gnome-calendar absent from systemPackages or services.radicale disabled (the loopback CalDAV that shares the agent vdir with the GUI window; see calendar-GUI-bump go 9047).";
             assert lib.assertMsg cfg.programs.hyprland.enable
               "agentos-open-imports: desktop-open.nix is NOT imported — programs.hyprland.enable is false.";
             assert lib.assertMsg (hasPkg "agos-sys")
@@ -376,7 +378,7 @@
             assert lib.assertMsg (builtins.hasAttr "agos-mail-proton-preflight" cfg.systemd.services)
               "agentos-open-imports: mail-proton-bridge-open.nix is NOT imported — the Proton-via-Bridge cred scaffold (agos-mail-proton-preflight) is absent.";
             pkgs.runCommand "agentos-open-imports-check" { } ''
-              echo "agentos-open imports all fourteen Phase-2 modules: calendar(agos-cal) desktop(hyprland) settings(agos-sys) model(agos-seed-model) genesis(agent-brain) calculator(agos-calc) files(agos-files) email(thunderbird) mail-secret(agos-mail-token-preflight) notes(agos-notes) docs(agos-doc) media(agos-media) web(agos-web) mail-proton(agos-mail-proton-preflight)"
+              echo "agentos-open imports all fourteen Phase-2 modules: calendar(agos-cal+gnome-calendar/radicale) desktop(hyprland) settings(agos-sys) model(agos-seed-model) genesis(agent-brain) calculator(agos-calc) files(agos-files) email(thunderbird) mail-secret(agos-mail-token-preflight) notes(agos-notes) docs(agos-doc) media(agos-media) web(agos-web) mail-proton(agos-mail-proton-preflight)"
               touch $out
             '';
 
