@@ -40,12 +40,14 @@ in {
   #   #4 model-open:    the brain (qwen2.5:7b-instruct) BAKED INTO THE IMAGE (Dillon 8988).
   #   #5 genesis-open:  THE GENESIS LOCK — the soul (GENESIS.md) baked into the brain
   #                     derivation (path+hash literals; Geist "bind not bytes"). agent-brain.
+  #   #6 calculator-open: Qalculate! GUI + agent-drivable agos-calc CLI (ambient dozen).
   imports = [
     ./modules/calendar-open.nix
     ./modules/desktop-open.nix
     ./modules/settings-open.nix
     ./modules/model-open.nix
     ./modules/genesis-open.nix
+    ./modules/calculator-open.nix
   ];
 
   # --- boot / hardware (MIRROR of configuration.nix — see header) --------------
