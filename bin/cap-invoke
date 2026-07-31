@@ -116,9 +116,10 @@ def _impl_name_ok(name):
 
 
 def _meta_key_ok(key):
-    """meta.key is the ONLY meta field that survives normalization: it is IDENTITY the BROKER later
-    hands to `taint recall` / `taint stamp` as the tag / namespace under which a result's provenance
-    is bound (bin/broker `_commit_provenance`). A hostile impl must not be able to smuggle a
+    """The shared charset gate for every meta IDENTITY that survives normalization — both the single
+    `meta.key` (mem.remember) and each per-entry `meta.entries[i].key` (mem.recall). It is the tag /
+    namespace the BROKER later hands to `taint recall` / `taint stamp` to bind a result's provenance
+    (bin/broker `_commit_provenance`). A hostile impl must not be able to smuggle a
     traversal / control-char / colliding / oversized tag through the seam, so charset-confine it HERE
     (go-live gate #2 — the dispatcher is the sanctioned confinement point: 'charset-confine key in
     the dispatcher OR pin broker-side'). Confine CONSERVATIVELY — reject dangerous forms, do NOT
@@ -170,9 +171,16 @@ def main():
     if not (os.path.isfile(impl_path) and os.access(impl_path, os.X_OK)):
         _fail(EXIT_REQUEST, "impl binary not found/executable: %s" % impl_path)
 
-    # Minimal, controlled env for the impl: PATH so the interpreter resolves, and the registry
-    # path (capabilities.list needs it; other impls ignore it). No other inherited variables.
-    impl_env = {"PATH": os.environ.get("PATH", "")}
+    # Minimal, controlled env for the impl — NOTHING is inherited from this dispatcher's ambient
+    # environment (the load-bearing "no inherited variables" rule: a stray PATH that reached the
+    # broker must NEVER flow through to an impl). PATH is PINNED by the trusted boot via
+    # AGENT_OS_CAP_PATH (the cap-invoke wrapper sets it to store-only paths); absent that pin it is
+    # EMPTY — never `os.environ["PATH"]`. Safe because every impl is direct-exec'd by ABSOLUTE path
+    # with an absolute (patchShebangs'd / test-pinned) interpreter shebang, so the kernel needs no
+    # PATH to resolve the interpreter; PATH matters only if an impl itself spawns a helper by bare
+    # name, and the trusted boot then declares a store-only one. Plus the registry path
+    # (capabilities.list needs it; other impls ignore it). No other variables.
+    impl_env = {"PATH": os.environ.get("AGENT_OS_CAP_PATH", "")}
     if reg_path:
         impl_env["AGENT_OS_REGISTRY"] = reg_path
 
@@ -220,16 +228,35 @@ def main():
         _fail(EXIT_IMPL, "impl 'content' is not a string or null")
 
     # NORMALIZE meta down to identity only. Any impl-reported origin / extra meta is dropped here
-    # (the broker ignores them too — belt and suspenders on the trust boundary). meta.key is the
-    # ONLY surviving field and it is charset-confined (go-live gate #2): a key the broker would
-    # later use as a `taint recall` / `stamp` tag must not carry traversal / control / oversized
-    # bytes. A key that fails the gate is DROPPED (meta_out stays {}), fail-closed downstream.
+    # (the broker ignores them too — belt and suspenders on the trust boundary). Exactly two shapes
+    # survive, both charset-confined (go-live gate #2): the identities the broker later hands to
+    # `taint stamp` / `taint recall` must not carry traversal / control / oversized bytes.
+    #   • meta.key      — the single-tag identity for mem.remember (T1 write).
+    #   • meta.entries  — the per-hit list for fuzzy MANY-hit mem.recall (T0 read): [{key, content}].
+    # A field that fails its gate is DROPPED (meta_out omits it), which is fail-closed downstream:
+    # the broker treats an unidentified recall / keyless remember as untrusted.
     meta_out = {}
     meta_in = obj.get("meta")
     if isinstance(meta_in, dict):
         key = meta_in.get("key")
         if _meta_key_ok(key):
             meta_out["key"] = key
+        # mem.recall is fuzzy MANY-hit: its provenance rides a per-entry `entries` list (one
+        # {key, content} per hit) the broker binds ONE AT A TIME against each entry's OWN content-
+        # hash (bin/broker `_commit_provenance`, PIN A — never a hash of the concatenated result).
+        # Survive it ALL-OR-NOTHING: pass the list through ONLY if EVERY element is a {key, content}
+        # dict whose key clears the same charset gate and whose content is a real string. One non-
+        # conforming element DROPS the whole field -> the broker sees no per-entry provenance and
+        # fails closed (taints the session wholesale). This keeps the dispatcher the sanctioned
+        # confinement point; the broker's per-entry key re-check is then belt-and-suspenders for a
+        # hostile seam that bypasses this normalization. Each surviving entry is rebuilt to identity
+        # {key, content} only — any impl-reported extra per-entry field is dropped.
+        entries_in = meta_in.get("entries")
+        if isinstance(entries_in, list) and all(
+            isinstance(e, dict) and _meta_key_ok(e.get("key")) and isinstance(e.get("content"), str)
+            for e in entries_in
+        ):
+            meta_out["entries"] = [{"key": e["key"], "content": e["content"]} for e in entries_in]
 
     _emit(ok, content, meta_out, EXIT_OK)
 

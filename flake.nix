@@ -153,21 +153,25 @@
             touch $out
           '';
 
-        # Phase 4 (v0.2 A1) — the tool-calling loop's property battery. Drives the REAL
-        # bin/agent-loop against a scripted fake Ollama (tests/ollama-stub.py) over the
-        # sandbox loopback and proves the loop MECHANICS: a plain answer skips tools; a valid
-        # echo call round-trips (dispatch -> result fed back as a role:"tool" message that
-        # preserves the content_type:"data" envelope -> final answer); three denials in one
-        # user turn stop tool-calling and the final turn is taken with NO tools offered;
-        # tool_calls emitted on that withheld final turn are NEVER dispatched; and model-
-        # supplied terminal control bytes are scrubbed before the tty. agent-loop lives on the
-        # UNTRUSTED side and makes zero security decisions, so this is loop correctness, not a
-        # wall test. A regression fails `nix flake check`.
+        # Phase 4 (v0.2 A2) — the tool-calling loop's property battery. Drives the REAL
+        # bin/agent-loop against a scripted fake Ollama (tests/ollama-stub.py) over the sandbox
+        # loopback AND the REAL bin/mcp piped into a deterministic stub broker
+        # (tests/broker-stub.py), and proves the loop MECHANICS: a plain answer skips tools; a
+        # valid capability call round-trips THROUGH THE WALL (dispatch -> broker data_result fed
+        # back as a role:"tool" message that preserves the content_type:"data" envelope -> final
+        # answer), with the tool surface itself discovered through the wall via capabilities.list;
+        # three broker denials in one user turn stop tool-calling and the final turn is taken with
+        # NO tools offered; tool_calls emitted on that withheld final turn are NEVER dispatched;
+        # and model-supplied terminal control bytes are scrubbed before the tty. agent-loop lives
+        # on the UNTRUSTED side and makes zero security decisions (the stub replaces the broker's
+        # policy decision, not the loop's behavior), so this is loop correctness, not a wall
+        # policy test — mcp and broker carry their own batteries. A regression fails `nix flake check`.
         agent-loop =
           nixpkgs.legacyPackages.${system}.runCommand "agent-loop-check"
             { nativeBuildInputs = [ nixpkgs.legacyPackages.${system}.python3 ]; } ''
               work="$(mktemp -d)"
-              bash ${./tests/agent-loop-battery.sh} ${./bin/agent-loop} ${./tests/ollama-stub.py} "$work"
+              bash ${./tests/agent-loop-battery.sh} ${./bin/agent-loop} ${./tests/ollama-stub.py} \
+                ${./bin/mcp} ${./tests/broker-stub.py} "$work"
               touch $out
             '';
 
@@ -188,6 +192,25 @@
             work="$(mktemp -d)"
             bash ${./tests/cap-battery.sh} ${./bin/cap-invoke} ${./bin/cap-capabilities-list} \
               ${registryJson} "$work"
+            touch $out
+          '';
+
+        # Phase 2 · A2 — the mem.* capability IMPLS' property battery. `capabilities` above proves the
+        # DISPATCHER (cap-invoke); this proves the two impls BEHIND mem.remember / mem.recall via
+        # DIRECT-invoke with AGENT_OS_MEM_ROOT=<scratch> — the DESIGNED test override (cap-mem-remember:41).
+        # The seam strips AGENT_OS_MEM_ROOT (impl env = {PATH, AGENT_OS_REGISTRY}), so a through-seam write
+        # lands at the hardcoded /var/lib/agent-os/mem, which a non-root check-derivation cannot create;
+        # the direct path is the only in-sandbox home for the write round-trip. Covers PIN-2 byte-identity
+        # (no trailing-newline hinge), PIN-A per-entry content-hash binding, content-addressed idempotency,
+        # multi-hit score-ordering + MAX_HITS ceiling, the key-grammar fence (nothing written on an illegal
+        # namespace), and fail-closed DROP of oversized / non-utf8 / illegal-slug files. The through-the-WALL
+        # write->read E2E (real /var, boot-wired seam, root) is a nixosTest-VM forward-obligation on
+        # task-279, deliberately NOT built here (a check-derivation cannot write /var). Regression -> RED.
+        mem-cap =
+          nixpkgs.legacyPackages.${system}.runCommand "mem-cap-check"
+            { nativeBuildInputs = [ nixpkgs.legacyPackages.${system}.python3 ]; } ''
+            work="$(mktemp -d)"
+            bash ${./tests/mem-cap-battery.sh} ${./bin/cap-mem-remember} ${./bin/cap-mem-recall} "$work"
             touch $out
           '';
 
