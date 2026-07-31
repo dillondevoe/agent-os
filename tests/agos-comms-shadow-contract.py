@@ -152,7 +152,19 @@ def test_exactly_once_delivery():
     counts = S.deliver_once(root, MODEL, sink=sink2)
     check(sink2 == [] and all(c == 0 for c in counts.values()),
           "double-fire: re-delivery produced %r / %r" % (sink2, counts))
-    print("5. exactly-once delivery + orphan→nobody + no double-fire — PASS")
+    # A done summons NOBODY: mark a comm processed, re-scan (emits its done), and the next delivery
+    # pass MUST stay 0 for every brain — a completion is not a broadcast re-summons. (A bare done()
+    # with empty `to` would broadcast to all consumers, inflating every brain's delivered count.)
+    base = "2026-07-31-air-to-augur-alpha.md"
+    with open(os.path.join(comms, "_done", base), "w") as f:
+        f.write("done\n")
+    r = S.scan_once(comms, root, MODEL)
+    check(r["dones"] == 1, "expected 1 done emitted, got %d" % r["dones"])
+    sink3 = []
+    counts3 = S.deliver_once(root, MODEL, sink=sink3)
+    check(sink3 == [] and all(c == 0 for c in counts3.values()),
+          "done wrongly summoned a consumer (empty-to broadcast?): %r / %r" % (sink3, counts3))
+    print("5. exactly-once delivery + orphan→nobody + no double-fire + done→nobody — PASS")
 
 
 def test_machine_partition_and_order():

@@ -222,8 +222,13 @@ def scan_once(comms_dir, root, model):
             continue  # only complete comms we actually emitted a request for
         actor = parse_actor(base)
         writer = E.EventLog(root, host_of(actor, model))
-        writer.done(base, "comms", payload={"marker": "_done/" + base}, actor=actor,
-                    ts=_iso(os.path.getmtime(path)))
+        # A done routes to NOBODY, never broadcast: a completion must not re-summon every consumer.
+        # agos_events' done()/emit() treat an empty `to` as BROADCAST, so a bare done() would be
+        # "delivered" to every brain's shadow consumer — inflating each brain's delivery count by the
+        # done-count (the delivered≠routed skew a naive readout shows). await_done() finds a done by
+        # corr_id via read() regardless of `to`, so completion threading is unaffected by routing here.
+        writer.emit("comms", "done", payload={"marker": "_done/" + base}, corr_id=base, actor=actor,
+                    to=[NOBODY], ts=_iso(os.path.getmtime(path)))
         done_already.add(base)
         dones += 1
 
