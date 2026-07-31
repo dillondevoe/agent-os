@@ -379,6 +379,26 @@
               echo "agentos-open imports all fourteen Phase-2 modules: calendar(agos-cal) desktop(hyprland) settings(agos-sys) model(agos-seed-model) genesis(agent-brain) calculator(agos-calc) files(agos-files) email(thunderbird) mail-secret(agos-mail-token-preflight) notes(agos-notes) docs(agos-doc) media(agos-media) web(agos-web) mail-proton(agos-mail-proton-preflight)"
               touch $out
             '';
+
+        # Orchestration engine · Phase 1 — the `agos-events` append-only event-log library's CONTRACT
+        # BATTERY. Proves, against the MULTI-WRITER-across-SyncThing reality Geist ruled load-bearing
+        # (per-(topic,machine) single-writer files; merge-read ordered by ts→machine→id; per-(consumer,
+        # topic,machine) cursors): multi-writer exactly-once (no double/miss), replay-from-0, defer()
+        # redelivery with NO done + head-of-line by writer (Geist PIN #1), deterministic ordering
+        # (ts dominates, machine breaks ties), first-class done/await_done threaded by corr_id, and
+        # routing on (topic, to) — NEVER by parsing payloads (Geist ruling #2). Zero external deps;
+        # a regression fails `nix flake check`. (Phase-1 library; the shadow brain-comms migration
+        # rides on top and is measured separately — Rabbot owns that before/after readout.)
+        agos-events-contract =
+          nixpkgs.legacyPackages.${system}.runCommand "agos-events-contract-check"
+            { nativeBuildInputs = [ nixpkgs.legacyPackages.${system}.python3 ]; } ''
+              work="$(mktemp -d)"
+              cp ${./modules/agos_events.py} "$work/agos_events.py"
+              cp ${./tests/agos-events-contract.py} "$work/contract.py"
+              cd "$work"
+              python3 contract.py
+              touch $out
+            '';
       };
     };
 }
