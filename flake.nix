@@ -304,6 +304,48 @@
             }"
             touch $out
           '';
+
+        # Phase 2 (OPEN lane) — the DROPPED-IMPORT guard ("imports can't ship green").
+        # SCAR (#42 -> fixed #44): a rebase resolved configuration-open.nix's `imports = [ … ]`
+        # conflict by DELETING the whole block. Every Phase-2 module is self-contained, so with
+        # nothing importing them the agentos-open toplevel still EVALUATED and BUILT clean — it just
+        # silently shipped an image with no calendar, no desktop, no settings, and no in-image brain.
+        # `nix flake check` never builds the open toplevel (the SAME gap the nft checks above close
+        # for the sealed egress rule), so it read as merged+green.
+        #
+        # WHY A MARKER-ASSERT, NOT A TOPLEVEL BUILD (Rabbot's choice-of-form to me): building
+        # `agentos-open.config.system.build.toplevel` is the strongest guard but REALIZES the ~4.68GB
+        # qwen2.5 model FOD (modules/model-open.nix) on every CI run — bandwidth-hostile for a public
+        # repo. This asserts, at EVAL time (zero realization, DVo-cheap), that each of the four
+        # bundled modules left its unique fingerprint in the built config. Drop any import and its
+        # marker goes unset -> this throws, naming the module. Same dropped-import class, caught for
+        # free. (Upgrade to a full toplevel build later if a fetch-capable CI ever wants belt+braces.)
+        #
+        # GUARD-OF-THE-GUARD: each marker must stay UNIQUE to exactly one module (a fingerprint no
+        # other module sets), or a dropped import could be masked by an unrelated one. Today:
+        #   calendar-open -> `agos-cal` CLI in systemPackages   (the agent's read/write calendar hand)
+        #   desktop-open  -> programs.hyprland.enable           (the reproducible compositor)
+        #   settings-open -> `agos-sys` CLI in systemPackages   (the agent's settings hand)
+        #   model-open    -> systemd service `agos-seed-model`  (the in-image brain, Dillon 8988)
+        agentos-open-imports =
+          let
+            pkgs = nixpkgs.legacyPackages.${system};
+            lib  = nixpkgs.lib;
+            cfg  = self.nixosConfigurations.agentos-open.config;
+            hasPkg = n: lib.any (p: lib.hasInfix n (p.name or "")) cfg.environment.systemPackages;
+          in
+            assert lib.assertMsg (hasPkg "agos-cal")
+              "agentos-open-imports: calendar-open.nix is NOT imported — agos-cal missing from systemPackages (dropped imports block? see #42/#44).";
+            assert lib.assertMsg cfg.programs.hyprland.enable
+              "agentos-open-imports: desktop-open.nix is NOT imported — programs.hyprland.enable is false.";
+            assert lib.assertMsg (hasPkg "agos-sys")
+              "agentos-open-imports: settings-open.nix is NOT imported — agos-sys missing from systemPackages.";
+            assert lib.assertMsg (builtins.hasAttr "agos-seed-model" cfg.systemd.services)
+              "agentos-open-imports: model-open.nix is NOT imported — the in-image brain (agos-seed-model, Dillon 8988) is absent.";
+            pkgs.runCommand "agentos-open-imports-check" { } ''
+              echo "agentos-open imports all four Phase-2 modules: calendar(agos-cal) desktop(hyprland) settings(agos-sys) model(agos-seed-model)"
+              touch $out
+            '';
       };
     };
 }
