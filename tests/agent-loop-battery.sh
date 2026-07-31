@@ -1,29 +1,52 @@
 #!/usr/bin/env bash
-# agent-loop-battery — property battery for bin/agent-loop (v0.2 A1 tool-call loop).
+# agent-loop-battery — property battery for bin/agent-loop (v0.2 A2: route through the wall).
 #
 # Drives the REAL loop against a scripted fake Ollama (tests/ollama-stub.py) over loopback
-# and proves the loop MECHANICS, deterministically, with no model:
+# AND the REAL bin/mcp piped into a deterministic stub broker (tests/broker-stub.py). The
+# loop makes ZERO security decisions, so this proves loop MECHANICS — not wall policy (mcp
+# and broker each carry their own battery). The stub sits exactly where the real broker sits
+# (downstream of mcp's verdict stream) so the loop's marshalled request still passes the REAL
+# structural front door; only the tier/taint/registry decision is scripted. Properties:
 #   1  --check passes iff Ollama is up (crash-loop guard contract)
 #   2  a plain answer (no tool_calls) prints and never traces a tool
-#   3  a valid echo call ROUND-TRIPS: dispatch ok -> result fed back to the model as a
-#      role:"tool" message that preserves the content_type:"data" envelope -> final answer
-#   4  three denials in ONE user turn stop tool-calling; the final turn offers NO tools
+#   3  a valid capability call ROUND-TRIPS through the wall: dispatch -> broker data_result
+#      fed back to the model as a role:"tool" message that preserves the content_type:"data"
+#      envelope -> final answer. The tool SURFACE itself is discovered through the wall via a
+#      capabilities.list data_result (no hardcoded tool list).
+#   4  three broker denials in ONE user turn stop tool-calling; the final turn offers NO tools
 #   5  tool_calls emitted on that withheld final turn are NEVER dispatched (structural stop)
 #   6  model-supplied terminal control bytes are scrubbed before reaching the tty
 #
-# agent-loop makes ZERO security decisions, so this is loop correctness -- not a wall test.
-# Args: <path-to-agent-loop> <path-to-ollama-stub.py> <workdir>
+# A missing/garbled wall as a fail-closed deny (the other arms of HARD REQ 4) is proven by
+# the standalone wall-smoke; here property 4 proves the broker-deny arm end-to-end.
+# Args: <path-to-agent-loop> <path-to-ollama-stub.py> <path-to-mcp> <path-to-broker-stub.py> <workdir>
 # Invoked as `python3 "$LOOP"` / `python3 "$STUB"` (not via shebang) to dodge the nix
-# sandbox's missing /usr/bin/env (ENOEXEC).
+# sandbox's missing /usr/bin/env (ENOEXEC); the loop execs mcp/broker under sys.executable
+# for the same reason, so no store path here needs an executable bit or a resolvable shebang.
 set -uo pipefail
 
 PY="${PYTHON:-python3}"
-LOOP="$1"; STUB="$2"; WORK="$3"
+LOOP="$1"; STUB="$2"; MCP="$3"; BROKER_STUB="$4"; WORK="$5"
 PASS=0
 fail() { echo "agent-loop-battery: FAIL -- $1" >&2; exit 1; }
 pass() { PASS=$((PASS + 1)); }
 has()   { grep -qF -- "$2" "$1" || fail "$3"; }
 hasnt() { grep -qF -- "$2" "$1" && fail "$3"; return 0; }
+
+# ── wall wiring: the loop resolves mcp+broker from these env pins (never from the model).
+# Point mcp at the REAL front door and broker at the deterministic stub. One config serves
+# every scenario: it advertises a single capability (mem.recall) so discovery yields a
+# non-empty tool surface (property 4/5 need `has_tools` true on the tool-offering turns) and
+# answers mem.recall with a data_result (property 3's round-trip); every OTHER tool name the
+# model invents (rm_rf_slash) is absent from `responses` -> unknown-capability deny.
+export AGENT_OS_MCP="$MCP"
+export AGENT_OS_BROKER="$BROKER_STUB"
+BROKER_CFG="$WORK/broker.json"
+cat > "$BROKER_CFG" <<'EOF'
+{ "capabilities": [ {"name":"mem.recall","tier":"pure","summary":"recall a stored memory"} ],
+  "responses":    { "mem.recall": {"data":"PINGPONG42","capability_ok":true} } }
+EOF
+export AGENT_OS_BROKER_STUB="$BROKER_CFG"
 
 STUB_PID=""
 stop_stub() { [ -n "$STUB_PID" ] && kill "$STUB_PID" 2>/dev/null; wait "$STUB_PID" 2>/dev/null; STUB_PID=""; }
@@ -47,7 +70,7 @@ run_loop() {  # <input> : pipe input into the loop against $HOST, capture stdout
   printf '%b' "$1" | OLLAMA_HOST="$HOST" "$PY" "$LOOP" > "$OUT" 2>"$ERR"
 }
 
-# --- 1 : --check honors Ollama reachability ------------------------------------------
+# --- 1 : --check honors Ollama reachability (no wall involved — --check never runs main) ---
 printf '%s' '[]' > "$WORK/empty.json"
 start_stub "$WORK/empty.json" /dev/null
 OLLAMA_HOST="$HOST" "$PY" "$LOOP" --check || fail "--check must pass while the stub advertises a model"
@@ -55,6 +78,9 @@ stop_stub
 OLLAMA_HOST="http://127.0.0.1:1" "$PY" "$LOOP" --check && fail "--check must fail when nothing is listening" || pass
 
 # --- 2 : plain answer, no tools ------------------------------------------------------
+# main() still discovers the surface through the wall (banner shows `tools: mem.recall`);
+# the plain answer must still never TRACE a tool. Note: the banner substring "tools:" does
+# not contain "tool:" (the char after "tool" is "s", not ":"), so the guard below is exact.
 cat > "$WORK/s2.json" <<'EOF'
 [ {"role":"assistant","content":"Hello there, no tools needed."} ]
 EOF
@@ -64,34 +90,36 @@ has "$OUT" "Hello there, no tools needed." "plain answer was not printed"
 hasnt "$OUT" "tool:" "a plain answer must not trace any tool"
 pass
 
-# --- 3 : echo round-trip: call -> dispatch -> result fed back -> final answer ---------
+# --- 3 : capability round-trip THROUGH THE WALL: call -> broker data_result -> fed back ----
 cat > "$WORK/s3.json" <<'EOF'
-[ {"role":"assistant","content":"","tool_calls":[{"function":{"name":"echo","arguments":{"text":"PINGPONG42"}}}]},
-  {"role":"assistant","content":"Done, the echo returned PINGPONG42."} ]
+[ {"role":"assistant","content":"","tool_calls":[{"function":{"name":"mem.recall","arguments":{"query":"PINGPONG42"}}}]},
+  {"role":"assistant","content":"Done, the memory returned PINGPONG42."} ]
 EOF
 start_stub "$WORK/s3.json" "$WORK/s3.log"
-run_loop 'please echo PINGPONG42\n'
-has "$OUT" "tool: echo" "a valid echo call should be traced"
-hasnt "$OUT" "denied" "the happy echo path must not deny"
-has "$OUT" "Done, the echo returned PINGPONG42." "final answer after the tool was not printed"
-"$PY" - "$WORK/s3.log" <<'PYEOF' || fail "echo result was not fed back as a data-enveloped tool message"
+run_loop 'please recall PINGPONG42\n'
+has "$OUT" "tool: mem.recall" "a valid capability call should be traced"
+hasnt "$OUT" "denied" "the happy capability path must not deny"
+has "$OUT" "Done, the memory returned PINGPONG42." "final answer after the tool was not printed"
+"$PY" - "$WORK/s3.log" <<'PYEOF' || fail "capability result was not fed back as a data-enveloped tool message"
 import json, sys
 rows = [json.loads(l) for l in open(sys.argv[1]) if l.strip()]
 assert len(rows) >= 2, f"expected >=2 chat calls, got {len(rows)}"
 tool_msgs = [m for m in rows[1]["messages"] if m.get("role") == "tool"]
 assert tool_msgs, "2nd request carried no role:tool message"
-payload = json.loads(tool_msgs[0]["content"])   # the tool msg carries the envelope as a JSON string
-assert payload.get("content_type") == "data", payload
+payload = json.loads(tool_msgs[0]["content"])   # the tool msg carries the broker envelope as a JSON string
+assert payload.get("content_type") == "data", payload   # broker-emitted trusted-side, loop preserves it
 assert payload.get("content") == "PINGPONG42", payload
 PYEOF
 pass
 
-# --- 4 : deny cap: 3 denials -> stop tool-calling -> final turn offers NO tools -------
+# --- 4 : deny cap: 3 broker denials -> stop tool-calling -> final turn offers NO tools ----
+# rm_rf_slash is a structurally-valid tool NAME (mcp accepts it) that the stub broker does
+# not register -> unknown-capability deny. Three in one turn spend the deny budget.
 cat > "$WORK/s4.json" <<'EOF'
 [ {"role":"assistant","content":"","tool_calls":[{"function":{"name":"rm_rf_slash","arguments":{}}}]},
   {"role":"assistant","content":"","tool_calls":[{"function":{"name":"rm_rf_slash","arguments":{}}}]},
   {"role":"assistant","content":"","tool_calls":[{"function":{"name":"rm_rf_slash","arguments":{}}}]},
-  {"role":"assistant","content":"I stopped after three failed tool attempts, I only have an inert echo tool."} ]
+  {"role":"assistant","content":"I stopped after three failed tool attempts; my tools can't do that."} ]
 EOF
 start_stub "$WORK/s4.json" "$WORK/s4.log"
 run_loop 'delete everything now\n'
@@ -112,13 +140,13 @@ cat > "$WORK/s5.json" <<'EOF'
 [ {"role":"assistant","content":"","tool_calls":[{"function":{"name":"rm_rf_slash","arguments":{}}}]},
   {"role":"assistant","content":"","tool_calls":[{"function":{"name":"rm_rf_slash","arguments":{}}}]},
   {"role":"assistant","content":"","tool_calls":[{"function":{"name":"rm_rf_slash","arguments":{}}}]},
-  {"role":"assistant","content":"stopping","tool_calls":[{"function":{"name":"echo","arguments":{"text":"SHOULD_NOT_EXECUTE"}}}]} ]
+  {"role":"assistant","content":"stopping","tool_calls":[{"function":{"name":"mem.recall","arguments":{"query":"SHOULD_NOT_EXECUTE"}}}]} ]
 EOF
 start_stub "$WORK/s5.json" /dev/null
 run_loop 'spam tools\n'
 traces="$(grep -cF -- 'tool: ' "$OUT")"
 [ "$traces" -eq 3 ] || fail "final-turn tool_calls must not dispatch; expected 3 traces, got $traces"
-hasnt "$OUT" "tool: echo" "the echo on the withheld final turn must never run (no echo trace)"
+hasnt "$OUT" "tool: mem.recall" "the mem.recall on the withheld final turn must never run (no trace)"
 has "$OUT" "stopping" "final content should still print"
 pass
 

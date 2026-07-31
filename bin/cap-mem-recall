@@ -1,0 +1,169 @@
+#!/usr/bin/env python3
+# cap-mem-recall — Phase 2 · A2 impl for the T0 `mem.recall` capability.
+#
+# Security surface: branch -> PR -> Fable -> merge. Never direct-push.
+#
+# Tier T0 (AUTO — runs even under taint). Reads memory entries in an allowlisted namespace and
+# returns the fuzzy top matches. It is READ-ONLY (sandbox readOnlyPaths = /var/lib/agent-os/mem);
+# re-tainting recalled entries is the BROKER's job, not this impl's — the impl only surfaces
+# candidates plus, per PIN A, the exact stored octets the broker needs to re-derive each entry's
+# origin (sha256 vs the remember stamp). An entry written by an untrusted turn therefore stays
+# untrusted on recall (cross-session-laundering fence), and a swapped-under-key file fails the
+# hash and re-taints.
+#
+# Seam contract (invoked by cap-invoke, the AGENT_OS_INVOKE_SEAM dispatcher):
+#   stdin  : {"capability":"mem.recall","arguments":{"namespace":<str>,"query":<str>}}
+#   stdout : {"ok":true, "content":<json str of hits>, "meta":{"entries":[{"key","content"}...]}}  exit 0
+#   stdout : {"ok":false,"content":null,"meta":{}}                                                  exit 3
+#            on any contract/infra failure (dispatcher then withholds, fail-closed).
+#
+# ⭐ PIN A (multi-hit provenance — the closure fix): recall is fuzzy MANY-hit, so meta cannot be a
+#   single key. It carries `entries`: one {key, content} per hit, where `content` is the EXACT
+#   stored octets (this file's bytes, utf-8-decoded — the same string mem.remember wrote). The
+#   broker hashes each entry's content INDIVIDUALLY and calls `taint recall <key_i>
+#   --content-hash <h_i>` per entry; it must NEVER hash a concatenated payload (that matches no
+#   per-entry stamp and silently degrades every TRUSTED tag). return-octets == file-octets is the
+#   same PIN-2 invariant mem.remember pins on the write side — here it is the read side of the
+#   round-trip.
+#
+# ⭐ Fail-closed consistency: the model-facing `content` and the broker-facing `meta.entries` are
+#   built from the SAME filtered hit list. A file whose derived key is not grammar-legal, is
+#   oversized, or is not valid utf-8 is DROPPED from BOTH (never released, never half-tainted) —
+#   drop-not-release is fail-closed (a dropped entry cannot launder). In normal operation nothing
+#   drops: mem.remember only ever writes legal `<ns>.<sha256[:16]>.md` slugs.
+
+import difflib
+import json
+import os
+import re
+import sys
+
+# Storage root. Hardcoded to the sandbox-declared path; AGENT_OS_MEM_ROOT is a TEST-ONLY override
+# (the seam strips the impl env to PATH + AGENT_OS_REGISTRY, so it is never attacker-settable in
+# production — it only takes effect when the battery invokes the impl directly, bypassing the seam).
+MEM_ROOT = os.environ.get("AGENT_OS_MEM_ROOT", "/var/lib/agent-os/mem")
+
+MAX_HITS = 8                    # fuzzy multi-hit ceiling (matches the human bin/mem recall shape).
+MAX_ENTRY_BYTES = 262144       # 256 KiB per-entry read cap — bounds memory vs a giant planted file.
+
+_NS_RE = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")   # dumb twin of broker _NS_RE.
+_LEAF_RE = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")  # leaf dir name must be key-safe.
+_HASH_RE = re.compile(r"\A[0-9a-f]{16}\Z")                    # content-address suffix.
+# Full runtime key charset (leaf-discriminated, slash-free, <=256): the meta.key grammar the
+# broker's _meta_key_ok mirror enforces. Enforced on the FULL key incl. "<leaf>." + ".md".
+_KEY_RE = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9._-]{0,255}\Z")
+
+
+def _fail(msg):
+    sys.stderr.write("cap-mem-recall: %s\n" % msg)
+    sys.stdout.write(json.dumps({"ok": False, "content": None, "meta": {}},
+                                sort_keys=True, separators=(",", ":"), ensure_ascii=True))
+    sys.exit(3)
+
+
+def _tokenize(s):
+    return [t for t in re.split(r"[^a-z0-9]+", s.lower()) if t]
+
+
+def main():
+    try:
+        raw = sys.stdin.buffer.read()
+    except OSError as e:
+        _fail("could not read stdin (%s)" % e)
+
+    try:
+        req = json.loads(raw.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError) as e:
+        _fail("request is not valid JSON (%s)" % e)
+    if not isinstance(req, dict):
+        _fail("request is not a JSON object")
+
+    args = req.get("arguments")
+    if not isinstance(args, dict):
+        _fail("'arguments' is not a JSON object")
+    namespace = args.get("namespace")
+    query = args.get("query")
+    if not (isinstance(namespace, str) and _NS_RE.match(namespace)):
+        _fail("'namespace' missing or not a valid namespace")
+    if not isinstance(query, str):
+        _fail("'query' is not a string")
+
+    q_tokens = _tokenize(query)
+    q_lower = query.lower()
+
+    # Enumerate leaves (immediate key-safe subdirs of the root). Missing root -> empty recall,
+    # which is a valid (not error) outcome: nothing remembered yet.
+    leaves = []
+    if os.path.isdir(MEM_ROOT):
+        try:
+            leaves = sorted(d for d in os.listdir(MEM_ROOT)
+                            if _LEAF_RE.match(d) and os.path.isdir(os.path.join(MEM_ROOT, d)))
+        except OSError as e:
+            _fail("could not list mem root (%s)" % e)
+
+    hits = []
+    for leaf in leaves:
+        leaf_dir = os.path.join(MEM_ROOT, leaf)
+        try:
+            names = os.listdir(leaf_dir)
+        except OSError:
+            continue
+        for relname in names:
+            if not relname.endswith(".md"):
+                continue
+            # Exact reconstruction of mem.remember's naming: "<namespace>.<16-hex>.md". Parsing on
+            # the LAST dot (not a prefix match) prevents namespace "a" from matching "a.b.<hash>.md".
+            core = relname[:-3]
+            idx = core.rfind(".")
+            if idx < 0:
+                continue
+            ns_part, hash_part = core[:idx], core[idx + 1:]
+            if ns_part != namespace or not _HASH_RE.match(hash_part):
+                continue
+
+            key = "%s.%s" % (leaf, relname)  # <leaf>.<namespace>.<hash>.md
+            if not _KEY_RE.match(key):
+                sys.stderr.write("cap-mem-recall: drop illegal key %r (fail-closed)\n" % key)
+                continue
+
+            fpath = os.path.join(leaf_dir, relname)
+            try:
+                if os.path.getsize(fpath) > MAX_ENTRY_BYTES:
+                    sys.stderr.write("cap-mem-recall: drop oversized %r\n" % relname)
+                    continue
+                with open(fpath, "rb") as f:
+                    octets = f.read(MAX_ENTRY_BYTES + 1)
+                if len(octets) > MAX_ENTRY_BYTES:
+                    continue
+                content_str = octets.decode("utf-8")  # strict; remember only ever wrote valid utf-8
+            except (OSError, UnicodeDecodeError) as e:
+                sys.stderr.write("cap-mem-recall: drop unreadable %r (%s)\n" % (relname, e))
+                continue
+
+            c_lower = content_str.lower()
+            if q_tokens:
+                score = sum(1 for t in q_tokens if t in c_lower)
+                if score <= 0:
+                    continue  # a non-empty query that matches no token is not a hit
+            else:
+                score = 0  # empty query = list mode: include all (ranked by key for determinism)
+            ratio = difflib.SequenceMatcher(None, q_lower, c_lower).ratio() if q_lower else 0.0
+            hits.append({"key": key, "score": score, "ratio": ratio, "content": content_str})
+
+    # Rank: score desc, difflib ratio desc, key asc (fully deterministic — no clock, no randomness).
+    hits.sort(key=lambda h: (-h["score"], -h["ratio"], h["key"]))
+    hits = hits[:MAX_HITS]
+
+    # Model-facing content and broker-facing meta.entries are built from the SAME list (fail-closed
+    # consistency). meta.entries[i].content is the exact file octets -> broker hashes it per entry.
+    released = {"entries": [{"key": h["key"], "content": h["content"]} for h in hits]}
+    content = json.dumps(released, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    meta = {"entries": [{"key": h["key"], "content": h["content"]} for h in hits]}
+
+    sys.stdout.write(json.dumps({"ok": True, "content": content, "meta": meta},
+                                sort_keys=True, separators=(",", ":"), ensure_ascii=True))
+    sys.exit(0)
+
+
+if __name__ == "__main__":
+    main()

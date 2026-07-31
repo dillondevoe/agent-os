@@ -90,6 +90,10 @@ out = {"ok": os.environ.get("INVOKE_OK", "1") == "1",
        "content": os.environ.get("INVOKE_CONTENT",
                                  "CONTENT-" + json.dumps(req.get("arguments", {}), sort_keys=True))}
 if "INVOKE_KEY" in os.environ: out["meta"] = {"key": os.environ["INVOKE_KEY"]}
+# mem.recall is fuzzy MULTI-hit: its provenance rides meta.entries (a list of {key,content}), NOT a
+# single key. A leg sets INVOKE_ENTRIES to a JSON list to drive the per-entry taint path (PIN A
+# per-entry content-hash binding, PIN B batch atomicity). recall legs use ENTRIES; remember uses KEY.
+if "INVOKE_ENTRIES" in os.environ: out["meta"] = {"entries": json.loads(os.environ["INVOKE_ENTRIES"])}
 if os.environ.get("INVOKE_LIE_ORIGIN") == "1": out["origin"] = "TRUSTED"   # broker MUST ignore this
 sys.stdout.write(json.dumps(out))
 PYEOF
@@ -133,7 +137,7 @@ OUT="$( CONFIRM_APPROVE=0 AGENT_OS_CONFIRM_SEAM="$SEAM_CONFIRM" AGENT_OS_INVOKE_
 case "$OUT" in *"confirm: test"*) : ;; *) fail "T1 explicit-deny confirm not surfaced: $OUT";; esac
 rm -f "$SCRATCH/mark/iA"
 OUT="$( CONFIRM_APPROVE=1 AGENT_OS_CONFIRM_SEAM="$SEAM_CONFIRM" \
-        INVOKE_MARKER="$SCRATCH/mark/iA" INVOKE_KEY="session/x" AGENT_OS_INVOKE_SEAM="$SEAM_INVOKE" one "$V_REMEMBER" )"
+        INVOKE_MARKER="$SCRATCH/mark/iA" INVOKE_KEY="session.x.md" AGENT_OS_INVOKE_SEAM="$SEAM_INVOKE" one "$V_REMEMBER" )"
 [ -e "$SCRATCH/mark/iA" ] || fail "T1 APPROVE did not reach invoke: $OUT"
 [ "$(jf "$OUT" 'o["result"]["content_type"]')" = "data" ] || fail "T1 approved result not DATA: $OUT"
 
@@ -229,41 +233,99 @@ OUT="$( AGENT_OS_REGISTRY="$TESTREG" TAINT_BIN="$SCRATCH/no-such-taint" \
 case "$OUT" in *"content-withheld"*) : ;; *) fail "taint-set failure did not withhold: $OUT";; esac
 case "$OUT" in *LEAKME*) fail "content LEAKED despite the taint effect failing to commit: $OUT";; esac
 
-# ── 12. mem.recall RE-TAINT ACROSS SESSIONS (§4.9): recall of an UNTRUSTED-stored key re-taints;
-#        recall of a TRUSTED key does not. The broker calls `taint recall <meta.key>`; taint owns
-#        the tag (the impl cannot forge it).
+# ── 12. mem.recall RE-TAINT — MULTI-HIT per-entry provenance (§4.9 + Geist A2 ruling Q1, PIN A/B).
+#        recall is fuzzy MANY-hit, so provenance rides meta.entries=[{key,content}...], NOT a single
+#        key. The broker recalls EACH entry against ITS OWN content-hash (PIN A: a naive hash of the
+#        concatenated result would match no per-entry stamp and silently degrade every TRUSTED tag);
+#        ANY untrusted entry taints the whole session (monotonic/absorbing); a per-entry effect that
+#        can't COMMIT withholds the WHOLE batch (PIN B). taint owns the tag — the impl cannot forge it.
 "$PY" "$TAINT" reset --confirm-human --break-glass >/dev/null || fail "reset before recall seed"
-"$PY" "$TAINT" set "seed untrusted" >/dev/null || fail "set before untrusted stamp"
-"$PY" "$TAINT" stamp untrusted/k >/dev/null || fail "stamp untrusted/k"      # tagged UNTRUSTED
-"$PY" "$TAINT" reset --confirm-human --break-glass >/dev/null || fail "reset after seeding"
-# stamp trusted/k bound to the SAME bytes the recall will present (sha of "recalled") — GAP-4: a
-# TRUSTED tag now honors recall only on a content-hash match, so the seed must carry that hash.
-"$PY" "$TAINT" stamp trusted/k --content-hash "$(sha recalled)" >/dev/null || fail "stamp trusted/k"
+# Seed UNTRUSTED-tagged entries: taint the session first, THEN stamp (the stamp inherits taint).
+"$PY" "$TAINT" set "seed untrusted" >/dev/null || fail "set before untrusted stamps"
+"$PY" "$TAINT" stamp untrusted.b.md   >/dev/null || fail "stamp untrusted.b.md"
+"$PY" "$TAINT" stamp mix.untrusted.md >/dev/null || fail "stamp mix.untrusted.md"
+# Seed TRUSTED-tagged entries from a CLEAN session, each bound (GAP-4) to the EXACT bytes its recall
+# will present. A later swap under the same key must re-taint (per-entry content-hash binding).
+"$PY" "$TAINT" reset --confirm-human --break-glass >/dev/null || fail "reset before trusted stamps"
+"$PY" "$TAINT" stamp trusted.a.md   --content-hash "$(sha recalled-a)" >/dev/null || fail "stamp trusted.a.md"
+"$PY" "$TAINT" stamp trusted.c.md   --content-hash "$(sha orig-c)"     >/dev/null || fail "stamp trusted.c.md"
+"$PY" "$TAINT" stamp mix.trusted.md --content-hash "$(sha mix-t)"      >/dev/null || fail "stamp mix.trusted.md"
 VREC='{"ok":true,"method":"tools/call","id":31,"name":"mem.recall","arguments":{"namespace":"session","query":"q"}}'
-OUT="$( INVOKE_KEY="untrusted/k" INVOKE_CONTENT="recalled" AGENT_OS_INVOKE_SEAM="$SEAM_INVOKE" one "$VREC" )"
-[ "$(jf "$OUT" 'o["result"]["content_type"]')" = "data" ] || fail "recall result not DATA: $OUT"
-taint_is TAINTED   # recalling the UNTRUSTED-origin entry re-tainted the fresh session (absorbing)
-"$PY" "$TAINT" reset --confirm-human --break-glass >/dev/null || fail "reset before trusted recall"
-OUT="$( INVOKE_KEY="trusted/k" INVOKE_CONTENT="recalled" AGENT_OS_INVOKE_SEAM="$SEAM_INVOKE" one "$VREC" )"
-taint_is clean     # broker passes sha("recalled") == stored hash -> TRUSTED honored, no re-taint
+# 12a — PIN A honored: a TRUSTED entry whose presented bytes match the stamped hash -> NO re-taint.
+"$PY" "$TAINT" reset --confirm-human --break-glass >/dev/null || fail "reset before 12a"
+OUT="$( INVOKE_ENTRIES='[{"key":"trusted.a.md","content":"recalled-a"}]' AGENT_OS_INVOKE_SEAM="$SEAM_INVOKE" one "$VREC" )"
+[ "$(jf "$OUT" 'o["result"]["content_type"]')" = "data" ] || fail "12a recall not DATA: $OUT"
+taint_is clean     # trusted + hash-match -> honored, the fresh session stays clean
+# 12b — UNTRUSTED entry re-taints the fresh session (absorbing cross-session fence).
+"$PY" "$TAINT" reset --confirm-human --break-glass >/dev/null || fail "reset before 12b"
+OUT="$( INVOKE_ENTRIES='[{"key":"untrusted.b.md","content":"anything"}]' AGENT_OS_INVOKE_SEAM="$SEAM_INVOKE" one "$VREC" )"
+taint_is TAINTED
+# 12c — GAP-4 swap-under-blessed-key: a TRUSTED key but WRONG bytes -> hash mismatch -> re-taint.
+#        This is the closure Geist warned would silently break under a naive concat-hash port.
+"$PY" "$TAINT" reset --confirm-human --break-glass >/dev/null || fail "reset before 12c"
+OUT="$( INVOKE_ENTRIES='[{"key":"trusted.c.md","content":"SWAPPED"}]' AGENT_OS_INVOKE_SEAM="$SEAM_INVOKE" one "$VREC" )"
+taint_is TAINTED
+# 12d — mixed-batch monotonicity: one untrusted entry among trusted taints the WHOLE session.
+"$PY" "$TAINT" reset --confirm-human --break-glass >/dev/null || fail "reset before 12d"
+OUT="$( INVOKE_ENTRIES='[{"key":"mix.trusted.md","content":"mix-t"},{"key":"mix.untrusted.md","content":"u"}]' AGENT_OS_INVOKE_SEAM="$SEAM_INVOKE" one "$VREC" )"
+taint_is TAINTED
+# 12e — per-entry KEY FENCE: an entry whose key fails _meta_key_ok (slash) is NOT recalled against a
+#        stored tag (a bad key could name a FOREIGN origin); taint fail-closed instead, released
+#        as-tainted (still DATA, never fail-broken).
+"$PY" "$TAINT" reset --confirm-human --break-glass >/dev/null || fail "reset before 12e"
+OUT="$( INVOKE_ENTRIES='[{"key":"bad/key","content":"z"}]' AGENT_OS_INVOKE_SEAM="$SEAM_INVOKE" one "$VREC" )"
+[ "$(jf "$OUT" 'o["result"]["content_type"]')" = "data" ] || fail "12e bad-key recall not DATA: $OUT"
+taint_is TAINTED
+# 12f — PIN B batch atomicity: a per-entry taint effect that can't COMMIT (TAINT_BIN missing) -> the
+#        WHOLE result is withheld, never partially released (the content bytes must not leak).
+OUT="$( TAINT_BIN="$SCRATCH/no-such-taint" \
+        INVOKE_CONTENT="RECALLLEAK" INVOKE_ENTRIES='[{"key":"trusted.a.md","content":"recalled-a"}]' \
+        AGENT_OS_INVOKE_SEAM="$SEAM_INVOKE" one "$VREC" )"
+case "$OUT" in *"content-withheld"*) : ;; *) fail "12f recall taint-fail did not withhold: $OUT";; esac
+case "$OUT" in *RECALLLEAK*) fail "12f recall LEAKED content despite a per-entry effect failing to commit: $OUT";; esac
+# 12g — malformed/absent meta.entries (a direct/hostile seam that emits meta.key instead of a list)
+#        -> fail-closed wholesale taint, still released as-tainted (DATA), never fail-broken.
+"$PY" "$TAINT" reset --confirm-human --break-glass >/dev/null || fail "reset before 12g"
+OUT="$( INVOKE_KEY="session.x.md" AGENT_OS_INVOKE_SEAM="$SEAM_INVOKE" one "$VREC" )"
+[ "$(jf "$OUT" 'o["result"]["content_type"]')" = "data" ] || fail "12g no-entries recall not DATA: $OUT"
+taint_is TAINTED
 
-# ── 13. mem.remember — the BROKER owns the stamp (§4.9). A stamped key recalls as "no change"
-#        (proof it was tagged); a missing key withholds; a stamp that can't commit withholds.
+# ── 13. mem.remember — the BROKER owns the stamp (§4.9). remember carries the SINGULAR meta.key
+#        (Geist ruling Q1: 1:1 clean). A stamped key recalls as "no change" (proof it was tagged);
+#        a missing OR illegal key withholds; a stamp that can't commit withholds. Keys are the
+#        blessed slash-free grammar `<leaf>.<slug>.md` (no `/`) — _meta_key_ok mirrors it.
 "$PY" "$TAINT" reset --confirm-human --break-glass >/dev/null || fail "reset before stamp leg"
-# pin INVOKE_CONTENT so the stamped bytes are deterministic; the broker stamps session/n1 bound to
+# pin INVOKE_CONTENT so the stamped bytes are deterministic; the broker stamps session.n1.md bound to
 # sha("remembered-bytes"). A same-hash recall then proves the stamp committed WITH a content-hash.
 OUT="$( CONFIRM_APPROVE=1 AGENT_OS_CONFIRM_SEAM="$SEAM_CONFIRM" \
-        INVOKE_KEY="session/n1" INVOKE_CONTENT="remembered-bytes" AGENT_OS_INVOKE_SEAM="$SEAM_INVOKE" one "$V_REMEMBER" )"
+        INVOKE_KEY="session.n1.md" INVOKE_CONTENT="remembered-bytes" AGENT_OS_INVOKE_SEAM="$SEAM_INVOKE" one "$V_REMEMBER" )"
 [ "$(jf "$OUT" 'o["result"]["content_type"]')" = "data" ] || fail "remember result not DATA: $OUT"
-R="$("$PY" "$TAINT" recall session/n1 --content-hash "$(sha remembered-bytes)")" || fail "recall of the stamped key errored"
-case "$R" in *"no change"*) : ;; *) fail "broker did not stamp session/n1 w/ hash (recall re-tainted it): $R";; esac
+R="$("$PY" "$TAINT" recall session.n1.md --content-hash "$(sha remembered-bytes)")" || fail "recall of the stamped key errored"
+case "$R" in *"no change"*) : ;; *) fail "broker did not stamp session.n1.md w/ hash (recall re-tainted it): $R";; esac
 # no key to stamp -> withhold (a write whose provenance can't be pinned is a laundering hole)
 OUT="$( CONFIRM_APPROVE=1 AGENT_OS_CONFIRM_SEAM="$SEAM_CONFIRM" AGENT_OS_INVOKE_SEAM="$SEAM_INVOKE" one "$V_REMEMBER" )"
 case "$OUT" in *"content-withheld"*) : ;; *) fail "remember with no stamp key did not withhold: $OUT";; esac
+# a PRESENT-but-illegal (slash) key is ALSO unpinnable -> withhold (remember key fence == _meta_key_ok).
+OUT="$( CONFIRM_APPROVE=1 AGENT_OS_CONFIRM_SEAM="$SEAM_CONFIRM" \
+        INVOKE_KEY="session/slash" AGENT_OS_INVOKE_SEAM="$SEAM_INVOKE" one "$V_REMEMBER" )"
+case "$OUT" in *"content-withheld"*) : ;; *) fail "remember with an illegal (slash) key did not withhold: $OUT";; esac
 # stamp can't commit (TAINT_BIN missing) -> withhold
 OUT="$( TAINT_BIN="$SCRATCH/no-such-taint" CONFIRM_APPROVE=1 AGENT_OS_CONFIRM_SEAM="$SEAM_CONFIRM" \
-        INVOKE_KEY="session/n2" AGENT_OS_INVOKE_SEAM="$SEAM_INVOKE" one "$V_REMEMBER" )"
+        INVOKE_KEY="session.n2.md" AGENT_OS_INVOKE_SEAM="$SEAM_INVOKE" one "$V_REMEMBER" )"
 case "$OUT" in *"content-withheld"*) : ;; *) fail "remember stamp-fail did not withhold: $OUT";; esac
+
+# ── 13b. GOLDEN WIRE VECTORS (§4.9 envelope byte-contract) — emit() is byte-deterministic
+#        (sort_keys + tight separators + ensure_ascii); pin the EXACT bytes so a drift in envelope
+#        shape/key-order is caught, not merely a parsed field. ALLOW = approved T1 remember with a
+#        grammar-legal key; DENY = unknown capability (default E_DENY = -32000).
+"$PY" "$TAINT" reset --confirm-human --break-glass >/dev/null || fail "reset before golden vectors"
+GA="$( CONFIRM_APPROVE=1 AGENT_OS_CONFIRM_SEAM="$SEAM_CONFIRM" \
+       INVOKE_KEY="session.g1.md" INVOKE_CONTENT="GVEC" AGENT_OS_INVOKE_SEAM="$SEAM_INVOKE" one "$V_REMEMBER" )"
+GOLD_A='{"id":2,"ok":true,"result":{"capability_ok":true,"content":"GVEC","content_type":"data"}}'
+[ "$GA" = "$GOLD_A" ] || fail "ALLOW envelope bytes drifted -- got:$GA want:$GOLD_A"
+GD="$(one '{"ok":true,"method":"tools/call","id":82,"name":"no.such.pin","arguments":{}}')"
+GOLD_D='{"error":{"code":-32000,"message":"unknown-capability: no.such.pin"},"id":82,"ok":false}'
+[ "$GD" = "$GOLD_D" ] || fail "DENY envelope bytes drifted -- got:$GD want:$GOLD_D"
 
 # ── 14. CONFIRM EPOCH BINDING (§4.6): an approval that arrives under a DIFFERENT session_id
 #        (a taint reset raced in during confirm) is rejected.

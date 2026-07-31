@@ -357,9 +357,13 @@ broker_confirm() {
   printf '%s' "$out"
 }
 
-# T1 mem.remember, approved -> stamped -> DATA-fenced content
+# T1 mem.remember, approved -> stamped -> DATA-fenced content. The stub's INVOKE_KEY is a BLESSED
+# runtime key (`<leaf>.<ns>.<16hex>.md`) — the exact shape cap-mem-remember emits for namespace
+# "session" — so it passes the broker's _meta_key_ok provenance fence (which mirrors cap-invoke's
+# meta.key gate and rejects slash/dotdot/control/oversized keys). An old slash-style key would now
+# fail-closed as `provenance unpinnable`, which is the fence doing its job.
 V_REMEMBER='{"ok":true,"method":"tools/call","id":91,"name":"mem.remember","arguments":{"namespace":"session","content":"note"}}'
-OUT="$(broker_confirm "$V_REMEMBER" approve "session/i1")"
+OUT="$(broker_confirm "$V_REMEMBER" approve "session.session.0123456789abcdef.md")"
 [ "$(jf "$OUT" 'o["result"]["content_type"]')" = "data" ] || fail "T1 remember approved not DATA-fenced: $OUT"
 # T2 message.send, approved -> invoke stub -> DATA-fenced content
 V_SEND='{"ok":true,"method":"tools/call","id":92,"name":"message.send","arguments":{"recipient":"peer@ex.example","body":"hi"}}'

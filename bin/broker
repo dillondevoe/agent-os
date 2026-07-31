@@ -168,6 +168,23 @@ def _content_hash_args(content):
     return ("--content-hash", ch) if ch else ()
 
 
+def _meta_key_ok(key):
+    """Mirror of cap-invoke's meta.key gate (bin/cap-invoke `_meta_key_ok`): the broker re-checks
+    EVERY impl-supplied key BEFORE it becomes a `taint recall` / `taint stamp` tag, so a hostile
+    impl — or any future seam that bypasses cap-invoke — cannot smuggle a traversal / control-char /
+    oversized tag into the provenance store (a bad tag could name a FOREIGN entry's origin). Kept
+    byte-identical to the dispatcher gate so the two trust-boundary checks can never differ: <=256,
+    no '.'/'..' / '..'-substring / '/', no C0/DEL control chars. Conservative on purpose — it
+    rejects the dangerous forms without dictating the mem.* key grammar (non-ASCII is NOT rejected;
+    the grammar may legitimately allow UTF-8). Enforced on the FULL runtime key (incl. the
+    '<leaf>.' prefix + '.md' suffix)."""
+    if not (isinstance(key, str) and key) or len(key) > 256:
+        return False
+    if key in (".", "..") or ".." in key or "/" in key:
+        return False
+    return all(ord(c) >= 0x20 and ord(c) != 0x7f for c in key)
+
+
 # ── Audit (Step 2) — append BEFORE effect; a non-zero append is a fail-closed deny ──
 def audit_append(record):
     """Append one broker record via Step-2 audit. Return (ok:bool, head_hash:str|None).
@@ -485,24 +502,49 @@ class Broker:
     # ── provenance side-effects (§3 stage 9) — taint MUST commit before content leaves ──
     def _commit_provenance(self, name, invoke_res):
         """Derive origin by BROKER POLICY and commit the required taint effect FIRST. Return
-        (proceed:bool, reason). proceed=False -> withhold content, typed error, audit."""
+        (proceed:bool, reason). proceed=False -> withhold content, typed error, audit.
+
+        PIN A/B (multi-hit recall — the closure fix): mem.recall is fuzzy MANY-hit, so its
+        provenance rides a per-entry `meta.entries` list (one {key, content} per hit), NOT a single
+        key. The broker recalls EACH entry against ITS OWN content-hash — never a hash of the
+        concatenated result (that would match no per-entry stamp and silently degrade every TRUSTED
+        tag). Batch atomicity (PIN B): every per-entry effect must COMMIT before Stage-10 releases a
+        byte; the FIRST effect that fails to commit returns proceed=False, and the Stage-9 caller
+        withholds the WHOLE result — never a partial release. Monotonic taint means an already-
+        committed earlier effect on a withheld batch only ever over-taints (the safe direction)."""
         meta = invoke_res.get("meta") or {}
         if name == "mem.recall":
-            key = meta.get("key")
-            if isinstance(key, str) and key:
-                # taint owns the tag; the broker asks it, never trusts an impl origin field.
-                # Bind the recall to the exact bytes about to be released (GAP-4): a TRUSTED tag
-                # is honored only if this hash matches the vouched one; a swap-under-key re-taints.
-                ok = taint_effect("recall", key, *_content_hash_args(invoke_res.get("content")))
-            else:
-                # can't identify the recalled entry -> unknown provenance -> untrusted.
-                ok = taint_effect("set", "mem.recall unidentified-key (fail-closed untrusted)")
-            return ok, (None if ok else "taint-recall-failed")
+            entries = meta.get("entries")
+            if not isinstance(entries, list):
+                # No per-entry provenance to bind (absent/malformed meta). The released `content`
+                # may still carry bytes we cannot attribute per entry -> fail closed by tainting the
+                # session wholesale (release-as-tainted), the same posture as the old unidentified
+                # single-key path. cap-invoke already drops a non-conforming entries list, so this
+                # fires only on a direct/hostile seam.
+                ok = taint_effect("set", "mem.recall no entries (fail-closed untrusted)")
+                return ok, (None if ok else "taint-set-failed")
+            for ent in entries:
+                # Per-entry key fence: an entry whose key is absent or not grammar-legal cannot be
+                # bound to a stored tag (a bad key could name a FOREIGN entry's origin). Do NOT
+                # recall it; taint the session fail-closed instead (release-as-tainted, never
+                # fail-broken). Only a NON-COMMITTING taint op withholds the batch.
+                if not (isinstance(ent, dict) and _meta_key_ok(ent.get("key"))):
+                    if not taint_effect("set", "mem.recall bad-key entry (fail-closed untrusted)"):
+                        return False, "taint-set-failed (recall bad key)"
+                    continue
+                # PIN A: hash THIS entry's content ALONE -> its own --content-hash. taint owns the
+                # tag; a TRUSTED tag is honored only if this per-entry hash matches the stamped one;
+                # a swap under a blessed key re-taints (GAP-4).
+                key = ent.get("key")
+                if not taint_effect("recall", key, *_content_hash_args(ent.get("content"))):
+                    return False, "taint-recall-failed: %s" % key
+            return True, None
         if name == "mem.remember":
             key = meta.get("key")
-            if not (isinstance(key, str) and key):
-                # a write whose origin cannot be pinned is a laundering hole -> fail the request.
-                return False, "mem.remember: no key to stamp (provenance unpinnable)"
+            if not (isinstance(key, str) and _meta_key_ok(key)):
+                # a write whose origin cannot be pinned (no / illegal key) is a laundering hole ->
+                # fail the request. The key-fence mirrors the recall path and cap-invoke's gate.
+                return False, "mem.remember: no valid key to stamp (provenance unpinnable)"
             # the BROKER stamps (§4.9 MUST-FIX #2); bind the tag to the exact written bytes (GAP-4)
             ok = taint_effect("stamp", key, *_content_hash_args(invoke_res.get("content")))
             return ok, (None if ok else "taint-stamp-failed")

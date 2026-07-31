@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""agent-loop — the tool-calling BRAIN for Agent OS (v0.2 A1: prove the loop).
+"""agent-loop — the tool-calling BRAIN for Agent OS (v0.2 A2: route through the wall).
 
 Wraps the local Qwen in a function-calling loop using Ollama's NATIVE tools API
 (`/api/chat` accepts a `tools` array and returns structured `message.tool_calls`),
@@ -7,33 +7,36 @@ so we never regex ReAct prose out of model text — Ollama does the parse. agent
 execs whatever `$BRAIN` names; point BRAIN here (or let agent-shell prefer it) to
 get a model that can *ask for actions*, not only talk.
 
-WHAT A1 IS (deliberately tiny — Geist v0.2 spec §1/§3, Rabbot A1 tee-up):
-  This proves the LOOP MECHANICS ONLY. The single wired tool is `echo`, an INERT
-  diagnostic that returns text verbatim and touches nothing. There is NO real
-  capability and NO broker wiring here — `dispatch()` is the seam where A2 will
-  route real tool-calls through `mcp parse | broker run` (THE WALL). Until then the
-  model can call `echo`, watch the result feed back, and continue — enough to prove
-  the round-trip end to end.
+WHAT A2 IS (Geist v0.2 spec §1/§3, Rabbot A2 directive): the loop now routes EVERY
+  model tool-call through THE WALL — `mcp parse | broker run`. `mcp parse` is the
+  structural JSON-RPC classifier (fail-closed); `broker run` is the trusted decision
+  point (tier, taint, arg-schema, origin, confirm). The tool surface is derived at
+  startup from the LIVE registry via a `capabilities.list` call through that same
+  wall (no hardcoded tool list). A1's inert `echo` stand-in is gone; the round-trip
+  it proved — call, result feeds back, model continues — now carries real caps.
 
 WHERE THIS SITS (the load-bearing design fact — Geist §1):
   agent-loop lives on the UNTRUSTED side of the wall. It translates and shuttles
-  bytes; it makes ZERO security decisions and reaches NOTHING outside this process
-  (no filesystem, no network beyond the local Ollama it wraps, no shell, no exec).
-  A bug here can produce a garbage tool request — which, once A2 lands, dies
-  fail-closed at mcp/broker — but can never widen authority. `dispatch()` below is
-  the ONLY place a tool name turns into an effect, and in A1 the only effect is
-  echoing a string.
+  bytes and makes ZERO security decisions. It reaches outside this process in exactly
+  ONE way: it execs the wall pipeline (mcp+broker, resolved as store-pinned siblings)
+  to hand the request across and read the verdict back — no other filesystem, no
+  network beyond the local Ollama it wraps, no shell (the pipe is wired natively, the
+  model's bytes never touch a shell interpreter). A bug here can produce a garbage
+  tool request — which dies fail-closed at mcp/broker — but can NEVER widen authority:
+  `dispatch()` returns an ALLOW only for a well-formed broker data_result envelope, so
+  a missing/hung/garbled wall and a broker deny collapse to the SAME fail-closed denial.
 
 RELIABILITY (Geist §3): 7B-class function-calling is mediocre under a big tool
-  surface, so the surface is one tool. Malformed/hallucinated/denied calls are
-  DATA, not errors: each comes back to the model as a structured tool result and it
-  may retry. A hard cap (3 denials per user turn) stops an infinite deny-loop from
-  burning the session — the loop then takes one final turn with tools withheld so
-  the model explains, in plain words, what it wanted and why it couldn't.
+  surface, so the surface stays lean (the registry's handful of caps). Malformed/
+  hallucinated/denied calls are DATA, not errors: each comes back to the model as a
+  structured tool result and it may retry. A hard cap (3 denials per user turn) stops
+  an infinite deny-loop from burning the session — the loop then takes one final turn
+  with tools withheld so the model explains, in plain words, what it wanted and why it
+  couldn't.
 
 stdlib only (urllib) so it runs anywhere Python does, incl. the built VM.
 """
-import json, os, re, sys, urllib.request, urllib.error, http.client
+import json, os, re, subprocess, sys, urllib.request, urllib.error, http.client
 
 HOST  = os.environ.get("OLLAMA_HOST", "http://127.0.0.1:11434").rstrip("/")
 if not HOST.startswith(("http://", "https://")):     # env-sourced, not model — but harden as knobs multiply
@@ -43,16 +46,16 @@ SYSTEM = os.environ.get(
     "BRAIN_SYSTEM",
     "You are the resident agent of this computer (Agent OS). You run locally on the "
     "user's own hardware — no cloud. Be concise, direct, and honest about what you can "
-    "and cannot do. You have exactly ONE tool: `echo`, an inert diagnostic that returns "
-    "text verbatim and changes nothing on the machine — it exists only to demonstrate "
-    "that tool-calling works. Real capabilities (reading files, memory, changing "
-    "settings) are not wired yet. If you need something beyond `echo`, say so plainly "
-    "rather than inventing a tool that does not exist.")
+    "and cannot do. The tools listed in this request are your ONLY way to act on the "
+    "machine, and every call goes through a security broker that may require confirmation "
+    "or refuse it. A refusal comes back to you as data — read it and adapt rather than "
+    "retrying the same call blindly. If you need something none of your tools offer, say "
+    "so plainly rather than inventing a tool that does not exist.")
 
 C_YOU = "\033[38;5;179m"; C_AI = "\033[38;5;79m"; C_DIM = "\033[38;5;244m"; C0 = "\033[0m"
 
 MAX_TURNS     = 24    # bound history re-sent each turn over a long session
-MAX_TOOL_HOPS = 8     # max tool-executing model turns per user message (halts a happy-path echo spin)
+MAX_TOOL_HOPS = 8     # max tool-executing model turns per user message (halts a happy-path tool spin)
 MAX_DENIALS   = 3     # dispatch/broker denials per user turn before we stop tool-calling (Geist §3)
 MAX_RESP_BYTES = 4_000_000   # bound a hostile/huge /api/chat body so one turn can't balloon memory
 
@@ -62,45 +65,122 @@ def _clean(s):
     it reaches the login tty (ESC/CSI/OSC injection defense). Keeps \\t and \\n."""
     return _CTRL.sub("", s if isinstance(s, str) else str(s))
 
-# ── the tool surface (A1: exactly one, inert) ────────────────────────────────────────
-# Ollama function-tool schema. The registry is the eventual single source of truth for
-# this list (Geist §3 derives `tools` from capabilities.list); A1 hardcodes the one inert
-# tool because no registry/broker path is wired yet. A2 replaces ECHO_TOOL with the
-# registry-derived set and points `dispatch()` at the broker.
-ECHO_TOOL = {
-    "type": "function",
-    "function": {
-        "name": "echo",
-        "description": ("Echo a message back verbatim. INERT diagnostic: performs no "
-                        "action, touches nothing on the system, only returns the text "
-                        "you pass. Use it to confirm tool-calling works."),
-        "parameters": {
-            "type": "object",
-            "properties": {"text": {"type": "string", "description": "the text to echo back"}},
-            "required": ["text"],
-        },
-    },
-}
-TOOLS = [ECHO_TOOL]
+# ── the wall (A2: `mcp parse | broker run`) ──────────────────────────────────────────
+# THE SEAM. Every model tool-call is marshalled into a JSON-RPC 2.0 tools/call line and
+# piped through the two-stage wall: `mcp parse` (structural classifier, fail-closed) then
+# `broker run` (the trusted decision point — tier, taint, arg-schema, origin, confirm). The
+# loop is the UNTRUSTED side: it makes ZERO security decisions and can NEVER manufacture an
+# allow. mcp+broker are resolved as siblings of this file by default and overridable ONLY by
+# the trusted boot (never by the model) via env — production nix pins them to store paths,
+# the same discipline the broker's own seams (AGENT_OS_INVOKE_SEAM, …) already use.
+_BINDIR = os.path.dirname(os.path.realpath(__file__))
+MCP     = os.environ.get("AGENT_OS_MCP",    os.path.join(_BINDIR, "mcp"))
+BROKER  = os.environ.get("AGENT_OS_BROKER", os.path.join(_BINDIR, "broker"))
+WALL_TIMEOUT_S = 90       # a hung wall must never freeze the login shell → timeout ≡ deny
+_req_seq = 0              # monotonic JSON-RPC id; single-flight (one request per wall run)
+
+def _wall(request):
+    """Run ONE JSON-RPC request object through `mcp parse | broker run` and return the
+    broker's single response dict — or None on ANY failure (the caller then denies,
+    fail-closed). Two NATIVE pipes, no shell: the model's bytes never reach a shell
+    interpreter. Both stages run under THIS python3 (sys.executable) so neither depends on
+    a `#!/usr/bin/env python3` shebang resolving (the nix-sandbox ENOEXEC trap)."""
+    line = (json.dumps(request, separators=(",", ":"), ensure_ascii=True) + "\n").encode()
+    p_mcp = p_brk = None
+    out = b""
+    try:
+        p_mcp = subprocess.Popen([sys.executable, MCP, "parse"],
+                                 stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                 stderr=subprocess.DEVNULL)
+        p_brk = subprocess.Popen([sys.executable, BROKER, "run"],
+                                 stdin=p_mcp.stdout, stdout=subprocess.PIPE,
+                                 stderr=subprocess.DEVNULL)
+        p_mcp.stdout.close()          # broker owns the read end → it EOFs when mcp exits
+        try:
+            p_mcp.stdin.write(line)
+            p_mcp.stdin.close()       # tiny single line, no reader deadlock; EOF ends mcp
+        except (BrokenPipeError, OSError):
+            pass                      # mcp died early → broker EOFs → no verdict → deny below
+        out, _ = p_brk.communicate(timeout=WALL_TIMEOUT_S)
+    except Exception as e:
+        sys.stderr.write(_clean(f"[agent-loop] wall error: {e}") + "\n")
+        return None
+    finally:
+        for p in (p_brk, p_mcp):      # never leak a hung/half-dead wall process
+            if p and p.poll() is None:
+                try: p.kill()
+                except Exception: pass
+            if p:
+                try: p.wait(timeout=5)
+                except Exception: pass
+    for raw in (out or b"").splitlines():   # broker emits one canonical line per verdict
+        s = raw.strip()
+        if not s:
+            continue
+        try:
+            return json.loads(s.decode("utf-8"))
+        except (ValueError, UnicodeDecodeError):
+            return None               # garbage from the wall → deny (fail-closed)
+    return None                       # no verdict at all → deny
 
 def dispatch(name, arguments):
-    """Route a model tool-call to its impl → return (ok: bool, result: dict).
+    """Route a model tool-call THROUGH THE WALL → return (ok: bool, result: dict), the same
+    contract converse() already speaks. This function makes ZERO security decisions: `ok` is
+    True IFF the broker returned an ALLOW — a well-formed `data_result` envelope (ok:true).
+    A broker DENY, or any wall failure (unreachable / hung / crashed / garbled), is ok=False,
+    a denial the model sees as data and may adapt to. The loop can NEVER turn a deny into an
+    allow (HARD REQ 4). The content_type:"data" envelope is emitted TRUSTED-SIDE by the
+    broker; the loop no longer stamps it."""
+    global _req_seq
+    _req_seq += 1
+    resp = _wall({"jsonrpc": "2.0", "id": _req_seq, "method": "tools/call",
+                  "params": {"name": name, "arguments": arguments}})
+    if not isinstance(resp, dict):
+        return False, {"error": "wall unreachable or returned no verdict (fail-closed deny)"}
+    if resp.get("ok") is True and isinstance(resp.get("result"), dict):
+        # ALLOW: hand the broker's data envelope straight back — {content_type, capability_ok,
+        # content}. capability_ok=False (e.g. a mem.recall miss) is STILL an allow: the model
+        # got a data answer, not a wall refusal, so it does NOT count toward the deny cap.
+        return True, resp["result"]
+    # Denial: a broker deny envelope carries a TRUSTED (broker-authored, never attacker) error
+    # object — pass it through so the model learns WHY (attacker bytes are confined to the
+    # data_result `content`, never error.message; that is the broker's §4.9 guarantee).
+    err = resp.get("error") if isinstance(resp.get("error"), dict) else \
+        {"message": "denied (malformed wall response)"}
+    return False, {"error": err}
 
-    THE A2 SEAM. In A1 the only wired tool is the inert `echo`; every other name is a
-    structured deny with the SAME shape a broker tier-deny will take in A2, so the
-    model-facing contract (a deny is data — feed it back, count it toward the cap) is
-    proven now against the echo stand-in and does not change when A2 routes real caps
-    through `mcp parse | broker run`. This function makes ZERO security decisions and
-    reaches NOTHING outside this process (no fs, no net, no exec, no shell)."""
-    if name == "echo":
-        text = arguments.get("text", "")
-        if not isinstance(text, str):
-            return False, {"error": "echo: 'text' must be a string"}
-        # content_type:"data" is preserved end to end (Geist §3): the fence that lets an
-        # honest model tell tool-returned DATA from instructions. A2's broker emits the
-        # same envelope; keep the shape identical now so nothing downstream flattens it.
-        return True, {"content_type": "data", "content": _clean(text)}
-    return False, {"error": f"unknown tool: {name!r} (v0.2 A1 wires only: echo)"}
+def _ollama_tool(name, description):
+    """One Ollama function-tool entry. Parameters are deliberately PERMISSIVE ({type:object},
+    no property schema, no required list): the broker's check_args is the SOLE arg-schema
+    authority (§4.3). Advertising a local schema would only teach the 7B to self-censor args
+    the wall would accept — worse, a WRONG local schema could suppress a valid call. So the
+    loop stays schema-free and lets every structurally-formed call reach the wall to be judged."""
+    return {"type": "function",
+            "function": {"name": name, "description": description or name,
+                         "parameters": {"type": "object"}}}
+
+def discover_tools():
+    """Build the model's tool surface from the LIVE registry via ONE `capabilities.list` call
+    THROUGH THE WALL (Geist §3: tools derive from the registry, not a hardcode). The loop makes
+    no security decision here — it only renders what the broker reports the agent may ask for.
+    On ANY failure (wall down, registry unreadable → capabilities.list denies, malformed
+    content) it returns [] and the brain runs as a pure conversational floor with NO tools —
+    fail-closed and non-fatal (never crash the login shell over a missing wall)."""
+    ok, result = dispatch("capabilities.list", {})
+    if not ok or not isinstance(result, dict) or not isinstance(result.get("content"), str):
+        sys.stderr.write("[agent-loop] capabilities.list unavailable at the wall — "
+                         "running with NO tools (chat only)\n")
+        return []
+    try:
+        caps = json.loads(result["content"]).get("capabilities", [])
+    except (ValueError, AttributeError):
+        caps = []
+    tools = []
+    for c in caps:
+        if isinstance(c, dict) and isinstance(c.get("name"), str):
+            summary = c.get("summary") if isinstance(c.get("summary"), str) else ""
+            tools.append(_ollama_tool(c["name"], summary))
+    return tools
 
 def _post(path, payload):
     req = urllib.request.Request(
@@ -161,13 +241,13 @@ def _emit_trace(name, ok):
     sys.stdout.write(f"{C_DIM}  ↳ tool: {_clean(name) or '?'} → {'ok' if ok else 'denied'}{C0}\n")
     sys.stdout.flush()
 
-def converse(history):
+def converse(history, tools):
     """Drive tool-calling turns for one user message until the model gives a final text
     answer (no tool_calls), or the deny/hop budget is spent. Appends every turn to `history`
     (so the model keeps context). Returns the final assistant text, or None on transport loss."""
     denials = 0
     for _hop in range(MAX_TOOL_HOPS):
-        msg = chat_once(history, TOOLS)
+        msg = chat_once(history, tools)
         if msg is None:
             return None
         calls = msg.get("tool_calls") or []
@@ -204,7 +284,9 @@ def converse(history):
     return text
 
 def main():
-    sys.stdout.write(f"{C_DIM}brain: {MODEL} @ {HOST} (local — no cloud) · tools: echo (inert){C0}\n")
+    tools = discover_tools()        # live registry surface via capabilities.list through the wall
+    names = ", ".join(t["function"]["name"] for t in tools) or "none (chat only)"
+    sys.stdout.write(f"{C_DIM}brain: {MODEL} @ {HOST} (local — no cloud) · tools: {names}{C0}\n")
     history = [{"role": "system", "content": SYSTEM}]
     while True:
         sys.stdout.write(f"{C_YOU}you ›{C0} "); sys.stdout.flush()
@@ -217,7 +299,7 @@ def main():
         if msg in ("exit", "quit", ":q"):
             break
         history.append({"role": "user", "content": msg})
-        reply = converse(history)
+        reply = converse(history, tools)
         if reply is None:           # transport lost — don't spin
             break
         if len(history) > 1 + 4 * MAX_TURNS:   # bound history (tool turns inflate it faster than chat)

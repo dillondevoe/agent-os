@@ -1,0 +1,129 @@
+#!/usr/bin/env python3
+# cap-mem-remember — Phase 2 · A2 impl for the T1 `mem.remember` capability.
+#
+# Security surface: branch -> PR -> Fable -> merge. Never direct-push.
+#
+# Tier T1 (reversible local side effect). Writes ONE memory entry into the SESSION namespace
+# and returns the exact stored octets so the broker can origin-stamp the entry. The taint rides
+# the storage: broker maps mem.recall origin from the stored entry's tag, so a memory written by
+# an untrusted turn stays untrusted when recalled later (cross-session-laundering fence).
+#
+# Seam contract (invoked by cap-invoke, the AGENT_OS_INVOKE_SEAM dispatcher):
+#   stdin  : {"capability":"mem.remember","arguments":{"namespace":<str>,"content":<str>}}
+#   stdout : {"ok":true, "content":<stored octets, verbatim>, "meta":{"key":"session.<slug>.md"}}  exit 0
+#   stdout : {"ok":false,"content":null,"meta":{}}                                                  exit 3
+#            on any contract/infra failure (the dispatcher then withholds, fail-closed).
+#
+# ⭐⭐ INTEGRITY HINGE (PIN 2 — do NOT "improve" this):
+#   The `.md` file bytes are the EXACT seam-content octets — no YAML frontmatter, no title,
+#   no appended metadata, and explicitly NO trailing-newline courtesy. The broker stamps the
+#   entry with sha256 of the `content` string it receives here; a future `taint boot` re-hashes
+#   the file octets. If this writer appended even a single "\n", boot's file hash would diverge
+#   from the stamped seam hash and every recall would false-taint. Session capability-writes are
+#   pure content BY DESIGN — integrity binding beats decoration in this namespace. Anything mem
+#   wants to record ABOUT an entry (origin/timestamp) lives in the taint ledger, never in the
+#   .md. The human-facing memory tree (bin/mem CLI, trusted/human namespaces) keeps its own
+#   formatting; those are not hash-bound capability writes.
+#
+#   For the same reason the returned `content` field is the stored octets verbatim (NOT an ack /
+#   key): the broker learns the canonical hash from what we RETURN, not by re-reading the file
+#   (a second reader would be an integrity differential). return-bytes == file-bytes is the
+#   invariant the broker-battery round-trip vector pins.
+
+import hashlib
+import json
+import os
+import re
+import sys
+
+# Runtime storage root. Hardcoded to the sandbox-declared path; the seam passes the impl only
+# PATH + AGENT_OS_REGISTRY, so AGENT_OS_MEM_ROOT is NEVER attacker-settable in production (it is
+# stripped before exec) — it exists solely so the test battery can point the impl at a scratch
+# dir when invoking it directly (bypassing the seam).
+MEM_ROOT = os.environ.get("AGENT_OS_MEM_ROOT", "/var/lib/agent-os/mem")
+LEAF = "session"  # mem.remember writes ONLY the session leaf — never the trusted-origin leaf.
+
+# Namespace charset — the dumb twin of the broker's _NS_RE (bin/broker). Defensive: the broker
+# already validated `namespace`, but the impl re-checks so a contract slip can't smuggle a path
+# segment. First char alnum, then [A-Za-z0-9._-], max 64 total. No "/", no "..", so it can only
+# ever name a flat file directly under the leaf.
+_NS_RE = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
+
+
+def _fail(msg):
+    sys.stderr.write("cap-mem-remember: %s\n" % msg)
+    sys.stdout.write(json.dumps({"ok": False, "content": None, "meta": {}},
+                                sort_keys=True, separators=(",", ":"), ensure_ascii=True))
+    sys.exit(3)
+
+
+def main():
+    try:
+        raw = sys.stdin.buffer.read()
+    except OSError as e:
+        _fail("could not read stdin (%s)" % e)
+
+    try:
+        req = json.loads(raw.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError) as e:
+        _fail("request is not valid JSON (%s)" % e)
+    if not isinstance(req, dict):
+        _fail("request is not a JSON object")
+
+    args = req.get("arguments")
+    if not isinstance(args, dict):
+        _fail("'arguments' is not a JSON object")
+    namespace = args.get("namespace")
+    content = args.get("content")
+    if not (isinstance(namespace, str) and _NS_RE.match(namespace)):
+        _fail("'namespace' missing or not a valid namespace")
+    if not isinstance(content, str):
+        _fail("'content' is not a string")
+
+    # Content-addressed slug: <namespace>.<sha256(content)[:16]>. Content-addressing makes
+    # remember idempotent (same content -> same slug -> same file, same hash) and keeps the
+    # namespace legible in the key prefix so recall can glob by it. The full runtime key is
+    # boot-shaped: "session.<slug>.md" (leaf-discriminated, slash-free) so a future taint-boot
+    # key is a trivial "<leaf>." + relpath concat — no character transform, no parser differential.
+    octets = content.encode("utf-8")
+    digest16 = hashlib.sha256(octets).hexdigest()[:16]
+    slug = "%s.%s" % (namespace, digest16)
+    relname = "%s.md" % slug
+    key = "%s.%s" % (LEAF, relname)  # session.<namespace>.<hash>.md
+
+    # Belt-and-suspenders on the FULL key (incl. the "session." prefix + ".md" suffix overhead):
+    # meta.key-legal charset, slash-free, <=256. The broker's _meta_key_ok gate mirrors this; a
+    # key that fails would be dropped downstream (no stamp) — reject here so we fail loud instead.
+    if not re.match(r"\A[A-Za-z0-9][A-Za-z0-9._-]{0,255}\Z", key):
+        _fail("derived key is not grammar-legal: %r" % key)
+
+    leaf_dir = os.path.join(MEM_ROOT, LEAF)
+    path = os.path.join(leaf_dir, relname)
+
+    # Atomic write of the EXACT octets (see INTEGRITY HINGE above). Temp + os.replace keeps a
+    # concurrent recall from ever observing a half-written file; the temp lives in the same leaf
+    # dir so it stays inside the sandbox's single readWritePath and the rename is atomic.
+    tmp = path + ".tmp"
+    try:
+        os.makedirs(leaf_dir, exist_ok=True)
+        with open(tmp, "wb") as f:
+            f.write(octets)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except OSError as e:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        _fail("could not persist entry (%s)" % e)
+
+    # Return the stored octets verbatim as `content` (broker stamps sha256 of THIS string; it must
+    # equal the file bytes). meta.key is the 1:1 stamp tag for this single write.
+    sys.stdout.write(json.dumps({"ok": True, "content": content, "meta": {"key": key}},
+                                sort_keys=True, separators=(",", ":"), ensure_ascii=True))
+    sys.exit(0)
+
+
+if __name__ == "__main__":
+    main()

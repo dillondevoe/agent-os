@@ -73,4 +73,44 @@ case "$CONTENT" in *capabilities.list*) : ;; *) fail "list content did not inclu
 # taints the session here (status flips to `taint: TAINTED`) and this assert fails.
 taint_is clean
 
-echo "seam-live: all properties hold (wired capabilities.list returns blessed content + leaves taint CLEAN)"
+# ── property 3 (A2): mem.recall dispatches through the REAL wall + the caller's AGENT_OS_MEM_ROOT is
+#    STRIPPED by the seam (env-strip is itself a security property — a caller cannot redirect memory) ──
+# The seam builds the impl env as EXACTLY {PATH, AGENT_OS_REGISTRY} (cap-invoke) — AGENT_OS_MEM_ROOT is
+# NOT inherited. We prove that end-to-end here: plant a hostile entry under a caller-set MEM_ROOT, export
+# it (the broker forwards its whole env to the seam subprocess — exactly how broker.nix pins prod), and
+# drive a real mem.recall. If the override were honored the planted marker would surface; because the seam
+# strips it, mem.recall runs against the hardcoded /var/lib/agent-os/mem (absent in a check-derivation ->
+# a well-formed EMPTY result) and the marker never appears. This is the write-cap's READ side proven
+# through the wall without a writable /var; the WRITE side (real /var) is the task-279 nixosTest-VM
+# forward-obligation. The direct-invoke round-trip lives in tests/mem-cap-battery.sh (checks.<sys>.mem-cap).
+ATTACKER_MEM="$SCRATCH/attacker-mem"
+mkdir -p "$ATTACKER_MEM/session"
+MARKER="ATTACKER-PLANTED-MEM-MUST-NOT-SURFACE"
+# legal <ns>.<16hex>.md slug + tokens matching the query, so IF the env override leaked, recall WOULD hit it.
+printf '%s attacker planted marker' "$MARKER" > "$ATTACKER_MEM/session/probe.0123456789abcdef.md"
+export AGENT_OS_MEM_ROOT="$ATTACKER_MEM"
+
+V_RECALL='{"ok":true,"method":"tools/call","id":2,"name":"mem.recall","arguments":{"namespace":"probe","query":"attacker planted marker"}}'
+OUT="$(printf '%s\n' "$V_RECALL" | "$PY" "$BROKER" run)" || fail "broker run errored on mem.recall"
+
+[ "$(jf "$OUT" 'o["ok"]')" = "true" ]                              || fail "3: broker envelope ok!=true on recall: $OUT"
+[ "$(jf "$OUT" 'o["result"]["capability_ok"]')" = "true" ]         || fail "3: mem.recall capability_ok!=true (seam/impl did not dispatch clean): $OUT"
+[ "$(jf "$OUT" 'o["result"]["content_type"]')" = "data" ]         || fail "3: mem.recall result not DATA-fenced: $OUT"
+# well-formed EMPTY result: the hardcoded root is empty in-sandbox -> meta.entries == [] (a list, not error)
+printf '%s' "$OUT" | "$PY" -c '
+import sys, json
+o = json.load(sys.stdin)
+content = json.loads(o["result"]["content"])
+assert content.get("entries") == [], "recall not empty against hardcoded root: %r" % content
+' || fail "3: mem.recall did not return a well-formed empty result against the hardcoded root: $OUT"
+# THE env-strip assertion: the caller-set MEM_ROOT was ignored, so its planted marker cannot appear.
+case "$OUT" in *"$MARKER"*) fail "3: SEAM DID NOT STRIP AGENT_OS_MEM_ROOT — caller redirected memory ($OUT)";; esac
+
+# ── property 4 (A2): an empty mem.recall leaves the session taint CLEAN ───────
+# broker _commit_provenance: entries==[] is a LIST (not absent/malformed) -> the per-entry recall loop
+# runs zero times and returns proceed=True with NO taint effect (the fail-closed `taint set` fires only
+# on an ABSENT/non-list entries, which cap-invoke already drops). So a legitimate empty recall must NOT
+# taint. If this regresses (e.g. empty treated as unidentified), status flips to TAINTED here.
+taint_is clean
+
+echo "seam-live: all properties hold (wired capabilities.list blessed+CLEAN; mem.recall dispatches, seam strips MEM_ROOT, empty recall stays CLEAN)"
