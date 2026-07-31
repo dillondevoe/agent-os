@@ -36,7 +36,12 @@ in {
   # OPEN-only module so it can never perturb the sealed surface.
   #   #1 calendar-open: nuclear-accurate agent-read/write calendar (Dillon's flagged priority).
   #   #2 desktop-open:  reproducible Hyprland desktop + Waybar ambient bar.
-  imports = [ ./modules/calendar-open.nix ./modules/desktop-open.nix ];
+  #   #3 settings-open: agent-drivable agos-sys settings CLI + human GUI tools.
+  imports = [
+    ./modules/calendar-open.nix
+    ./modules/desktop-open.nix
+    ./modules/settings-open.nix
+  ];
 
   # --- boot / hardware (MIRROR of configuration.nix — see header) --------------
   boot.loader.systemd-boot.enable = lib.mkDefault true;
