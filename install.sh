@@ -1,18 +1,29 @@
 #!/usr/bin/env bash
 # Agent OS v0.1 — Dell installer. One-shot: partition → format → mount → install.
-# Run from the NixOS-minimal installer shell:
-#   curl -sL https://raw.githubusercontent.com/dillondevoe/agent-os/main/install.sh | sudo bash
+#
+# Run as ROOT from the NixOS-minimal installer shell. Become root FIRST, then pipe:
+#   sudo -i
+#   curl -sL https://raw.githubusercontent.com/dillondevoe/agent-os/main/install.sh | bash
+#
+# ⚠️ ENV OVERRIDES MUST PREFIX THE PIPED `bash` — not curl, not sudo. The var has to land in
+#    the environment of the process that RUNS the script:
+#       ✅  curl -sL .../install.sh | VARIANT=agentos-open bash
+#       ❌  VARIANT=agentos-open curl -sL .../install.sh | sudo -E bash
+#            (the var is in CURL's env; sudo -E has nothing to preserve → script sees it UNSET)
+#       ❌  curl -sL .../install.sh | sudo VARIANT=agentos-open bash
+#            (sudo's default env_reset strips it → script sees it UNSET)
+#    A lost VARIANT silently defaults to the SEALED box, so the YES-gate below prints the
+#    RESOLVED variant and makes you type it — a fall-through can't install the wrong OS unseen.
 #
 # VARIANTS:
-#   VARIANT=agentos       (default) — the sovereign box (sealed after model pull).
-#   VARIANT=agentos-open             — the OPEN / MESHED dev box (Dillon msg 8926):
-#     OpenSSH + Tailscale + full-power user + real shell, no egress wall, no auto-pull.
-#     Pass a Tailscale PRE-AUTH key so the Dell auto-joins the mesh on first boot:
-#       VARIANT=agentos-open TS_AUTHKEY=tskey-auth-xxxx curl -sL .../install.sh | sudo -E bash
-#     (sudo -E preserves TS_AUTHKEY. The key is written to the TARGET only, mode 0600 —
-#      it is never stored in the repo. Omit it and run `tailscale up` by hand later.)
+#   (default)              — the sovereign box (sealed after model pull). Just `| bash`.
+#   VARIANT=agentos-open   — the OPEN / MESHED dev box (Dillon msg 8926): OpenSSH + Tailscale +
+#     full-power user + real shell, no egress wall, no auto-pull. Pass a Tailscale PRE-AUTH key so
+#     the Dell auto-joins the mesh on first boot (written to the TARGET only, mode 0600 — never in
+#     the repo; omit it and run `tailscale up --ssh` by hand later):
+#       curl -sL .../install.sh | VARIANT=agentos-open TS_AUTHKEY=tskey-auth-xxxx bash
 #
-# ⚠️ ERASES THE TARGET DISK. Shows you the disk and requires you to type YES first.
+# ⚠️ ERASES THE TARGET DISK. Shows you the disk + resolved variant and requires you to type YES.
 set -euo pipefail
 
 VARIANT="${VARIANT:-agentos}"
@@ -21,7 +32,7 @@ case "$VARIANT" in
   *) echo "Unknown VARIANT '$VARIANT' (expected 'agentos' or 'agentos-open')."; exit 1 ;;
 esac
 FLAKE="github:dillondevoe/agent-os#${VARIANT}"
-DISK="${DISK:-/dev/nvme0n1}"   # override with:  DISK=/dev/sdX curl ... | sudo DISK=/dev/sdX bash
+DISK="${DISK:-/dev/nvme0n1}"   # override:  curl ... | DISK=/dev/sdX bash   (prefix on the piped bash)
 TS_AUTHKEY="${TS_AUTHKEY:-}"   # OPEN variant only — Tailscale pre-auth key (runtime secret, never committed)
 
 echo "=============================================================="
@@ -29,9 +40,14 @@ echo " Agent OS installer — variant: $VARIANT — target disk: $DISK"
 echo "=============================================================="
 lsblk -o NAME,SIZE,TYPE,MODEL,MOUNTPOINT
 echo "--------------------------------------------------------------"
-echo "This will ERASE $DISK completely and install Agent OS on it."
+echo "This will ERASE $DISK completely and install Agent OS (variant: $VARIANT) on it."
 echo "The USB you booted from is separate and will NOT be touched."
-printf "Type YES (caps) to wipe %s and install: " "$DISK"
+if [ "$VARIANT" = agentos ]; then
+  echo "  → variant 'agentos' = the SEALED sovereign box. If you meant the OPEN/MESHED dev box"
+  echo "    and this fell through to the default, ABORT and re-run with the var on the PIPED bash:"
+  echo "        curl -sL .../install.sh | VARIANT=agentos-open bash   (NOT before curl, NOT after sudo)"
+fi
+printf "Type YES (caps) to ERASE %s and install variant '%s': " "$DISK" "$VARIANT"
 read -r CONFIRM < /dev/tty
 [ "$CONFIRM" = "YES" ] || { echo "Aborted — nothing changed."; exit 1; }
 
@@ -87,7 +103,7 @@ fi
 # CLEAN_NVRAM=1 prunes ONLY our own entries, and ONLY those that already exist NOW — snapshot
 # them here, before nixos-install registers a FRESH one, so the new entry is never a candidate.
 # Default OFF: the whole-drive wipe is the right default; a dual-booter must never lose another
-# OS's entry.  Enable with:  CLEAN_NVRAM=1 curl ... | sudo CLEAN_NVRAM=1 bash
+# OS's entry.  Enable with:  curl ... | CLEAN_NVRAM=1 bash   (var prefixes the piped bash)
 CLEAN_NVRAM="${CLEAN_NVRAM:-0}"
 NVRAM_LABEL_RE='Linux Boot Manager|NixOS|Agent OS'
 # efibootmgr may be absent from the minimal-installer PATH — belt: fall back to nix-shell. Every
