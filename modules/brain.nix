@@ -70,4 +70,37 @@
       "$OLLAMA" pull qwen2.5:7b-instruct
     '';
   };
+
+  # Self-healing retry for the first-boot brain pull (Rec A). On a wifi-late boot the
+  # oneshot above gives up its ~2min tcp/443 wait before the network associates and ends
+  # FAILED, so the model never lands. PR #21 made the agent user rootless, so agent-shell
+  # can NO LONGER re-kick the pull (that dead `sudo systemctl restart` is removed there) —
+  # the retry HAS to live root-side. This ROOT timer simply re-fires the ROOT oneshot above
+  # until the model is present. It adds NO new privileged surface: it only retries a service
+  # that already runs at boot, so nothing new becomes root-reachable and the agent stays
+  # powerless (posture ratified: geist A-timer ruling, 2026-07-30).
+  #
+  # Self-quiescent, no explicit stop needed: on a successful pull the oneshot stays
+  # `active (exited)` (RemainAfterExit = true above) and never deactivates, so
+  # OnUnitInactiveSec below never elapses again and the timer goes idle on its own. It only
+  # keeps firing while the oneshot sits FAILED (the wifi-late window). Cadence is
+  # intentionally coarse — that window is minutes, not seconds, and nothing about the
+  # posture depends on the number.
+  #
+  # CI blind spot: this lives on the boot/activation path, which `nix flake check` only
+  # EVALUATES and `nix build .#vm` can't exercise (mkVMOverride swaps the boot surface).
+  # Eval-green here means the unit text is well-formed, NOT that the wifi-late self-heal
+  # fires — that is proven by a real first-boot smoke, not CI.
+  systemd.timers.agent-os-pull-model = {
+    description = "Agent OS — retry the first-boot brain pull while online, until the model lands";
+    wantedBy = [ "timers.target" ];
+    timerConfig = {
+      # Guaranteed floor: fire at least once after the boot oneshot's ~2min wait resolves,
+      # even in the edge where the unit never reports an inactive timestamp.
+      OnBootSec = "180s";
+      # Workhorse: retry 60s after each FAILED pull. Goes idle once the pull succeeds (the
+      # unit stays active-exited and never re-deactivates). Coarse on purpose.
+      OnUnitInactiveSec = "60s";
+    };
+  };
 }
