@@ -23,7 +23,7 @@
 # from configuration-open.nix, perturbs nothing sealed. SEAL-TIME (Geist, Phase 4): the
 # SAME mechanism gives the sovereign variant its Phase-S "no first-boot network" posture —
 # fold this in there; do not re-solve it.
-{ pkgs, lib, ... }:
+{ config, pkgs, lib, ... }:
 let
   modelTag = "qwen2.5:7b-instruct";
 
@@ -62,7 +62,20 @@ in {
     after = [ "ollama.service" ];
     requires = [ "ollama.service" ];
     path = [ pkgs.ollama ];
-    environment.OLLAMA_HOST = "127.0.0.1:11434";
+    # The ollama CLI evaluates envconfig.AsMap()/Models() at startup and PANICS with
+    # "$HOME is not defined" unless HOME (or OLLAMA_MODELS) is set — and a systemd unit
+    # inherits neither by default. That panic fired inside the wait-loop AND before the
+    # idempotent tag-check reached `ollama create`, so on a FRESH install (weights only
+    # in the FOD, seed = the sole import path) the box booted brainless — the founder
+    # "boots alive" directive broken (Rabbot P1, 2026-07-31). Mirror the daemon's own env:
+    # HOME + the exact model store it reads/writes, so `ollama create` lands the blob where
+    # the daemon serves it. Sourced from the services.ollama options (not hardcoded) so it
+    # can never drift from whatever the daemon uses.
+    environment = {
+      OLLAMA_HOST = "127.0.0.1:11434";
+      HOME = config.services.ollama.home;               # /var/lib/ollama
+      OLLAMA_MODELS = config.services.ollama.modelsDir;  # /var/lib/ollama/models (daemon's store)
+    };
     serviceConfig = {
       Type = "oneshot";
       RemainAfterExit = true;
