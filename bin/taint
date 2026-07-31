@@ -621,11 +621,22 @@ def cmd_recall(argv):
 
 def cmd_boot(argv):
     mem_root = None
-    if argv:
-        if argv[0] == "--mem-root" and len(argv) >= 2:
-            mem_root = argv[1]
+    # --key-prefix (Rec A forward-obligation, task-279 gate 7): boot-for-mem is wired PER-LEAF, one
+    # invocation per leaf dir with --key-prefix "<leaf>." — the walk's relpath-within-leaf (`<slug>.md`,
+    # no '/') then CONCATENATES to the seam's stamped runtime key `<leaf>.<slug>.md`. Pure concat, no
+    # '/'->'.' transform (the flat-file storage pin makes the derivation a string join, not a parser).
+    # Default "" preserves the legacy raw-relpath keying; boot-for-mem itself stays UNWIRED until a
+    # caller passes the prefix. cap-invoke's _meta_key_ok forbids '/' in a key, which is why a raw
+    # relpath (`<leaf>/<slug>.md`) can never match a stamped key — so this flag is load-bearing.
+    key_prefix = ""
+    i = 0
+    while i < len(argv):
+        if argv[i] == "--mem-root" and i + 1 < len(argv):
+            mem_root = argv[i + 1]; i += 2
+        elif argv[i] == "--key-prefix" and i + 1 < len(argv):
+            key_prefix = argv[i + 1]; i += 2
         else:
-            sys.stderr.write("usage: taint boot [--mem-root DIR]\n")
+            sys.stderr.write("usage: taint boot [--mem-root DIR] [--key-prefix PREFIX]\n")
             return 2
     tags, corrupt = load_origins()
     reasons = []
@@ -648,7 +659,7 @@ def cmd_boot(argv):
                 if not fn.endswith(".md"):
                     continue
                 fpath = os.path.join(dirpath, fn)
-                key = os.path.relpath(fpath, mem_root)
+                key = key_prefix + os.path.relpath(fpath, mem_root)
                 v = tags.get(key)
                 if v is None:
                     unknown.append(key)
