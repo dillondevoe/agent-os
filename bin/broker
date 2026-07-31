@@ -538,6 +538,23 @@ class Broker:
                 key = ent.get("key")
                 if not taint_effect("recall", key, *_content_hash_args(ent.get("content"))):
                     return False, "taint-recall-failed: %s" % key
+            # Content-coverage (Fable FF1): Stage-9 bound each ENTRY's content above, but Stage-10
+            # releases the SEPARATE res["content"] (~L649). Assert they are the SAME bytes — the
+            # released envelope MUST equal the canonical serialization of the tainted entries, which is
+            # exactly what the sanctioned cap-mem-recall emits (recall:159-161 — json.dumps({"entries":
+            # [{key,content}...]}, sort_keys, compact, ensure_ascii, built from the same list as
+            # meta.entries). A divergence means a hostile / cap-invoke-bypassing seam handed the model
+            # bytes the per-entry taint never covered (empty-entries + arbitrary content; or a
+            # hash-matching entry + smuggled extra) -> withhold the WHOLE batch (PIN B), typed error +
+            # audit. Byte-exact against the pinned impl, so the sanctioned seam always passes; only a
+            # real divergence trips it.
+            try:
+                expected = json.dumps({"entries": entries}, sort_keys=True,
+                                      separators=(",", ":"), ensure_ascii=True)
+            except (TypeError, ValueError):
+                return False, "mem.recall entries not serializable (coverage uncheckable)"
+            if invoke_res.get("content") != expected:
+                return False, "mem.recall content diverges from tainted entries (coverage gap)"
             return True, None
         if name == "mem.remember":
             key = meta.get("key")
