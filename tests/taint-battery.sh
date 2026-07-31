@@ -431,6 +431,34 @@ printf 'clean body\n' > "$G4BMEM/domain/n2.md"
   case "$o" in *"content-hash mismatch on trusted mem"*) : ;; *) exit 116;; esac
 ) || fail "GAP-4 boot hash-mismatch on a never-recalled TRUSTED tag not caught — rc $?"
 
+# 16. REC-A --key-prefix boot derivation (task-279 gate 7). Under Rec A the seam stamps the DOTTED
+#     runtime key `<leaf>.<slug>.md` (cap-invoke _meta_key_ok forbids '/'), while storage is flat at
+#     $MEM_ROOT/<leaf>/<slug>.md. Boot-for-mem is wired PER-LEAF: `taint boot --mem-root
+#     $MEM_ROOT/<leaf> --key-prefix "<leaf>."`, so the walk's relpath-within-leaf (`<slug>.md`, no '/')
+#     concatenates to `<leaf>.<slug>.md` and MATCHES the stamp — pure concat, no '/'->'.' transform
+#     (Geist Rec-A pin). Two legs prove the flag is LOAD-BEARING, not cosmetic: (a) WITH the prefix a
+#     stamped dotted key boots CLEAN; (b) the SAME file+stamp WITHOUT the prefix derives the bare
+#     `<slug>.md`, misses the ledger -> unknown-origin -> TAINTED (the exact bin/taint relpath/stamp
+#     mismatch this gate closes).
+KPMEM="$SCRATCH/keyprefix-memroot"; mkdir -p "$KPMEM/session"
+printf 'blessed session body\n' > "$KPMEM/session/foo.md"     # flat file; relpath-within-leaf = foo.md
+H_KP="$(file_hash "$KPMEM/session/foo.md")"
+( export AGENT_OS_TAINT_DIR="$SCRATCH/taint-keyprefix"
+  mkdir -p "$AGENT_OS_TAINT_DIR"
+  reset_clean >/dev/null || exit 121
+  # seam stamps the DOTTED runtime key (what cap-invoke/broker emit under Rec A), TRUSTED + hash-bound
+  "$PY" "$TAINT" stamp session.foo.md --content-hash "$H_KP" >/dev/null || exit 122
+  # (a) per-leaf boot WITH the prefix: derived key = "session." + "foo.md" = session.foo.md -> CLEAN
+  o="$("$PY" "$TAINT" boot --mem-root "$KPMEM/session" --key-prefix "session.")" || exit 123
+  case "$o" in *"BOOT clean"*) : ;; *) exit 124;; esac
+  # (b) SAME file+stamp WITHOUT the prefix: derived key = "foo.md" != stamped session.foo.md ->
+  #     unknown-origin -> TAINTED. reset_clean only resets the SESSION; the ledger tag persists.
+  reset_clean >/dev/null || exit 125
+  o="$("$PY" "$TAINT" boot --mem-root "$KPMEM/session")" || exit 126
+  case "$o" in *"BOOT TAINTED"*) : ;; *) exit 127;; esac
+  case "$o" in *"unknown-origin mem loaded"*) : ;; *) exit 128;; esac
+) || fail "REC-A --key-prefix boot derivation failed (with-prefix clean / without-prefix tainted) — rc $?"
+
 # Final: the corrupt/no-log sections logged only via the real audit (or not at all); the
 # real chain must STILL verify end-to-end.
 av || fail "audit chain broken after the no-log / corrupt-state sections"
