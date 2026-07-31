@@ -316,7 +316,7 @@
         # WHY A MARKER-ASSERT, NOT A TOPLEVEL BUILD (Rabbot's choice-of-form to me): building
         # `agentos-open.config.system.build.toplevel` is the strongest guard but REALIZES the ~4.68GB
         # qwen2.5 model FOD (modules/model-open.nix) on every CI run — bandwidth-hostile for a public
-        # repo. This asserts, at EVAL time (zero realization, DVo-cheap), that each of the seven
+        # repo. This asserts, at EVAL time (zero realization, DVo-cheap), that each of the eight
         # bundled modules left its unique fingerprint in the built config. Drop any import and its
         # marker goes unset -> this throws, naming the module. Same dropped-import class, caught for
         # free. (Upgrade to a full toplevel build later if a fetch-capable CI ever wants belt+braces.)
@@ -330,6 +330,7 @@
         #   genesis-open  -> `agent-brain` in systemPackages    (the genesis-locked soul-reading brain)
         #   calculator-open -> `agos-calc` CLI in systemPackages (the agent's calculator hand)
         #   files-open    -> `agos-files` CLI in systemPackages (the agent's read-only files hand)
+        #   email-open    -> `thunderbird` in systemPackages     (human mail GUI; agent hand = MCP, escalated)
         agentos-open-imports =
           let
             pkgs = nixpkgs.legacyPackages.${system};
@@ -351,8 +352,10 @@
               "agentos-open-imports: calculator-open.nix is NOT imported — agos-calc missing from systemPackages.";
             assert lib.assertMsg (hasPkg "agos-files")
               "agentos-open-imports: files-open.nix is NOT imported — agos-files missing from systemPackages.";
+            assert lib.assertMsg (hasPkg "thunderbird")
+              "agentos-open-imports: email-open.nix is NOT imported — thunderbird (the human mail GUI) missing from systemPackages.";
             pkgs.runCommand "agentos-open-imports-check" { } ''
-              echo "agentos-open imports all seven Phase-2 modules: calendar(agos-cal) desktop(hyprland) settings(agos-sys) model(agos-seed-model) genesis(agent-brain) calculator(agos-calc) files(agos-files)"
+              echo "agentos-open imports all eight Phase-2 modules: calendar(agos-cal) desktop(hyprland) settings(agos-sys) model(agos-seed-model) genesis(agent-brain) calculator(agos-calc) files(agos-files) email(thunderbird)"
               touch $out
             '';
       };
