@@ -49,6 +49,8 @@ in {
   #                     over a real plain-md store (GUI+hand symmetry, mirrors calendar).
   #   #10 docs-open:    Zathura document-viewer GUI + agent-drivable (read-only) agos-doc CLI
   #                     — extracts PDF content (pairs with files-open's metadata-only hand).
+  #   #11 media-open:   imv/mpv media GUIs + agent-drivable (read-only) agos-media CLI
+  #                     — probes image/video/audio metadata via ffprobe (completes the read trio).
   imports = [
     ./modules/calendar-open.nix
     ./modules/desktop-open.nix
@@ -61,6 +63,7 @@ in {
     ./modules/mail-secret-open.nix
     ./modules/notes-open.nix
     ./modules/docs-open.nix
+    ./modules/media-open.nix
   ];
 
   # --- boot / hardware (MIRROR of configuration.nix — see header) --------------
