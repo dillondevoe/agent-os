@@ -47,27 +47,59 @@
     wants    = [ "ollama.service" "network-online.target" ];
     wantedBy = [ "multi-user.target" ];
     environment.OLLAMA_HOST = "http://127.0.0.1:11434";
-    serviceConfig = { Type = "oneshot"; RemainAfterExit = true; };
+    serviceConfig = {
+      Type = "oneshot";
+      RemainAfterExit = true;
+      # Publish pull progress where the ROOTLESS agent-shell can READ it: a root-owned tmpfs
+      # dir (0755, world-traversable) holding a 0644 status file. Preserve it across the timer's
+      # failed→retry restarts so the login always has a line to show; /run is tmpfs so it still
+      # clears on reboot. The agent only READS this file — no new privileged surface, no sudo.
+      RuntimeDirectory = "agent-os";
+      RuntimeDirectoryMode = "0755";
+      RuntimeDirectoryPreserve = "yes";
+    };
     script = ''
       OLLAMA=${config.services.ollama.package}/bin/ollama
+      STATUS=/run/agent-os/pull-status
+      # world-readable one-line progress the rootless agent-shell tails (atomic write, 0644).
+      say() { printf '%s\n' "$*" > "$STATUS.tmp" 2>/dev/null && chmod 0644 "$STATUS.tmp" 2>/dev/null && mv -f "$STATUS.tmp" "$STATUS" 2>/dev/null || true; }
+
       # already have it? nothing to do (covers sealed + all later boots).
       if "$OLLAMA" list 2>/dev/null | grep -q 'qwen2.5:7b-instruct'; then
-        echo "agent-os: model already present"; exit 0
+        say "model already present"; echo "agent-os: model already present"; exit 0
       fi
       # Wait for REAL connectivity — network-online.target can be reached before wifi has
       # fully associated/DHCP'd, which would fail the pull. Poll up to ~2min.
       # Probe with a tcp/443 connect (dep-free bash /dev/tcp), NOT ping: the clean-room
       # egress wall drops ICMP for every uid (root included), so ping never succeeds here
-      # even when online — it would burn the full ~2min every first boot. tcp/443 rides the
-      # same DNS+443 channel the model pull uses, so a passing probe means the pull can run.
+      # even when online — it would burn the full ~2min every first boot. Probe the MODEL HOST
+      # itself (registry.ollama.ai:443) — the exact host+channel `ollama pull` fetches from — so a
+      # passing probe means the pull can actually run, not merely that some other site is up.
+      say "waiting for network..."
       for _i in $(seq 1 24); do
-        timeout 4 ${pkgs.bash}/bin/bash -c ': >/dev/tcp/github.com/443' >/dev/null 2>&1 && break
-        echo "agent-os: waiting for network... ($_i/24)"; sleep 5
+        timeout 4 ${pkgs.bash}/bin/bash -c ': >/dev/tcp/registry.ollama.ai/443' >/dev/null 2>&1 && break
+        echo "agent-os: waiting for network... ($_i/24)"; say "waiting for network... ($_i/24)"; sleep 5
       done
       echo "agent-os: pulling qwen2.5:7b-instruct (~4.7GB, first boot only)..."
-      # NO `|| exit 0`: a real failure must leave the unit FAILED (retriable via restart /
-      # next reboot), not silently mark itself done and never pull ("wifi ate the install").
-      "$OLLAMA" pull qwen2.5:7b-instruct
+      say "starting download (~4.7GB, first boot only)..."
+      # Stream the pull's progress into the status file: ollama redraws one progress line with
+      # carriage returns, so split \r into \n and keep writing the LATEST line. Capture the pull's
+      # REAL exit code out-of-band (a file, NOT the pipe) so the tee can't mask a failure:
+      # NO `|| exit 0` — a real failure must leave the unit FAILED (retriable by the timer / next
+      # reboot), never silently mark done and never pull ("wifi ate the install"). (If ollama emits
+      # no interim progress when its stdout is a pipe, the status simply holds on "starting
+      # download..." until completion — degraded but still correct; --check + the timer are unaffected.)
+      _RCF=/run/agent-os/.pull-rc
+      ( "$OLLAMA" pull qwen2.5:7b-instruct 2>&1; echo $? > "$_RCF" ) | tr '\r' '\n' | while IFS= read -r _l; do
+        [ -n "$_l" ] && say "$_l"
+      done
+      _rc="$(cat "$_RCF" 2>/dev/null || echo 1)"; rm -f "$_RCF"
+      if [ "$_rc" = 0 ]; then
+        say "download complete — starting the brain"; echo "agent-os: pull complete"
+      else
+        say "download failed — retrying automatically"; echo "agent-os: pull failed (rc=$_rc)"
+      fi
+      exit "$_rc"
     '';
   };
 

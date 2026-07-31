@@ -120,10 +120,12 @@ else
   # egress wall (modules/clean-room.nix) — the wall permits DNS + tcp/{80,443} in the unsealed
   # provisioning window but never ICMP for the non-root agent user — so `ping` ALWAYS fails
   # here even when online, wedging first boot at the memory floor (the brain never pulls). Use
-  # a dep-free bash /dev/tcp probe over an ALREADY-PERMITTED channel (DNS-resolve github.com +
-  # tcp/443): no curl dependency, opens no new egress hole. `timeout` bounds a black-hole SYN;
+  # a dep-free bash /dev/tcp probe over an ALREADY-PERMITTED channel (DNS-resolve the MODEL HOST
+  # registry.ollama.ai + tcp/443): no curl dependency, opens no new egress hole. Probe the model
+  # host itself (not github) so "online" means the host the pull actually fetches from is
+  # reachable — a reply here means the `ollama pull` can run. `timeout` bounds a black-hole SYN;
   # `2>/dev/null` swallows the connection-refused / DNS noise so a failure is silent.
-  _net_ok() { timeout 4 bash -c ': >/dev/tcp/github.com/443' >/dev/null 2>&1; }
+  _net_ok() { timeout 4 bash -c ': >/dev/tcp/registry.ollama.ai/443' >/dev/null 2>&1; }
   if command -v nmtui >/dev/null 2>&1 && ! _net_ok; then
     printf "\n${BANNER}Let's get you online.${RST} No network yet — I need it to install my brain.\n"
     printf "Open the wifi picker? [Y/n] "
@@ -131,19 +133,60 @@ else
     case "$_ans" in ""|y|Y|yes|YES) nmtui || true ;; *) : ;; esac
   fi
   if command -v systemctl >/dev/null 2>&1 && _net_ok; then
-    # Online but no brain yet. The pull is a ROOT service (agent-os-pull-model) driven by a
-    # self-healing ROOT timer (agent-os-pull-model.timer, modules/brain.nix) that re-fires it
-    # whenever the box is online until the model lands. The agent is rootless by design
-    # (PR #21), so it does NOT and CANNOT kick that service from here — the old
-    # `sudo systemctl restart agent-os-pull-model` was dead code (no sudo for this user) that
-    # only leaked "agent is not in the sudoers file" to the tty. Just check whether the timer
-    # has finished the pull; if so, boot the brain — otherwise fall through to the memory
-    # floor while it downloads in the background.
-    _ob2="$(resolve_brain brain-ollama)" || true
-    if [ -n "$_ob2" ] && "$_ob2" --check >/dev/null 2>&1; then
-      cd "$HOME"; printf "${DIM}Brain ready — starting it. Talk to it below.${RST}\n\n"; exec "$_ob2"
+    # Online but the local brain may still be DOWNLOADING. The pull is a ROOT service
+    # (agent-os-pull-model) driven by a self-healing ROOT timer (agent-os-pull-model.timer,
+    # modules/brain.nix); the agent is rootless by design (PR #21) so it can only WATCH the
+    # pull, never kick it (the old `sudo systemctl restart` was dead code — no sudo for this
+    # user — that only leaked "agent is not in the sudoers file"). Two first-run wins over the
+    # old "one message → drop to floor → reboot":
+    #   1. show the root-published progress (world-readable /run/agent-os/pull-status — we only
+    #      READ it: no sudo, no systemctl, no new capability), and
+    #   2. poll `--check` and, the instant the model lands, exec the brain in THIS session — no
+    #      reboot / re-login. INTERRUPTIBLE: Enter drops to the memory floor for anyone who does
+    #      not want to wait; the floor below is always the fall-through (any failure / timeout).
+    # set +e for the whole interactive poll: a login shell must NEVER crash-loop getty's
+    # autologin, and an -e trip on a bounded read / --check / tail here would do exactly that.
+    # The only ways out are exec (process replaced) or falling through to the floor (also +e).
+    set +e
+    _STATUS=/run/agent-os/pull-status
+    # A ready LOCAL brain by the SAME precedence as the main path (agent-loop preferred over
+    # brain-ollama), each gated on its own --check so we never exec a brain that cannot talk.
+    # Echoes a path, or nothing.
+    _pick_brain() {
+      local _b
+      _b="$(resolve_brain agent-loop)";   [ -n "$_b" ] && "$_b" --check >/dev/null 2>&1 && { printf '%s' "$_b"; return 0; }
+      _b="$(resolve_brain brain-ollama)"; [ -n "$_b" ] && "$_b" --check >/dev/null 2>&1 && { printf '%s' "$_b"; return 0; }
+      return 1
+    }
+    _ready="$(_pick_brain)"
+    if [ -z "$_ready" ]; then
+      printf "\n${DIM}Online — installing the local brain (~4.7GB, first boot only). It boots on its own when ready.${RST}\n"
+      printf "${DIM}Press Enter to drop to the memory floor instead — it keeps downloading in the background.${RST}\n\n"
+      _t0=$SECONDS
+      while :; do
+        # live progress: overwrite one line with the latest root-published status (pad/truncate to clear)
+        if [ -r "$_STATUS" ]; then
+          _line="$(tail -n1 "$_STATUS" 2>/dev/null || true)"
+          [ -n "$_line" ] && printf "\r${DIM}  %-72.72s${RST}" "$_line"
+        fi
+        _ready="$(_pick_brain)"
+        [ -n "$_ready" ] && break
+        # safety bound: a truly wedged pull must not hold the console forever. A normal pull is
+        # minutes; after ~1h fall to the floor (the root timer keeps retrying regardless).
+        [ "$(( SECONDS - _t0 ))" -ge 3600 ] && { printf "\n${DIM}Still downloading after a while — dropping to the memory floor. Type 'exit' when it is done to boot the brain.${RST}\n\n"; break; }
+        # interruptible 3s poll gap: Enter (rc 0) or EOF (rc<=128) → floor; a genuine timeout
+        # (rc>128) just polls again. Reading /dev/tty keeps this tied to the console.
+        if IFS= read -r -t 3 _key < /dev/tty; then
+          printf "\n${DIM}Dropping to the memory floor — the brain keeps downloading. Type 'exit' when it is done to boot it.${RST}\n\n"; break
+        else
+          [ $? -le 128 ] && { printf "\n${DIM}Dropping to the memory floor. Type 'exit' when the brain is done to boot it.${RST}\n\n"; break; }
+        fi
+      done
     fi
-    printf "\n${DIM}Online — the local brain (~4.7GB) is downloading in the background now; ready in a few minutes. If it stalls, reboot once to finish.${RST}\n"
+    if [ -n "$_ready" ]; then
+      printf "\n${DIM}Brain ready — starting it. Talk to it below.${RST}\n\n"
+      cd "$HOME"; exec "$_ready"
+    fi
   fi
   printf "${DIM}(memory floor — brain not installed yet. 'remember / recall / tree' work now.)${RST}\n\n"
   # tiny placeholder so the scaffold is demoable with zero deps. It drives the SAME
@@ -154,16 +197,29 @@ else
   # respawn into an untypeable crash loop. Drop -e and disable globbing for the REPL
   # (recall/remember want word-splitting, never filename expansion).
   set +e; set -f
+  # Best-effort readline line-editing so up/down cycles previous inputs on the console.
+  # (`read -e` uses readline only where the shell can attach it; emacs mode is the enabler.
+  # A harmless no-op otherwise — purely cosmetic, no security surface.)
+  set -o emacs 2>/dev/null || true
   while true; do
     printf "${BANNER}you ›${RST} "
-    IFS= read -r line || { echo; break; }
+    IFS= read -e -r line || { echo; break; }
+    [ -n "$line" ] && history -s "$line" 2>/dev/null   # feed up/down history
     case "$line" in
       "") : ;;
       exit|quit) break ;;
+      reboot)
+        # The floor tells first-run users to reboot to finish the install, and they naturally
+        # type it here. An active LOCAL console session may reboot via logind WITHOUT root
+        # (polkit org.freedesktop.login1.reboot); try it — if policy denies it, DON'T fake
+        # success and NEVER escalate: print the honest fallback. (No sudo is granted the agent.)
+        printf "${DIM}rebooting…${RST}\n"
+        systemctl reboot 2>/dev/null || loginctl reboot 2>/dev/null \
+          || printf "${DIM}Can't reboot without privileges here. Press Ctrl-Alt-Del to reboot, or type 'exit' to boot the brain once the model has finished downloading.${RST}\n" ;;
       "recall "*)   "$MEM_BIN" recall ${line#recall } ;;
       "remember "*) "$MEM_BIN" remember ${line#remember } ;;
       "tree")       "$MEM_BIN" tree ;;
-      *) echo "  (placeholder brain — memory works: 'remember <domain/title> <fact>', 'recall <term>', 'tree'. Install the real brain for the rest.)";;
+      *) echo "  (placeholder brain — memory works: 'remember <domain/title> <fact>', 'recall <term>', 'tree'; 'exit' boots the brain once the model's downloaded. Install the real brain for the rest.)";;
     esac
   done
 fi
