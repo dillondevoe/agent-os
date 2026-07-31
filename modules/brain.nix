@@ -90,8 +90,15 @@
       # no interim progress when its stdout is a pipe, the status simply holds on "starting
       # download..." until completion — degraded but still correct; --check + the timer are unaffected.)
       _RCF=/run/agent-os/.pull-rc
-      ( "$OLLAMA" pull qwen2.5:7b-instruct 2>&1; echo $? > "$_RCF" ) | tr '\r' '\n' | while IFS= read -r _l; do
-        [ -n "$_l" ] && say "$_l"
+      # `set +e` FIRST inside the subshell: it inherits the script's errexit, so a FAILING pull would
+      # kill the subshell before `echo $?` runs and lose the real rc (_RCF missing → cat falls back to 1
+      # — still FAILED so the invariant holds, but the "rc=$_rc" log would always lie "1"). With +e the
+      # echo always records the true rc.
+      ( set +e; "$OLLAMA" pull qwen2.5:7b-instruct 2>&1; echo $? > "$_RCF" ) | tr '\r' '\n' | while IFS= read -r _l; do
+        # `|| true`: a trailing-empty tr'd line makes the [ -n ] test false → the && chain returns 1 → the
+        # while (this pipeline's tail element) returns 1 → the script's `set -e` would spuriously mark a
+        # GOOD pull FAILED. Force the body's rc to 0.
+        [ -n "$_l" ] && say "$_l" || true
       done
       _rc="$(cat "$_RCF" 2>/dev/null || echo 1)"; rm -f "$_RCF"
       if [ "$_rc" = 0 ]; then
