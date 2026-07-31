@@ -49,8 +49,66 @@ mount -t ext4 "${P}2" /mnt
 mkdir -p /mnt/boot
 mount -t vfat "${P}1" /mnt/boot
 
+# --- CLEAN_NVRAM (opt-in) — snapshot stale Agent OS UEFI entries BEFORE install --------------
+# The whole-disk wipe above clears on-DISK loaders but NEVER motherboard UEFI NVRAM, so each
+# reinstall's firmware "Linux Boot Manager" entry piles up ("getting insane"). Opt-in
+# CLEAN_NVRAM=1 prunes ONLY our own entries, and ONLY those that already exist NOW — snapshot
+# them here, before nixos-install registers a FRESH one, so the new entry is never a candidate.
+# Default OFF: the whole-drive wipe is the right default; a dual-booter must never lose another
+# OS's entry.  Enable with:  CLEAN_NVRAM=1 curl ... | sudo CLEAN_NVRAM=1 bash
+CLEAN_NVRAM="${CLEAN_NVRAM:-0}"
+NVRAM_LABEL_RE='Linux Boot Manager|NixOS|Agent OS'
+# efibootmgr may be absent from the minimal-installer PATH — belt: fall back to nix-shell. Every
+# arg used below is a simple token (-v / -b / XXXX / -B), so joining "$*" into --run is safe.
+efibm() { if command -v efibootmgr >/dev/null 2>&1; then efibootmgr "$@"; else nix-shell -p efibootmgr --run "efibootmgr $*"; fi; }
+STALE_NVRAM_BOOTNUMS=""
+if [ "$CLEAN_NVRAM" = 1 ]; then
+  echo ">>> CLEAN_NVRAM=1: recording pre-existing Agent OS/NixOS UEFI entries (pruned after install)..."
+  # efibm (no -v): one line per entry, "BootXXXX* Label". Keep bootnums whose LABEL matches ours.
+  # 2>/dev/null + ||true: a BIOS/legacy boot (no efivars) yields nothing → the feature no-ops.
+  STALE_NVRAM_BOOTNUMS="$(efibm 2>/dev/null | grep -E '^Boot[0-9A-Fa-f]{4}[* ]' | grep -E "$NVRAM_LABEL_RE" | sed -E 's/^Boot([0-9A-Fa-f]{4}).*/\1/')" || true
+  if [ -n "$STALE_NVRAM_BOOTNUMS" ]; then
+    echo "    flagged (pre-existing): $(echo $STALE_NVRAM_BOOTNUMS | tr '\n' ' ')"
+  else
+    echo "    none found — nothing to prune."
+  fi
+fi
+
 echo ">>> Installing Agent OS from $FLAKE (fetch + build, a few minutes)..."
 nixos-install --no-root-passwd --flake "$FLAKE"
+
+# --- CLEAN_NVRAM (opt-in) — prune the pre-recorded stale entries AFTER install ---------------
+# nixos-install just registered a FRESH "Linux Boot Manager" entry via bootctl. Delete exactly the
+# entries snapshotted BEFORE it (never the new one), re-verifying each STILL matches our label.
+# Print every deletion and gate on YES (same idiom as the disk wipe): nothing is removed silently,
+# and only OUR labels are ever eligible. Deletions are non-fatal — the OS is already installed.
+if [ "$CLEAN_NVRAM" = 1 ] && [ -n "$STALE_NVRAM_BOOTNUMS" ]; then
+  echo ">>> CLEAN_NVRAM: reviewing stale Agent OS/NixOS UEFI entries to prune..."
+  CUR_NVRAM="$(efibm 2>/dev/null || true)"
+  PRUNE_BOOTNUMS=""
+  for bn in $STALE_NVRAM_BOOTNUMS; do
+    entry="$(printf '%s\n' "$CUR_NVRAM" | grep -E "^Boot${bn}[* ]" || true)"
+    if [ -n "$entry" ] && printf '%s\n' "$entry" | grep -qE "$NVRAM_LABEL_RE"; then
+      echo "    will delete: $entry"
+      PRUNE_BOOTNUMS="$PRUNE_BOOTNUMS $bn"
+    fi
+  done
+  if [ -n "$PRUNE_BOOTNUMS" ]; then
+    printf "Type YES (caps) to delete the above stale UEFI entr(y/ies) from firmware: "
+    read -r NVRAM_CONFIRM < /dev/tty
+    if [ "$NVRAM_CONFIRM" = YES ]; then
+      for bn in $PRUNE_BOOTNUMS; do
+        echo "    + efibootmgr -b $bn -B"
+        efibm -b "$bn" -B >/dev/null || echo "    (warning: could not delete Boot${bn} — leaving it)"
+      done
+      echo ">>> NVRAM prune done — stale Agent OS entries removed; the fresh one remains."
+    else
+      echo ">>> NVRAM prune SKIPPED (not confirmed) — nothing removed."
+    fi
+  else
+    echo "    nothing to prune (snapshotted entries no longer present)."
+  fi
+fi
 
 # Network on first boot is NOT carried from the installer. A copied NetworkManager profile
 # produces a DEAD connection in the installed system — it comes up "connected" but never
