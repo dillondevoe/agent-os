@@ -72,11 +72,12 @@
       # fully associated/DHCP'd, which would fail the pull. Poll up to ~2min.
       # Probe with a tcp/443 connect (dep-free bash /dev/tcp), NOT ping: the clean-room
       # egress wall drops ICMP for every uid (root included), so ping never succeeds here
-      # even when online — it would burn the full ~2min every first boot. tcp/443 rides the
-      # same DNS+443 channel the model pull uses, so a passing probe means the pull can run.
+      # even when online — it would burn the full ~2min every first boot. Probe the MODEL HOST
+      # itself (registry.ollama.ai:443) — the exact host+channel `ollama pull` fetches from — so a
+      # passing probe means the pull can actually run, not merely that some other site is up.
       say "waiting for network..."
       for _i in $(seq 1 24); do
-        timeout 4 ${pkgs.bash}/bin/bash -c ': >/dev/tcp/github.com/443' >/dev/null 2>&1 && break
+        timeout 4 ${pkgs.bash}/bin/bash -c ': >/dev/tcp/registry.ollama.ai/443' >/dev/null 2>&1 && break
         echo "agent-os: waiting for network... ($_i/24)"; say "waiting for network... ($_i/24)"; sleep 5
       done
       echo "agent-os: pulling qwen2.5:7b-instruct (~4.7GB, first boot only)..."

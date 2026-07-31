@@ -120,10 +120,12 @@ else
   # egress wall (modules/clean-room.nix) — the wall permits DNS + tcp/{80,443} in the unsealed
   # provisioning window but never ICMP for the non-root agent user — so `ping` ALWAYS fails
   # here even when online, wedging first boot at the memory floor (the brain never pulls). Use
-  # a dep-free bash /dev/tcp probe over an ALREADY-PERMITTED channel (DNS-resolve github.com +
-  # tcp/443): no curl dependency, opens no new egress hole. `timeout` bounds a black-hole SYN;
+  # a dep-free bash /dev/tcp probe over an ALREADY-PERMITTED channel (DNS-resolve the MODEL HOST
+  # registry.ollama.ai + tcp/443): no curl dependency, opens no new egress hole. Probe the model
+  # host itself (not github) so "online" means the host the pull actually fetches from is
+  # reachable — a reply here means the `ollama pull` can run. `timeout` bounds a black-hole SYN;
   # `2>/dev/null` swallows the connection-refused / DNS noise so a failure is silent.
-  _net_ok() { timeout 4 bash -c ': >/dev/tcp/github.com/443' >/dev/null 2>&1; }
+  _net_ok() { timeout 4 bash -c ': >/dev/tcp/registry.ollama.ai/443' >/dev/null 2>&1; }
   if command -v nmtui >/dev/null 2>&1 && ! _net_ok; then
     printf "\n${BANNER}Let's get you online.${RST} No network yet — I need it to install my brain.\n"
     printf "Open the wifi picker? [Y/n] "
