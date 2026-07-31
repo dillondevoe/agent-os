@@ -43,8 +43,11 @@ in {
   #   #6 calculator-open: Qalculate! GUI + agent-drivable agos-calc CLI (ambient dozen).
   #   #7 files-open:    Thunar file-manager GUI + agent-drivable (read-only) agos-files CLI.
   #   #8 email-open:    Thunderbird human mail GUI (agent hand = MCP connector, RULING-A).
-  #      mail-secret-open: agent-side of email (#8) — the (A) MCP-email token scaffold
+  #      mail-secret-open: agent-side of email (#8) — the (A) MCP-email token scaffold for GMAIL
   #                     (out-of-tree secret plumbing, no creds). NOT a new dozen app.
+  #      mail-proton-bridge-open: the "both" (Dillon 9035) — Proton-via-Bridge cred scaffold,
+  #                     parallel to Gmail (ships protonmail-bridge + localhost IMAP/SMTP contract,
+  #                     out-of-tree cred, no secrets). NOT a new dozen app.
   #   #9 notes-open:    Apostrophe markdown editor GUI + agent-drivable agos-notes CLI
   #                     over a real plain-md store (GUI+hand symmetry, mirrors calendar).
   #   #10 docs-open:    Zathura document-viewer GUI + agent-drivable (read-only) agos-doc CLI
@@ -64,6 +67,7 @@ in {
     ./modules/files-open.nix
     ./modules/email-open.nix
     ./modules/mail-secret-open.nix
+    ./modules/mail-proton-bridge-open.nix
     ./modules/notes-open.nix
     ./modules/docs-open.nix
     ./modules/media-open.nix
