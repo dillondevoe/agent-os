@@ -52,29 +52,19 @@ mount -t vfat "${P}1" /mnt/boot
 echo ">>> Installing Agent OS from $FLAKE (fetch + build, a few minutes)..."
 nixos-install --no-root-passwd --flake "$FLAKE"
 
-# Carry the wifi you connected in the installer INTO the installed system, so it has
-# network on first boot and the local model can auto-pull. Without this, a wifi user
-# boots with no network → the brain can't download → stuck at the memory floor.
-# (Ethernet auto-connects via DHCP and needs none of this; this is the wifi path.)
-echo ">>> Carrying your network connection into the install..."
-NM_SRC=/etc/NetworkManager/system-connections
-NM_DST=/mnt/etc/NetworkManager/system-connections
-if compgen -G "$NM_SRC/*" >/dev/null 2>&1; then
-  mkdir -p "$NM_DST"
-  cp -a "$NM_SRC"/* "$NM_DST"/ 2>/dev/null || true
-  chmod 700 "$NM_DST" 2>/dev/null || true
-  chmod 600 "$NM_DST"/* 2>/dev/null || true
-  echo "    ✓ network connection(s) copied — Agent OS will be online on first boot."
-else
-  echo "    (no saved connections found. On wifi? connect with 'nmtui' BEFORE this, then re-run."
-  echo "     On ethernet? you're fine — DHCP auto-connects, no carry needed.)"
-fi
+# Network on first boot is NOT carried from the installer. A copied NetworkManager profile
+# produces a DEAD connection in the installed system — it comes up "connected" but never
+# routes, which masks the real no-network state AND fights the boot-time brain pull. Instead
+# the installed system's agent-shell offers an nmtui wifi picker on first boot and pulls the
+# brain in-shell once genuinely online (see bin/agent-shell `_net_ok`). Ethernet just DHCPs.
+echo ">>> Network: set up on FIRST BOOT (agent-shell offers a wifi picker), not carried"
+echo "    from the installer — a carried wifi profile comes up dead. Ethernet auto-DHCPs."
 
 echo "=============================================================="
 echo " ✅ DONE. Run:  reboot"
 echo " Then boot the INTERNAL disk (F12 → Linux Boot Manager, NOT the USB)."
-echo " First boot: it gets online + installs its local brain, then you're"
-echo " talking to it at a  you ›  prompt."
+echo " First boot: it gets online (wifi: it offers a picker; ethernet: auto), installs"
+echo " its local brain, then you're talking to it at a  you ›  prompt."
 echo ""
 echo " ⚠️  If boot hangs on 'waiting for /dev/disk/by-label/nixos': your"
 echo "     machine hides the NVMe behind Intel VMD. Fix: reboot → BIOS (F2)"

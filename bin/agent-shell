@@ -116,7 +116,14 @@ else
   # is how a blank machine gets online from the OS ITSELF, no installer-carry needed.
   # FULLY GUARDED: every step is optional + `|| true`'d; any failure just proceeds to
   # the memory REPL below. The login shell must never crash-loop (that scar is real).
-  _net_ok() { ping -c1 -W2 1.1.1.1 >/dev/null 2>&1; }
+  # Reachability probe. MUST NOT use ping: ICMP echo has NO accept rule in the clean-room
+  # egress wall (modules/clean-room.nix) — the wall permits DNS + tcp/{80,443} in the unsealed
+  # provisioning window but never ICMP for the non-root agent user — so `ping` ALWAYS fails
+  # here even when online, wedging first boot at the memory floor (the brain never pulls). Use
+  # a dep-free bash /dev/tcp probe over an ALREADY-PERMITTED channel (DNS-resolve github.com +
+  # tcp/443): no curl dependency, opens no new egress hole. `timeout` bounds a black-hole SYN;
+  # `2>/dev/null` swallows the connection-refused / DNS noise so a failure is silent.
+  _net_ok() { timeout 4 bash -c ': >/dev/tcp/github.com/443' >/dev/null 2>&1; }
   if command -v nmtui >/dev/null 2>&1 && ! _net_ok; then
     printf "\n${BANNER}Let's get you online.${RST} No network yet — I need it to install my brain.\n"
     printf "Open the wifi picker? [Y/n] "
