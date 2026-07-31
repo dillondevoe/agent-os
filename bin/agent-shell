@@ -131,19 +131,21 @@ else
     case "$_ans" in ""|y|Y|yes|YES) nmtui || true ;; *) : ;; esac
   fi
   if command -v systemctl >/dev/null 2>&1 && _net_ok; then
-    # Online but no brain yet → pull it now (reuses the first-boot service, correct paths).
-    printf "\n${DIM}Online. Installing the local brain (~4.7GB, one time — a few minutes, hang tight)...${RST}\n"
-    # RESTART (not start): the boot-time run may have already fired + given up before wifi
-    # was connected, marking itself "done" — a plain `start` would then be a no-op (the
-    # "wifi picker ate the install" bug). restart forces a fresh run now that we're online.
-    sudo systemctl reset-failed agent-os-pull-model >/dev/null 2>&1 || true
-    sudo systemctl restart agent-os-pull-model >/dev/null 2>&1 || true
+    # Online but no brain yet. The pull is a ROOT service (agent-os-pull-model) driven by a
+    # self-healing ROOT timer (agent-os-pull-model.timer, modules/brain.nix) that re-fires it
+    # whenever the box is online until the model lands. The agent is rootless by design
+    # (PR #21), so it does NOT and CANNOT kick that service from here — the old
+    # `sudo systemctl restart agent-os-pull-model` was dead code (no sudo for this user) that
+    # only leaked "agent is not in the sudoers file" to the tty. Just check whether the timer
+    # has finished the pull; if so, boot the brain — otherwise fall through to the memory
+    # floor while it downloads in the background.
     _ob2="$(resolve_brain brain-ollama)" || true
     if [ -n "$_ob2" ] && "$_ob2" --check >/dev/null 2>&1; then
       cd "$HOME"; printf "${DIM}Brain ready — starting it. Talk to it below.${RST}\n\n"; exec "$_ob2"
     fi
+    printf "\n${DIM}Online — the local brain (~4.7GB) is downloading in the background now; ready in a few minutes. If it stalls, reboot once to finish.${RST}\n"
   fi
-  printf "${DIM}(memory floor — brain not installed yet. 'remember / recall / tree' work now. Get online + reboot to finish.)${RST}\n\n"
+  printf "${DIM}(memory floor — brain not installed yet. 'remember / recall / tree' work now.)${RST}\n\n"
   # tiny placeholder so the scaffold is demoable with zero deps. It drives the SAME
   # `mem` memory layer the real brain uses — so the memory model is real even here.
   MEM_BIN="$(dirname "$0")/mem"; [ -x "$MEM_BIN" ] || MEM_BIN="mem"
