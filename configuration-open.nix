@@ -42,7 +42,9 @@ in {
   #                     derivation (path+hash literals; Geist "bind not bytes"). agent-brain.
   #   #6 calculator-open: Qalculate! GUI + agent-drivable agos-calc CLI (ambient dozen).
   #   #7 files-open:    Thunar file-manager GUI + agent-drivable (read-only) agos-files CLI.
-  #   #8 email-open:    Thunderbird human mail GUI (agent hand = MCP connector, escalated).
+  #   #8 email-open:    Thunderbird human mail GUI (agent hand = MCP connector, RULING-A).
+  #      mail-secret-open: agent-side of email (#8) — the (A) MCP-email token scaffold
+  #                     (out-of-tree secret plumbing, no creds). NOT a new dozen app.
   imports = [
     ./modules/calendar-open.nix
     ./modules/desktop-open.nix
@@ -52,6 +54,7 @@ in {
     ./modules/calculator-open.nix
     ./modules/files-open.nix
     ./modules/email-open.nix
+    ./modules/mail-secret-open.nix
   ];
 
   # --- boot / hardware (MIRROR of configuration.nix — see header) --------------
