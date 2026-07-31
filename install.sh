@@ -85,10 +85,24 @@ nixos-install --no-root-passwd --flake "$FLAKE"
 if [ "$CLEAN_NVRAM" = 1 ] && [ -n "$STALE_NVRAM_BOOTNUMS" ]; then
   echo ">>> CLEAN_NVRAM: reviewing stale Agent OS/NixOS UEFI entries to prune..."
   CUR_NVRAM="$(efibm 2>/dev/null || true)"
+  # Belt-and-suspenders (Fable): grab the FRESH ESP's PARTUUID and NEVER delete an entry whose
+  # verbose device path carries it. bootctl already matches by partition-GUID+path (not label) and
+  # the snapshot-before design meant the new entry was never a candidate — this converts that
+  # "safe by reasoning" into "safe by DIRECT OBSERVATION" of the just-installed partition. A BIOS/
+  # legacy or blkid-less path yields an empty PARTUUID → the guard no-ops (prior safety unchanged).
+  # efibootmgr -v prints the GPT partition GUID inside HD(1,GPT,<partuuid>,...), so a fixed-string
+  # match of the fresh PARTUUID against the verbose line pins the new entry by observation.
+  NEW_ESP_PARTUUID="$(blkid -s PARTUUID -o value "${P}1" 2>/dev/null || true)"
+  CUR_NVRAM_V="$(efibm -v 2>/dev/null || true)"
   PRUNE_BOOTNUMS=""
   for bn in $STALE_NVRAM_BOOTNUMS; do
     entry="$(printf '%s\n' "$CUR_NVRAM" | grep -E "^Boot${bn}[* ]" || true)"
     if [ -n "$entry" ] && printf '%s\n' "$entry" | grep -qE "$NVRAM_LABEL_RE"; then
+      vline="$(printf '%s\n' "$CUR_NVRAM_V" | grep -E "^Boot${bn}[* ]" || true)"
+      if [ -n "$NEW_ESP_PARTUUID" ] && printf '%s\n' "$vline" | grep -iqF "$NEW_ESP_PARTUUID"; then
+        echo "    keeping Boot${bn} — device path carries the fresh ESP PARTUUID ($NEW_ESP_PARTUUID)"
+        continue
+      fi
       echo "    will delete: $entry"
       PRUNE_BOOTNUMS="$PRUNE_BOOTNUMS $bn"
     fi
