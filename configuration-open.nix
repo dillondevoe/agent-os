@@ -33,9 +33,10 @@ let
   meshPubKey = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKJTAziP2h4A1uPJeQ4++F8f+Uw3vLzjV7sGSylxA2RH rabbot-mini-to-agentos-20260731";
 in {
   # Phase 2 ambient substrate (Augur, OS build lead). Each app is a self-contained,
-  # OPEN-only module so it can never perturb the sealed surface. First increment:
-  # the nuclear-accurate agent-read/write calendar (Dillon's flagged priority).
-  imports = [ ./modules/calendar-open.nix ];
+  # OPEN-only module so it can never perturb the sealed surface.
+  #   #1 calendar-open: nuclear-accurate agent-read/write calendar (Dillon's flagged priority).
+  #   #2 desktop-open:  reproducible Hyprland desktop + Waybar ambient bar.
+  imports = [ ./modules/calendar-open.nix ./modules/desktop-open.nix ];
 
   # --- boot / hardware (MIRROR of configuration.nix — see header) --------------
   boot.loader.systemd-boot.enable = lib.mkDefault true;
