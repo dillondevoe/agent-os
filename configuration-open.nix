@@ -51,6 +51,9 @@ in {
   #                     — extracts PDF content (pairs with files-open's metadata-only hand).
   #   #11 media-open:   imv/mpv media GUIs + agent-drivable (read-only) agos-media CLI
   #                     — probes image/video/audio metadata via ffprobe (completes the read trio).
+  #   #12 web-open:     Firefox web browser (human) + agent-drivable (read-only) agos-web CLI
+  #                     — fetches a public URL & extracts readable text (Rabbot browser-#12 RULING).
+  #                     COMPLETES THE AMBIENT DOZEN (12/12). Browser AUTOMATION parked = later increment.
   imports = [
     ./modules/calendar-open.nix
     ./modules/desktop-open.nix
@@ -64,6 +67,7 @@ in {
     ./modules/notes-open.nix
     ./modules/docs-open.nix
     ./modules/media-open.nix
+    ./modules/web-open.nix
   ];
 
   # --- boot / hardware (MIRROR of configuration.nix — see header) --------------
