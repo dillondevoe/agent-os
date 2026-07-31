@@ -193,9 +193,15 @@ class EventLog:
             raise ValueError("invalid kind %r (must be one of %s)" % (kind, sorted(KINDS)))
 
     # ---- write -------------------------------------------------------------
-    def emit(self, topic, kind, payload=None, corr_id=None, actor=None, to=None):
+    def emit(self, topic, kind, payload=None, corr_id=None, actor=None, to=None, ts=None):
         """Append one event to THIS machine's file for `topic`; assign a per-file monotonic id under
-        a LOCAL exclusive flock; fsync. Returns the event dict (with id/ts filled in)."""
+        a LOCAL exclusive flock; fsync. Returns the event dict (with id/ts filled in).
+
+        `ts` (optional, ISO-8601 UTC) overrides the emit timestamp. Default is now(). An override is
+        for events that REPRESENT a past occurrence with its own arrival time — e.g. the brain-comms
+        shadow emits one event per comm and stamps it with the comm's file mtime, so the cross-machine
+        merge order (ts, machine, id) reproduces real arrival order regardless of when the scan ran.
+        `id` stays monotonic per file (append order); only the recorded `ts` changes."""
         self._validate(topic, kind)
         path = self._file(topic, self.machine)
         os.makedirs(self.events_dir, exist_ok=True)
@@ -206,7 +212,7 @@ class EventLog:
                 ev = {
                     "v": SCHEMA_VERSION,
                     "id": eid,
-                    "ts": _now_iso(),
+                    "ts": ts if ts is not None else _now_iso(),
                     "topic": topic,
                     "kind": kind,
                     "actor": actor if actor is not None else self.machine,
@@ -221,9 +227,10 @@ class EventLog:
                 fcntl.flock(f.fileno(), fcntl.LOCK_UN)
         return dict(ev, _machine=self.machine)
 
-    def done(self, corr_id, topic, payload=None, actor=None):
-        """Emit a first-class completion event (kind='done') threaded by corr_id."""
-        return self.emit(topic, "done", payload=payload or {}, corr_id=corr_id, actor=actor)
+    def done(self, corr_id, topic, payload=None, actor=None, ts=None):
+        """Emit a first-class completion event (kind='done') threaded by corr_id. `ts` overrides the
+        completion time (e.g. the mtime of the `_done/` marker in the comms shadow)."""
+        return self.emit(topic, "done", payload=payload or {}, corr_id=corr_id, actor=actor, ts=ts)
 
     # ---- read --------------------------------------------------------------
     def read(self, topic, cursor=None):
@@ -318,8 +325,8 @@ def default_log():
     return _DEFAULT
 
 
-def emit(topic, kind, payload=None, corr_id=None, actor=None, to=None):
-    return default_log().emit(topic, kind, payload=payload, corr_id=corr_id, actor=actor, to=to)
+def emit(topic, kind, payload=None, corr_id=None, actor=None, to=None, ts=None):
+    return default_log().emit(topic, kind, payload=payload, corr_id=corr_id, actor=actor, to=to, ts=ts)
 
 
 def read(topic, cursor=None):
@@ -334,8 +341,8 @@ def cursor_set(consumer, topic, cursor):
     return default_log().cursor_set(consumer, topic, cursor)
 
 
-def done(corr_id, topic, payload=None, actor=None):
-    return default_log().done(corr_id, topic, payload=payload, actor=actor)
+def done(corr_id, topic, payload=None, actor=None, ts=None):
+    return default_log().done(corr_id, topic, payload=payload, actor=actor, ts=ts)
 
 
 def await_done(corr_id, topic, timeout=30.0, poll=0.05):

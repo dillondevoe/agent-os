@@ -399,6 +399,27 @@
               python3 contract.py
               touch $out
             '';
+
+        # Orchestration engine · Phase 1 part 2 — the SHADOW brain-comms migration's CONTRACT BATTERY
+        # (agos_comms_shadow, atop agos_events). Observes + parallel-emits, changes NO routing (the live
+        # `_done/`+dispatch-watchers stay truth). Proves the migration is faithful BEFORE any cutover:
+        # PORT PARITY — two INDEPENDENT route derivations agree on every comm (route_from_to(parse) ==
+        # file_route(globs)); ROUTE TRUTH over every documented hazard (single/broadcast/the broadcast_gap
+        # where to-all misses scout/phoenix/geist/rebound/combined air-<brain>/to-mesh orphan→nobody);
+        # EMIT idempotency; DONE corr_id threading; EXACTLY-ONCE cursor'd delivery with the mtime-refire
+        # double-fire structurally killed + orphan→no-brain; author-host machine partition in arrival
+        # (mtime) order. A regression fails `nix flake check`.
+        agos-comms-shadow-contract =
+          nixpkgs.legacyPackages.${system}.runCommand "agos-comms-shadow-contract-check"
+            { nativeBuildInputs = [ nixpkgs.legacyPackages.${system}.python3 ]; } ''
+              work="$(mktemp -d)"
+              cp ${./modules/agos_events.py} "$work/agos_events.py"
+              cp ${./modules/agos_comms_shadow.py} "$work/agos_comms_shadow.py"
+              cp ${./tests/agos-comms-shadow-contract.py} "$work/contract.py"
+              cd "$work"
+              python3 contract.py
+              touch $out
+            '';
       };
     };
 }

@@ -180,6 +180,23 @@ def test_routing_on_to():
     print("F. routing on (topic, to), broadcast, cc — PASS")
 
 
+def test_ts_override_drives_order():
+    # emit() with an explicit ts records THAT ts and it drives merge order — even within one file,
+    # where id is monotonic-ascending, an earlier ts sorts first. This is what lets the comms shadow
+    # stamp events with real arrival (file-mtime) times and still merge in true arrival order.
+    root = _root()
+    mini = E.EventLog(root, "mini")
+    late = mini.emit("t", "note", {"n": "late"}, ts="2026-07-31T00:00:09.000000Z")   # id 1, late ts
+    early = mini.emit("t", "note", {"n": "early"}, ts="2026-07-31T00:00:01.000000Z")  # id 2, early ts
+    check(late["id"] == 1 and early["id"] == 2, "ids not monotonic per file: %r %r" % (late, early))
+    order = [(e["id"], e["payload"]["n"]) for e in mini.read("t")]
+    check(order == [(2, "early"), (1, "late")], "ts override did not drive order: %r" % order)
+    # A done() ts override records too.
+    d = mini.done("w", "t", {"ok": 1}, ts="2026-07-31T00:00:05.000000Z")
+    check(d["ts"] == "2026-07-31T00:00:05.000000Z", "done ts override not recorded: %r" % d)
+    print("G. ts override recorded + drives merge order — PASS")
+
+
 def main():
     test_multiwriter_exactly_once()
     test_replay_from_zero()
@@ -187,6 +204,7 @@ def main():
     test_ordering_deterministic()
     test_done_await()
     test_routing_on_to()
+    test_ts_override_drives_order()
     print("\nagos-events contract battery: ALL PASS")
 
 
