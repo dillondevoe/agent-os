@@ -309,10 +309,14 @@ def diff_report(comms_dir, root, model, state_dir="~/jarvis-sync/state"):
         # the corpus AND retained in watcher state) — watcher state keeps only the last ~200.
         shadow = snap.get(brain, set())
         corpus = set(bases)
-        missed = sorted((fired & corpus) - shadow)   # watcher fired, shadow wouldn't route → real gap
-        extra = sorted(shadow - fired)                # shadow routes, watcher hasn't fired (defer/never)
+        tested = fired & corpus                        # comms BOTH sides can see = the real test set
+        missed = sorted(tested - shadow)               # watcher fired, shadow wouldn't route → real gap
+        extra = sorted(shadow - fired)                 # shadow routes, watcher hasn't fired (defer/never)
+        # tested_overlap is the N behind this brain's missed=0. A zero over tested_overlap==0 is
+        # VACUOUS (the brain's fired-history has aged out of the corpus root) — not proof; only a zero
+        # over tested_overlap>0 is load-bearing. Without this field the reader can't tell the two apart.
         crosscheck[brain] = {"watcher_fired": len(fired), "shadow_routed": len(shadow),
-                             "missed": missed, "extra_count": len(extra)}
+                             "tested_overlap": len(tested), "missed": missed, "extra_count": len(extra)}
 
     # Structural double-fire guarantee: a fresh delivery pass over the SAME log delivers 0 new (cursor).
     # (Uses throwaway consumers so it doesn't disturb the real per-brain cursors.)
@@ -331,6 +335,8 @@ def diff_report(comms_dir, root, model, state_dir="~/jarvis-sync/state"):
             "port_parity is the primary proof: two independent route derivations over the live corpus.",
             "live_crosscheck 'extra' is expected transient (a comm the watcher hasn't fired yet, e.g. "
             "Rabbot deferred); 'missed' is the metric that must be 0.",
+            "missed=0 is load-bearing ONLY where tested_overlap>0; a zero over tested_overlap==0 is "
+            "VACUOUS (that brain's fired-history has aged out of the corpus root, nothing to test yet).",
             "watcher state retains only the last ~200 fired basenames and only for comms that host has "
             "seen; augur state is local to dvo, others sync from their hosts.",
         ],
