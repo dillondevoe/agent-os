@@ -38,11 +38,14 @@ in {
   #   #2 desktop-open:  reproducible Hyprland desktop + Waybar ambient bar.
   #   #3 settings-open: agent-drivable agos-sys settings CLI + human GUI tools.
   #   #4 model-open:    the brain (qwen2.5:7b-instruct) BAKED INTO THE IMAGE (Dillon 8988).
+  #   #5 genesis-open:  THE GENESIS LOCK — the soul (GENESIS.md) baked into the brain
+  #                     derivation (path+hash literals; Geist "bind not bytes"). agent-brain.
   imports = [
     ./modules/calendar-open.nix
     ./modules/desktop-open.nix
     ./modules/settings-open.nix
     ./modules/model-open.nix
+    ./modules/genesis-open.nix
   ];
 
   # --- boot / hardware (MIRROR of configuration.nix — see header) --------------
