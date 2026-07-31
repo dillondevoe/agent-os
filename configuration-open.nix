@@ -45,6 +45,8 @@ in {
   #   #8 email-open:    Thunderbird human mail GUI (agent hand = MCP connector, RULING-A).
   #      mail-secret-open: agent-side of email (#8) — the (A) MCP-email token scaffold
   #                     (out-of-tree secret plumbing, no creds). NOT a new dozen app.
+  #   #9 notes-open:    Apostrophe markdown editor GUI + agent-drivable agos-notes CLI
+  #                     over a real plain-md store (GUI+hand symmetry, mirrors calendar).
   imports = [
     ./modules/calendar-open.nix
     ./modules/desktop-open.nix
@@ -55,6 +57,7 @@ in {
     ./modules/files-open.nix
     ./modules/email-open.nix
     ./modules/mail-secret-open.nix
+    ./modules/notes-open.nix
   ];
 
   # --- boot / hardware (MIRROR of configuration.nix — see header) --------------
