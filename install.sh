@@ -3,14 +3,29 @@
 # Run from the NixOS-minimal installer shell:
 #   curl -sL https://raw.githubusercontent.com/dillondevoe/agent-os/main/install.sh | sudo bash
 #
+# VARIANTS:
+#   VARIANT=agentos       (default) — the sovereign box (sealed after model pull).
+#   VARIANT=agentos-open             — the OPEN / MESHED dev box (Dillon msg 8926):
+#     OpenSSH + Tailscale + full-power user + real shell, no egress wall, no auto-pull.
+#     Pass a Tailscale PRE-AUTH key so the Dell auto-joins the mesh on first boot:
+#       VARIANT=agentos-open TS_AUTHKEY=tskey-auth-xxxx curl -sL .../install.sh | sudo -E bash
+#     (sudo -E preserves TS_AUTHKEY. The key is written to the TARGET only, mode 0600 —
+#      it is never stored in the repo. Omit it and run `tailscale up` by hand later.)
+#
 # ⚠️ ERASES THE TARGET DISK. Shows you the disk and requires you to type YES first.
 set -euo pipefail
 
-FLAKE="github:dillondevoe/agent-os#agentos"
+VARIANT="${VARIANT:-agentos}"
+case "$VARIANT" in
+  agentos|agentos-open) : ;;
+  *) echo "Unknown VARIANT '$VARIANT' (expected 'agentos' or 'agentos-open')."; exit 1 ;;
+esac
+FLAKE="github:dillondevoe/agent-os#${VARIANT}"
 DISK="${DISK:-/dev/nvme0n1}"   # override with:  DISK=/dev/sdX curl ... | sudo DISK=/dev/sdX bash
+TS_AUTHKEY="${TS_AUTHKEY:-}"   # OPEN variant only — Tailscale pre-auth key (runtime secret, never committed)
 
 echo "=============================================================="
-echo " Agent OS installer — target disk: $DISK"
+echo " Agent OS installer — variant: $VARIANT — target disk: $DISK"
 echo "=============================================================="
 lsblk -o NAME,SIZE,TYPE,MODEL,MOUNTPOINT
 echo "--------------------------------------------------------------"
@@ -48,6 +63,23 @@ echo ">>> Mounting (explicit fs types — auto-detect can trip on stale FAT sigs
 mount -t ext4 "${P}2" /mnt
 mkdir -p /mnt/boot
 mount -t vfat "${P}1" /mnt/boot
+
+# --- OPEN variant: place the Tailscale pre-auth key on the TARGET (never committed) ----------
+# configuration-open.nix sets services.tailscale.authKeyFile = /var/lib/tailscale/authkey, so
+# NixOS's tailscaled-autoconnect runs `tailscale up --auth-key file:... --ssh` on first boot and
+# the Dell joins the mesh unattended. We write the key ONLY to the mounted target FS, mode 0600,
+# root-owned — it lands in the installed system, not the repo and not the installer image. If
+# TS_AUTHKEY is empty the box still installs; run `tailscale up` by hand once it's booted.
+if [ "$VARIANT" = agentos-open ]; then
+  if [ -n "$TS_AUTHKEY" ]; then
+    echo ">>> OPEN: staging Tailscale pre-auth key on the target (/var/lib/tailscale/authkey, 0600)..."
+    install -d -m 0700 /mnt/var/lib/tailscale
+    ( umask 077; printf '%s' "$TS_AUTHKEY" > /mnt/var/lib/tailscale/authkey )
+    chmod 0600 /mnt/var/lib/tailscale/authkey
+  else
+    echo ">>> OPEN: no TS_AUTHKEY given — skipping mesh auto-join. Run 'tailscale up --ssh' after boot."
+  fi
+fi
 
 # --- CLEAN_NVRAM (opt-in) — snapshot stale Agent OS UEFI entries BEFORE install --------------
 # The whole-disk wipe above clears on-DISK loaders but NEVER motherboard UEFI NVRAM, so each
@@ -135,8 +167,16 @@ echo "    from the installer — a carried wifi profile comes up dead. Ethernet 
 echo "=============================================================="
 echo " ✅ DONE. Run:  reboot"
 echo " Then boot the INTERNAL disk (F12 → Linux Boot Manager, NOT the USB)."
-echo " First boot: it gets online (wifi: it offers a picker; ethernet: auto), installs"
-echo " its local brain, then you're talking to it at a  you ›  prompt."
+if [ "$VARIANT" = agentos-open ]; then
+  echo " OPEN/MESHED box. First boot: ethernet auto-DHCPs (wifi: log in on the console —"
+  echo " it autologins to a bash shell — and run 'nmtui'). If you passed TS_AUTHKEY it joins"
+  echo " your tailnet automatically (SSH: 'tailscale status' to see it); otherwise run"
+  echo " 'sudo tailscale up --ssh'. The ollama daemon is up with NO model — rsync the blobs"
+  echo " over the mesh. SSH is key-only for agent@ and root@ (mini's key baked in)."
+else
+  echo " First boot: it gets online (wifi: it offers a picker; ethernet: auto), installs"
+  echo " its local brain, then you're talking to it at a  you ›  prompt."
+fi
 echo ""
 echo " ⚠️  If boot hangs on 'waiting for /dev/disk/by-label/nixos': your"
 echo "     machine hides the NVMe behind Intel VMD. Fix: reboot → BIOS (F2)"

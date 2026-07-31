@@ -30,6 +30,18 @@
         inherit system;
         modules = baseModules ++ extraModules;
       };
+      # OPEN / MESHED variant (`agentos-open`, Dillon msg 8926). A deliberately
+      # PERMISSIVE dev box — OpenSSH + Tailscale + full-power user + real bash shell
+      # + ollama daemon, NO clean-room egress wall, NO agent-shell REPL, NO auto-pull.
+      # Built from a SELF-CONTAINED base (configuration-open.nix) that shares ZERO
+      # modules with the sovereign path above, so it can never perturb the sealed
+      # surface. Rabbot meshes in over Tailscale/SSH and builds on the Dell live; the
+      # box is sealed + repackaged for GitHub at the END, not here.
+      openModules = [ ./configuration-open.nix ];
+      mkOpenSystem = extraModules: nixpkgs.lib.nixosSystem {
+        inherit system;
+        modules = openModules ++ extraModules;
+      };
     in {
       # The whole machine. `agent-shell.nix` is the part that makes it Agent OS;
       # `configuration.nix` is boring base plumbing (bootloader, user, network).
@@ -37,12 +49,20 @@
       # Same machine, egress wall sealed — the post-model-pull `switch` target.
       nixosConfigurations.agentos-sealed = mkSystem [ { agentos.cleanRoom.sealed = true; } ];
 
+      # OPEN / MESHED dev variant — intentionally permissive (see `openModules`).
+      # Install:  nixos-install --flake github:dillondevoe/agent-os#agentos-open
+      # (install.sh VARIANT=agentos-open bakes the mesh authorized_keys + TS_AUTHKEY).
+      nixosConfigurations.agentos-open = mkOpenSystem [ ];
+
       # Prove boot-and-talk in a VM BEFORE it ever touches the Dell:
       #   nix build .#vm && ./result/bin/run-*-vm       (unsealed: can pull a model)
       #   nix build .#vm-sealed                          (sealed: nixpkgs-only egress)
       packages.${system} = {
         vm        = self.nixosConfigurations.agentos.config.system.build.vm;
         vm-sealed = self.nixosConfigurations.agentos-sealed.config.system.build.vm;
+        # Boot-sanity the open variant in a VM before it touches the Dell:
+        #   nix build .#vm-open && ./result/bin/run-*-vm
+        vm-open   = self.nixosConfigurations.agentos-open.config.system.build.vm;
 
         # seal-failloud fail-down loop, driven headless (nixosTest). Kept OUT of `checks`
         # so routine `nix flake check` stays fast — this boots a VM (minutes) vs the 6
