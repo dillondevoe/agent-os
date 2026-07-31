@@ -47,6 +47,8 @@ in {
   #                     (out-of-tree secret plumbing, no creds). NOT a new dozen app.
   #   #9 notes-open:    Apostrophe markdown editor GUI + agent-drivable agos-notes CLI
   #                     over a real plain-md store (GUI+hand symmetry, mirrors calendar).
+  #   #10 docs-open:    Zathura document-viewer GUI + agent-drivable (read-only) agos-doc CLI
+  #                     — extracts PDF content (pairs with files-open's metadata-only hand).
   imports = [
     ./modules/calendar-open.nix
     ./modules/desktop-open.nix
@@ -58,6 +60,7 @@ in {
     ./modules/email-open.nix
     ./modules/mail-secret-open.nix
     ./modules/notes-open.nix
+    ./modules/docs-open.nix
   ];
 
   # --- boot / hardware (MIRROR of configuration.nix — see header) --------------
