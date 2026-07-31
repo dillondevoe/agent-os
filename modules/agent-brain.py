@@ -41,6 +41,13 @@ TOOLS=[
  {"type":"function","function":{"name":"calendar.add","description":"Add a REAL event to the user's calendar. Use when they want to schedule/add/create/remember an appointment or event.","parameters":{"type":"object","properties":{"start":{"type":"string","description":"start time as 'YYYY-MM-DD HH:MM' (24h, local)"},"summary":{"type":"string","description":"the event title"},"end":{"type":"string","description":"optional end time 'YYYY-MM-DD HH:MM'; defaults to +1h"}},"required":["start","summary"]}}},
  {"type":"function","function":{"name":"calendar.now","description":"Get the exact current date/time from the calendar (station timezone).","parameters":{"type":"object","properties":{}}}},
  {"type":"function","function":{"name":"calendar.cals","description":"List the user's calendar collections.","parameters":{"type":"object","properties":{}}}},
+ {"type":"function","function":{"name":"calculator","description":"Evaluate a math expression (arithmetic, %, units, functions). Use for any calculation.","parameters":{"type":"object","properties":{"expression":{"type":"string","description":"e.g. (2+3)*4, sqrt(2), 200*15%, 5 km + 300 m"}},"required":["expression"]}}},
+ {"type":"function","function":{"name":"system","description":"Read or change machine settings. action 'status' reports network/audio/display/power; 'volume' sets 0-100 or mute/unmute/toggle; 'brightness' sets 0-100.","parameters":{"type":"object","properties":{"action":{"type":"string","description":"status | volume | brightness"},"value":{"type":"string","description":"for volume/brightness: 0-100 (or mute/unmute/toggle for volume)"}},"required":["action"]}}},
+ {"type":"function","function":{"name":"list_files","description":"List the entries (files/folders) in a directory. Use when the user asks what's in a folder.","parameters":{"type":"object","properties":{"dir":{"type":"string","description":"absolute directory path"}},"required":["dir"]}}},
+ {"type":"function","function":{"name":"read_document","description":"Extract text from a PDF document — whole doc or one page. Use to read/summarize a PDF the user names.","parameters":{"type":"object","properties":{"path":{"type":"string","description":"path to the .pdf"},"page":{"type":"integer","description":"optional 1-indexed page; omit for whole doc"}},"required":["path"]}}},
+ {"type":"function","function":{"name":"media_info","description":"Probe an image/video/audio file (type, format, duration, dimensions, streams). Use to inspect a media file.","parameters":{"type":"object","properties":{"path":{"type":"string","description":"path to the media file"}},"required":["path"]}}},
+ {"type":"function","function":{"name":"notes","description":"The user's notes. action 'list' shows all notes newest-first; 'read' returns one note's body (needs slug).","parameters":{"type":"object","properties":{"action":{"type":"string","description":"list | read"},"slug":{"type":"string","description":"for 'read': the note slug"}}}}},
+ {"type":"function","function":{"name":"fetch_web","description":"Fetch a public web page and return its readable text (nav/boilerplate stripped). Use to READ what a page says (the inference half of browsing); use open_url instead to show the user a site.","parameters":{"type":"object","properties":{"url":{"type":"string","description":"full http(s) URL"}},"required":["url"]}}},
 ]
 
 def live_context():
@@ -123,7 +130,36 @@ def do_tool(name,args):
         return f"desktop: {act} done"
     if name in ("calendar.now","calendar.agenda","calendar.add","calendar.cals"):
         return _agos(name,args)
+    # the ambient-dozen hands — thin wrappers over the agos-* CLIs (each emits JSON, exits 0 on success)
+    if name=="calculator":     return _run_agos("agos-calc","eval",args.get("expression",""))
+    if name=="system":
+        a=args.get("action","").lower()
+        if a=="status": return _run_agos("agos-sys","status")
+        if a in ("volume","brightness"): return _run_agos("agos-sys",a,str(args.get("value","")))
+        return f"system: unknown action '{a}' (use status|volume|brightness)"
+    if name=="list_files":     return _run_agos("agos-files","list",args.get("dir",""))
+    if name=="read_document":
+        c=["agos-doc","text",args.get("path","")]
+        if args.get("page"): c.append(str(args["page"]))
+        return _run_agos(*c)
+    if name=="media_info":     return _run_agos("agos-media","info",args.get("path",""))
+    if name=="notes":
+        a=args.get("action","list").lower()
+        if a=="list": return _run_agos("agos-notes","list")
+        if a=="read": return _run_agos("agos-notes","read",args.get("slug",""))
+        return f"notes: unknown action '{a}' (use list|read)"
+    if name=="fetch_web":      return _run_agos("agos-web","fetch",args.get("url",""))
     return "unknown tool"
+
+def _run_agos(*cmd):
+    # generic runner for the agos-* ambient-dozen CLIs; passes their JSON stdout through verbatim
+    cli=cmd[0]
+    try:
+        o=subprocess.run([c for c in cmd if c!=""],capture_output=True,text=True,timeout=25)
+        if o.returncode!=0: return f"{cli} error: "+((o.stderr or o.stdout).strip()[:400] or "failed")
+        return (o.stdout.strip() or "(done)")[:4000]
+    except FileNotFoundError: return f"{cli} not on PATH (its module isn't deployed on this box yet)"
+    except Exception as e: return f"{cli} error: {e}"
 
 def _agos(name,args):
     # thin wrapper over the agos-cal CLI (ships with the calendar-open module); passes JSON through
