@@ -86,14 +86,27 @@ import sys, json, os
 try: req = json.load(sys.stdin)
 except Exception: req = {}
 if os.environ.get("INVOKE_MARKER"): open(os.environ["INVOKE_MARKER"], "w").close()
-out = {"ok": os.environ.get("INVOKE_OK", "1") == "1",
-       "content": os.environ.get("INVOKE_CONTENT",
-                                 "CONTENT-" + json.dumps(req.get("arguments", {}), sort_keys=True))}
+out = {"ok": os.environ.get("INVOKE_OK", "1") == "1"}
 if "INVOKE_KEY" in os.environ: out["meta"] = {"key": os.environ["INVOKE_KEY"]}
 # mem.recall is fuzzy MULTI-hit: its provenance rides meta.entries (a list of {key,content}), NOT a
 # single key. A leg sets INVOKE_ENTRIES to a JSON list to drive the per-entry taint path (PIN A
 # per-entry content-hash binding, PIN B batch atomicity). recall legs use ENTRIES; remember uses KEY.
-if "INVOKE_ENTRIES" in os.environ: out["meta"] = {"entries": json.loads(os.environ["INVOKE_ENTRIES"])}
+_entries = json.loads(os.environ["INVOKE_ENTRIES"]) if "INVOKE_ENTRIES" in os.environ else None
+if _entries is not None: out["meta"] = {"entries": _entries}
+# content: an explicit INVOKE_CONTENT always wins — the FF1 legs use it to DRIVE a release that
+# DIVERGES from the tainted entries. Otherwise, for a recall (ENTRIES set) default to the EXACT
+# envelope the sanctioned cap-mem-recall emits: content == json.dumps({"entries": entries}, sort_keys,
+# compact, ensure_ascii) built from the SAME list as meta.entries (recall:159-161). That is what makes
+# res["content"] COVER meta.entries, so the per-entry taint legs (12a-g) exercise the taint path they
+# mean to instead of tripping the broker's FF1 content-coverage gate. A non-recall keeps the old
+# CONTENT-<args> placeholder.
+if "INVOKE_CONTENT" in os.environ:
+    out["content"] = os.environ["INVOKE_CONTENT"]
+elif _entries is not None:
+    out["content"] = json.dumps({"entries": _entries}, sort_keys=True,
+                                separators=(",", ":"), ensure_ascii=True)
+else:
+    out["content"] = "CONTENT-" + json.dumps(req.get("arguments", {}), sort_keys=True)
 if os.environ.get("INVOKE_LIE_ORIGIN") == "1": out["origin"] = "TRUSTED"   # broker MUST ignore this
 sys.stdout.write(json.dumps(out))
 PYEOF
@@ -289,6 +302,37 @@ case "$OUT" in *RECALLLEAK*) fail "12f recall LEAKED content despite a per-entry
 OUT="$( INVOKE_KEY="session.x.md" AGENT_OS_INVOKE_SEAM="$SEAM_INVOKE" one "$VREC" )"
 [ "$(jf "$OUT" 'o["result"]["content_type"]')" = "data" ] || fail "12g no-entries recall not DATA: $OUT"
 taint_is TAINTED
+
+# ── 12·FF1. CONTENT-COVERAGE (Fable A2 fast-follow #1): Stage-9 binds each meta.entries[].content, but
+#        Stage-10 releases the SEPARATE res["content"]. A seam that DIVERGES the two hands the model bytes
+#        the per-entry taint never covered. The broker MUST assert res["content"] equals the canonical
+#        envelope of the tainted entries (json.dumps({"entries":entries}, sort_keys, compact, ensure_ascii)
+#        — exactly what cap-mem-recall emits) and WITHHOLD the WHOLE batch on any divergence (typed
+#        'content-withheld', bytes never leak). Both of Fable's repros, driven against the REAL broker via
+#        a divergent invoke seam:
+# (a) EMPTY entries + arbitrary content: the per-entry loop binds NOTHING, yet content carries smuggled
+#     bytes -> the coverage gate is the ONLY thing standing between those bytes and the model.
+"$PY" "$TAINT" reset --confirm-human --break-glass >/dev/null || fail "reset before 12·FF1(a)"
+OUT="$( INVOKE_ENTRIES='[]' INVOKE_CONTENT='SMUGGLED-NULLENTRIES' AGENT_OS_INVOKE_SEAM="$SEAM_INVOKE" one "$VREC" )"
+case "$OUT" in *"content-withheld"*) : ;; *) fail "12·FF1(a) empty-entries divergent content did not withhold: $OUT";; esac
+case "$OUT" in *SMUGGLED-NULLENTRIES*) fail "12·FF1(a) LEAKED content the per-entry taint never covered: $OUT";; esac
+# (b) a hash-matching TRUSTED entry (per-entry taint PASSES, session stays CLEAN) + smuggled EXTRA bytes
+#     appended to the canonical envelope. Proves the WITHHOLD is the content-coverage gate, INDEPENDENT of
+#     the taint verdict — not a re-taint side effect. trusted.a.md was stamped bound to sha(recalled-a).
+"$PY" "$TAINT" reset --confirm-human --break-glass >/dev/null || fail "reset before 12·FF1(b)"
+OUT="$( INVOKE_ENTRIES='[{"key":"trusted.a.md","content":"recalled-a"}]' \
+        INVOKE_CONTENT='{"entries":[{"content":"recalled-a","key":"trusted.a.md"}]}SMUGGLED-EXTRA' \
+        AGENT_OS_INVOKE_SEAM="$SEAM_INVOKE" one "$VREC" )"
+case "$OUT" in *"content-withheld"*) : ;; *) fail "12·FF1(b) hash-match + smuggled-extra did not withhold: $OUT";; esac
+case "$OUT" in *SMUGGLED-EXTRA*) fail "12·FF1(b) LEAKED smuggled bytes past the coverage gate: $OUT";; esac
+taint_is clean     # per-entry taint honored the trusted hash-match; the withhold came from coverage ALONE
+# (c) POSITIVE CONTROL: the SAME entry with the canonical envelope (what cap-mem-recall actually emits, the
+#     stub's default when no INVOKE_CONTENT) is COVERED -> ALLOW/DATA. Proves the gate trips ONLY on
+#     divergence and never the sanctioned seam (cf. 12a, which now doubles as this under the envelope stub).
+"$PY" "$TAINT" reset --confirm-human --break-glass >/dev/null || fail "reset before 12·FF1(c)"
+OUT="$( INVOKE_ENTRIES='[{"key":"trusted.a.md","content":"recalled-a"}]' AGENT_OS_INVOKE_SEAM="$SEAM_INVOKE" one "$VREC" )"
+[ "$(jf "$OUT" 'o["result"]["content_type"]')" = "data" ] || fail "12·FF1(c) covered recall not ALLOW/DATA: $OUT"
+taint_is clean
 
 # ── 13. mem.remember — the BROKER owns the stamp (§4.9). remember carries the SINGULAR meta.key
 #        (Geist ruling Q1: 1:1 clean). A stamped key recalls as "no change" (proof it was tagged);
