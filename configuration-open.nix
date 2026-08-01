@@ -72,6 +72,7 @@ in {
     ./modules/docs-open.nix
     ./modules/media-open.nix
     ./modules/web-open.nix
+    ./modules/gaming-open.nix
   ];
 
   # --- boot / hardware (MIRROR of configuration.nix — see header) --------------
