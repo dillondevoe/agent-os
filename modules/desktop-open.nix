@@ -29,7 +29,9 @@ let
     monitor = , preferred, auto, 1
     exec-once = waybar
     exec-once = kitty
+    exec-once = hyprctl setcursor Bibata-Modern-Amber 24
     env = XCURSOR_SIZE,24
+    env = XCURSOR_THEME,Bibata-Modern-Amber
     general {
         gaps_in = 5
         gaps_out = 12
@@ -81,6 +83,20 @@ let
     bind = $mod, right, movefocus, r
     bind = $mod, up, movefocus, u
     bind = $mod, down, movefocus, d
+
+    # Laptop function / media keys (XF86 keysyms). Default Hyprland binds none of these, so the
+    # Dell's Fn brightness/volume keys are dead until wired here. bindel = repeat-on-hold (ramp while
+    # held) + works on lockscreen; bindl = locked, single-shot (toggles/transport). Backlight write
+    # perms come from the video group + brightnessctl's udev rule (see systemPackages block below).
+    bindel = ,XF86MonBrightnessUp,exec,brightnessctl set +10%
+    bindel = ,XF86MonBrightnessDown,exec,brightnessctl set 10%-
+    bindel = ,XF86AudioRaiseVolume,exec,wpctl set-volume -l 1.0 @DEFAULT_AUDIO_SINK@ 5%+
+    bindel = ,XF86AudioLowerVolume,exec,wpctl set-volume @DEFAULT_AUDIO_SINK@ 5%-
+    bindl  = ,XF86AudioMute,exec,wpctl set-mute @DEFAULT_AUDIO_SINK@ toggle
+    bindl  = ,XF86AudioMicMute,exec,wpctl set-mute @DEFAULT_AUDIO_SOURCE@ toggle
+    bindl  = ,XF86AudioPlay,exec,playerctl play-pause
+    bindl  = ,XF86AudioNext,exec,playerctl next
+    bindl  = ,XF86AudioPrev,exec,playerctl previous
   '';
 
   # The ambient bar: workspaces | clock | volume · network · battery · tray.
@@ -178,7 +194,18 @@ in
     grim slurp wl-clipboard     # screenshots + clipboard
     wireplumber                 # wpctl — the volume module's on-click mute toggle
     xdg-utils                   # xdg-open etc. for portal handoff
+    brightnessctl               # backlight control for the XF86MonBrightness* Fn keys
+    playerctl                   # MPRIS transport for the XF86AudioPlay/Next/Prev keys
+    bibata-cursors              # Bibata-Modern-Amber — the OS's default cursor identity (orange + shadow)
   ];
+
+  # Fn brightness keys need write access to /sys/class/backlight/*/brightness without root.
+  # brightnessctl ships a udev rule that chgrps the backlight to the `video` group; installing it
+  # via services.udev.packages + putting the agent in `video` is the canonical rootless path.
+  # extraGroups is listOf str, so this concatenates with configuration-open.nix's [ "wheel"
+  # "networkmanager" ] rather than clashing.
+  users.users.${user}.extraGroups = [ "video" ];
+  services.udev.packages = [ pkgs.brightnessctl ];
 
   # Seed the reproducible baseline into the agent's config. Force-symlink to the store so the
   # RUNNING config always == the verified Nix source (reproducibility guarantee). Live per-user
