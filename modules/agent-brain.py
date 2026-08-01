@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # Agent OS local brain — WITH HANDS + CONTEXT ANTENNA.
 # Talk to it; it acts (browse, run commands, arrange windows) AND it knows the real NOW.
-import json, re, subprocess, sys, urllib.request, datetime, os, hashlib
+import json, re, subprocess, sys, urllib.request, datetime, os, hashlib, time
 
 OLLAMA="http://127.0.0.1:11434/api/chat"; MODEL="qwen2.5:7b-instruct"
 
@@ -86,14 +86,52 @@ SYS_BASE=("You are the local brain of Agent OS, running ON the user's own machin
      "After a tool runs, confirm in one short line. Be concise and direct — you're a doer, not a lecturer.")
 
 def sysmsg():
-    # SOUL first, unspoofably (Geist item 3): identity leads, then operational addendum, then live senses.
+    # SOUL first, unspoofably (Geist item 3): identity leads, then operational addendum.
+    # STATIC ONLY — byte-identical across turns so ollama's KV cache hits on this prefix.
+    # Live senses move to the per-turn user message (see user_turn()) so only that small
+    # tail re-evaluates each turn instead of busting the whole ~800-token prefix. (P1 fix,
+    # rabbot-to-page-P1-agent-brain-promptsplit-streaming-feelgood-2026-08-01: cold rate
+    # ~17 tok/s / ~48s per turn when this block changed every turn; cached prefix ~5037 tok/s.)
     parts=[]
     if SOUL: parts.append(SOUL.strip())
     parts.append("--- OPERATING NOTES ---\n"+SYS_BASE)
-    parts.append("--- LIVE CONTEXT (your senses, refreshed now) ---\n"+live_context())
     return {"role":"system","content":"\n\n".join(parts)}
 
+def user_turn(text):
+    # volatile live_context rides the user turn's tail, not the system prompt.
+    return {"role":"user","content":text+"\n\n--- LIVE CONTEXT (your senses, refreshed now) ---\n"+live_context()}
+
+def chat_stream(msgs):
+    # Streaming + liveness indicator (P1 fix #2, same comm as above). Buffers tokens for
+    # tool_calls/content-regex parsing (extract_tools) while printing as they arrive.
+    body=json.dumps({"model":MODEL,"messages":msgs,"tools":TOOLS,"stream":True}).encode()
+    r=urllib.request.Request(OLLAMA,data=body,headers={"Content-Type":"application/json"})
+    t0=time.time(); content=""; tool_calls=[]; first_token=False; eval_count=0; eval_dur=0.0
+    sys.stdout.write("\033[2mthinking…\033[0m"); sys.stdout.flush()
+    with urllib.request.urlopen(r,timeout=180) as resp:
+        for line in resp:
+            line=line.strip()
+            if not line: continue
+            chunk=json.loads(line)
+            msg=chunk.get("message") or {}
+            piece=msg.get("content","")
+            if piece:
+                if not first_token:
+                    sys.stdout.write("\r\033[K"); first_token=True
+                content+=piece; sys.stdout.write(piece); sys.stdout.flush()
+            if msg.get("tool_calls"):
+                tool_calls=msg["tool_calls"]
+            if chunk.get("done"):
+                eval_count=chunk.get("eval_count") or 0
+                eval_dur=(chunk.get("eval_duration") or 0)/1e9
+    if not first_token: sys.stdout.write("\r\033[K")
+    elapsed=time.time()-t0
+    tps=f", {eval_count/eval_dur:.0f} tok/s" if eval_count and eval_dur else ""
+    sys.stderr.write(f"\033[2m[{elapsed:.1f}s{tps}]\033[0m\n")
+    return {"role":"assistant","content":content,"tool_calls":tool_calls}
+
 def chat(msgs):
+    # non-streaming fallback, kept for --once callers that want a single return value only
     body=json.dumps({"model":MODEL,"messages":msgs,"tools":TOOLS,"stream":False}).encode()
     r=urllib.request.Request(OLLAMA,data=body,headers={"Content-Type":"application/json"})
     return json.load(urllib.request.urlopen(r,timeout=180))["message"]
@@ -179,20 +217,21 @@ def _agos(name,args):
 
 def turn(msgs):
     for _ in range(6):
-        msg=chat(msgs); msgs.append(msg)
+        msg=chat_stream(msgs); msgs.append(msg)
         calls,clean=extract_tools(msg)
         if not calls:
-            if clean: print(clean)
+            if clean and not msg.get("content"): print(clean)  # regex-extracted clean text wasn't already streamed
             return
-        if clean: print(clean)
+        if clean and not msg.get("content"): print(clean)
         for name,args in calls:
-            print(f"  \033[33m⚡ {name} {json.dumps(args)}\033[0m")
+            print(f"  \033[33m⚡ calling {name} {json.dumps(args)}…\033[0m")
             res=do_tool(name,args); msgs.append({"role":"tool","content":str(res)})
 
 def main():
-    # system message is rebuilt each turn so the context antenna stays fresh
+    # system message stays STATIC across turns (byte-identical prefix = KV cache hit);
+    # live_context rides each user turn's tail instead (see user_turn()).
     if len(sys.argv)>2 and sys.argv[1]=="--once":
-        msgs=[sysmsg(),{"role":"user","content":sys.argv[2]}]; turn(msgs); return
+        msgs=[sysmsg(),user_turn(sys.argv[2])]; turn(msgs); return
     print("  \033[1mAgent OS brain\033[0m — I have hands, and I know the real now. Ask me to do things.")
     msgs=[sysmsg()]
     while True:
@@ -200,6 +239,5 @@ def main():
         except (EOFError,KeyboardInterrupt): print(); break
         if not u: continue
         if u in ("exit","quit"): break
-        msgs[0]=sysmsg()  # refresh senses each turn
-        msgs.append({"role":"user","content":u}); turn(msgs)
+        msgs.append(user_turn(u)); turn(msgs)
 if __name__=="__main__": main()
