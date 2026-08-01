@@ -79,6 +79,14 @@ in {
     serviceConfig = {
       Type = "oneshot";
       RemainAfterExit = true;
+      # Run as the SAME static user the ollama daemon runs as (services.ollama.user in
+      # configuration-open.nix), NOT root. The seed's `ollama create` lands blobs +
+      # manifests in the daemon's model store; a root-run import leaves root-owned files
+      # that the (non-root) daemon can't overwrite on a later runtime `ollama pull` →
+      # "permission denied" on the -partial blob, even though the seeded model reads fine.
+      # Same user = consistent ownership = pull works (Rabbot Dell bench, 2026-08-01).
+      User = config.services.ollama.user;
+      Group = config.services.ollama.group;
     };
     script = ''
       # Wait for the loopback Ollama API to answer (daemon just started).

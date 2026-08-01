@@ -162,6 +162,22 @@ in {
     enable = true;
     host = "127.0.0.1";
     port = 11434;
+    # Static service user instead of the module default DynamicUser. A DynamicUser's
+    # transient uid is NOT guaranteed stable across reboots, so the persistent model
+    # store under /var/lib/ollama can end up owned by a uid the daemon no longer runs
+    # as → a new `ollama pull` fails "permission denied" writing its -partial blob while
+    # the already-seeded 7B still READS fine (world-readable). Compounded by the root-run
+    # agos-seed-model (model-open.nix) leaving root-owned blobs. A static ollama user
+    # pins ownership so the store stays writable across reboots + future model swaps —
+    # the Dell benchmark's broken-pull finding (Rabbot, 2026-08-01). The seed runs as
+    # this SAME user (see model-open.nix) so first-boot import never re-poisons ownership.
+    user = "ollama";
+    group = "ollama";
+    # Keep the 7B RESIDENT rather than unloading after the default idle window. The Dell
+    # bench measured a ~51s cold reload (model load + a 17 tok/s cold prompt-eval of the
+    # 815-tok prefix) on EVERY call after an idle gap; resident → first token 314ms.
+    # ~160× on perceived latency, free, zero quality change — THE "it's slow" fix.
+    environmentVariables.OLLAMA_KEEP_ALIVE = "-1";
   };
   environment.variables = {
     OLLAMA_HOST  = "http://127.0.0.1:11434";
