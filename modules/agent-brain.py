@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # Agent OS local brain — WITH HANDS + CONTEXT ANTENNA.
 # Talk to it; it acts (browse, run commands, arrange windows) AND it knows the real NOW.
-import json, re, subprocess, sys, urllib.request, urllib.error, datetime, os, hashlib, time, threading
+import json, re, subprocess, sys, urllib.request, urllib.error, datetime, os, hashlib, time, threading, shutil
 
 OLLAMA="http://127.0.0.1:11434/api/chat"; MODEL="qwen2.5:7b-instruct"
 
@@ -107,9 +107,18 @@ CHAT_TIMEOUT_S=600  # was 180 — a cold CPU prefill (~2560 tok @ ~14 tok/s) can
 def chat_stream(msgs):
     # Streaming + liveness indicator (P1 fix #2, same comm as above). Buffers tokens for
     # tool_calls/content-regex parsing (extract_tools) while printing as they arrive.
+    #
+    # Word-boundary soft wrap (P1 item 3, rabbot-to-page-RUNTIME-ANSWERS-hyprland-kitty-
+    # firefox-items345-2026-08-01): the mid-word "weird" wrapping in Dillon's kitty session
+    # is kitty's own hard character-wrap at the column edge — it has no word awareness. We
+    # track the current visual column ourselves and emit a newline before a token that would
+    # split across term width, so kitty never has to hard-wrap mid-word. Dumb on purpose: no
+    # reflow on resize, just wrap-at-word going forward from turn start.
+    term_cols=shutil.get_terminal_size(fallback=(80,24)).columns
     body=json.dumps({"model":MODEL,"messages":msgs,"tools":TOOLS,"stream":True}).encode()
     r=urllib.request.Request(OLLAMA,data=body,headers={"Content-Type":"application/json"})
     t0=time.time(); content=""; tool_calls=[]; first_token=False; eval_count=0; eval_dur=0.0
+    col=0
     sys.stdout.write("\033[2mthinking…\033[0m"); sys.stdout.flush()
     with urllib.request.urlopen(r,timeout=CHAT_TIMEOUT_S) as resp:
         for line in resp:
@@ -121,7 +130,17 @@ def chat_stream(msgs):
             if piece:
                 if not first_token:
                     sys.stdout.write("\r\033[K"); first_token=True
-                content+=piece; sys.stdout.write(piece); sys.stdout.flush()
+                content+=piece
+                for tok in re.findall(r'\S+\s*|\s+', piece):
+                    if '\n' in tok:
+                        col=len(tok)-tok.rfind('\n')-1
+                    elif col+len(tok)>term_cols and tok.strip():
+                        sys.stdout.write("\n"); col=len(tok); sys.stdout.write(tok)
+                        continue
+                    else:
+                        col+=len(tok)
+                    sys.stdout.write(tok)
+                sys.stdout.flush()
             if msg.get("tool_calls"):
                 tool_calls=msg["tool_calls"]
             if chunk.get("done"):
