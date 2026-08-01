@@ -266,10 +266,24 @@ def warmup_greeting(msgs):
     # ollama is up, so the cold prefill (~3min class on CPU) happens during boot dead-time instead
     # of on the user's actual first message. Runs in a background thread — CHAT_LOCK means a real
     # user turn queues behind it rather than racing it, but input() itself is never blocked.
-    if not _model_pulled():
+    #
+    # Poll rather than check-once (PR #49 review nit #1, rabbot-to-page-pr49-MERGED-two-followup-nits):
+    # on true cold boot ollama may not be up yet at the instant this thread starts — that's the exact
+    # case the feature exists for, so a single check silently no-ops the warmup for the case that
+    # matters most. Retry every 3s for up to ~60s.
+    for _ in range(20):
+        if _model_pulled():
+            break
+        time.sleep(3)
+    else:
         return
-    msgs.append(user_turn("boot complete, greet the operator in one line"))
-    turn(msgs)
+    # Throwaway history (PR #49 review nit #2): appending straight to the shared `msgs` list outside
+    # CHAT_LOCK let a fast first real user message interleave with the warmup's own append, scrambling
+    # turn order (warmup-user, real-user, warmup-assistant). A separate [sysmsg(), user_turn(...)] list
+    # still warms the static-prefix KV cache — that's all the feature needs — without touching the
+    # shared history at all.
+    warmup_msgs=[sysmsg(), user_turn("boot complete, greet the operator in one line")]
+    turn(warmup_msgs)
 
 def main():
     # system message stays STATIC across turns (byte-identical prefix = KV cache hit);
