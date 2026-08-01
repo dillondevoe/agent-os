@@ -130,7 +130,22 @@ def chat_stream(msgs):
     body=json.dumps({"model":MODEL,"messages":msgs,"tools":TOOLS,"stream":True}).encode()
     r=urllib.request.Request(OLLAMA,data=body,headers={"Content-Type":"application/json"})
     t0=time.time(); content=""; tool_calls=[]; first_token=False; eval_count=0; eval_dur=0.0
-    col=0
+    col=0; in_code=False
+    # Code-block rendering (P1 item 3, task #265): dim everything inside a ``` fence so it
+    # reads as distinct from prose. Simplified for streaming — no box/indent, no collapse —
+    # a token can only toggle the fence once (rare backtick-split-across-chunks edge case
+    # accepted, same "keep it dumb" tradeoff as the word-wrap fix above).
+    def _emit(tok):
+        nonlocal col
+        if '\n' in tok:
+            col=len(tok)-tok.rfind('\n')-1
+        elif col+len(tok)>term_cols and tok.strip():
+            sys.stdout.write("\n"); col=len(tok)
+            sys.stdout.write(f"\033[2m{tok}\033[0m" if in_code else tok)
+            return
+        else:
+            col+=len(tok)
+        sys.stdout.write(f"\033[2m{tok}\033[0m" if in_code else tok)
     def _thinking_frame(i):
         sys.stdout.write(f"\r\033[K\033[2mthinking{'.'*(i%3+1)}\033[0m"); sys.stdout.flush()
     think_stop,think_t=_spin(_thinking_frame)
@@ -148,14 +163,13 @@ def chat_stream(msgs):
                         sys.stdout.write("\r\033[K"); first_token=True
                     content+=piece
                     for tok in re.findall(r'\S+\s*|\s+', piece):
-                        if '\n' in tok:
-                            col=len(tok)-tok.rfind('\n')-1
-                        elif col+len(tok)>term_cols and tok.strip():
-                            sys.stdout.write("\n"); col=len(tok); sys.stdout.write(tok)
-                            continue
+                        if '```' in tok:
+                            segs=tok.split('```')
+                            for i,seg in enumerate(segs):
+                                if seg: _emit(seg)
+                                if i<len(segs)-1: in_code=not in_code
                         else:
-                            col+=len(tok)
-                        sys.stdout.write(tok)
+                            _emit(tok)
                     sys.stdout.flush()
                 if msg.get("tool_calls"):
                     tool_calls=msg["tool_calls"]
