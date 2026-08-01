@@ -293,10 +293,26 @@ def main():
     print("  \033[1mAgent OS brain\033[0m — I have hands, and I know the real now. Ask me to do things.")
     msgs=[sysmsg()]
     threading.Thread(target=warmup_greeting, args=(msgs,), daemon=True).start()
+    # ^C must not kill the brain (P1 Dillon directive, msg 9263: "that'd be like losing your
+    # desktop"). At the idle prompt, one ^C is a warning — exit needs a second ^C within ~2s
+    # or the word exit/quit. During generation, ^C cancels that turn only (see the try/except
+    # around turn() below) and drops back to the prompt.
+    last_sigint=0.0
     while True:
         try: u=input("\n\033[36myou ›\033[0m ").strip()
-        except (EOFError,KeyboardInterrupt): print(); break
+        except EOFError: print(); break
+        except KeyboardInterrupt:
+            now=time.time()
+            if now-last_sigint<2: print(); break
+            last_sigint=now
+            print("\n\033[2m(^C again within 2s to exit, or type exit/quit)\033[0m")
+            continue
         if not u: continue
         if u in ("exit","quit"): break
-        msgs.append(user_turn(u)); turn(msgs)
+        msgs.append(user_turn(u))
+        try:
+            turn(msgs)
+        except KeyboardInterrupt:
+            sys.stdout.write("\r\033[K")
+            print("\033[2m(interrupted)\033[0m")
 if __name__=="__main__": main()
