@@ -37,9 +37,20 @@ in {
   users.users.agent.shell = pkgs.bash;
   environment.loginShellInit = ''
     # Only take over the primary console — other ttys stay plain for rescue.
+    #
+    # Respawn loop, not exec (P1 Dillon directive, msg 9263: "^C kills it, that'd be like
+    # losing your desktop"): the brain IS the desktop, so if agent-shell (or the brain it
+    # execs into) ever dies — crash, an accidental double-^C exit, OOM — tty1 must land
+    # straight back on the brain, not a bare shell prompt. `exec` replaced this login
+    # shell's process with agent-shell, so a dead agent-shell had nothing left underneath
+    # it to relaunch from; a plain while-loop keeps this shell alive as the relauncher.
+    # Warm relaunch is ~11s (model stays resident in ollama) so a death is nearly invisible.
     if [ "$(tty)" = "/dev/tty1" ] && [ -z "$AGENT_OS_ACTIVE" ]; then
       export AGENT_OS_ACTIVE=1
-      exec ${agentShell}/bin/agent-shell
+      while :; do
+        ${agentShell}/bin/agent-shell
+        sleep 1
+      done
     fi
   '';
 
