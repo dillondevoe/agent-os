@@ -422,6 +422,27 @@
               python3 contract.py
               touch $out
             '';
+
+        # Orchestration engine · Phase 1 CUTOVER — the LIVE routing layer's CONTRACT BATTERY
+        # (agos_comms_live, atop agos_events + agos_comms_shadow). Where the shadow battery proves the
+        # route DERIVATIONS are faithful, this proves the LIVE MECHANICS the cutover turns on: the
+        # react-on-delta consumer (wake_pending fires exactly the NEW summonses routed to a brain, and a
+        # re-run yields NOTHING — the mtime-refire double-fire structurally killed by the cursor), route
+        # fidelity under the live path (broadcast gap, rebound, un-addressed brain), fresh-delta ordering,
+        # emit idempotency, and Saga's read-only cohesion sweep (a request with no done reads UNRESOLVED,
+        # clears when its done lands, and advances no cursor). A regression fails `nix flake check`.
+        agos-comms-live-contract =
+          nixpkgs.legacyPackages.${system}.runCommand "agos-comms-live-contract-check"
+            { nativeBuildInputs = [ nixpkgs.legacyPackages.${system}.python3 ]; } ''
+              work="$(mktemp -d)"
+              cp ${./modules/agos_events.py} "$work/agos_events.py"
+              cp ${./modules/agos_comms_shadow.py} "$work/agos_comms_shadow.py"
+              cp ${./modules/agos_comms_live.py} "$work/agos_comms_live.py"
+              cp ${./tests/agos-comms-live-contract.py} "$work/contract.py"
+              cd "$work"
+              python3 contract.py
+              touch $out
+            '';
       };
     };
 }

@@ -1,0 +1,27 @@
+#!/usr/bin/env python3
+"""agos-comms-live — Agent OS orchestration Phase-1 CUTOVER driver (the LIVE routing layer).
+
+Promotes agos-events from shadow to routing truth. Three roles, all thin over the proven shadow:
+
+  agos-comms-live emit            # EMITTER: request per new comm + done per completed. Idempotent.
+                                  #   Run on a @1min cron (the log's live feed). Single-writer per host.
+  agos-comms-live wake <brain>    # CONSUMER: advance <brain>'s cursor, fire (exit 10) iff a NEW summons
+                                  #   is routed to it. Replaces the dispatch-watcher's glob-poll.
+  agos-comms-live peek <brain>    # diagnostics: what's routed / pending after cursor (reads only).
+  agos-comms-live cohesion [age]  # SAGA: unresolved request<->done chains (read-only sweep).
+
+Env: AGOS_EVENTS_DIR (live root; default = the proven shadow root, so cursors are already at "now" and
+cutover does NOT re-fire history), AGOS_COMMS_DIR (brain-comms), AGOS_MESH_MODEL. stdlib only.
+
+Rollback (BUILD-PLAN): the markdown comms never stopped being written (PIN #2), so reverting a consumer
+to its glob-poll is the whole rollback — nothing to un-migrate.
+"""
+import os
+import sys
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "modules"))
+
+import agos_comms_live as L  # noqa: E402
+
+if __name__ == "__main__":
+    raise SystemExit(L.main(sys.argv[1:]))
