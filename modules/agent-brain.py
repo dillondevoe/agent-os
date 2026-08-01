@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # Agent OS local brain — WITH HANDS + CONTEXT ANTENNA.
 # Talk to it; it acts (browse, run commands, arrange windows) AND it knows the real NOW.
-import json, re, subprocess, sys, urllib.request, datetime, os, hashlib, time
+import json, re, subprocess, sys, urllib.request, urllib.error, datetime, os, hashlib, time, threading
 
 OLLAMA="http://127.0.0.1:11434/api/chat"; MODEL="qwen2.5:7b-instruct"
 
@@ -71,19 +71,18 @@ def live_context():
     if wins: lines.append("Open windows right now: "+wins)
     return "\n".join(lines)
 
-SYS_BASE=("You are the local brain of Agent OS, running ON the user's own machine — sovereign, private, no cloud. "
-     "PLATFORM (critical — you are NOT on Windows or macOS): Agent OS is a NixOS-based LINUX system. Software is "
-     "installed the NixOS way — declaratively via nix (e.g. Steam = enable `programs.steam` in the system config, "
-     "NOT a downloaded .exe/.msi installer). NEVER use Windows commands (no `shutdown /r`, no .exe, no PowerShell) "
-     "or macOS commands. On this machine: reboot = `systemctl reboot`, shutdown = `systemctl poweroff`, install a "
-     "quick tool = `nix profile install nixpkgs#<name>`, packages live in nixpkgs. If a task needs a permanent "
-     "system change (installing Steam, a driver, a service), say so — that's a change to the OS config, and note it. "
-     "You HAVE HANDS: open_url opens a website in the browser, run_command runs a shell command here, "
-     "arrange_windows rearranges the desktop. When the user asks for something a tool can do, CALL THE TOOL and DO IT — "
-     "never explain how they could do it themselves. "
-     "BROWSE vs INFERENCE: if they want to SEE, read, watch, or use something → open_url (browse). "
-     "If they just want a quick answer or fact → answer directly from what you know (inference). When unsure, ask which. "
-     "After a tool runs, confirm in one short line. Be concise and direct — you're a doer, not a lecturer.")
+# Trimmed for prefill cost (P1 fix #3, rabbot-to-page-P1-UPGRADE-brain-timeout-crash-2026-08-01:
+# 2560-token static prefix @ 14 tok/s CPU prompt-processing = ~3min cold boot). Same content,
+# denser wording. SOUL itself is genesis-locked and out of scope for Page to trim.
+SYS_BASE=("You are Agent OS's local brain — sovereign, private, on-machine, no cloud. "
+     "PLATFORM: NixOS Linux, not Windows/macOS — install via nix (e.g. `programs.steam` in system "
+     "config, never .exe/.msi), reboot=`systemctl reboot`, shutdown=`systemctl poweroff`, quick tool="
+     "`nix profile install nixpkgs#<name>`. Never use Windows/macOS commands. A permanent system "
+     "change (installing Steam, a driver, a service) means editing the OS config — say so. "
+     "You HAVE HANDS: open_url (browser), run_command (shell here), arrange_windows (desktop). "
+     "When a tool can do it, CALL IT — don't explain how the user could do it themselves. "
+     "BROWSE vs INFERENCE: want to see/read/watch/use something → open_url. Want a quick fact → "
+     "answer directly. Unsure → ask. Confirm tool results in one short line. Be concise, be a doer.")
 
 def sysmsg():
     # SOUL first, unspoofably (Geist item 3): identity leads, then operational addendum.
@@ -101,6 +100,10 @@ def user_turn(text):
     # volatile live_context rides the user turn's tail, not the system prompt.
     return {"role":"user","content":text+"\n\n--- LIVE CONTEXT (your senses, refreshed now) ---\n"+live_context()}
 
+CHAT_TIMEOUT_S=600  # was 180 — a cold CPU prefill (~2560 tok @ ~14 tok/s) can take ~3min by
+                     # itself; 180s guaranteed a TimeoutError on first boot turn (P1 fix #1/#2,
+                     # rabbot-to-page-P1-UPGRADE-brain-timeout-crash-2026-08-01, live-hit by Dillon).
+
 def chat_stream(msgs):
     # Streaming + liveness indicator (P1 fix #2, same comm as above). Buffers tokens for
     # tool_calls/content-regex parsing (extract_tools) while printing as they arrive.
@@ -108,7 +111,7 @@ def chat_stream(msgs):
     r=urllib.request.Request(OLLAMA,data=body,headers={"Content-Type":"application/json"})
     t0=time.time(); content=""; tool_calls=[]; first_token=False; eval_count=0; eval_dur=0.0
     sys.stdout.write("\033[2mthinking…\033[0m"); sys.stdout.flush()
-    with urllib.request.urlopen(r,timeout=180) as resp:
+    with urllib.request.urlopen(r,timeout=CHAT_TIMEOUT_S) as resp:
         for line in resp:
             line=line.strip()
             if not line: continue
@@ -215,9 +218,29 @@ def _agos(name,args):
     except FileNotFoundError: return "calendar error: agos-cal not on PATH (calendar module not deployed)"
     except Exception as e: return f"calendar error: {e}"
 
+CHAT_LOCK=threading.Lock()  # serializes chat_stream calls (warmup thread vs interactive turns)
+                            # onto ollama's single inference slot, and protects the shared msgs list.
+
+def chat_stream_safe(msgs, retries=1):
+    # Never crash to a raw traceback on tty1 (P1 fix #1). A cold-boot prefill can outrun even the
+    # 600s timeout under heavy load; on timeout/connection failure, tell the user and retry once —
+    # the KV slot is already cached from the failed attempt, so retry #2 is cheap (live-verified:
+    # Dillon's retry after the 3min timeout completed fast off the cached slot).
+    for attempt in range(retries+1):
+        try:
+            with CHAT_LOCK:
+                return chat_stream(msgs)
+        except (TimeoutError, urllib.error.URLError, ConnectionError) as e:
+            sys.stdout.write("\r\033[K")
+            if attempt < retries:
+                print(f"  \033[2m(still warming the model — retrying…)\033[0m")
+            else:
+                print(f"  \033[31m(model isn't responding right now — try again in a moment: {e})\033[0m")
+                return {"role":"assistant","content":"","tool_calls":[]}
+
 def turn(msgs):
     for _ in range(6):
-        msg=chat_stream(msgs); msgs.append(msg)
+        msg=chat_stream_safe(msgs); msgs.append(msg)
         calls,clean=extract_tools(msg)
         if not calls:
             if clean and not msg.get("content"): print(clean)  # regex-extracted clean text wasn't already streamed
@@ -227,6 +250,27 @@ def turn(msgs):
             print(f"  \033[33m⚡ calling {name} {json.dumps(args)}…\033[0m")
             res=do_tool(name,args); msgs.append({"role":"tool","content":str(res)})
 
+def _model_pulled():
+    # guard for the memory-floor path: don't fire a warmup generation against a model that
+    # hasn't finished pulling yet.
+    try:
+        r=urllib.request.Request("http://127.0.0.1:11434/api/tags")
+        tags=json.load(urllib.request.urlopen(r,timeout=5))
+        return any(m.get("name","").startswith(MODEL.split(":")[0]) for m in tags.get("models",[]))
+    except Exception:
+        return False
+
+def warmup_greeting(msgs):
+    # Boot-warmup (P1, was P2 idea comm rabbot-to-page-P2-boot-warmup-greeting-kv-prewarm,
+    # upgraded same-day after the live timeout crash): fire the agent's own first turn as soon as
+    # ollama is up, so the cold prefill (~3min class on CPU) happens during boot dead-time instead
+    # of on the user's actual first message. Runs in a background thread — CHAT_LOCK means a real
+    # user turn queues behind it rather than racing it, but input() itself is never blocked.
+    if not _model_pulled():
+        return
+    msgs.append(user_turn("boot complete, greet the operator in one line"))
+    turn(msgs)
+
 def main():
     # system message stays STATIC across turns (byte-identical prefix = KV cache hit);
     # live_context rides each user turn's tail instead (see user_turn()).
@@ -234,6 +278,7 @@ def main():
         msgs=[sysmsg(),user_turn(sys.argv[2])]; turn(msgs); return
     print("  \033[1mAgent OS brain\033[0m — I have hands, and I know the real now. Ask me to do things.")
     msgs=[sysmsg()]
+    threading.Thread(target=warmup_greeting, args=(msgs,), daemon=True).start()
     while True:
         try: u=input("\n\033[36myou ›\033[0m ").strip()
         except (EOFError,KeyboardInterrupt): print(); break
