@@ -17,6 +17,11 @@
 # Waybar glyphs: this baseline uses ASCII labels (no nerd-font dependency) so the bar renders
 # correctly on any host out of the box; nerd-font iconography is a deliberate follow-up (bundle a
 # glyph font, then swap the `format` strings). Ship-working-over-pretty.
+# One deliberate exception: the battery charging marker ⚡ (U+26A1). Verified present in
+# DejaVuSansMono.ttf's own cmap ((3,1) BMP fmt-4 AND (3,10) fmt-12 subtables) — it is a core
+# DejaVu glyph, NOT a nerd-font/emoji dependency, so it renders (no tofu box) on the dejavu_fonts
+# this module already ships. The plug emoji 🔌 (U+1F50C) is NOT in DejaVu and was rejected for that
+# reason. If the bar's font is ever swapped away from DejaVu, re-verify or fall back to ASCII "chg".
 
 { pkgs, ... }:
 
@@ -121,8 +126,10 @@ let
       "battery": {
         "states": { "warning": 20, "critical": 10 },
         "format": "bat {capacity}%",
-        "format-charging": "chg {capacity}%",
-        "format-plugged": "plg {capacity}%"
+        "format-charging": "bat {capacity}% ⚡",
+        "format-plugged": "bat {capacity}% ⚡",
+        "format-full": "bat {capacity}% ⚡",
+        "tooltip-format": "{timeTo}"
       },
       "network": {
         "format-wifi": "wifi {signalStrength}%",
