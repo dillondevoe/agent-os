@@ -276,6 +276,22 @@ def chat_stream_safe(msgs, retries=1):
                 print(f"  \033[31m(model isn't responding right now — try again in a moment: {e})\033[0m")
                 return {"role":"assistant","content":"","tool_calls":[]}
 
+EXPAND_BUFFERS=[]  # tool-call full outputs kept for the :expand N command (item 2, task #265)
+
+def _compact_for_display(text,head=4,tail=3):
+    # Tool-call result COMPACTION (P1 item 2, rabbot-to-page-P1-UX-motion-plus-agentic-cli-
+    # conventions-pack-2026-08-01: "walls of text are the #1 complaint class"). TTY-dumb by
+    # design (Rabbot's framing) — no interactive folding, just a re-printable buffer behind
+    # a `:expand N` command typed at the prompt.
+    lines=text.splitlines()
+    if len(lines)<=head+tail+1:
+        return text
+    EXPAND_BUFFERS.append(text)
+    idx=len(EXPAND_BUFFERS)
+    hidden=len(lines)-head-tail
+    shown=lines[:head]+[f"\033[2m… ({hidden} more lines, :expand {idx} to see)\033[0m"]+lines[-tail:]
+    return "\n".join(shown)
+
 def turn(msgs):
     for _ in range(6):
         msg=chat_stream_safe(msgs); msgs.append(msg)
@@ -295,7 +311,11 @@ def turn(msgs):
             finally:
                 spin_stop.set(); spin_t.join(timeout=1)
                 print(f"\r\033[K  \033[33m⚡ {label}\033[0m")
-            msgs.append({"role":"tool","content":str(res)})
+            res=str(res)
+            preview=_compact_for_display(res)
+            if preview!=res or "\n" in preview:
+                print(f"\033[2m{preview}\033[0m")
+            msgs.append({"role":"tool","content":res})
 
 def _model_pulled():
     # guard for the memory-floor path: don't fire a warmup generation against a model that
@@ -357,6 +377,13 @@ def main():
             continue
         if not u: continue
         if u in ("exit","quit"): break
+        if u.startswith(":expand"):
+            parts=u.split()
+            try: n=int(parts[1]) if len(parts)>1 else len(EXPAND_BUFFERS)
+            except ValueError: n=0
+            if 1<=n<=len(EXPAND_BUFFERS): print(EXPAND_BUFFERS[n-1])
+            else: print(f"  \033[2m(no such buffer — have 1..{len(EXPAND_BUFFERS)})\033[0m")
+            continue
         msgs.append(user_turn(u))
         try:
             turn(msgs)
