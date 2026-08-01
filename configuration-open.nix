@@ -62,6 +62,7 @@ in {
     ./modules/desktop-open.nix
     ./modules/settings-open.nix
     ./modules/model-open.nix
+    ./modules/model-3b-open.nix   # additive, NON-DEFAULT 2nd brain (qwen2.5:3b-augur); default unchanged
     ./modules/genesis-open.nix
     ./modules/calculator-open.nix
     ./modules/files-open.nix

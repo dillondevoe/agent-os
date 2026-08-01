@@ -357,6 +357,8 @@
               "agentos-open-imports: settings-open.nix is NOT imported — agos-sys missing from systemPackages.";
             assert lib.assertMsg (builtins.hasAttr "agos-seed-model" cfg.systemd.services)
               "agentos-open-imports: model-open.nix is NOT imported — the in-image brain (agos-seed-model, Dillon 8988) is absent.";
+            assert lib.assertMsg (builtins.hasAttr "agos-seed-model-3b" cfg.systemd.services)
+              "agentos-open-imports: model-3b-open.nix is NOT imported — the additive NON-DEFAULT 2nd brain (agos-seed-model-3b, qwen2.5:3b-augur) is absent.";
             assert lib.assertMsg (hasPkg "agent-brain")
               "agentos-open-imports: genesis-open.nix is NOT imported — agent-brain (the genesis-locked soul-reading brain) missing from systemPackages.";
             assert lib.assertMsg (hasPkg "agos-calc")
@@ -378,7 +380,7 @@
             assert lib.assertMsg (builtins.hasAttr "agos-mail-proton-preflight" cfg.systemd.services)
               "agentos-open-imports: mail-proton-bridge-open.nix is NOT imported — the Proton-via-Bridge cred scaffold (agos-mail-proton-preflight) is absent.";
             pkgs.runCommand "agentos-open-imports-check" { } ''
-              echo "agentos-open imports all fourteen Phase-2 modules: calendar(agos-cal+gnome-calendar/radicale) desktop(hyprland) settings(agos-sys) model(agos-seed-model) genesis(agent-brain) calculator(agos-calc) files(agos-files) email(thunderbird) mail-secret(agos-mail-token-preflight) notes(agos-notes) docs(agos-doc) media(agos-media) web(agos-web) mail-proton(agos-mail-proton-preflight)"
+              echo "agentos-open imports all fourteen Phase-2 modules: calendar(agos-cal+gnome-calendar/radicale) desktop(hyprland) settings(agos-sys) model(agos-seed-model) genesis(agent-brain) calculator(agos-calc) files(agos-files) email(thunderbird) mail-secret(agos-mail-token-preflight) notes(agos-notes) docs(agos-doc) media(agos-media) web(agos-web) mail-proton(agos-mail-proton-preflight) + additive NON-DEFAULT 3B(agos-seed-model-3b, qwen2.5:3b-augur)"
               touch $out
             '';
 
