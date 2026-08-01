@@ -79,14 +79,22 @@ in {
     serviceConfig = {
       Type = "oneshot";
       RemainAfterExit = true;
-      # Run as the SAME static user the ollama daemon runs as (services.ollama.user in
-      # configuration-open.nix), NOT root. The seed's `ollama create` lands blobs +
-      # manifests in the daemon's model store; a root-run import leaves root-owned files
-      # that the (non-root) daemon can't overwrite on a later runtime `ollama pull` →
-      # "permission denied" on the -partial blob, even though the seeded model reads fine.
-      # Same user = consistent ownership = pull works (Rabbot Dell bench, 2026-08-01).
+      # Run as the SAME user the ollama daemon runs as (services.ollama.user in
+      # configuration-open.nix = "ollama", uid 992), NOT root — a root-run import leaves
+      # root-owned blobs the (non-root) daemon can't overwrite on a later `ollama pull`.
+      # But same-NAME is not enough: the NixOS ollama module ALWAYS sets DynamicUser=true,
+      # so the daemon's store is sandboxed behind /var/lib/private/ollama (0700 root:root)
+      # and a bare static-user unit gets no bind-mount → uid 992 can't even traverse it
+      # (EACCES on `ollama create`; verified live on the Dell, Rabbot 2026-08-01 — this unit
+      # only ever seeded while first-boot uid luck held). Join the daemon's namespace with
+      # DynamicUser + StateDirectory=ollama (→ the /var/lib/private/ollama → /var/lib/ollama
+      # bind-mount), while KEEPING User/Group pinned so the shared StateDirectory ownership
+      # stays uid 992 (a nameless DynamicUser would chown it to a per-unit uid). Writable AND
+      # consistent = seed lands + future pulls work.
       User = config.services.ollama.user;
       Group = config.services.ollama.group;
+      DynamicUser = true;
+      StateDirectory = "ollama";
     };
     script = ''
       # Wait for the loopback Ollama API to answer (daemon just started).

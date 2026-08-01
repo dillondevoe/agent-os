@@ -66,8 +66,9 @@ let
   '';
 in {
   # First-boot seed: import the bundled 3B into Ollama LOCALLY (no network). Mirrors
-  # agos-seed-model exactly (same env fix for the ollama-CLI $HOME panic, same static user so
-  # blob ownership matches the daemon). Ordered AFTER agos-seed-model so the DEFAULT 7B seeds
+  # agos-seed-model exactly (same env fix for the ollama-CLI $HOME panic, same user +
+  # DynamicUser/StateDirectory namespace so it can WRITE the daemon's store). Ordered AFTER
+  # agos-seed-model so the DEFAULT 7B seeds
   # first and the two `ollama create`s never race on a fresh boot. Idempotent + RemainAfterExit.
   systemd.services.agos-seed-model-3b = {
     description = "Seed ${modelTag3b} (non-default) into Ollama from the in-image GGUF (local, no network)";
@@ -83,8 +84,21 @@ in {
     serviceConfig = {
       Type = "oneshot";
       RemainAfterExit = true;
+      # The daemon's store is NOT writable by a bare static-user unit. The NixOS ollama
+      # module ALWAYS sets DynamicUser=true (even with services.ollama.user pinned), so the
+      # real state lives at /var/lib/private/ollama and /var/lib/private is 0700 root:root —
+      # a unit without the DynamicUser sandbox gets no bind-mount and uid 992 can't traverse
+      # it (EACCES on `ollama create`; verified live on the Dell, Rabbot 2026-08-01). Enter
+      # the SAME namespace: DynamicUser + StateDirectory=ollama gives this unit the
+      # /var/lib/private/ollama → /var/lib/ollama bind-mount the daemon has. User/Group are
+      # KEPT pinned to services.ollama.user ("ollama", the static uid-992 name) — WITHOUT it,
+      # DynamicUser would allocate a fresh uid for THIS unit's name and chown the shared
+      # StateDirectory away from the daemon (re-poisoning ownership). Name pinned + sandbox
+      # joined = writable AND consistent.
       User = config.services.ollama.user;
       Group = config.services.ollama.group;
+      DynamicUser = true;
+      StateDirectory = "ollama";
     };
     script = ''
       for _ in $(seq 1 60); do
