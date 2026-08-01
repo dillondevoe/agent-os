@@ -104,6 +104,18 @@ CHAT_TIMEOUT_S=600  # was 180 — a cold CPU prefill (~2560 tok @ ~14 tok/s) can
                      # itself; 180s guaranteed a TimeoutError on first boot turn (P1 fix #1/#2,
                      # rabbot-to-page-P1-UPGRADE-brain-timeout-crash-2026-08-01, live-hit by Dillon).
 
+def _spin(render, interval=0.35):
+    # Motion-in-loading (P1 item 1, rabbot-to-page-P1-UX-motion-plus-agentic-cli-conventions-
+    # pack-2026-08-01, Dillon msg 9272: "anything that blocks >1s shows motion"). One tiny
+    # daemon thread ticking a frame counter into `render(i)`; caller owns stop()/join().
+    stop=threading.Event()
+    def run():
+        i=0
+        while not stop.is_set():
+            render(i); i+=1; time.sleep(interval)
+    t=threading.Thread(target=run,daemon=True); t.start()
+    return stop,t
+
 def chat_stream(msgs):
     # Streaming + liveness indicator (P1 fix #2, same comm as above). Buffers tokens for
     # tool_calls/content-regex parsing (extract_tools) while printing as they arrive.
@@ -119,34 +131,41 @@ def chat_stream(msgs):
     r=urllib.request.Request(OLLAMA,data=body,headers={"Content-Type":"application/json"})
     t0=time.time(); content=""; tool_calls=[]; first_token=False; eval_count=0; eval_dur=0.0
     col=0
-    sys.stdout.write("\033[2mthinking…\033[0m"); sys.stdout.flush()
-    with urllib.request.urlopen(r,timeout=CHAT_TIMEOUT_S) as resp:
-        for line in resp:
-            line=line.strip()
-            if not line: continue
-            chunk=json.loads(line)
-            msg=chunk.get("message") or {}
-            piece=msg.get("content","")
-            if piece:
-                if not first_token:
-                    sys.stdout.write("\r\033[K"); first_token=True
-                content+=piece
-                for tok in re.findall(r'\S+\s*|\s+', piece):
-                    if '\n' in tok:
-                        col=len(tok)-tok.rfind('\n')-1
-                    elif col+len(tok)>term_cols and tok.strip():
-                        sys.stdout.write("\n"); col=len(tok); sys.stdout.write(tok)
-                        continue
-                    else:
-                        col+=len(tok)
-                    sys.stdout.write(tok)
-                sys.stdout.flush()
-            if msg.get("tool_calls"):
-                tool_calls=msg["tool_calls"]
-            if chunk.get("done"):
-                eval_count=chunk.get("eval_count") or 0
-                eval_dur=(chunk.get("eval_duration") or 0)/1e9
-    if not first_token: sys.stdout.write("\r\033[K")
+    def _thinking_frame(i):
+        sys.stdout.write(f"\r\033[K\033[2mthinking{'.'*(i%3+1)}\033[0m"); sys.stdout.flush()
+    think_stop,think_t=_spin(_thinking_frame)
+    try:
+        with urllib.request.urlopen(r,timeout=CHAT_TIMEOUT_S) as resp:
+            for line in resp:
+                line=line.strip()
+                if not line: continue
+                chunk=json.loads(line)
+                msg=chunk.get("message") or {}
+                piece=msg.get("content","")
+                if piece:
+                    if not first_token:
+                        think_stop.set(); think_t.join(timeout=1)
+                        sys.stdout.write("\r\033[K"); first_token=True
+                    content+=piece
+                    for tok in re.findall(r'\S+\s*|\s+', piece):
+                        if '\n' in tok:
+                            col=len(tok)-tok.rfind('\n')-1
+                        elif col+len(tok)>term_cols and tok.strip():
+                            sys.stdout.write("\n"); col=len(tok); sys.stdout.write(tok)
+                            continue
+                        else:
+                            col+=len(tok)
+                        sys.stdout.write(tok)
+                    sys.stdout.flush()
+                if msg.get("tool_calls"):
+                    tool_calls=msg["tool_calls"]
+                if chunk.get("done"):
+                    eval_count=chunk.get("eval_count") or 0
+                    eval_dur=(chunk.get("eval_duration") or 0)/1e9
+    finally:
+        if not first_token:
+            think_stop.set(); think_t.join(timeout=1)
+            sys.stdout.write("\r\033[K")
     elapsed=time.time()-t0
     tps=f", {eval_count/eval_dur:.0f} tok/s" if eval_count and eval_dur else ""
     sys.stderr.write(f"\033[2m[{elapsed:.1f}s{tps}]\033[0m\n")
@@ -266,8 +285,17 @@ def turn(msgs):
             return
         if clean and not msg.get("content"): print(clean)
         for name,args in calls:
-            print(f"  \033[33m⚡ calling {name} {json.dumps(args)}…\033[0m")
-            res=do_tool(name,args); msgs.append({"role":"tool","content":str(res)})
+            label=f"calling {name} {json.dumps(args)}…"
+            def _tool_frame(i,label=label):
+                glyph="\033[7m⚡\033[0m" if i%2 else "⚡"
+                sys.stdout.write(f"\r\033[K  \033[33m{glyph} {label}\033[0m"); sys.stdout.flush()
+            spin_stop,spin_t=_spin(_tool_frame,interval=0.3)
+            try:
+                res=do_tool(name,args)
+            finally:
+                spin_stop.set(); spin_t.join(timeout=1)
+                print(f"\r\033[K  \033[33m⚡ {label}\033[0m")
+            msgs.append({"role":"tool","content":str(res)})
 
 def _model_pulled():
     # guard for the memory-floor path: don't fire a warmup generation against a model that
