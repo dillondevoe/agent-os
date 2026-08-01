@@ -310,6 +310,7 @@ def main():
     if len(sys.argv)>2 and sys.argv[1]=="--once":
         msgs=[sysmsg(),user_turn(sys.argv[2])]; turn(msgs); return
     print("  \033[1mAgent OS brain\033[0m — I have hands, and I know the real now. Ask me to do things.")
+    print("  \033[2mLost a window? Alt+Tab cycles them, or Super+/ opens the keybind cheatsheet.\033[0m")
     msgs=[sysmsg()]
     threading.Thread(target=warmup_greeting, args=(msgs,), daemon=True).start()
     # ^C must not kill the brain (P1 Dillon directive, msg 9263: "that'd be like losing your

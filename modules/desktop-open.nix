@@ -95,6 +95,16 @@ let
     bind = $mod, up, movefocus, u
     bind = $mod, down, movefocus, d
 
+    # Window discoverability (rabbot-to-page-P2-window-discoverability-alt-tab-taskbar-
+    # cheatsheet-2026-08-01, Dillon msg 9268: clicked off Firefox, no way back). Alt-Tab is
+    # the reflex everyone reaches for first — this config had none.
+    bind = ALT, TAB, cyclenext
+    bind = ALT, TAB, bringactivetotop
+    bind = ALT SHIFT, TAB, cyclenext, prev
+    bind = ALT SHIFT, TAB, bringactivetotop
+    # Cheatsheet: Super+/ pops a kitty window rendering the static keybind list below.
+    bind = $mod, slash, exec, kitty --title cheatsheet -e less -R ${cheatsheetTxt}
+
     # Laptop function / media keys (XF86 keysyms). Default Hyprland binds none of these, so the
     # Dell's Fn brightness/volume keys are dead until wired here. bindel = repeat-on-hold (ramp while
     # held) + works on lockscreen; bindl = locked, single-shot (toggles/transport). Backlight write
@@ -123,18 +133,50 @@ let
     map ctrl+shift+c copy_to_clipboard
   '';
 
+  # Cheatsheet (item 3 of the same comm) — a static list, popped via Super+/. Deliberately
+  # plain text through `less`, not a fancier overlay: this is the "how do I get back" panic
+  # button, it has to work even if something else is broken.
+  cheatsheetTxt = pkgs.writeText "cheatsheet.txt" ''
+    Agent OS — keybind cheatsheet (Super+/ to reopen this)
+
+      Super + Return    open terminal (kitty)
+      Super + B         open Firefox
+      Super + R         app launcher (wofi)
+      Alt + Tab         cycle to next window   (Alt+Shift+Tab = prev)
+      Super + Q         close focused window
+      Super + F         fullscreen toggle
+      Super + V         floating toggle
+      Super + arrows    move focus between windows
+      Ctrl + V          paste into terminal
+      Ctrl + Shift + C  copy from terminal
+      Super + Shift + M exit Hyprland session
+
+    Lost a window? Alt+Tab cycles through everything open, including a
+    minimized/click-away Firefox. The taskbar in the top bar also shows it —
+    click to focus.
+
+    q to close this.
+  '';
+
   waybarConf = pkgs.writeText "config.jsonc" ''
     {
       "layer": "top",
       "position": "top",
       "height": 30,
       "spacing": 6,
-      "modules-left": ["hyprland/workspaces"],
+      "modules-left": ["hyprland/workspaces", "wlr/taskbar"],
       "modules-center": ["clock"],
       "modules-right": ["pulseaudio", "network", "battery", "tray"],
       "hyprland/workspaces": {
         "on-click": "activate",
         "format": "{id}"
+      },
+      "wlr/taskbar": {
+        "format": "{icon} {title:.20}",
+        "icon-size": 16,
+        "tooltip-format": "{title}",
+        "on-click": "activate",
+        "on-click-middle": "close"
       },
       "clock": {
         "format": "{:%a %d %b  %H:%M}",
@@ -182,6 +224,20 @@ let
       color: #1a1b26;
       background: #7aa2f7;
       border-radius: 6px;
+    }
+    #taskbar {
+      padding: 0 4px;
+    }
+    #taskbar button {
+      padding: 0 8px;
+      margin: 3px 2px;
+      color: #c0caf5;
+      background: rgba(122, 162, 247, 0.15);
+      border-radius: 6px;
+    }
+    #taskbar button.active {
+      color: #1a1b26;
+      background: #bb9af7;
     }
     #clock, #battery, #network, #pulseaudio, #tray {
       padding: 0 10px;
