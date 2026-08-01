@@ -33,7 +33,13 @@ let
   hyprConf = pkgs.writeText "hyprland.conf" ''
     monitor = , preferred, auto, 1
     exec-once = waybar
-    exec-once = kitty
+    # Item 5 (same comm as item 4 above): the session Dillon actually lands in is this
+    # Hyprland/kitty desktop, not bare tty1 — agent-shell.nix's respawn loop (PR #52) only
+    # covers the tty1-console path. "The brain IS the desktop" means THIS session should open
+    # as the brain, and a death/exit should respawn it in place. Mirrors the tty1 respawn
+    # shape exactly (while :; do ...; sleep 1; done); warm relaunch ~11s per Rabbot's live
+    # numbers. $mod+RETURN (below) stays bound to plain kitty as the manual-shell escape hatch.
+    exec-once = kitty -e sh -c 'while :; do agent-shell; sleep 1; done'
     exec-once = hyprctl setcursor Bibata-Modern-Amber 24
     env = XCURSOR_SIZE,24
     env = XCURSOR_THEME,Bibata-Modern-Amber
@@ -106,6 +112,17 @@ let
 
   # The ambient bar: workspaces | clock | volume · network · battery · tray.
   # Battery hides itself on hosts with no battery (VM/desktop) — no error there.
+  # Item 4 fix (rabbot-to-page-RUNTIME-ANSWERS-hyprland-kitty-firefox-items345-2026-08-01):
+  # wl-clipboard + kitty were already present and working — the gap was Dillon pressing plain
+  # Ctrl+V (kitty's default paste is Ctrl+Shift+V) and getting a literal ^V into the brain's
+  # input. Bind Ctrl+V to paste explicitly. Plain Ctrl+C is deliberately left UNBOUND here —
+  # it must keep reaching the brain as SIGINT (agent-brain.py's own ^C handling, PR #52).
+  kittyConf = pkgs.writeText "kitty.conf" ''
+    map ctrl+v paste_from_clipboard
+    map ctrl+shift+v paste_from_clipboard
+    map ctrl+shift+c copy_to_clipboard
+  '';
+
   waybarConf = pkgs.writeText "config.jsonc" ''
     {
       "layer": "top",
@@ -221,9 +238,11 @@ in
     "d /home/${user}/.config 0755 ${user} users - -"
     "d /home/${user}/.config/hypr 0755 ${user} users - -"
     "d /home/${user}/.config/waybar 0755 ${user} users - -"
+    "d /home/${user}/.config/kitty 0755 ${user} users - -"
     "L+ /home/${user}/.config/hypr/hyprland.conf - - - - ${hyprConf}"
     "L+ /home/${user}/.config/waybar/config.jsonc - - - - ${waybarConf}"
     "L+ /home/${user}/.config/waybar/style.css - - - - ${waybarStyle}"
+    "L+ /home/${user}/.config/kitty/kitty.conf - - - - ${kittyConf}"
   ];
 
   # Autologin (getty) already drops us on tty1 as `agent`. Launch Hyprland from the login shell on
