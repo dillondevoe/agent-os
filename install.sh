@@ -97,6 +97,59 @@ if [ "$VARIANT" = agentos-open ]; then
   fi
 fi
 
+# --- Break-glass root password: provision /etc/agent-os/break-glass.hash on the TARGET --------
+# configuration.nix runs users.mutableUsers=false and modules/break-glass.nix sets
+#   users.users.root.hashedPasswordFile = "/etc/agent-os/break-glass.hash";
+# so if that file is ABSENT at activation, root has no valid password and the ONLY admin path — the
+# tty3 break-glass console — is fail-safe CLOSED: a fresh base install would then be recoverable
+# ONLY from installer media. So for the sealed sovereign box we REQUIRE an operator-set break-glass
+# password here: hash it sha-512 (crypt) and write it 0600 root:root to the target BEFORE
+# nixos-install (activation reads the file at install time). The plaintext never touches disk or the
+# repo — only the one-way crypt hash is written, and only into the installed system.
+#   Unattended path: pre-seed BREAK_GLASS_HASH='$6$...' (a sha-512 crypt, NOT a plaintext) on the
+#   piped bash for reinstalls — same "secret via env, never committed" rule as TS_AUTHKEY.
+#   The OPEN/meshed dev box SKIPS this: it has a full-power passwordless-sudo user, so root's console
+#   door is not its only admin path (root.hashedPasswordFile is unused on -open).
+BREAK_GLASS_HASH="${BREAK_GLASS_HASH:-}"
+if [ "$VARIANT" = agentos ]; then
+  BG_HASH=""
+  case "$BREAK_GLASS_HASH" in
+    '$6$'*) BG_HASH="$BREAK_GLASS_HASH"; echo ">>> Break-glass: using pre-seeded BREAK_GLASS_HASH (sha-512 crypt)." ;;
+    '')     : ;;
+    *)      echo "BREAK_GLASS_HASH is set but is not a sha-512 crypt ('\$6\$...'). Refusing to use it."; exit 1 ;;
+  esac
+  if [ -z "$BG_HASH" ]; then
+    echo ">>> Break-glass: set the ROOT rescue password for the tty3 console."
+    echo "    On the SEALED box this is the ONLY admin path — no agent sudo, no SSH. Don't lose it."
+    echo "    Provisioned to the TARGET only (sha-512 crypt, 0600 root:root); never stored in the repo."
+    # mkpasswd may be absent from the minimal-installer PATH — pull it via nix-shell (same belt as the
+    # mkfs/efibootmgr blocks) and resolve its store path once; the path stays valid after the shell exits.
+    MKPASSWD="$(nix-shell -p mkpasswd --run 'command -v mkpasswd')"
+    while [ -z "$BG_HASH" ]; do
+      printf "    Enter break-glass (root) password: ";    read -rs BG_PW1 < /dev/tty; echo
+      printf "    Re-enter break-glass (root) password: "; read -rs BG_PW2 < /dev/tty; echo
+      if [ -z "$BG_PW1" ];           then echo "    Empty password not allowed — the door must be gated. Try again."; continue; fi
+      if [ "$BG_PW1" != "$BG_PW2" ]; then echo "    Passwords did not match — try again."; continue; fi
+      # Password -> mkpasswd via STDIN (-s): never on argv (world-readable in ps) and never
+      # interpolated into a command string (no quoting/injection surface for a "'"-bearing password).
+      BG_HASH="$(printf '%s' "$BG_PW1" | "$MKPASSWD" -m sha-512 -s)" || { echo "    mkpasswd failed — try again."; BG_HASH=""; }
+    done
+    unset BG_PW1 BG_PW2
+  fi
+  case "$BG_HASH" in
+    '$6$'*) : ;;
+    *) echo "FATAL: break-glass hash is not a valid sha-512 crypt — refusing to install a box with no admin path."; exit 1 ;;
+  esac
+  echo ">>> Break-glass: writing /etc/agent-os/break-glass.hash on the target (0600 root:root)..."
+  install -d -m 0755 /mnt/etc/agent-os
+  ( umask 077; printf '%s\n' "$BG_HASH" > /mnt/etc/agent-os/break-glass.hash )
+  chmod 0600 /mnt/etc/agent-os/break-glass.hash
+  chown root:root /mnt/etc/agent-os/break-glass.hash
+  unset BG_HASH
+  # Read-back guard: confirm the door credential actually landed before building a mutableUsers=false box.
+  grep -q '^\$6\$' /mnt/etc/agent-os/break-glass.hash || { echo "FATAL: break-glass.hash did not write correctly."; exit 1; }
+fi
+
 # --- CLEAN_NVRAM (opt-in) — snapshot stale Agent OS UEFI entries BEFORE install --------------
 # The whole-disk wipe above clears on-DISK loaders but NEVER motherboard UEFI NVRAM, so each
 # reinstall's firmware "Linux Boot Manager" entry piles up ("getting insane"). Opt-in
