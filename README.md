@@ -109,10 +109,31 @@ modules/clean-room.nix    the egress wall (default-DROP outbound; sealed = nixpk
 bin/agent-shell           login program: seeds the memory tree, boot banner, hands to the brain
 bin/mem                   the markdown-memory tool (path = meaning)
 bin/brain-ollama          the local-model chat shim (stdlib, no deps)
+tests/run-local.sh        run every nix-free property battery in one command
 ```
 
 > Flakes only see git-tracked files — `git add` after editing, or `nix build` silently uses the old
 > version. `nix flake check` validates the whole config without hardware.
+
+### Tests
+
+Every property battery runs in CI under a **sandboxed** `nix flake check` (see
+`.github/workflows/flake-check.yml`) — that is the merge gate, and `sandbox = true` is
+load-bearing: a permissive local nix can pass where the clean-room build fails.
+
+```
+nix flake check --option sandbox true -L     # the real gate: all batteries + nix eval
+bash tests/run-local.sh                      # the nix-free subset, one table, seconds
+bash tests/run-local.sh -v                   # ...with output from any failure
+```
+
+`tests/run-local.sh` exists because each battery takes its own positional arguments
+(between one and seven), so running one by hand means reconstructing its signature. It
+wires up the nine that need no Nix store — front-door kick, agos-events, comms
+shadow/live contracts, agent-loop, audit, taint, mem-cap, mcp — and is meant for a fast
+local loop, **not** as merge evidence. The registry- and store-dependent batteries
+(broker, cap, confirm, seam-live, nft-ruleset, open-imports, seal-faildown) only run
+under the flake check.
 
 ---
 
