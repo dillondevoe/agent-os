@@ -20,9 +20,12 @@
   };
 
   # Make the whole stack agree on ONE brain + ONE model WITHOUT editing the security-
-  # reviewed shim. v0.1 (sovereign, CPU-only 5440) defaults to the snappy 7B-instruct
-  # tier; the 14.8B stays PULLABLE as the judgment lane (`setup-brain.sh --model
-  # qwen2.5:14b`). BRAIN is pinned to the local floor so the login shell NEVER selects a
+  # reviewed shim. v0.1 (sovereign, CPU-only 5440) defaults to the dense 9B tier
+  # (qwen3.5:9b, ~6.6GB). NOTE: Qwen3.5 ships no 14B, so the previous "14.8B judgment
+  # lane, pull it with qwen2.5:14b" advice is dead — that tier does not exist in this
+  # generation and pointing users at it would pull a two-generations-stale model. The
+  # real step up is a Qwen3.6 27B-class (~17GB), which needs its own hardware tier.
+  # BRAIN is pinned to the local floor so the login shell NEVER selects a
   # cloud brain even if a `claude` CLI were ever present (belt-and-suspenders on the
   # no-cloud-path-in-v0.1 rule; none is installed on the image). setup-brain.sh pulls
   # exactly OLLAMA_MODEL, so `brain-ollama --check` (>=1 model) AND the /api/chat model
