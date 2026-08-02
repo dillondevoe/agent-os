@@ -32,14 +32,26 @@ let
   # borders, blur/rounding/shadows/animations). `$mod`/`$(...)` are literal in Nix '' strings.
   hyprConf = pkgs.writeText "hyprland.conf" ''
     monitor = , preferred, auto, 1
-    exec-once = waybar
+    # Desktop doctrine (rabbot-to-page-P1-desktop-doctrine-spec 2026-08-02, Dillon msgs
+    # 9293/9295): the bar is now a systemd user unit (Restart=always, declared below in Nix)
+    # instead of a fire-and-forget exec-once — survives waybar crashes and config reloads.
+    # First hand the unit the Wayland session env, then start it.
+    exec-once = dbus-update-activation-environment --systemd WAYLAND_DISPLAY XDG_CURRENT_DESKTOP HYPRLAND_INSTANCE_SIGNATURE
+    exec-once = systemctl --user restart waybar.service
     # Item 5 (same comm as item 4 above): the session Dillon actually lands in is this
     # Hyprland/kitty desktop, not bare tty1 — agent-shell.nix's respawn loop (PR #52) only
     # covers the tty1-console path. "The brain IS the desktop" means THIS session should open
     # as the brain, and a death/exit should respawn it in place. Mirrors the tty1 respawn
     # shape exactly (while :; do ...; sleep 1; done); warm relaunch ~11s per Rabbot's live
     # numbers. $mod+RETURN (below) stays bound to plain kitty as the manual-shell escape hatch.
-    exec-once = kitty -e sh -c 'while :; do agent-brain; sleep 1; done'
+    # --class brain-home is the anchor the ws1 window rules (below) key on. Keyed to this
+    # dedicated class, NOT generic kitty — otherwise every terminal (incl. the cheatsheet
+    # popup and $mod+RETURN shells) would get yanked to ws1.
+    exec-once = kitty --class brain-home -e sh -c 'while :; do agent-brain; sleep 1; done'
+    # Brain overlay: a SECOND brain instance pinned to special:brain, toggled from anywhere
+    # with Super+grave. Separate history from the ws1 brain — acceptable v1 (ollama
+    # serializes the model slot; CHAT_LOCK is per-process). Same respawn shape.
+    exec-once = kitty --class brain-overlay -e sh -c 'while :; do agent-brain; sleep 1; done'
     exec-once = hyprctl setcursor Bibata-Modern-Amber 24
     env = XCURSOR_SIZE,24
     env = XCURSOR_THEME,Bibata-Modern-Amber
@@ -82,14 +94,46 @@ let
         kb_layout = us
         follow_mouse = 1
     }
+    # Desktop doctrine window rules: ws1 = the brain, always; everything else opens on
+    # ws2+ so the brain never gets buried. Super+1 = "take me home."
+    # maximize (not fullscreen) on the home brain — deliberate: fullscreen would hide the
+    # bar, and "always on" bar is the whole point of the systemd unit above.
+    windowrulev2 = workspace 1, class:^(brain-home)$
+    windowrulev2 = maximize, class:^(brain-home)$
+    windowrulev2 = workspace special:brain, class:^(brain-overlay)$
+    windowrulev2 = workspace 2, class:^(firefox)$
+    windowrulev2 = workspace 3, class:^(steam)$
+    # Games (steam_app_* class) own ws5 fullscreen — console feel: launch from Steam →
+    # game owns ws5, Super+1 back to brain, Super+5 back to game. Steam client itself
+    # stays ws3 windowed. `immediate` (tearing) deliberately NOT set — needs its own
+    # eval on this Mesa/iGPU (post-reset polish, per spec addendum; same for gamescope).
+    windowrulev2 = workspace 5, class:^(steam_app_.*)$
+    windowrulev2 = fullscreen, class:^(steam_app_.*)$
+    # Cheatsheet popup stays a normal floating window — never tiled away or yanked.
+    windowrulev2 = float, title:^(cheatsheet)$
+
     $mod = SUPER
     bind = $mod, RETURN, exec, kitty
     bind = $mod, B, exec, firefox
     bind = $mod, R, exec, wofi --show drun
+    bind = $mod, D, exec, wofi --show drun
+    bind = $mod, grave, togglespecialworkspace, brain
     bind = $mod, Q, killactive
     bind = $mod, F, fullscreen
     bind = $mod, V, togglefloating
     bind = $mod SHIFT, M, exit
+    # Workspace switching — this config had NO workspace binds before the doctrine; the
+    # ws1/ws2+/ws5 rules above are only reachable with these. Super+1 = brain home.
+    bind = $mod, 1, workspace, 1
+    bind = $mod, 2, workspace, 2
+    bind = $mod, 3, workspace, 3
+    bind = $mod, 4, workspace, 4
+    bind = $mod, 5, workspace, 5
+    bind = $mod SHIFT, 1, movetoworkspace, 1
+    bind = $mod SHIFT, 2, movetoworkspace, 2
+    bind = $mod SHIFT, 3, movetoworkspace, 3
+    bind = $mod SHIFT, 4, movetoworkspace, 4
+    bind = $mod SHIFT, 5, movetoworkspace, 5
     bind = $mod, left, movefocus, l
     bind = $mod, right, movefocus, r
     bind = $mod, up, movefocus, u
@@ -139,9 +183,13 @@ let
   cheatsheetTxt = pkgs.writeText "cheatsheet.txt" ''
     Agent OS — keybind cheatsheet (Super+/ to reopen this)
 
+      Super + 1         brain home (workspace 1 — the brain always lives here)
+      Super + `         brain overlay from anywhere (tap again to hide)
       Super + Return    open terminal (kitty)
-      Super + B         open Firefox
-      Super + R         app launcher (wofi)
+      Super + B         open Firefox (opens on workspace 2)
+      Super + D         app launcher (wofi, fuzzy search)
+      Super + R         app launcher (wofi — same as Super+D)
+      Super + 2..5      switch workspace (Shift = move window there)
       Alt + Tab         cycle to next window   (Alt+Shift+Tab = prev)
       Super + Q         close focused window
       Super + F         fullscreen toggle
@@ -153,7 +201,13 @@ let
 
     Lost a window? Alt+Tab cycles through everything open, including a
     minimized/click-away Firefox. The taskbar in the top bar also shows it —
-    click to focus.
+    click to focus. Super+1 always returns to the brain.
+
+    Bar quick-slots (left side): steam / web / apps — "apps" opens the
+    full-screen app drawer (nwg-drawer).
+
+    Gaming: launch a game from Steam → it takes workspace 5 fullscreen.
+    Super+1 back to the brain, Super+5 back to the game.
 
     q to close this.
   '';
@@ -164,7 +218,7 @@ let
       "position": "top",
       "height": 30,
       "spacing": 6,
-      "modules-left": ["hyprland/workspaces", "wlr/taskbar"],
+      "modules-left": ["hyprland/workspaces", "wlr/taskbar", "custom/steam", "custom/firefox", "custom/drawer"],
       "modules-center": ["clock"],
       "modules-right": ["pulseaudio", "network", "battery", "tray"],
       "hyprland/workspaces": {
@@ -200,6 +254,21 @@ let
         "format": "vol {volume}%",
         "format-muted": "muted",
         "on-click": "wpctl set-mute @DEFAULT_AUDIO_SINK@ toggle"
+      },
+      "custom/steam": {
+        "format": "steam",
+        "on-click": "steam",
+        "tooltip": false
+      },
+      "custom/firefox": {
+        "format": "web",
+        "on-click": "firefox",
+        "tooltip": false
+      },
+      "custom/drawer": {
+        "format": "apps",
+        "on-click": "nwg-drawer",
+        "tooltip": false
       },
       "tray": { "spacing": 8 }
     }
@@ -239,6 +308,13 @@ let
       color: #1a1b26;
       background: #bb9af7;
     }
+    #custom-steam, #custom-firefox, #custom-drawer {
+      padding: 0 8px;
+      margin: 3px 2px;
+      color: #7aa2f7;
+      background: rgba(122, 162, 247, 0.10);
+      border-radius: 6px;
+    }
     #clock, #battery, #network, #pulseaudio, #tray {
       padding: 0 10px;
     }
@@ -266,11 +342,27 @@ in
 
   fonts.packages = with pkgs; [ dejavu_fonts ];
 
+  # The "always on" bar (doctrine item 2): waybar as a systemd user unit with
+  # Restart=always — survives waybar crashes AND hyprland config reloads. Not
+  # WantedBy graphical-session.target: this session is exec'd from the tty1 login
+  # shell (loginShellInit below), so graphical-session.target never activates —
+  # hyprland's exec-once starts the unit explicitly after importing the Wayland
+  # env into the user manager (dbus-update-activation-environment line above).
+  systemd.user.services.waybar = {
+    description = "Waybar ambient status bar";
+    serviceConfig = {
+      ExecStart = "${pkgs.waybar}/bin/waybar";
+      Restart = "always";
+      RestartSec = 2;
+    };
+  };
+
   environment.systemPackages = with pkgs; [
     firefox                     # GPU-accelerated browser (baseline)
     kitty                       # terminal (baseline)
     waybar                      # ambient status bar
-    wofi                        # launcher
+    wofi                        # launcher — keyboard-first fuzzy search (Super+D / Super+R)
+    nwg-drawer                  # full-screen icon-grid app drawer ("phone home screen" browse mode)
     grim slurp wl-clipboard     # screenshots + clipboard
     wireplumber                 # wpctl — the volume module's on-click mute toggle
     xdg-utils                   # xdg-open etc. for portal handoff
