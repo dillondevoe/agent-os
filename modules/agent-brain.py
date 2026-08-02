@@ -147,7 +147,7 @@ def chat_stream(msgs):
             col+=len(tok)
         sys.stdout.write(f"\033[2m{tok}\033[0m" if in_code else tok)
     def _thinking_frame(i):
-        sys.stdout.write(f"\r\033[K\033[2mthinking{'.'*(i%3+1)}\033[0m"); sys.stdout.flush()
+        sys.stdout.write(f"\r\033[K\033[2mthinking{'.'*(i%3+1)} (^C cancels this turn)\033[0m"); sys.stdout.flush()
     think_stop,think_t=_spin(_thinking_frame)
     try:
         with urllib.request.urlopen(r,timeout=CHAT_TIMEOUT_S) as resp:
