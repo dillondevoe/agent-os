@@ -381,7 +381,7 @@ def main():
     # around turn() below) and drops back to the prompt.
     last_sigint=0.0
     while True:
-        try: u=input("\n\033[36myou ›\033[0m ").strip()
+        try: u=input("\n\033[1;36myou ›\033[0m ").strip()
         except EOFError: print(); break
         except KeyboardInterrupt:
             now=time.time()
