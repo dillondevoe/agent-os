@@ -51,6 +51,40 @@ Connects to the existing postscarcity.social infra — which is why it's been "s
 - Brand/mascot (the Djinn as a wisp-of-smoke genie) — at public-reveal time, not before.
 
 ---
-*North-star vision (safety-by-architecture, browse-as-dispatch, structural open-source ethics,
-Djinn-to-Djinn, the open-core/network business model) lives in Rabbot's scratch + the eventual
-unified PS thesis. This file is the BUILD plan — kept lean, boots-first.*
+
+## The North Star — where years of this go
+*(Dillon, 2026-08-02: "our own model trained in systems operations that we unleash on the
+world… a hybrid inference mesh of interconnected models all cooperating to become a new swarm
+of intelligent compute that changes how operating computers works for everyone.")*
+
+Three arcs, one road — each step pays for itself:
+
+**1. Hardware tiers — meet every machine where it is.** 8GB minimum gives the potatoes a fair
+shot; a 32GB box should get a ready-installed beast. Genesis detects RAM + GPU and picks the
+tier: 8GB → 3B front-door + 7B · 16GB → 14B · 32GB → 30B-class MoE (~3B active params: 30B
+knowledge at near-14B speed). Speculative decoding (the shipped 3B drafting for the big model)
+is a free streaming win at every tier. The GPU detection matrix (Intel iGPU: measured;
+Arc discrete / NVIDIA / AMD: in progress) feeds the same switch — and doubles as the gaming
+config, because gamers already own the hardware that makes local models feel instant and
+they'll be the early adopters.
+
+**2. Our own sysops model — the training ladder.** Not scratch pretraining; an open base plus
+years of proprietary systems-operations data until it's ours in every way that matters:
+LoRA now (the 3B refusal-retrain is literally step one) → sysops SFT on
+(system state → action → outcome) triples → a distillation flywheel where frontier models
+generate ops trajectories and we compress them into the shipped model → the moat: every
+installed box, **with explicit consent**, contributing real-machine, real-failure, real-fix
+telemetry. An OS that learns from its own fleet.
+
+**3. The inference mesh.** The dev fleet (mini/Air/DVo/Dell, specialized brains cooperating
+over comms) is the working prototype. Generalized: boxes discover each other, route by
+capability — a potato hands hard questions to the beast on the LAN, the beast escalates to
+cloud only on consent (the summon-Claude pattern, generalized to peers). Systems operations is
+the domain where a swarm of small models plausibly beats one big one, because ops decomposes:
+every box is the world expert on its own state, and learned skills propagate through the mesh.
+
+Users will always be able to plug their own LLMs in — the tiers are defaults, not walls.
+
+*The rest of the north-star vision (safety-by-architecture, browse-as-dispatch, structural
+open-source ethics, Djinn-to-Djinn, the open-core/network business model) lives in the
+eventual unified PS thesis. This file is the BUILD plan — kept lean, boots-first.*

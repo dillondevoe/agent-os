@@ -89,6 +89,11 @@ behind Intel VMD — if boot times out looking for the disk, set **BIOS → SATA
 
 ---
 
+## Where this goes
+Hardware-tiered local models (8GB potato → 32GB beast), a sysops-trained model of our own
+built rung by rung, and an inference mesh of cooperating machines. The full arc:
+**[ROADMAP.md → The North Star](ROADMAP.md#the-north-star--where-years-of-this-go)**.
+
 ## How it's built
 
 Declarative NixOS — the machine is a reproducible expression, and the agent can rewrite its own
