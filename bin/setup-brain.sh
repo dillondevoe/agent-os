@@ -17,8 +17,11 @@ setup-brain.sh — provision the Agent OS brain(s).
 
 Env:
   BRAIN_MODEL   model tag to pull (default: $OLLAMA_MODEL, else qwen3.5:9b —
-                the ~6.6GB 7B fast tier = v0.1 default brain; 14.8B is the judgment
-                lane, pull it with `--model qwen2.5:14b`)
+                the ~6.6GB dense 9B = v0.1 default brain. There is NO small dense
+                tier above it in this generation: Qwen3.5 has no 14B, so the old
+                `qwen2.5:14b` judgment-lane advice is dead. If you want more
+                headroom the next real step up is a Qwen3.6 MoE/dense
+                (e.g. qwen3.6:27b), which wants ~17GB and its own hardware tier.)
   OLLAMA_HOST   ollama endpoint  (default: http://127.0.0.1:11434)
 USAGE
 }

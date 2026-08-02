@@ -43,14 +43,34 @@ fi
 
 # 4. tamper-evidence: edit a PAST record -> verify MUST fail (non-zero).
 cp "$LOG" "$LOG.bak"
-sed -i '2s/"n":2/"n":999/' "$LOG"
+# PORTABILITY (found 2026-08-02 by tests/run-local.sh on macOS): `sed -i '2s/...'` is GNU
+# syntax. BSD/macOS sed reads the next argument as the backup suffix, so it errors with
+# "invalid command code" AND LEAVES THE FILE UNCHANGED. The battery then ran `verify`
+# against an untampered log, which correctly PASSED — and the test reported
+# "verify PASSED on a tampered log", i.e. a false failure locally and, worse, a
+# VACUOUS assertion anywhere sed silently no-ops. Do the edit in python so the mutation
+# is guaranteed on every platform and the property is actually exercised.
+"$PY" - "$LOG" <<'TAMPER'
+import pathlib, sys
+p = pathlib.Path(sys.argv[1])
+lines = p.read_text().splitlines()
+if len(lines) < 2:
+    sys.exit("audit-battery: log has fewer than 2 records; cannot tamper-test")
+before = lines[1]
+lines[1] = lines[1].replace('"n":2', '"n":999')
+if lines[1] == before:
+    sys.exit('audit-battery: expected \'"n":2\' in record 2; tamper edit did not apply')
+p.write_text("\n".join(lines) + "\n")
+TAMPER
 if "$PY" "$AUDIT" verify >/dev/null 2>&1; then fail "verify PASSED on a tampered log"; fi
 cp "$LOG.bak" "$LOG"
 "$PY" "$AUDIT" verify >/dev/null || fail "verify failed after restoring the backup"
 
 # 5. truncation-evidence: drop the last record -> verify still fine (valid prefix),
 #    but dropping a MIDDLE record breaks the chain.
-sed -i '2d' "$LOG"
+# Portable delete: `sed -i '2d'` is GNU-only (see the note at the tamper step above).
+# cap-battery.sh:99 already documents this repo's portable idiom — use it here too.
+sed -i.bak2 '2d' "$LOG" && rm -f "$LOG.bak2"
 if "$PY" "$AUDIT" verify >/dev/null 2>&1; then fail "verify PASSED after deleting a middle record"; fi
 cp "$LOG.bak" "$LOG"
 
@@ -93,7 +113,8 @@ TT="$SCRATCH/torn/audit"; mkdir -p "$TT"
 TR="$SCRATCH/trunc/audit"; mkdir -p "$TR"
 ( export AGENT_OS_AUDIT_DIR="$TR"
   for i in 1 2 3; do echo "{\"cap\":\"c\",\"n\":$i}" | "$PY" "$AUDIT" append >/dev/null || exit 7; done
-  sed -i '3d' "$TR/audit.log"                         # drop the LAST record entirely
+  # Portable delete (GNU bare -i is not BSD-compatible; see the tamper-step note above).
+  sed -i.bak3 '3d' "$TR/audit.log" && rm -f "$TR/audit.log.bak3"   # drop the LAST record entirely
   "$PY" "$AUDIT" verify >/dev/null 2>&1 || exit 8     # a valid prefix still verifies OK
 ) || fail "verify should PASS on a truncated valid prefix (documents the tail-truncation gap)"
 
