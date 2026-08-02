@@ -4,6 +4,7 @@
 import json, re, subprocess, sys, urllib.request, urllib.error, datetime, os, hashlib, time, threading, shutil
 
 OLLAMA="http://127.0.0.1:11434/api/chat"; MODEL="qwen2.5:7b-instruct"
+MODEL_3B="qwen2.5:3b-augur"  # front-door (model-3b-open.nix); absent → front-door bypasses to 7B
 
 # ── THE SOUL (genesis lock, Geist ruling "bind not bytes") ─────────────────────
 # These two are BUILD-TIME LITERALS. genesis-open.nix substitutes @GENESIS_PATH@ with
@@ -331,6 +332,89 @@ def turn(msgs):
                 print(f"\033[2m{preview}\033[0m")
             msgs.append({"role":"tool","content":res})
 
+# ── 3B FRONT-DOOR → 7B KICK SIGNAL (A-with-a-wall, interim) ────────────────────
+# Dillon picked Design A (msg 9272); Rabbot's wall shape governs; Augur's spec is
+# 3B-FRONTDOOR-KICK-SIGNAL-SPEC.md. Every interactive turn hits the 3B first. The 3B
+# may ANSWER pure-conversation/dispatch turns but has NO executor path: any
+# action-shaped output is structurally discarded and the turn re-dispatches to the 7B,
+# which stays the ONLY tool-wielder (do_tool is reachable solely from turn()'s 7B
+# loop — frontdoor_* never executes anything). This wall is INTERIM: when Augur's
+# refusal-retrain + no-regression gate lands, the 3B graduates to executing its own
+# validated lane's tools; until then EVERY 3B tool_call is discarded.
+#
+# run-6's output is strictly bimodal (tool_calls XOR pure text, zero hybrids), so the
+# primary kick detector is structural, not a fuzzy classifier. The pure-text heuristics
+# below are the secondary net for text turns that still INTEND an action. Bias: unsure →
+# kick (a false kick costs one 7B hop; a false keep lets the 3B free-text past its
+# competence). The spec's "off-lane topic" heuristic is NOT implemented v1 — no cheap
+# local topic classifier exists; the length + uncertainty guards absorb most of it.
+_TOOLCALL_TOKEN_RE=re.compile(r"<tool_call>")                     # Qwen2.5 Hermes special token in raw decode
+_ACTION_OFFER_RE=re.compile(r"\b(want me to|should i|shall i|i can (?:make|do|run|edit)|let me)\b",re.I)
+_UNSURE_RE=re.compile(r"\b(not sure|i don'?t (?:have|know)|can'?t tell)\b",re.I)
+_FRONTDOOR_MAX_TOKENS=60  # run-6 conversational answers are terse; longer = off-distribution (tune on Dell)
+
+def frontdoor_decide(msg):
+    """Pure decision: (kick: bool, reason: str, proposal: str). NEVER executes anything.
+    Rule (1) hard: any tool_call — parsed, raw <tool_call> token, or JSON-shaped call in
+    content (extract_tools' fallback regex) — kicks, and the call itself is the proposal
+    forwarded to the 7B as context only."""
+    calls,clean=extract_tools(msg)
+    raw=msg.get("content","") or ""
+    if calls or _TOOLCALL_TOKEN_RE.search(raw):
+        prop=json.dumps([{"name":n,"arguments":a} for n,a in calls]) if calls else raw.strip()
+        return True,"tool_call",prop
+    text=raw.strip()
+    if not text:
+        return True,"empty",""
+    if _ACTION_OFFER_RE.search(text): return True,"action_offer",text
+    if _UNSURE_RE.search(text):       return True,"unsure",text
+    if len(text.split())>_FRONTDOOR_MAX_TOKENS: return True,"length",text
+    return False,"",text
+
+_FRONTDOOR_OK=None  # tri-state cache: None=unprobed, True/False after first tags check
+def _frontdoor_available():
+    global _FRONTDOOR_OK
+    if _FRONTDOOR_OK is None:
+        try:
+            r=urllib.request.Request("http://127.0.0.1:11434/api/tags")
+            tags=json.load(urllib.request.urlopen(r,timeout=5))
+            _FRONTDOOR_OK=any(m.get("name","").startswith(MODEL_3B) for m in tags.get("models",[]))
+        except Exception:
+            _FRONTDOOR_OK=False
+    return _FRONTDOOR_OK
+
+def frontdoor_turn(msgs):
+    """Interactive entry: 3B first, kick to the 7B turn() on any action shape.
+    Fail-open to turn() (the status-quo 7B path) if the 3B is absent or errors — the
+    wall protects against the 3B ACTING, not against its absence. --once and the
+    warmup thread call turn() directly and are deliberately untouched (boot prewarm
+    warms the 7B KV prefix; front-dooring them would change prewarm semantics)."""
+    if not _frontdoor_available():
+        return turn(msgs)
+    stop,t=_spin(lambda i: (sys.stdout.write(f"\r\033[K\033[2mrouting{'.'*(i%3+1)}\033[0m"),sys.stdout.flush()))
+    t0=time.time()
+    try:
+        body=json.dumps({"model":MODEL_3B,"messages":msgs,"tools":TOOLS,"stream":False,"keep_alive":-1}).encode()
+        r=urllib.request.Request(OLLAMA,data=body,headers={"Content-Type":"application/json"})
+        with CHAT_LOCK:
+            msg=json.load(urllib.request.urlopen(r,timeout=CHAT_TIMEOUT_S))["message"]
+    except Exception:
+        stop.set(); t.join(timeout=1); sys.stdout.write("\r\033[K")
+        return turn(msgs)  # 3B down mid-session → status-quo 7B path
+    stop.set(); t.join(timeout=1); sys.stdout.write("\r\033[K")
+    sys.stderr.write(f"\033[2m[front-door {time.time()-t0:.1f}s]\033[0m\n")
+    kick,reason,proposal=frontdoor_decide(msg)
+    if not kick:
+        # clean, terse, no-action-offer pure text: the 3B's answer stands.
+        print(proposal)
+        msgs.append({"role":"assistant","content":proposal,"tool_calls":[]})
+        return
+    # Discard-and-kick: the 3B's output reaches the 7B as CONTEXT ONLY; nothing from the
+    # 3B is executed, ever (rule 1 — this sits before any execution path by construction).
+    if proposal:
+        msgs.append({"role":"system","content":"(front-door 3B proposed, NOT executed — treat as a hint only: "+proposal[:600]+")"})
+    turn(msgs)
+
 def _model_pulled():
     # guard for the memory-floor path: don't fire a warmup generation against a model that
     # hasn't finished pulling yet.
@@ -400,7 +484,7 @@ def main():
             continue
         msgs.append(user_turn(u))
         try:
-            turn(msgs)
+            frontdoor_turn(msgs)
         except KeyboardInterrupt:
             sys.stdout.write("\r\033[K")
             print("\033[2m(interrupted)\033[0m")
