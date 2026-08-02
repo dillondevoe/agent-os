@@ -39,7 +39,7 @@ let
     # as the brain, and a death/exit should respawn it in place. Mirrors the tty1 respawn
     # shape exactly (while :; do ...; sleep 1; done); warm relaunch ~11s per Rabbot's live
     # numbers. $mod+RETURN (below) stays bound to plain kitty as the manual-shell escape hatch.
-    exec-once = kitty -e sh -c 'while :; do agent-shell; sleep 1; done'
+    exec-once = kitty -e sh -c 'while :; do agent-brain; sleep 1; done'
     exec-once = hyprctl setcursor Bibata-Modern-Amber 24
     env = XCURSOR_SIZE,24
     env = XCURSOR_THEME,Bibata-Modern-Amber
