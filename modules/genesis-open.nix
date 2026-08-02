@@ -75,4 +75,32 @@ in {
   # DEV-ALIGNMENT copy (NOT the security path — see header). Read-only store symlink at a
   # stable human path, byte-identical to the baked soul.
   environment.etc."agent-os/GENESIS.md".source = ../GENESIS.md;
+
+  # Boot-time prewarm (P1, rabbot-to-page-P1-boot-time-prewarm-unit-shave-cold-start-2026-
+  # 08-02, Dillon msg 9277: "first thinking taking 3 minutes is too long :("). The in-process
+  # warmup (agent-brain.py's warmup_greeting, PR #49/#50) only wins if boot→first-message
+  # exceeds the cold prefill (~3min CPU) — Dillon types immediately, so his real turn queues
+  # on CHAT_LOCK behind the warmup and still eats the full 3 minutes. Shave it by starting
+  # the prefill AT POWER-ON instead: a oneshot that fires the SAME --once path (byte-
+  # identical sysmsg() prefix -> same KV-cache slot) as soon as Ollama has the model seeded,
+  # so the slot is hot before Hyprland even starts. keep_alive=-1 (agent-brain.py) keeps that
+  # slot loaded after this unit exits; the in-process warmup stays as belt — it no-ops fast
+  # against an already-hot slot. Not gated on boot (no `before` on the session) — this simply
+  # runs as early as it can, in parallel.
+  systemd.services.agos-boot-prewarm = {
+    description = "Agent OS — prewarm the brain's KV cache at boot (shaves the first-message cold-start wait)";
+    wantedBy = [ "multi-user.target" ];
+    after = [ "ollama.service" "agos-seed-model.service" ];
+    requires = [ "ollama.service" ];
+    serviceConfig = {
+      Type = "oneshot";
+      RemainAfterExit = true;
+      # HTTP-only against the loopback Ollama API — no ollama store access needed, so this
+      # unit does NOT need agos-seed-model's DynamicUser+StateDirectory namespace join.
+      DynamicUser = true;
+    };
+    script = ''
+      ${agent-brain}/bin/agent-brain --once "boot warmup — reply with one word" >/dev/null 2>&1 || true
+    '';
+  };
 }
