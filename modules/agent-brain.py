@@ -1,7 +1,22 @@
 #!/usr/bin/env python3
 # Agent OS local brain — WITH HANDS + CONTEXT ANTENNA.
 # Talk to it; it acts (browse, run commands, arrange windows) AND it knows the real NOW.
-import json, re, subprocess, sys, urllib.request, urllib.error, datetime, os, hashlib, time, threading, shutil
+import json, re, subprocess, sys, urllib.request, urllib.error, datetime, os, hashlib, time, threading, shutil, contextlib
+
+# ── UX v2 slice 1: INPUT LOCK (rabbot-to-page-P2-ux-v2-spec 2026-08-02, Dillon msg 9315) ──
+# prompt_toolkit PromptSession + patch_stdout = a bottom input line that background output
+# (warmup greeting, any threaded print) can never scroll away or swallow — text prints
+# ABOVE the prompt instead of through it. Minimal-diff route per the spec: the existing
+# print-based streamer is untouched; only the REPL's input() is swapped. TTY-only guard:
+# pipes / --once / a missing prompt_toolkit all fall back to the plain input() loop, so
+# non-tty callers never see TUI escape codes and the genesis env stays optional in dev.
+try:
+    from prompt_toolkit import PromptSession
+    from prompt_toolkit.patch_stdout import patch_stdout
+    from prompt_toolkit.formatted_text import ANSI
+    _PTK = sys.stdin.isatty() and sys.stdout.isatty()
+except ImportError:
+    _PTK = False
 
 OLLAMA="http://127.0.0.1:11434/api/chat"; MODEL="qwen2.5:7b-instruct"
 MODEL_3B="qwen2.5:3b-augur"  # front-door (model-3b-open.nix); absent → front-door bypasses to 7B
@@ -467,8 +482,24 @@ def main():
     # or the word exit/quit. During generation, ^C cancels that turn only (see the try/except
     # around turn() below) and drops back to the prompt.
     last_sigint=0.0
+    # Input lock (slice 1): PromptSession owns the bottom line; patch_stdout(raw=True)
+    # routes any print that happens WHILE the prompt is active (warmup thread, stray
+    # background output) above it. raw=True keeps our ANSI styling/\r spinner codes
+    # intact. During generation no prompt is active, so the streamer/spinner write
+    # through unchanged. ^C semantics preserved: PromptSession.prompt raises
+    # KeyboardInterrupt at the prompt exactly like input() does.
+    if _PTK:
+        _session=PromptSession()
+        _read=lambda: _session.prompt(ANSI("\n\033[1;36myou ›\033[0m "))
+        _guard=patch_stdout(raw=True)
+    else:
+        _read=lambda: input("\n\033[1;36myou ›\033[0m ")
+        _guard=contextlib.nullcontext()
+    # ExitStack instead of a `with` block so the whole existing loop keeps its indent
+    # (minimal diff); closed after the loop to detach the stdout proxy cleanly.
+    _stack=contextlib.ExitStack(); _stack.enter_context(_guard)
     while True:
-        try: u=input("\n\033[1;36myou ›\033[0m ").strip()
+        try: u=_read().strip()
         except EOFError: print(); break
         except KeyboardInterrupt:
             now=time.time()
@@ -491,4 +522,5 @@ def main():
         except KeyboardInterrupt:
             sys.stdout.write("\r\033[K")
             print("\033[2m(interrupted)\033[0m")
+    _stack.close()
 if __name__=="__main__": main()
