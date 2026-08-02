@@ -57,12 +57,18 @@ let
   # an explicit shebang substitution (deterministic — no dependence on /usr/bin/env or the
   # runtime PATH). The script's own subprocess calls (hyprctl/agos-cal/firefox/…) still
   # resolve against the ambient system PATH by design — do NOT confine them here.
+  # UX v2 slice 1: the brain's interpreter is now a python env carrying prompt_toolkit
+  # (PromptSession input lock). Same pinned-shebang mechanism — the env's bin/python3
+  # sees its site-packages, so no PYTHONPATH juggling. The brain degrades gracefully
+  # (ImportError guard) if run under a bare python3 in dev.
+  brainPython = pkgs.python3.withPackages (ps: [ ps.prompt-toolkit ]);
+
   agent-brain = pkgs.runCommand "agent-brain" { } ''
     mkdir -p "$out/bin"
     cp ${./agent-brain.py} "$out/bin/agent-brain"
     chmod +w "$out/bin/agent-brain"
     substituteInPlace "$out/bin/agent-brain" \
-      --replace-fail '#!/usr/bin/env python3' '#!${pkgs.python3}/bin/python3' \
+      --replace-fail '#!/usr/bin/env python3' '#!${brainPython}/bin/python3' \
       --replace-fail '@GENESIS_PATH@'   '${genesis}/GENESIS.md' \
       --replace-fail '@GENESIS_SHA256@' '${genesisSha}'
     chmod +x "$out/bin/agent-brain"
