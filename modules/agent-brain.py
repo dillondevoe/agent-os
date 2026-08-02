@@ -412,7 +412,10 @@ def frontdoor_turn(msgs):
     # Discard-and-kick: the 3B's output reaches the 7B as CONTEXT ONLY; nothing from the
     # 3B is executed, ever (rule 1 — this sits before any execution path by construction).
     if proposal:
-        msgs.append({"role":"system","content":"(front-door 3B proposed, NOT executed — treat as a hint only: "+proposal[:600]+")"})
+        # user-role, NOT system: the proposal is untrusted model output (steerable by
+        # anything in the history) — elevating it to system authority would hand a
+        # prompt-injection a privileged channel into the 7B. Bracketed as machine context.
+        msgs.append({"role":"user","content":"[front-door note — the local 3B proposed the following and it was DISCARDED, not executed. Possibly-wrong hint, apply your own judgment: "+proposal[:600]+"]"})
     turn(msgs)
 
 def _model_pulled():
