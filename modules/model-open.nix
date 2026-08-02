@@ -5,7 +5,7 @@
 # Cloudflare download over flaky wifi (the exact 2-day install pain). Boot Agent OS and
 # it is alive.
 #
-# HOW: the qwen2.5:7b-instruct weights (Q4_K_M GGUF, single file, ~4.68GB) are a
+# HOW: the qwen3.5:9b weights (UD-Q4_K_XL GGUF, single file, ~5.97GB) are a
 # fixed-output derivation — content-hashed, in the Nix closure, therefore IN THE IMAGE
 # (Rabbot's "lean reproducible" pick over an installer-staged tarball). At first boot a
 # local oneshot imports them into Ollama over the loopback API (`ollama create`) — a
@@ -25,21 +25,29 @@
 # fold this in there; do not re-solve it.
 { config, pkgs, lib, ... }:
 let
-  modelTag = "qwen2.5:7b-instruct";
+  modelTag = "qwen3.5:9b";
 
   # --- the weights: fixed-output derivation → in the closure → in the image -----
+  # Qwen3.5-9B (Mar 2026) replaces qwen2.5:7b-instruct (two generations stale).
+  # BFCL-V4 66.1 vs Qwen3-30B-A3B-Thinking's 42.4 — a 56% relative jump in agentic
+  # tool-calling at a third the parameters. TAU2-Bench 79.1. Most intelligent model
+  # under 10B as of Aug 2026.
+  # Unsloth UD-Q4_K_XL ("Unsloth Dynamic") quantises layers non-uniformly and beats a
+  # flat Q4_K_M at ~the same size. Q4_K_M is the FLOOR for reliable tool-calling —
+  # do not go below it; sub-Q4 breaks structured tool output.
   gguf = pkgs.fetchurl {
-    name = "qwen2.5-7b-instruct-q4_k_m.gguf";
-    url = "https://huggingface.co/bartowski/Qwen2.5-7B-Instruct-GGUF/resolve/main/Qwen2.5-7B-Instruct-Q4_K_M.gguf";
-    # HF LFS oid 65b8fcd92af6b4fefa935c625d1ac27ea29dcb6ee14589c55a8f115ceaaa1423
-    hash = "sha256-Zbj82Sr2tP76k1xiXRrCfqKdy27hRYnFWo8RXOqqFCM=";
+    name = "qwen3.5-9b-ud-q4_k_xl.gguf";
+    url = "https://huggingface.co/unsloth/Qwen3.5-9B-GGUF/resolve/main/Qwen3.5-9B-UD-Q4_K_XL.gguf";
+    # HF LFS oid 6f5d30666c2d8ae16a306e616d95341dcf3cc46810df84d7e6f5a7d1e4c1b293 (5.97 GB)
+    hash = "sha256-b10wZmwtiuFqMG5hbZU0Hc88xGgQ34TX5vWn0eTBspM=";
   };
 
-  # --- the Modelfile: ChatML template + qwen2.5 stops --------------------------
+  # --- the Modelfile: ChatML template + qwen3.5 stops --------------------------
   # Explicit template (not GGUF-metadata auto-detect) so the chat wiring is deterministic
-  # across Ollama versions. Tool-call template is a follow-up if agent-brain wants native
-  # tools; agent-brain drives via its own protocol regardless.
-  modelfile = pkgs.writeText "qwen2.5-instruct.modelfile" ''
+  # across Ollama versions. Qwen3.5 keeps the ChatML <|im_start|>/<|im_end|> framing.
+  # NOTE: Qwen3.5 defaults to THINKING mode and is a token hog if left unconstrained —
+  # an interactive OS shell must cap reasoning. See PARAMETER num_predict below.
+  modelfile = pkgs.writeText "qwen3.5-instruct.modelfile" ''
     FROM ${gguf}
     TEMPLATE """{{ if .System }}<|im_start|>system
     {{ .System }}<|im_end|>
@@ -51,6 +59,7 @@ let
     PARAMETER stop "<|im_start|>"
     PARAMETER stop "<|im_end|>"
     PARAMETER temperature 0.7
+    PARAMETER num_predict 2048
   '';
 in {
   # First-boot seed: import the bundled weights into Ollama LOCALLY (no network). Runs

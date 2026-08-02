@@ -18,8 +18,8 @@ try:
 except ImportError:
     _PTK = False
 
-OLLAMA="http://127.0.0.1:11434/api/chat"; MODEL="qwen2.5:7b-instruct"
-MODEL_3B="qwen2.5:3b-augur"  # front-door (model-3b-open.nix); absent → front-door bypasses to 7B
+OLLAMA="http://127.0.0.1:11434/api/chat"; MODEL="qwen3.5:9b"
+MODEL_3B="qwen2.5:3b-augur"  # front-door (model-3b-open.nix); absent → front-door bypasses to the 9B main brain
 
 # ── THE SOUL (genesis lock, Geist ruling "bind not bytes") ─────────────────────
 # These two are BUILD-TIME LITERALS. genesis-open.nix substitutes @GENESIS_PATH@ with

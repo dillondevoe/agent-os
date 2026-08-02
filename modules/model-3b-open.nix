@@ -1,7 +1,7 @@
 # modules/model-3b-open.nix — SECOND brain, BAKED INTO THE IMAGE (OPEN variant).
 #
 # Companion to modules/model-open.nix. That module bakes the DEFAULT 7B
-# (qwen2.5:7b-instruct) the agent serves. THIS module bakes an ADDITIONAL, NON-DEFAULT
+# (qwen3.5:9b) the agent serves. THIS module bakes an ADDITIONAL, NON-DEFAULT
 # 3B — the Augur "switchboard" run-6 fine-tune — under a DISTINCT Ollama tag so both
 # models are resident and selectable. It does NOT change agent-brain's default model:
 # a default-swap is a separate, Dillon-gated change (roadmap: "no default-swap till nod").

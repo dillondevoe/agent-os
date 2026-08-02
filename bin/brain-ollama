@@ -5,7 +5,7 @@ A minimal, dependency-free chat client for a *local* Ollama server. agent-shell
 execs whatever `$BRAIN` names; point BRAIN at this to make the login shell talk
 to a model running on the machine itself — no cloud, no API key, works grid-down.
 
-  OLLAMA_HOST=http://127.0.0.1:11434 OLLAMA_MODEL=qwen2.5:7b brain-ollama
+  OLLAMA_HOST=http://127.0.0.1:11434 OLLAMA_MODEL=qwen3.5:9b brain-ollama
 
 v0 is deliberately CHAT-ONLY: it does not run shell commands and does not yet
 read/write `mem`. Command-execution (the agentic Djinn) is a later, security-
@@ -19,7 +19,7 @@ import json, os, re, sys, urllib.request, urllib.error, http.client
 HOST  = os.environ.get("OLLAMA_HOST", "http://127.0.0.1:11434").rstrip("/")
 if not HOST.startswith(("http://", "https://")):     # env-sourced, not model — but harden as knobs multiply
     sys.stderr.write(f"[brain-ollama] refusing non-http(s) OLLAMA_HOST: {HOST!r}\n"); sys.exit(2)
-MODEL = os.environ.get("OLLAMA_MODEL", "qwen2.5:7b")
+MODEL = os.environ.get("OLLAMA_MODEL", "qwen3.5:9b")
 SYSTEM = os.environ.get(
     "BRAIN_SYSTEM",
     "You are the resident agent of this computer (Agent OS). You run locally on "
