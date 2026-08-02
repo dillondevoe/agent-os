@@ -41,7 +41,7 @@ import json, os, re, subprocess, sys, urllib.request, urllib.error, http.client
 HOST  = os.environ.get("OLLAMA_HOST", "http://127.0.0.1:11434").rstrip("/")
 if not HOST.startswith(("http://", "https://")):     # env-sourced, not model — but harden as knobs multiply
     sys.stderr.write(f"[agent-loop] refusing non-http(s) OLLAMA_HOST: {HOST!r}\n"); sys.exit(2)
-MODEL = os.environ.get("OLLAMA_MODEL", "qwen2.5:7b")
+MODEL = os.environ.get("OLLAMA_MODEL", "qwen3.5:9b")
 SYSTEM = os.environ.get(
     "BRAIN_SYSTEM",
     "You are the resident agent of this computer (Agent OS). You run locally on the "

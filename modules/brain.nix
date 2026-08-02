@@ -31,7 +31,7 @@
   environment.variables = {
     BRAIN        = "brain-ollama";          # local floor IS the brain in v0.1 — no cloud path
     OLLAMA_HOST  = "http://127.0.0.1:11434";
-    OLLAMA_MODEL = "qwen2.5:7b-instruct";   # 7B (~4.7GB) fast tier = v0.1 default brain
+    OLLAMA_MODEL = "qwen3.5:9b";   # 9B (~6.6GB) agentic tier = v0.1 default brain
   };
 
   # First-boot brain bootstrap. The mem-REPL floor (agent-shell with no model) has no
@@ -65,7 +65,7 @@
       say() { printf '%s\n' "$*" > "$STATUS.tmp" 2>/dev/null && chmod 0644 "$STATUS.tmp" 2>/dev/null && mv -f "$STATUS.tmp" "$STATUS" 2>/dev/null || true; }
 
       # already have it? nothing to do (covers sealed + all later boots).
-      if "$OLLAMA" list 2>/dev/null | grep -q 'qwen2.5:7b-instruct'; then
+      if "$OLLAMA" list 2>/dev/null | grep -q 'qwen3.5:9b'; then
         say "model already present"; echo "agent-os: model already present"; exit 0
       fi
       # Wait for REAL connectivity — network-online.target can be reached before wifi has
@@ -80,8 +80,8 @@
         timeout 4 ${pkgs.bash}/bin/bash -c ': >/dev/tcp/registry.ollama.ai/443' >/dev/null 2>&1 && break
         echo "agent-os: waiting for network... ($_i/24)"; say "waiting for network... ($_i/24)"; sleep 5
       done
-      echo "agent-os: pulling qwen2.5:7b-instruct (~4.7GB, first boot only)..."
-      say "starting download (~4.7GB, first boot only)..."
+      echo "agent-os: pulling qwen3.5:9b (~6.6GB, first boot only)..."
+      say "starting download (~6.6GB, first boot only)..."
       # Stream the pull's progress into the status file: ollama redraws one progress line with
       # carriage returns, so split \r into \n and keep writing the LATEST line. Capture the pull's
       # REAL exit code out-of-band (a file, NOT the pipe) so the tee can't mask a failure:
@@ -94,7 +94,7 @@
       # kill the subshell before `echo $?` runs and lose the real rc (_RCF missing → cat falls back to 1
       # — still FAILED so the invariant holds, but the "rc=$_rc" log would always lie "1"). With +e the
       # echo always records the true rc.
-      ( set +e; "$OLLAMA" pull qwen2.5:7b-instruct 2>&1; echo $? > "$_RCF" ) | tr '\r' '\n' | while IFS= read -r _l; do
+      ( set +e; "$OLLAMA" pull qwen3.5:9b 2>&1; echo $? > "$_RCF" ) | tr '\r' '\n' | while IFS= read -r _l; do
         # `|| true`: a trailing-empty tr'd line makes the [ -n ] test false → the && chain returns 1 → the
         # while (this pipeline's tail element) returns 1 → the script's `set -e` would spuriously mark a
         # GOOD pull FAILED. Force the body's rc to 0.
