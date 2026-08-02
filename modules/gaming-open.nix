@@ -40,5 +40,8 @@
     "steam-unwrapped"
     "steam-run"
     "steamcmd"
+    # Not gaming — this module just owns the variant's single allowUnfreePredicate
+    # (two definitions of a function option conflict, so additions land here).
+    "claude-code"
   ];
 }

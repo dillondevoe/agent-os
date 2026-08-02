@@ -197,6 +197,11 @@ in {
   # live; the rest is the usual agent toolbox.
   environment.systemPackages = with pkgs; [
     git curl jq ripgrep fd bat neovim python3 rsync tmux htop
+    # Claude Code CLI (Dillon msg 9280: "talk claude through this box"). Unfree —
+    # whitelisted in gaming-open.nix's allowUnfreePredicate (single shared predicate;
+    # a second definition elsewhere would conflict). Auth is per-user OAuth (`claude`
+    # → browser login with the Max account) — no secrets baked into the image.
+    claude-code
   ];
 
   # The box rebuilds itself from nixpkgs (and here the operator has full sudo to do so).
