@@ -127,7 +127,7 @@ def chat_stream(msgs):
     # split across term width, so kitty never has to hard-wrap mid-word. Dumb on purpose: no
     # reflow on resize, just wrap-at-word going forward from turn start.
     term_cols=shutil.get_terminal_size(fallback=(80,24)).columns
-    body=json.dumps({"model":MODEL,"messages":msgs,"tools":TOOLS,"stream":True}).encode()
+    body=json.dumps({"model":MODEL,"messages":msgs,"tools":TOOLS,"stream":True,"keep_alive":-1}).encode()
     r=urllib.request.Request(OLLAMA,data=body,headers={"Content-Type":"application/json"})
     t0=time.time(); content=""; tool_calls=[]; first_token=False; eval_count=0; eval_dur=0.0
     col=0; in_code=False
@@ -187,7 +187,7 @@ def chat_stream(msgs):
 
 def chat(msgs):
     # non-streaming fallback, kept for --once callers that want a single return value only
-    body=json.dumps({"model":MODEL,"messages":msgs,"tools":TOOLS,"stream":False}).encode()
+    body=json.dumps({"model":MODEL,"messages":msgs,"tools":TOOLS,"stream":False,"keep_alive":-1}).encode()
     r=urllib.request.Request(OLLAMA,data=body,headers={"Content-Type":"application/json"})
     return json.load(urllib.request.urlopen(r,timeout=180))["message"]
 
