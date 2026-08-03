@@ -74,6 +74,33 @@
       };
 
       checks.${system} = {
+        # Every .nix module PARSES — including ones nothing imports yet.
+        #
+        # WHY THIS IS ITS OWN CHECK: `agentos-open-imports` proves the modules that ARE
+        # imported are wired in. Nothing proved an UNIMPORTED module is even syntactically
+        # valid, so a broken or half-written module can sit on main indefinitely and only
+        # explode for the first person who imports it. Same failure shape as a config fix
+        # that never reaches the running process: green CI that never exercised the thing.
+        #
+        # `nix-instantiate --parse` checks syntax WITHOUT evaluating, so it needs none of
+        # the module arguments a real import would demand.
+        modules-parse =
+          let p = nixpkgs.legacyPackages.${system}; in
+          p.runCommand "modules-parse-check" { nativeBuildInputs = [ p.nix ]; } ''
+            export NIX_STATE_DIR="$(mktemp -d)"
+            fail=0
+            for f in ${./modules}/*.nix; do
+              if nix-instantiate --parse "$f" >/dev/null 2>err.txt; then
+                echo "ok          $(basename "$f")"
+              else
+                echo "PARSE FAIL  $(basename "$f")"; sed 's/^/    /' err.txt; fail=1
+              fi
+            done
+            [ "$fail" = 0 ] || { echo "modules-parse: a module does not parse"; exit 1; }
+            echo "modules-parse: all modules parse"
+            touch $out
+          '';
+
         # Phase 2 · Step 1 — evaluating the capability registry FORCES its invariant
         # assertions (mechanism 3 + INV-2 + schema). Any violation throws during eval,
         # so `nix flake check` fails to build this. That failure IS the test — a
