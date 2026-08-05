@@ -76,10 +76,14 @@ let
     url = "https://huggingface.co/dillondevoe/agent-os-qwen3.5-9b-lora/resolve/main/adapter_config.json";
     hash = "sha256-oC9q1onuYMy+tHjLc2Fqn/NtshXCCI6Dku4simUZaJM=";
   };
-  adapterDir = pkgs.linkFarm "qwen3.5-9b-agentos-lora" [
-    { name = "adapter_model.safetensors"; path = adapter; }
-    { name = "adapter_config.json";       path = adapterConfig; }
-  ];
+  # Real copies, not linkFarm: Ollama's directory walk does not resolve symlinked
+  # entries ("no Modelfile or safetensors files found" on a farm of links — second
+  # Dell seed attempt, 2026-08-05).
+  adapterDir = pkgs.runCommand "qwen3.5-9b-agentos-lora" { } ''
+    mkdir -p $out
+    cp ${adapter}       $out/adapter_model.safetensors
+    cp ${adapterConfig} $out/adapter_config.json
+  '';
 
   # Ollama consumes a LoRA via ADAPTER in the modelfile. The base FROM must be the tag the
   # image already seeded, so this derivation adds a lightweight layer instead of re-shipping
