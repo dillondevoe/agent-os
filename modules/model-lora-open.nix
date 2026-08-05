@@ -56,9 +56,9 @@ let
   #   1. upload adapter_model.safetensors (+ adapter_config.json) to a HF model repo
   #   2. hash it:  nix hash convert --hash-algo sha256 --to sri <sha256 of the file>
   #   3. set adapterUrl + adapterHash below, and flip `published` to true
-  published = false;
-  adapterUrl = "https://huggingface.co/OWNER/agent-os-qwen3.5-9b-lora/resolve/main/adapter_model.safetensors";
-  adapterHash = "";
+  published = true;
+  adapterUrl = "https://huggingface.co/dillondevoe/agent-os-qwen3.5-9b-lora/resolve/main/adapter_model.safetensors";
+  adapterHash = "sha256-7urBWQWgOhbIdrXGyT5iT/+SVh2yabRpjjtOtNtiJyY=";
 
   adapter = pkgs.fetchurl {
     name = "qwen3.5-9b-agentos-lora.safetensors";
