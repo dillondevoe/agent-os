@@ -66,6 +66,21 @@ let
     hash = adapterHash;
   };
 
+  # Ollama reads a safetensors (PEFT) adapter as a DIRECTORY: it opens
+  # adapter_config.json next to the weights to learn rank/targets. Pointing ADAPTER at
+  # the bare .safetensors file fails at seed time with "open adapter_config.json: no
+  # such file or directory" (first Dell boot, 2026-08-05). Both files are published in
+  # the HF repo; assemble them into one store path with Ollama's expected filenames.
+  adapterConfig = pkgs.fetchurl {
+    name = "qwen3.5-9b-agentos-lora-config.json";
+    url = "https://huggingface.co/dillondevoe/agent-os-qwen3.5-9b-lora/resolve/main/adapter_config.json";
+    hash = "sha256-oC9q1onuYMy+tHjLc2Fqn/NtshXCCI6Dku4simUZaJM=";
+  };
+  adapterDir = pkgs.linkFarm "qwen3.5-9b-agentos-lora" [
+    { name = "adapter_model.safetensors"; path = adapter; }
+    { name = "adapter_config.json";       path = adapterConfig; }
+  ];
+
   # Ollama consumes a LoRA via ADAPTER in the modelfile. The base FROM must be the tag the
   # image already seeded, so this derivation adds a lightweight layer instead of re-shipping
   # 6GB of weights.
@@ -76,7 +91,7 @@ let
   # mistake depressed the first eval run's parse rate.
   modelfile = pkgs.writeText "qwen3.5-9b-agentos.modelfile" ''
     FROM ${baseTag}
-    ADAPTER ${adapter}
+    ADAPTER ${adapterDir}
     PARAMETER stop "<|im_start|>"
     PARAMETER stop "<|im_end|>"
     PARAMETER temperature 0.7
