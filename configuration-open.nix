@@ -63,6 +63,7 @@ in {
     ./modules/settings-open.nix
     ./modules/model-open.nix
     ./modules/model-3b-open.nix   # additive, NON-DEFAULT 2nd brain (qwen2.5:3b-augur); default unchanged
+    ./modules/model-lora-open.nix # seeds qwen3.5:9b-agentos (base + fine-tuned adapter); selected below
     ./modules/genesis-open.nix
     ./modules/calculator-open.nix
     ./modules/files-open.nix
@@ -189,7 +190,12 @@ in {
   };
   environment.variables = {
     OLLAMA_HOST  = "http://127.0.0.1:11434";
-    OLLAMA_MODEL = "qwen2.5:7b-instruct";
+    # qwen3.5:9b-agentos = base 9B + the fine-tuned LoRA (model-lora-open.nix), selected
+    # per Dillon's reveal-boot go-ahead (msg 9410). Rollback is `OLLAMA_MODEL=qwen3.5:9b`
+    # in the session — both tags stay seeded, no rebuild needed. (The previous value here,
+    # qwen2.5:7b-instruct, was #66 drift: model-open.nix stopped seeding that tag when the
+    # 9B became the default brain, so this env pointed at a model the image no longer ships.)
+    OLLAMA_MODEL = "qwen3.5:9b-agentos";
   };
 
   # --- toolbox: a normal, usable box -------------------------------------------
