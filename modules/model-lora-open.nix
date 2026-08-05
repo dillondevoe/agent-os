@@ -53,37 +53,30 @@ let
   # assertion message below at EVAL time rather than an opaque hash-mismatch at BUILD time.
   #
   # To publish:
-  #   1. upload adapter_model.safetensors (+ adapter_config.json) to a HF model repo
-  #   2. hash it:  nix hash convert --hash-algo sha256 --to sri <sha256 of the file>
-  #   3. set adapterUrl + adapterHash below, and flip `published` to true
+  #   1. convert the PEFT adapter to GGUF (see WHY GGUF below):
+  #        python llama.cpp/convert_lora_to_gguf.py <adapter-dir> \
+  #          --base-model-id Qwen/Qwen3.5-9B --outtype f16
+  #   2. host the .gguf on a public URL (GitHub release asset here; the safetensors
+  #      original + training details live at HF dillondevoe/agent-os-qwen3.5-9b-lora)
+  #   3. hash it (SRI: base64 of the raw sha256, prefixed "sha256-")
+  #   4. set adapterUrl + adapterHash below, and flip `published` to true
+  #
+  # WHY GGUF, NOT THE SAFETENSORS PEFT DIR (first Dell boot, 2026-08-05): Ollama's
+  # safetensors ADAPTER conversion supports ONLY Llama/Mistral/Gemma architectures
+  # (docs/modelfile: "Currently supported Safetensor adapters"). For a Qwen base every
+  # safetensors layout fails at seed time — the bare file dies with "open
+  # adapter_config.json: no such file or directory", a directory with both PEFT files
+  # dies with "no Modelfile or safetensors files found". A GGUF adapter sidesteps the
+  # conversion entirely and is the format Ollama pairs with a GGUF FROM tag anyway.
   published = true;
-  adapterUrl = "https://huggingface.co/dillondevoe/agent-os-qwen3.5-9b-lora/resolve/main/adapter_model.safetensors";
-  adapterHash = "sha256-7urBWQWgOhbIdrXGyT5iT/+SVh2yabRpjjtOtNtiJyY=";
+  adapterUrl = "https://github.com/dillondevoe/agent-os/releases/download/lora-v1/qwen3.5-9b-agentos-lora.gguf";
+  adapterHash = "sha256-TvXe8nF9AzN7Y52dWUI/4tDSrDR+qEveKK+BsKvotO0=";
 
   adapter = pkgs.fetchurl {
-    name = "qwen3.5-9b-agentos-lora.safetensors";
+    name = "qwen3.5-9b-agentos-lora.gguf";
     url = adapterUrl;
     hash = adapterHash;
   };
-
-  # Ollama reads a safetensors (PEFT) adapter as a DIRECTORY: it opens
-  # adapter_config.json next to the weights to learn rank/targets. Pointing ADAPTER at
-  # the bare .safetensors file fails at seed time with "open adapter_config.json: no
-  # such file or directory" (first Dell boot, 2026-08-05). Both files are published in
-  # the HF repo; assemble them into one store path with Ollama's expected filenames.
-  adapterConfig = pkgs.fetchurl {
-    name = "qwen3.5-9b-agentos-lora-config.json";
-    url = "https://huggingface.co/dillondevoe/agent-os-qwen3.5-9b-lora/resolve/main/adapter_config.json";
-    hash = "sha256-oC9q1onuYMy+tHjLc2Fqn/NtshXCCI6Dku4simUZaJM=";
-  };
-  # Real copies, not linkFarm: Ollama's directory walk does not resolve symlinked
-  # entries ("no Modelfile or safetensors files found" on a farm of links — second
-  # Dell seed attempt, 2026-08-05).
-  adapterDir = pkgs.runCommand "qwen3.5-9b-agentos-lora" { } ''
-    mkdir -p $out
-    cp ${adapter}       $out/adapter_model.safetensors
-    cp ${adapterConfig} $out/adapter_config.json
-  '';
 
   # Ollama consumes a LoRA via ADAPTER in the modelfile. The base FROM must be the tag the
   # image already seeded, so this derivation adds a lightweight layer instead of re-shipping
@@ -95,7 +88,7 @@ let
   # mistake depressed the first eval run's parse rate.
   modelfile = pkgs.writeText "qwen3.5-9b-agentos.modelfile" ''
     FROM ${baseTag}
-    ADAPTER ${adapterDir}
+    ADAPTER ${adapter}
     PARAMETER stop "<|im_start|>"
     PARAMETER stop "<|im_end|>"
     PARAMETER temperature 0.7
