@@ -18,7 +18,10 @@ try:
 except ImportError:
     _PTK = False
 
-OLLAMA="http://127.0.0.1:11434/api/chat"; MODEL="qwen3.5:9b"
+# MODEL from env (P0 fix #2, spec-agentos-ux-polish 2026-08-05: the tuned qwen3.5:9b-agentos
+# was seeded but unused because of this hardcode — same class as the mini's 08-02 launcher scar).
+# The systemd/kitty launchers set OLLAMA_MODEL; bare dev runs keep the base default.
+OLLAMA="http://127.0.0.1:11434/api/chat"; MODEL=os.environ.get("OLLAMA_MODEL","qwen3.5:9b")
 MODEL_3B="qwen2.5:3b-augur"  # front-door (model-3b-open.nix); absent → front-door bypasses to the 9B main brain
 
 # ── THE SOUL (genesis lock, Geist ruling "bind not bytes") ─────────────────────
@@ -153,7 +156,7 @@ def chat_stream(msgs):
     body=json.dumps({"model":MODEL,"messages":msgs,"tools":TOOLS,"stream":True,"keep_alive":-1}).encode()
     r=urllib.request.Request(OLLAMA,data=body,headers={"Content-Type":"application/json"})
     t0=time.time(); content=""; tool_calls=[]; first_token=False; eval_count=0; eval_dur=0.0
-    col=0; in_code=False
+    col=0; in_code=False; thinking_seen=False
     # Code-block rendering (P1 item 3, task #265): dim everything inside a ``` fence so it
     # reads as distinct from prose. Simplified for streaming — no box/indent, no collapse —
     # a token can only toggle the fence once (rare backtick-split-across-chunks edge case
@@ -179,11 +182,29 @@ def chat_stream(msgs):
                 if not line: continue
                 chunk=json.loads(line)
                 msg=chunk.get("message") or {}
+                # THINKING RENDER (the actual P0 fix, spec "P0 DIAGNOSIS COMPLETE" 2026-08-06):
+                # qwen3.5:9b is a thinking model on a ~3 tok/s CPU — it emits a `thinking`
+                # stream for minutes before any content. Invisible thinking == "spinning
+                # forever". Render it as dim italic rapid-fire text as it streams; when the
+                # real answer starts, close with a one-line "— thought for Xs —" separator.
+                # (True collapse of already-printed lines isn't possible in a dumb TTY
+                # stream; the dim+separator approximation keeps the client simple.)
+                tpiece=msg.get("thinking","")
+                if tpiece:
+                    if not first_token and not thinking_seen:
+                        think_stop.set(); think_t.join(timeout=1)
+                        sys.stdout.write("\r\033[K")
+                    thinking_seen=True
+                    sys.stdout.write(f"\033[2;3m{tpiece}\033[0m"); sys.stdout.flush()
                 piece=msg.get("content","")
                 if piece:
                     if not first_token:
-                        think_stop.set(); think_t.join(timeout=1)
-                        sys.stdout.write("\r\033[K"); first_token=True
+                        if not thinking_seen:
+                            think_stop.set(); think_t.join(timeout=1)
+                        sys.stdout.write("\r\033[K")
+                        if thinking_seen:
+                            sys.stdout.write(f"\n\033[2m— thought for {time.time()-t0:.0f}s —\033[0m\n")
+                        first_token=True; col=0
                     content+=piece
                     for tok in re.findall(r'\S+\s*|\s+', piece):
                         if '```' in tok:
@@ -201,8 +222,11 @@ def chat_stream(msgs):
                     eval_dur=(chunk.get("eval_duration") or 0)/1e9
     finally:
         if not first_token:
-            think_stop.set(); think_t.join(timeout=1)
-            sys.stdout.write("\r\033[K")
+            think_stop.set(); think_t.join(timeout=1)  # idempotent if thinking already stopped it
+            if thinking_seen:
+                sys.stdout.write(f"\n\033[2m— thought for {time.time()-t0:.0f}s —\033[0m\n")
+            else:
+                sys.stdout.write("\r\033[K")
     elapsed=time.time()-t0
     tps=f", {eval_count/eval_dur:.0f} tok/s" if eval_count and eval_dur else ""
     sys.stderr.write(f"\033[2m[{elapsed:.1f}s{tps}]\033[0m\n")
