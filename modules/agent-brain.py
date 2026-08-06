@@ -85,6 +85,11 @@ def live_context():
     if mem: lines.append("Memory: "+mem)
     wins=probe("hyprctl clients -j 2>/dev/null | python3 -c \"import sys,json;\\nd=json.load(sys.stdin);\\nprint('; '.join(w.get('class','?')+': '+(w.get('title','')[:40]) for w in d) or 'none')\" 2>/dev/null")
     if wins: lines.append("Open windows right now: "+wins)
+    # Installed-app awareness (rabbot-to-page-ADD-to-pack-brain-blindspot 2026-08-01: brain
+    # looped `nix profile install steam` into the unfree wall while Steam was already on the
+    # box). Volatile tail on purpose — keeps the KV-cached static prefix untouched.
+    apps=probe("for a in steam firefox thunar kitty mpv libreoffice gimp; do command -v $a >/dev/null && printf '%s ' $a; done")
+    if apps: lines.append("Already-installed apps (RUN these, never re-install): "+apps.strip())
     return "\n".join(lines)
 
 # Trimmed for prefill cost (P1 fix #3, rabbot-to-page-P1-UPGRADE-brain-timeout-crash-2026-08-01:
@@ -95,6 +100,8 @@ SYS_BASE=("You are Agent OS's local brain — sovereign, private, on-machine, no
      "config, never .exe/.msi), reboot=`systemctl reboot`, shutdown=`systemctl poweroff`, quick tool="
      "`nix profile install nixpkgs#<name>`. Never use Windows/macOS commands. A permanent system "
      "change (installing Steam, a driver, a service) means editing the OS config — say so. "
+     "Before installing ANYTHING, `run_command command -v <name>` — if present, RUN it instead "
+     "of reinstalling. "
      "You HAVE HANDS: open_url (browser), run_command (shell here), arrange_windows (desktop). "
      "When a tool can do it, CALL IT — don't explain how the user could do it themselves. "
      "BROWSE vs INFERENCE: want to see/read/watch/use something → open_url. Want a quick fact → "
