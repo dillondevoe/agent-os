@@ -361,8 +361,22 @@ def chat_stream_safe(msgs, retries=1):
     # Dillon's retry after the 3min timeout completed fast off the cached slot).
     for attempt in range(retries+1):
         try:
-            with CHAT_LOCK:
+            # Queue visibility (task #265 follow-on, rabbot-to-page-P2-ux-v2-spec): the single
+            # ollama slot may be held by the boot-warmup thread (or a prior turn) — a silent
+            # blocking acquire reads as a hang. Say so while we wait.
+            if not CHAT_LOCK.acquire(blocking=False):
+                def _busy_frame(i):
+                    sys.stdout.write(f"\r\033[K\033[2mbrain busy{'.'*(i%3+1)} (finishing another job, your turn is queued)\033[0m"); sys.stdout.flush()
+                busy_stop,busy_t=_spin(_busy_frame)
+                try:
+                    CHAT_LOCK.acquire()
+                finally:
+                    busy_stop.set(); busy_t.join(timeout=1)
+                    sys.stdout.write("\r\033[K"); sys.stdout.flush()
+            try:
                 return chat_stream(msgs)
+            finally:
+                CHAT_LOCK.release()
         except (TimeoutError, urllib.error.URLError, ConnectionError) as e:
             sys.stdout.write("\r\033[K")
             if attempt < retries:
