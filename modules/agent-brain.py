@@ -22,6 +22,18 @@ except ImportError:
 # was seeded but unused because of this hardcode — same class as the mini's 08-02 launcher scar).
 # The systemd/kitty launchers set OLLAMA_MODEL; bare dev runs keep the base default.
 OLLAMA="http://127.0.0.1:11434/api/chat"; MODEL=os.environ.get("OLLAMA_MODEL","qwen3.5:9b")
+def _think_budget():
+    # OLLAMA_THINK: think-budget control for thinking models on the ~3 tok/s CPU box
+    # (spec 2026-08-05 item b). off/false/0 → no thinking (fastest replies);
+    # low/medium/high → per-level budget where the model supports it; on/true/1 → full.
+    # Unset → omit the key, keep the model's default.
+    v=os.environ.get("OLLAMA_THINK","").strip().lower()
+    if v in ("off","false","0","no"): return False
+    if v in ("on","true","1","yes"): return True
+    if v in ("low","medium","high"): return v
+    return None
+THINK=_think_budget()
+>>>>>>> 57b7201 (feat: OLLAMA_THINK env think-budget control for chat_stream)
 MODEL_3B="qwen2.5:3b-augur"  # front-door (model-3b-open.nix); absent → front-door bypasses to the 9B main brain
 
 # ── THE SOUL (genesis lock, Geist ruling "bind not bytes") ─────────────────────
@@ -160,7 +172,9 @@ def chat_stream(msgs):
     # split across term width, so kitty never has to hard-wrap mid-word. Dumb on purpose: no
     # reflow on resize, just wrap-at-word going forward from turn start.
     term_cols=shutil.get_terminal_size(fallback=(80,24)).columns
-    body=json.dumps({"model":MODEL,"messages":msgs,"tools":TOOLS,"stream":True,"keep_alive":-1}).encode()
+    payload={"model":MODEL,"messages":msgs,"tools":TOOLS,"stream":True,"keep_alive":-1}
+    if THINK is not None: payload["think"]=THINK
+    body=json.dumps(payload).encode()
     r=urllib.request.Request(OLLAMA,data=body,headers={"Content-Type":"application/json"})
     t0=time.time(); content=""; tool_calls=[]; first_token=False; eval_count=0; eval_dur=0.0
     col=0; in_code=False; thinking_seen=False
