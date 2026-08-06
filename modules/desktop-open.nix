@@ -48,10 +48,10 @@ let
     # dedicated class, NOT generic kitty — otherwise every terminal (incl. the cheatsheet
     # popup and $mod+RETURN shells) would get yanked to ws1.
     exec-once = kitty --class brain-home -e sh -c 'while :; do agent-brain; sleep 1; done'
-    # Brain overlay: a SECOND brain instance pinned to special:brain, toggled from anywhere
-    # with Super+grave. Separate history from the ws1 brain — acceptable v1 (ollama
-    # serializes the model slot; CHAT_LOCK is per-process). Same respawn shape.
-    exec-once = kitty --class brain-overlay -e sh -c 'while :; do agent-brain; sleep 1; done'
+    # brain-overlay (a second live chat surface pinned to special:brain) was removed
+    # 2026-08-06 per Dillon's call (rabbot-to-page-brain-overlay-decision-single-surface):
+    # "no idea why we ever made the overlay. it's one chat window always." Single surface
+    # only now; workspace 2 is freed for the demo-window "stage" (task #285 next slice).
     exec-once = hyprctl setcursor Bibata-Modern-Amber 24
     env = XCURSOR_SIZE,24
     env = XCURSOR_THEME,Bibata-Modern-Amber
@@ -100,7 +100,6 @@ let
     # bar, and "always on" bar is the whole point of the systemd unit above.
     windowrule = workspace 1, class:^(brain-home)$
     windowrule = maximize, class:^(brain-home)$
-    windowrule = workspace special:brain, class:^(brain-overlay)$
     windowrule = workspace 2, class:^(firefox)$
     windowrule = workspace 3, class:^(steam)$
     # Games (steam_app_* class) own ws5 fullscreen — console feel: launch from Steam →
@@ -117,7 +116,6 @@ let
     bind = $mod, B, exec, firefox
     bind = $mod, R, exec, wofi --show drun
     bind = $mod, D, exec, wofi --show drun
-    bind = $mod, grave, togglespecialworkspace, brain
     bind = $mod, Q, killactive
     bind = $mod, F, fullscreen
     bind = $mod, V, togglefloating
