@@ -33,7 +33,6 @@ def _think_budget():
     if v in ("low","medium","high"): return v
     return None
 THINK=_think_budget()
->>>>>>> 57b7201 (feat: OLLAMA_THINK env think-budget control for chat_stream)
 MODEL_3B="qwen2.5:3b-augur"  # front-door (model-3b-open.nix); absent → front-door bypasses to the 9B main brain
 
 # ── THE SOUL (genesis lock, Geist ruling "bind not bytes") ─────────────────────
