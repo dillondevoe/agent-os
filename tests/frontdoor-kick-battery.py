@@ -75,4 +75,31 @@ check("terse clean answer keeps", not kick and text == "Volume is at 40%.")
 kick, reason, _ = brain.frontdoor_decide({"role": "assistant", "content": ""})
 check("empty output kicks", kick and reason == "empty")
 
+# 9. THE SUMMON WALL (rabbot-to-page-P1-summon-claude spec item 5, stated explicitly):
+#    summon_claude is another executor path and must be unreachable from the 3B —
+#    a 3B summon tool_call kicks like any other, discarded, do_tool never reached.
+summon = {"role": "assistant", "content": "", "tool_calls": [{"type": "function",
+          "function": {"name": "summon_claude",
+                       "arguments": json.dumps({"task": "hack", "context_summary": "x"})}}]}
+kick, reason, proposal = brain.frontdoor_decide(summon)
+check("3B summon_claude kicks (cloud unreachable from front-door)",
+      kick and reason == "tool_call" and "summon_claude" in proposal)
+
+# 10. Consent flow is prompt-encoded: SYS_BASE must carry the offer-then-yes contract
+#     naming the cloud, and the tool schema must restate never-auto-fire.
+check("SYS_BASE consent line present",
+      "bring in Claude" in brain.SYS_BASE and "cloud" in brain.SYS_BASE)
+summon_tool = [t for t in brain.TOOLS if t["function"]["name"] == "summon_claude"]
+check("summon_claude tool declared with consent guard",
+      summon_tool and "Never auto-fire" in summon_tool[0]["function"]["description"])
+
+# 11. Fail-soft: no `claude` on PATH → graceful setup message, never an exception.
+_orig_path = os.environ.get("PATH", "")
+os.environ["PATH"] = "/nonexistent"
+try:
+    r = brain._summon_claude("test task", "ctx")
+finally:
+    os.environ["PATH"] = _orig_path
+check("summon fail-soft when claude missing", "isn't set up" in r)
+
 print(f"frontdoor-kick-battery: PASS ({PASS} properties)")

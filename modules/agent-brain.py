@@ -64,6 +64,7 @@ TOOLS=[
  {"type":"function","function":{"name":"media_info","description":"Probe an image/video/audio file (type, format, duration, dimensions, streams). Use to inspect a media file.","parameters":{"type":"object","properties":{"path":{"type":"string","description":"path to the media file"}},"required":["path"]}}},
  {"type":"function","function":{"name":"notes","description":"The user's notes. action 'list' shows all notes newest-first; 'read' returns one note's body (needs slug).","parameters":{"type":"object","properties":{"action":{"type":"string","description":"list | read"},"slug":{"type":"string","description":"for 'read': the note slug"}}}}},
  {"type":"function","function":{"name":"fetch_web","description":"Fetch a public web page and return its readable text (nav/boilerplate stripped). Use to READ what a page says (the inference half of browsing); use open_url instead to show the user a site.","parameters":{"type":"object","properties":{"url":{"type":"string","description":"full http(s) URL"}},"required":["url"]}}},
+ {"type":"function","function":{"name":"summon_claude","description":"Bring in cloud Claude for a task beyond the local brain. CLOUD, uses the user's account — call ONLY after the user has explicitly said yes to a summon offer this turn. Never auto-fire.","parameters":{"type":"object","properties":{"task":{"type":"string","description":"what Claude should do, stated completely"},"context_summary":{"type":"string","description":"compact summary of the last ~6 turns relevant to the task — never the whole history, never secrets"}},"required":["task","context_summary"]}}},
 ]
 
 def live_context():
@@ -98,7 +99,13 @@ SYS_BASE=("You are Agent OS's local brain — sovereign, private, on-machine, no
      "You HAVE HANDS: open_url (browser), run_command (shell here), arrange_windows (desktop). "
      "When a tool can do it, CALL IT — don't explain how the user could do it themselves. "
      "BROWSE vs INFERENCE: want to see/read/watch/use something → open_url. Want a quick fact → "
-     "answer directly. Unsure → ask. Confirm tool results in one short line. Be concise, be a doer.")
+     "answer directly. Unsure → ask. Confirm tool results in one short line. Be concise, be a doer. "
+     "Before installing anything, `command -v <name>` — if it's already present, just RUN it. "
+     "This system is built from a flake image: editing /etc/nixos/*.nix does NOTHING; permanent "
+     "changes happen in the OS repo — say so instead of editing. "
+     "SUMMON: when a task is beyond you (deep code work, long documents, hard reasoning), OFFER: "
+     "\"this one's beyond me — want me to bring in Claude? [cloud, uses your account]\" and call "
+     "summon_claude only after an explicit yes. The offer must name that it's cloud.")
 
 def sysmsg():
     # SOUL first, unspoofably (Geist item 3): identity leads, then operational addendum.
@@ -258,7 +265,34 @@ def do_tool(name,args):
         if a=="read": return _run_agos("agos-notes","read",args.get("slug",""))
         return f"notes: unknown action '{a}' (use list|read)"
     if name=="fetch_web":      return _run_agos("agos-web","fetch",args.get("url",""))
+    if name=="summon_claude":  return _summon_claude(args.get("task",""),args.get("context_summary",""))
     return "unknown tool"
+
+def _summon_claude(task,context_summary):
+    # Cloud summon (rabbot-to-page-P1-summon-claude-tool-local-first-consent-flow-2026-08-02,
+    # Dillon msg 9284). Consent lives upstream in SYS_BASE — by the time this runs the user
+    # has said yes. Reachable only through do_tool, which the 3B front-door structurally
+    # cannot fire (kick wall, PR #64) — cloud stays a summon on the 9B side, never an OS
+    # dependency. Brief = task + compacted context + one machine line, never full history.
+    if not task: return "summon error: no task given"
+    brief=(f"Task from Agent OS's local brain (relay your answer to the user through it):\n{task}\n\n"
+           f"Conversation context:\n{context_summary}\n\n"
+           f"Machine: NixOS Linux (Agent OS, flake-built — system changes go in the OS repo).")
+    try:
+        o=subprocess.run(["claude","-p",brief,"--output-format","text"],
+                         capture_output=True,text=True,timeout=180)
+        if o.returncode!=0:
+            err=(o.stderr or o.stdout).strip()[:300]
+            if "log in" in err.lower() or "auth" in err.lower():
+                return "Claude Code isn't logged in — run `claude` once in a terminal to sign in"
+            return f"Claude couldn't complete that: {err or 'no output'}"
+        return (o.stdout.strip() or "(Claude returned nothing)")[:8000]
+    except FileNotFoundError:
+        return "Claude Code isn't set up — run `claude` once in a terminal to log in"
+    except subprocess.TimeoutExpired:
+        return "Claude took too long (180s) — try a smaller ask, or run `claude` in a terminal for long jobs"
+    except Exception as e:
+        return f"summon error: {e}"  # fail-soft — never crash a turn
 
 def _run_agos(*cmd):
     # generic runner for the agos-* ambient-dozen CLIs; passes their JSON stdout through verbatim
@@ -331,16 +365,20 @@ def turn(msgs):
             return
         if clean and not msg.get("content"): print(clean)
         for name,args in calls:
-            label=f"calling {name} {json.dumps(args)}…"
-            def _tool_frame(i,label=label):
-                glyph="\033[7m⚡\033[0m" if i%2 else "⚡"
+            # summon gets its own cloud dressing — visually distinct from local ⚡ work.
+            if name=="summon_claude":
+                label="summoning Claude… [cloud]"; base="☁"
+            else:
+                label=f"calling {name} {json.dumps(args)}…"; base="⚡"
+            def _tool_frame(i,label=label,base=base):
+                glyph=f"\033[7m{base}\033[0m" if i%2 else base
                 sys.stdout.write(f"\r\033[K  \033[33m{glyph} {label}\033[0m"); sys.stdout.flush()
             spin_stop,spin_t=_spin(_tool_frame,interval=0.3)
             try:
                 res=do_tool(name,args)
             finally:
                 spin_stop.set(); spin_t.join(timeout=1)
-                print(f"\r\033[K  \033[33m⚡ {label}\033[0m")
+                print(f"\r\033[K  \033[33m{base} {label}\033[0m")
             res=str(res)
             preview=_compact_for_display(res)
             if preview!=res or "\n" in preview:
