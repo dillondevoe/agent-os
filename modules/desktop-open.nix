@@ -98,19 +98,19 @@ let
     # ws2+ so the brain never gets buried. Super+1 = "take me home."
     # maximize (not fullscreen) on the home brain — deliberate: fullscreen would hide the
     # bar, and "always on" bar is the whole point of the systemd unit above.
-    windowrulev2 = workspace 1, class:^(brain-home)$
-    windowrulev2 = maximize, class:^(brain-home)$
-    windowrulev2 = workspace special:brain, class:^(brain-overlay)$
-    windowrulev2 = workspace 2, class:^(firefox)$
-    windowrulev2 = workspace 3, class:^(steam)$
+    windowrule = workspace 1, class:^(brain-home)$
+    windowrule = maximize, class:^(brain-home)$
+    windowrule = workspace special:brain, class:^(brain-overlay)$
+    windowrule = workspace 2, class:^(firefox)$
+    windowrule = workspace 3, class:^(steam)$
     # Games (steam_app_* class) own ws5 fullscreen — console feel: launch from Steam →
     # game owns ws5, Super+1 back to brain, Super+5 back to game. Steam client itself
     # stays ws3 windowed. `immediate` (tearing) deliberately NOT set — needs its own
     # eval on this Mesa/iGPU (post-reset polish, per spec addendum; same for gamescope).
-    windowrulev2 = workspace 5, class:^(steam_app_.*)$
-    windowrulev2 = fullscreen, class:^(steam_app_.*)$
+    windowrule = workspace 5, class:^(steam_app_.*)$
+    windowrule = fullscreen, class:^(steam_app_.*)$
     # Cheatsheet popup stays a normal floating window — never tiled away or yanked.
-    windowrulev2 = float, title:^(cheatsheet)$
+    windowrule = float, title:^(cheatsheet)$
 
     $mod = SUPER
     bind = $mod, RETURN, exec, kitty
