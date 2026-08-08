@@ -26,9 +26,21 @@
         ./modules/system-set.nix    # PR-A: SCAFFOLD for the root-side system.set executor (impl in PR-J)
         ./modules/boot-branding.nix
       ];
+      # Stamp OUR repo revision into every built system.
+      #
+      # WHY: `nixos-version` reports `<release>.<nixpkgs-date>.<nixpkgs-shortrev>` — the trailing
+      # hash is the NIXPKGS pin from flake.lock, never this repo's commit. It therefore reads
+      # identically on every build cut from one lockfile and cannot answer "is this box running
+      # current config?" even in principle. That cost a full round-trip on the Dell (2026-08-08):
+      # `26.11.20260726.624af66` was read as a config rev, but 624af66 is nixpkgs and isn't a
+      # valid object in this repo at all, so the intended ancestry check could not be run.
+      #
+      # Read it back on the box with:  nixos-version --configuration-revision
+      # `dirtyShortRev` covers the build-on-the-Dell-live path, where the tree is uncommitted.
+      revModule = { system.configurationRevision = self.shortRev or self.dirtyShortRev or "dirty"; };
       mkSystem = extraModules: nixpkgs.lib.nixosSystem {
         inherit system;
-        modules = baseModules ++ extraModules;
+        modules = baseModules ++ [ revModule ] ++ extraModules;
       };
       # OPEN / MESHED variant (`agentos-open`, Dillon msg 8926). A deliberately
       # PERMISSIVE dev box — OpenSSH + Tailscale + full-power user + real bash shell
@@ -40,7 +52,7 @@
       openModules = [ ./configuration-open.nix ];
       mkOpenSystem = extraModules: nixpkgs.lib.nixosSystem {
         inherit system;
-        modules = openModules ++ extraModules;
+        modules = openModules ++ [ revModule ] ++ extraModules;
       };
     in {
       # The whole machine. `agent-shell.nix` is the part that makes it Agent OS;
