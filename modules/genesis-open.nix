@@ -61,7 +61,11 @@ let
   # (PromptSession input lock). Same pinned-shebang mechanism — the env's bin/python3
   # sees its site-packages, so no PYTHONPATH juggling. The brain degrades gracefully
   # (ImportError guard) if run under a bare python3 in dev.
-  brainPython = pkgs.python3.withPackages (ps: [ ps.prompt-toolkit ]);
+  # Phase 1.5 slice 2 (K6, task 287): providers.py needs pyyaml to parse providers.yaml.
+  # Without it here, agent-brain's provider-config import silently fails (caught by its
+  # own ImportError guard) and every boot falls back to legacy OLLAMA_MODEL-only behavior
+  # — the wiring would never actually activate on this build, just warn to stderr.
+  brainPython = pkgs.python3.withPackages (ps: [ ps.prompt-toolkit ps.pyyaml ]);
 
   agent-brain = pkgs.runCommand "agent-brain" { } ''
     mkdir -p "$out/bin"
