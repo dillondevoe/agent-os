@@ -18,10 +18,45 @@ try:
 except ImportError:
     _PTK = False
 
-# MODEL from env (P0 fix #2, spec-agentos-ux-polish 2026-08-05: the tuned qwen3.5:9b-agentos
-# was seeded but unused because of this hardcode — same class as the mini's 08-02 launcher scar).
-# The systemd/kitty launchers set OLLAMA_MODEL; bare dev runs keep the base default.
-OLLAMA="http://127.0.0.1:11434/api/chat"; MODEL=os.environ.get("OLLAMA_MODEL","qwen3.5:9b")
+# ── MODEL / PROVIDER WIRING (Phase 1.5 slice 2, K6, task 287) ──
+# Route the active brain model through the provider config's `floor` role instead of a
+# bare OLLAMA_MODEL env default. The floor provider is the offline guarantee (Geist
+# spine: the OS must always have a local floor) — providers.py enforces that `floor` is
+# required. The cloud `escalate` role is NOT wired here yet; summon_claude remains the
+# cloud path (a later slice connects escalate). Missing providers.yaml → legacy env-only
+# behavior. A PRESENT-BUT-INVALID yaml fails LOUD (a broken provider config is a real
+# error, not a silent degrade — mirrors the genesis-lock "refuse, don't repoint" rule).
+OLLAMA="http://127.0.0.1:11434/api/chat"
+try:
+    from providers import load_providers as _load_providers, resolve as _providers_resolve, \
+        ProviderConfigError as _ProviderConfigError
+except Exception:
+    _load_providers = _providers_resolve = None
+    class _ProviderConfigError(Exception): pass
+
+_PROVIDERS_PATH = os.environ.get("AGENT_OS_PROVIDERS", "/etc/agent-os/providers.yaml")
+_PROVIDERS = None
+if os.path.exists(_PROVIDERS_PATH):
+    if _load_providers is None:
+        sys.stderr.write("\n\033[2m⚠ provider config present but providers.py unavailable — falling back to OLLAMA_MODEL\033[0m\n")
+    else:
+        try:
+            _PROVIDERS = _load_providers(_PROVIDERS_PATH)
+        except _ProviderConfigError as _e:
+            sys.stderr.write(f"\n\033[1;31m⛔ provider config error: {_e} — I am not starting.\033[0m\n")
+            sys.exit(1)
+
+def _floor_model():
+    # floor role resolves to the local ollama provider; its `model:` key (if set) wins,
+    # else the OLLAMA_MODEL env default (unchanged prior behavior). escalate (cloud) is
+    # a later slice — for now the floor is the only model this brain serves.
+    env_model = os.environ.get("OLLAMA_MODEL", "qwen3.5:9b")
+    if not _PROVIDERS:
+        return env_model, "env-default"
+    name, cfg, _degraded = _providers_resolve(_PROVIDERS, "floor")
+    return cfg.get("model", env_model), name
+
+MODEL, ACTIVE_PROVIDER = _floor_model()
 def _think_budget():
     # OLLAMA_THINK: think-budget control for thinking models on the ~3 tok/s CPU box
     # (spec 2026-08-05 item b). off/false/0 → no thinking (fastest replies);

@@ -1,0 +1,23 @@
+# Agent OS provider config — Phase 1.5 (task 287). Deploy to /etc/agent-os/providers.yaml.
+#
+# Hard rules (enforced by modules/providers.py):
+#   - `floor` role is REQUIRED — the OS must always have an offline local brain.
+#   - api_key_ref must be a SECRET REFERENCE (op://vault/item/field), never a literal key.
+#   - a rate-limited/unreachable cloud provider degrades to `floor` — it NEVER silently
+#     spills onto another metered provider (each provider is its own metered bucket).
+#
+# This slice wires ONLY `floor` into agent-brain.py. `escalate` (cloud) is consumed by a
+# later slice; summon_claude remains the cloud path until then.
+providers:
+  local-ollama:
+    kind: ollama
+    cost_tier: free
+    model: qwen3.5:9b          # the floor model. OLLAMA_MODEL env overrides if this is unset.
+  cloud-claude:
+    kind: claude
+    cost_tier: metered
+    api_key_ref: op://agent-os/claude/api_key   # secret reference ONLY — never inline the key.
+
+roles:
+  floor: local-ollama          # always the local brain (offline guarantee)
+  escalate: cloud-claude        # cloud path (wired in a later slice)
