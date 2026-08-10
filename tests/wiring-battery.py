@@ -4,9 +4,25 @@
 # `floor` role, falls back to OLLAMA_MODEL when no config exists, and fails loud on a
 # present-but-invalid config. Mirrors providers-battery.py (standalone, py_compile + logic).
 #
-# Run: PYTHONPATH=modules python3 tests/wiring-battery.py   (needs pyyaml for the
-# provider path; without it the env-fallback + syntax checks still run.)
+# Run: PYTHONPATH=modules python3 tests/wiring-battery.py
+#
+# HARD REQUIREMENT (K6 post-merge bug, PR #77): pyyaml MUST be present in the shipped
+# brainPython env. providers.py does `import yaml`, and agent-brain.py's `except Exception`
+# guard swallows any ImportError — so a missing pyyaml does NOT crash; it silently degrades
+# every boot to legacy OLLAMA_MODEL with an unseen stderr warning. A test that SKIPs on
+# missing pyyaml would HIDE that exact regression (the old SKIP branches were dead code for
+# this reason). So: we FAIL LOUD if pyyaml is absent. Same genesis-lock parity the runtime now
+# has via ps.pyyaml in brainPython.
 import importlib.util, os, sys, tempfile, textwrap, py_compile
+
+# ── pre-flight: pyyaml required, not optional ──
+try:
+    import yaml  # noqa: F401  (imported only to assert the shipped env carries it)
+except ImportError:
+    print("  FAIL pyyaml present in brainPython — providers.py needs it; a missing pyyaml "
+          "silently degrades agent-brain to legacy OLLAMA_MODEL (K6 bug, PR #77). Add ps.pyyaml "
+          "to genesis-open.nix's brainPython.")
+    sys.exit(1)
 
 MOD = "modules/agent-brain.py"
 EX = 0
@@ -65,11 +81,7 @@ try:
     check("config MODEL == floor model key", b.MODEL == "qwen3.5:9b-agentos")
     check("config ACTIVE_PROVIDER == floor name", b.ACTIVE_PROVIDER == "local-ollama")
 except Exception as e:
-    # only a hard failure if pyyaml is present (provider path reachable); else note skip
-    if "No module named 'yaml'" in str(e):
-        print("  SKIP config-path (pyyaml absent here; validated on-box via run-local.sh)")
-    else:
-        check("config load", False); print("    " + repr(e))
+    check("config load", False); print("    " + repr(e))
 
 # 4) missing-model-key in floor → falls back to env default, still names the floor provider
 try:
@@ -85,10 +97,7 @@ try:
     check("floor-without-model key → env default model", b.MODEL == "qwen3.5:9b")
     check("floor-without-model key → provider named", b.ACTIVE_PROVIDER == "local-ollama")
 except Exception as e:
-    if "No module named 'yaml'" in str(e):
-        print("  SKIP floor-without-model (pyyaml absent)")
-    else:
-        check("floor-without-model load", False); print("    " + repr(e))
+    check("floor-without-model load", False); print("    " + repr(e))
 
 print("wiring-battery: " + ("ALL PASS" if EX == 0 else "FAILURES"))
 sys.exit(EX)
