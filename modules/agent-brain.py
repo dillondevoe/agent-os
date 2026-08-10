@@ -271,6 +271,42 @@ def extract_tools(msg):
     clean=re.sub(r"\bbrtc\b","",clean).strip()
     return out, clean
 
+# Per-tool emoji + primary-arg preview (task #285 slice 2, Hermes port — spec-agentos-ux-
+# polish-streaming-and-demo-window-2026-08-05 "Reference implementation" section: every
+# tool gets one emoji + one primary arg shown in the progress line, e.g. "🧮 Calculating
+# (2+3)*4…" instead of the old "calling calculator {"expression": "(2+3)*4"}…" json dump.
+TOOL_META={
+ "open_url":       {"emoji":"🌐","verb":"Opening","arg":"url"},
+ "run_command":    {"emoji":"💻","verb":"Running","arg":"command"},
+ "arrange_windows":{"emoji":"🪟","verb":"Arranging","arg":"action"},
+ "calendar.agenda":{"emoji":"📅","verb":"Checking agenda","arg":None},
+ "calendar.add":   {"emoji":"📅","verb":"Adding event","arg":"summary"},
+ "calendar.now":   {"emoji":"📅","verb":"Checking the time","arg":None},
+ "calendar.cals":  {"emoji":"📅","verb":"Listing calendars","arg":None},
+ "calculator":     {"emoji":"🧮","verb":"Calculating","arg":"expression"},
+ "system":         {"emoji":"⚙️","verb":"System","arg":"action"},
+ "list_files":     {"emoji":"📁","verb":"Listing","arg":"dir"},
+ "read_document":  {"emoji":"📄","verb":"Reading","arg":"path"},
+ "media_info":     {"emoji":"🎞️","verb":"Probing","arg":"path"},
+ "notes":          {"emoji":"📝","verb":"Notes","arg":"action"},
+ "fetch_web":      {"emoji":"🔍","verb":"Fetching","arg":"url"},
+ "summon_claude":  {"emoji":"☁️","verb":"Summoning Claude","arg":None},
+}
+TOOL_PREVIEW_LEN=40  # matches Hermes's default tool_preview_length
+
+def build_tool_preview(name,args,length=TOOL_PREVIEW_LEN):
+    meta=TOOL_META.get(name,{})
+    argkey=meta.get("arg")
+    if not argkey: return ""
+    val=str(args.get(argkey,"") or "")
+    if not val: return ""
+    val=val.replace("\n"," ")
+    return " "+(val if len(val)<=length else val[:length-1]+"…")
+
+def tool_progress_label(name,args):
+    meta=TOOL_META.get(name,{"emoji":"⚡","verb":f"calling {name}"})
+    return meta["emoji"], meta["verb"]+build_tool_preview(name,args)+"…"
+
 HYPR={"tidy":"layoutmsg orientationcycle","close":"killactive","fullscreen":"fullscreen,1",
       "cycle":"cyclenext","split":"togglesplit"}
 def do_tool(name,args):
@@ -427,7 +463,7 @@ def turn(msgs):
             if name=="summon_claude":
                 label="summoning Claude… [cloud]"; base="☁"
             else:
-                label=f"calling {name} {json.dumps(args)}…"; base="⚡"
+                base,label=tool_progress_label(name,args)
             def _tool_frame(i,label=label,base=base):
                 glyph=f"\033[7m{base}\033[0m" if i%2 else base
                 sys.stdout.write(f"\r\033[K  \033[33m{glyph} {label}\033[0m"); sys.stdout.flush()
@@ -439,7 +475,11 @@ def turn(msgs):
                 print(f"\r\033[K  \033[33m{base} {label}\033[0m")
             res=str(res)
             preview=_compact_for_display(res)
-            if preview!=res or "\n" in preview:
+            # Fenced code block for run_command output (Hermes port, task #285 slice 2) —
+            # reads as "the snake emoji + the code it ran" instead of bare dim text.
+            if name=="run_command":
+                print(f"\033[2m```\n{preview}\n```\033[0m")
+            elif preview!=res or "\n" in preview:
                 print(f"\033[2m{preview}\033[0m")
             msgs.append({"role":"tool","content":res})
 
