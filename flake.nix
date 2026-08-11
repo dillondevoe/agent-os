@@ -416,6 +416,26 @@
               "agentos-open-imports: media-open.nix is NOT imported — agos-media missing from systemPackages.";
             assert lib.assertMsg (hasPkg "agos-web")
               "agentos-open-imports: web-open.nix is NOT imported — agos-web missing from systemPackages.";
+            # GUARD-OF-THE-GUARD (Hermes, 08-09): the import asserts are present, but a module's
+            # acceptance BATTERY could be deleted and the build would stay green — same silent-degrade
+            # class as a dropped import. Assert each ambient hand's battery file exists in tests/.
+            # (Flake source is in the store, so builtins.pathExists resolves repo-relative.)
+            assert lib.assertMsg (builtins.pathExists ./tests/calendar-battery.py)
+              "agentos-open-imports: calendar-open battery missing (tests/calendar-battery.py deleted?).";
+            assert lib.assertMsg (builtins.pathExists ./tests/agos-calc-battery.py)
+              "agentos-open-imports: calculator-open battery missing (tests/agos-calc-battery.py deleted?).";
+            assert lib.assertMsg (builtins.pathExists ./tests/agos-sys-battery.py)
+              "agentos-open-imports: settings-open battery missing (tests/agos-sys-battery.py deleted?).";
+            assert lib.assertMsg (builtins.pathExists ./tests/agos-files-battery.py)
+              "agentos-open-imports: files-open battery missing (tests/agos-files-battery.py deleted?).";
+            assert lib.assertMsg (builtins.pathExists ./tests/agos-notes-battery.py)
+              "agentos-open-imports: notes-open battery missing (tests/agos-notes-battery.py deleted?).";
+            assert lib.assertMsg (builtins.pathExists ./tests/agos-doc-battery.py)
+              "agentos-open-imports: docs-open battery missing (tests/agos-doc-battery.py deleted?).";
+            assert lib.assertMsg (builtins.pathExists ./tests/agos-media-battery.py)
+              "agentos-open-imports: media-open battery missing (tests/agos-media-battery.py deleted?).";
+            assert lib.assertMsg (builtins.pathExists ./tests/agos-web-battery.py)
+              "agentos-open-imports: web-open battery missing (tests/agos-web-battery.py deleted?).";
             assert lib.assertMsg (builtins.hasAttr "agos-mail-proton-preflight" cfg.systemd.services)
               "agentos-open-imports: mail-proton-bridge-open.nix is NOT imported — the Proton-via-Bridge cred scaffold (agos-mail-proton-preflight) is absent.";
             pkgs.runCommand "agentos-open-imports-check" { } ''
