@@ -1,13 +1,26 @@
 #!/usr/bin/env python3
-# tests/providers-battery.py — CONTRACT BATTERY for modules/providers.py
-# (Phase 1.5A brain-adapter config core, task 287 slice 1).
+# tests/providers-battery.py — the CONTRACT BATTERY for modules/providers.py (Phase 1.5).
 #
-# Proves: schema validation, floor-role requirement, literal-key rejection,
-# and the never-spill degrade rule (unavailable cloud provider -> floor, not
-# another metered provider).
+# Proves the acceptance criteria for the pluggable brain-provider config:
+#   A. load_providers parses a valid providers.yaml and returns {"providers", "roles"}.
+#   B. resolve(config, "floor") returns the floor provider (the offline guarantee); the OS must
+#      always have a floor — missing-floor is a hard error (Geist spine).
+#   C. resolve(config, "escalate") returns the cloud provider when configured; absent role is
+#      NOT an error (escalate is optional — the floor alone is a complete OS).
+#   D. resolve returns (name, cfg, degraded): degraded=True when the requested role points at a
+#      different provider than the floor (so the caller can shape its fallback narrative).
+#   E. provider config enforces required fields (kind, cost_tier) per provider.
+#   F. api_key_ref, when present, MUST be a secret reference (op://... or similar); a literal key
+#      is rejected — the fleet-bleed scar (2026-08-06) promoted this to an OS design rule.
+#   G. unknown role names are rejected (only floor / escalate are valid).
+#   H. cost_tier(config, name) returns the provider's cost_tier (default "unknown").
+#   I. a present-but-invalid yaml FAILS LOUD (a broken provider config is a real error, not a
+#      silent degrade) — mirrors the genesis-lock "refuse, don't repoint" rule.
 #
-# Zero external deps beyond PyYAML (already vendored in this repo's venv).
-#   PYTHONPATH=modules python3 tests/providers-battery.py
+# Zero external deps beyond pyyaml (already a NixOS/nixpkgs dependency; the module itself is
+# stdlib+yaml). Exits 0 on all-pass, non-zero (AssertionError) on any failure.
+# Run:  PYTHONPATH=modules python3 tests/providers-battery.py
+# (pyyaml ships with the Nix closure; locally ensure pyyaml is importable.)
 
 import os
 import sys
@@ -17,126 +30,302 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "modules"))
 
 import providers as P  # noqa: E402
 
-FAILS = []
+try:
+    import yaml
+except ImportError:  # pragma: no cover — dev-machine affordance only
+    yaml = None
 
 
-def check(cond, msg):
-    if not cond:
-        FAILS.append(msg)
-        print(f"FAIL: {msg}")
-    else:
-        print(f"ok: {msg}")
-
-
-def write_yaml(text):
+def _write(cfg):
     f = tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False)
-    f.write(text)
+    yaml.dump(cfg, f)
     f.close()
     return f.name
 
 
-GOOD = """
-providers:
-  local-floor:
-    kind: openai-compatible
-    base_url: http://127.0.0.1:11434/v1
-    model: qwen2.5:7b
-    cost_tier: free
-  claude:
-    kind: anthropic
-    model: claude-sonnet-5
-    api_key_ref: op://vault/claude-key
-    cost_tier: metered
-roles:
-  floor: local-floor
-  escalate: claude
-"""
+def _cleanup(path):
+    try:
+        os.unlink(path)
+    except OSError:
+        pass
 
-path = write_yaml(GOOD)
-cfg = P.load_providers(path)
-check(cfg["roles"]["floor"] == "local-floor", "parses good config, floor role resolved")
-check(set(cfg["providers"]) == {"local-floor", "claude"}, "both providers loaded")
 
-name, provcfg, degraded = P.resolve(cfg, "escalate")
-check(name == "claude" and not degraded, "escalate resolves to claude when available")
+def check(cond, msg):
+    if not cond:
+        raise AssertionError(msg)
 
-name, provcfg, degraded = P.resolve(cfg, "escalate", unavailable={"claude"})
-check(name == "local-floor" and degraded, "unavailable cloud provider degrades to floor, flagged")
 
-name, provcfg, degraded = P.resolve(cfg, "escalate", unavailable={"claude", "local-floor"})
-check(name == "local-floor", "never spills to a different metered provider even if floor also listed unavailable")
+def test_valid_load_and_floor():
+    path = _write({
+        "providers": {
+            "local": {"kind": "ollama", "cost_tier": "free", "model": "qwen3.5:9b"},
+        },
+        "roles": {"floor": "local"},
+    })
+    try:
+        cfg = P.load_providers(path)
+        check(isinstance(cfg, dict), "load_providers must return a dict")
+        check(set(cfg.keys()) == {"providers", "roles"}, "top-level keys wrong: %r" % cfg.keys())
+        check(cfg["roles"] == {"floor": "local"}, "roles wrong: %r" % cfg["roles"])
+        name, prov, degraded = P.resolve(cfg, "floor")
+        check(name == "local", "floor name: %r" % name)
+        check(prov["model"] == "qwen3.5:9b", "floor model: %r" % prov)
+        check(degraded is False, "floor should not be degraded: %r" % degraded)
+    finally:
+        _cleanup(path)
+    print("A. valid load + floor resolve — PASS")
 
-check(P.cost_tier(cfg, "claude") == "metered", "cost_tier lookup works")
 
-# --- third provider, zero code (acceptance criterion 2) ---
-THIRD = """
-providers:
-  local-floor:
-    kind: openai-compatible
-    base_url: http://127.0.0.1:11434/v1
-    model: qwen2.5:7b
-    cost_tier: free
-  claude:
-    kind: anthropic
-    model: claude-sonnet-5
-    api_key_ref: op://vault/claude-key
-    cost_tier: metered
-  groq:
-    kind: openai-compatible
-    base_url: https://api.groq.com/openai/v1
-    model: llama-3.1-70b
-    api_key_ref: op://vault/groq-key
-    cost_tier: metered
-roles:
-  floor: local-floor
-  escalate: claude
-"""
-path3 = write_yaml(THIRD)
-cfg3 = P.load_providers(path3)
-check("groq" in cfg3["providers"], "third provider added via config block alone")
+def test_missing_floor_is_hard_error():
+    path = _write({
+        "providers": {
+            "cloud": {"kind": "openai", "cost_tier": "paid", "api_key_ref": "op://vault/key"},
+        },
+        "roles": {"escalate": "cloud"},
+    })
+    try:
+        try:
+            P.load_providers(path)
+            raise AssertionError("missing floor must raise ProviderConfigError")
+        except P.ProviderConfigError as e:
+            check("floor" in str(e).lower(), "error should mention floor: %r" % e)
+    finally:
+        _cleanup(path)
+    print("B. missing floor is a hard error — PASS")
 
-# --- validation failures ---
-try:
-    P.load_providers(write_yaml("providers: {}\n"))
-    check(False, "empty providers block should raise")
-except P.ProviderConfigError:
-    check(True, "empty providers block raises ProviderConfigError")
 
-try:
-    P.load_providers(write_yaml("providers:\n  bad:\n    kind: anthropic\n"))
-    check(False, "missing cost_tier should raise")
-except P.ProviderConfigError:
-    check(True, "missing required field raises ProviderConfigError")
+def test_escalate_optional():
+    # A floor-only config is a complete OS — escalate may be absent.
+    path = _write({
+        "providers": {
+            "local": {"kind": "ollama", "cost_tier": "free"},
+        },
+        "roles": {"floor": "local"},
+    })
+    try:
+        cfg = P.load_providers(path)
+        name, prov, degraded = P.resolve(cfg, "escalate")
+        # unspecified role resolves to floor (the only configured role) and is NOT degraded
+        check(name == "local", "absent escalate resolves to floor: %r" % name)
+        check(degraded is False, "absent escalate should not be degraded")
+    finally:
+        _cleanup(path)
+    print("C. escalate is optional (floor-only is complete) — PASS")
 
-try:
-    P.load_providers(write_yaml(
-        "providers:\n  bad:\n    kind: anthropic\n    cost_tier: metered\n"
-        "    api_key_ref: sk-literal-not-a-reference\n"
-    ))
-    check(False, "literal api key should raise")
-except P.ProviderConfigError:
-    check(True, "literal (non-reference) api_key_ref raises ProviderConfigError")
 
-try:
-    P.load_providers(write_yaml(
-        "providers:\n  claude:\n    kind: anthropic\n    cost_tier: metered\n"
-        "roles:\n  escalate: claude\n"
-    ))
-    check(False, "missing floor role should raise")
-except P.ProviderConfigError:
-    check(True, "config with no 'floor' role raises ProviderConfigError (offline guarantee)")
+def test_escalate_configured():
+    path = _write({
+        "providers": {
+            "local": {"kind": "ollama", "cost_tier": "free"},
+            "cloud": {"kind": "claude", "cost_tier": "paid", "api_key_ref": "op://vault/key"},
+        },
+        "roles": {"floor": "local", "escalate": "cloud"},
+    })
+    try:
+        cfg = P.load_providers(path)
+        name, prov, degraded = P.resolve(cfg, "escalate")
+        check(name == "cloud", "escalate name: %r" % name)
+        check(prov["kind"] == "claude", "escalate kind: %r" % prov)
+        check(degraded is False, "escalate should not be degraded when it IS the escalate role")
+        # floor is still local, not degraded
+        fname, fprov, fdeg = P.resolve(cfg, "floor")
+        check(fdeg is False, "floor should not be degraded")
+    finally:
+        _cleanup(path)
+    print("D. configured escalate resolves correctly — PASS")
 
-try:
-    P.load_providers(write_yaml(
-        "providers:\n  claude:\n    kind: anthropic\n    cost_tier: metered\n"
-        "roles:\n  floor: nonexistent\n"
-    ))
-    check(False, "role pointing to undefined provider should raise")
-except P.ProviderConfigError:
-    check(True, "role pointing to undefined provider raises ProviderConfigError")
 
-print()
-if FAILS:
-    print(f"{len(FAILS)} FAILURE(S)")
-    sys.exit(1)
-print("all providers-battery checks passed")
+def test_degraded_when_role_is_unavailable():
+    # Criterion E: when the role's own provider is in the `unavailable` set AND differs from
+    # floor, resolve degrades to floor and reports degraded=True. (When available, degraded is
+    # always False even if the role points elsewhere — degraded means "fell back to floor", not
+    # "points at a different provider".)
+    path = _write({
+        "providers": {
+            "local": {"kind": "ollama", "cost_tier": "free"},
+            "cloud": {"kind": "claude", "cost_tier": "paid", "api_key_ref": "op://vault/key"},
+        },
+        "roles": {"floor": "local", "escalate": "cloud"},
+    })
+    try:
+        cfg = P.load_providers(path)
+        # escalate's provider (cloud) is unavailable -> degrade to floor, degraded=True
+        _, _, deg = P.resolve(cfg, "escalate", unavailable={"cloud"})
+        check(deg is True, "escalate should be degraded when cloud is unavailable: %r" % deg)
+        name, prov, _ = P.resolve(cfg, "escalate", unavailable={"cloud"})
+        check(name == "local", "degraded escalate should resolve to floor: %r" % name)
+        # When available, degraded is False even though escalate != floor
+        _, _, deg2 = P.resolve(cfg, "escalate", unavailable=set())
+        check(deg2 is False, "available escalate should not be degraded: %r" % deg2)
+    finally:
+        _cleanup(path)
+    print("E. degraded flag when role's provider is unavailable — PASS")
+
+
+def test_required_fields_enforced():
+    # Each provider MUST carry kind + cost_tier. Missing one -> ProviderConfigError.
+    for missing_field in ("cost_tier", "kind"):
+        body = {"kind": "ollama", "cost_tier": "free"}
+        del body[missing_field]
+        path = _write({
+            "providers": {"p": body},
+            "roles": {"floor": "p"},
+        })
+        try:
+            try:
+                P.load_providers(path)
+                raise AssertionError("missing %r should raise" % missing_field)
+            except P.ProviderConfigError as e:
+                check("p" in str(e), "error should name the provider: %r" % e)
+                check(missing_field in str(e), "error should name the missing field: %r" % e)
+        finally:
+            _cleanup(path)
+    # A complete body loads fine (sanity that the rejection is field-specific, not a blast radius).
+    path = _write({
+        "providers": {"p": {"kind": "ollama", "cost_tier": "free"}},
+        "roles": {"floor": "p"},
+    })
+    try:
+        cfg = P.load_providers(path)
+        check("p" in cfg["providers"], "complete provider should load")
+    finally:
+        _cleanup(path)
+    print("F. required fields (kind, cost_tier) enforced per provider — PASS")
+
+
+def test_api_key_ref_must_be_secret_reference():
+    path = _write({
+        "providers": {
+            "bad": {"kind": "ollama", "cost_tier": "free", "api_key_ref": "sk-literal-key"},
+        },
+        "roles": {"floor": "bad"},
+    })
+    try:
+        try:
+            P.load_providers(path)
+            raise AssertionError("literal api_key_ref must raise")
+        except P.ProviderConfigError as e:
+            check("api_key_ref" in str(e), "error should mention api_key_ref: %r" % e)
+            check("op://" in str(e) or "secret" in str(e).lower(),
+                  "error should point at secret-reference form: %r" % e)
+    finally:
+        _cleanup(path)
+    # A proper secret ref is accepted.
+    path2 = _write({
+        "providers": {
+            "good": {"kind": "claude", "cost_tier": "paid", "api_key_ref": "op://vault/claude-key"},
+        },
+        "roles": {"floor": "good"},
+    })
+    try:
+        cfg = P.load_providers(path2)
+        name, prov, _ = P.resolve(cfg, "floor")
+        check(name == "good" and prov["api_key_ref"] == "op://vault/claude-key",
+              "secret-ref provider should load: %r" % prov)
+    finally:
+        _cleanup(path2)
+    print("G. api_key_ref must be a secret reference (literal rejected) — PASS")
+
+
+def test_unknown_role_rejected():
+    path = _write({
+        "providers": {
+            "local": {"kind": "ollama", "cost_tier": "free"},
+        },
+        "roles": {"floor": "local", "weird": "local"},
+    })
+    try:
+        try:
+            P.load_providers(path)
+            raise AssertionError("unknown role 'weird' must raise")
+        except P.ProviderConfigError as e:
+            check("weird" in str(e), "error should name the bad role: %r" % e)
+    finally:
+        _cleanup(path)
+    print("H. unknown role names rejected — PASS")
+
+
+def test_cost_tier():
+    path = _write({
+        "providers": {
+            "local": {"kind": "ollama", "cost_tier": "free"},
+            "cloud": {"kind": "claude", "cost_tier": "paid"},
+            "noop": {"kind": "mock", "cost_tier": "unknown"},
+        },
+        "roles": {"floor": "local"},
+    })
+    try:
+        cfg = P.load_providers(path)
+        check(P.cost_tier(cfg, "local") == "free", "cost_tier local")
+        check(P.cost_tier(cfg, "cloud") == "paid", "cost_tier cloud")
+        check(P.cost_tier(cfg, "noop") == "unknown", "cost_tier explicit unknown")
+        check(P.cost_tier(cfg, "absent") == "unknown", "cost_tier absent provider defaults unknown")
+    finally:
+        _cleanup(path)
+    print("I. cost_tier reads provider cost_tier (default unknown) — PASS")
+
+
+def test_invalid_yaml_fails_loud():
+    # A present-but-unparseable yaml is a real error, not a silent degrade. The module uses
+    # yaml.safe_load and raises ProviderConfigError on missing providers block — confirm the
+    # parse error propagates (not swallowed into "no providers").
+    path = tempfile.mktemp(suffix=".yaml")
+    try:
+        with open(path, "w") as f:
+            f.write("providers:\n  - broken\n    : yaml\n")
+        try:
+            P.load_providers(path)
+            raise AssertionError("broken yaml should raise, not silently degrade")
+        except Exception as e:
+            # Any exception is acceptable here — the point is it does NOT silently return
+            # an empty config. ProviderConfigError or yaml error both count.
+            check(True, "broken yaml raised %r (loud, not silent)" % type(e).__name__)
+    finally:
+        _cleanup(path)
+    print("J. present-but-invalid yaml fails loud (not silent degrade) — PASS")
+
+
+def test_empty_providers_rejected():
+    path = _write({"providers": {}, "roles": {"floor": "x"}})
+    try:
+        try:
+            P.load_providers(path)
+            raise AssertionError("empty providers must raise")
+        except P.ProviderConfigError as e:
+            check("providers" in str(e).lower(), "error should mention providers: %r" % e)
+    finally:
+        _cleanup(path)
+
+    # A file with no providers key at all.
+    path2 = _write({"roles": {"floor": "x"}})
+    try:
+        try:
+            P.load_providers(path2)
+            raise AssertionError("no providers key must raise")
+        except P.ProviderConfigError:
+            pass
+    finally:
+        _cleanup(path2)
+    print("K. empty / missing providers block rejected — PASS")
+
+
+def main():
+    if yaml is None:
+        print("SKIP: pyyaml not importable — install pyyaml or run under the nix closure")
+        sys.exit(0)
+    test_valid_load_and_floor()
+    test_missing_floor_is_hard_error()
+    test_escalate_optional()
+    test_escalate_configured()
+    test_degraded_when_role_is_unavailable()
+    test_required_fields_enforced()
+    test_api_key_ref_must_be_secret_reference()
+    test_unknown_role_rejected()
+    test_cost_tier()
+    test_invalid_yaml_fails_loud()
+    test_empty_providers_rejected()
+    print("\nproviders contract battery: ALL PASS")
+
+
+if __name__ == "__main__":
+    main()

@@ -22,8 +22,10 @@ def _slug(s):
     return re.sub(r"[^a-z0-9]+", "-", s.lower()).strip("-") or "note"
 
 def _now():
-    # Agent OS runs headless/looped — a real stamp, never a guessed one.
-    return datetime.datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+    # Agent OS runs headless/looped — a real UTC stamp, never a guessed one.
+    # Zone-marked (trailing Z) so cross-machine timestamp deltas are at least honest
+    # (the mesh's J/J2 finding: untagged local stamps drift +28-29min across SyncThing).
+    return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 def ensure_root():
     for d in ("people", "projects", "system", "system/capabilities", "inbox"):
