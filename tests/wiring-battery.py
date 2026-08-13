@@ -80,8 +80,36 @@ try:
     b = load_brain(yml.name)
     check("config MODEL == floor model key", b.MODEL == "qwen3.5:9b-agentos")
     check("config ACTIVE_PROVIDER == floor name", b.ACTIVE_PROVIDER == "local-ollama")
+    # ESCALATE_STATUS (task 287, escalate-role resolution slice, 2026-08-13): a status-only
+    # signal, distinct from the deferred Anthropic shim — proves the escalate role resolves
+    # to its configured provider without touching chat_stream's wire protocol at all.
+    check("escalate configured when role present + reachable", b.ESCALATE_STATUS["configured"] is True)
+    check("escalate provider name == cloud-claude", b.ESCALATE_STATUS["provider"] == "cloud-claude")
 except Exception as e:
     check("config load", False); print("    " + repr(e))
+
+# 3b) valid config with NO escalate role → ESCALATE_STATUS reports unconfigured, not an error
+try:
+    yml = tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False)
+    yml.write(textwrap.dedent("""
+        providers:
+          local-ollama: {kind: ollama, cost_tier: free, model: qwen3.5:9b-agentos}
+        roles:
+          floor: local-ollama
+    """))
+    yml.close()
+    b = load_brain(yml.name)
+    check("no-escalate-role → ESCALATE_STATUS.configured is False", b.ESCALATE_STATUS["configured"] is False)
+    check("no-escalate-role → ESCALATE_STATUS.provider is None", b.ESCALATE_STATUS["provider"] is None)
+except Exception as e:
+    check("no-escalate-role load", False); print("    " + repr(e))
+
+# 3c) no providers.yaml at all → ESCALATE_STATUS reports unconfigured (legacy env-only mode)
+try:
+    b = load_brain()
+    check("no-config → ESCALATE_STATUS.configured is False", b.ESCALATE_STATUS["configured"] is False)
+except Exception as e:
+    check("no-config ESCALATE_STATUS", False); print("    " + repr(e))
 
 # 4) missing-model-key in floor → falls back to env default, still names the floor provider
 try:
