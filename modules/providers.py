@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
 # Agent OS Phase 1.5A — pluggable brain provider config + role routing.
 # Standalone module: parses a providers.yaml, validates the schema, and resolves
-# which provider answers a `floor`/`escalate` role turn. NOT wired into
-# agent-brain.py yet (task 287, slice 1) — that's a follow-up slice once this
-# core is reviewed. Spec: jarvis-sync/spec-agentos-phase-1.5-pluggable-brain-portable-identity-2026-08-06.md §1.
+# which provider answers a `floor`/`escalate` role turn. WIRED into agent-brain.py
+# as the floor-role resolver since PR #77 (2026-08-10, task 287 slice 2): agent-brain.py
+# reads providers.yaml at startup and resolves `floor` through this module, falling back
+# to the legacy OLLAMA_MODEL env default when providers.yaml is absent; a present-but-
+# invalid yaml fails loud rather than silently degrading. The cloud `escalate` role is
+# not wired yet — that remains a follow-up slice.
+# Spec: jarvis-sync/spec-agentos-phase-1.5-pluggable-brain-portable-identity-2026-08-06.md §1.
 #
 # Hard rule from the spec (2026-08-06 fleet overnight-bleed scar, promoted to an
 # OS design rule): each provider is its own metered bucket. A rate-limited/

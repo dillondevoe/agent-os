@@ -1,6 +1,9 @@
 # Phase 2 · Step 6 — the real confirm channel (the wall's mouth)
 
-Status: **SPEC — Fable amendments 1–4 folded (2026-07-28), awaiting Rabbot verify → merge PR#11** (spec → PR → Fable(code) → merge, THEN code → PR → Fable(code) → merge).
+Status: **SHIPPED (2026-08-12 header update)** — `bin/confirm` + `modules/confirm.nix`
+implement this spec (Fable amendments 1–4 folded 2026-07-28, merged PR#11); `checks.confirm-channel`
+is green. This doc remains the normative spec of record for the confirm channel's design and
+integrity frame.
 Anchor: `docs/phase2-threat-model.md` §3 (INV-1), §7 (confirm channel), §10 (exfil case);
 `docs/phase2-broker-spec.md` §4.5 (authorize), §4.6 (confirm seam), §4.8 (audit ordering).
 Owner: Augur (DVo). Security surface — **branch → PR → Fable, never self-merge, never direct-push.**

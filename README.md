@@ -77,11 +77,16 @@ password** — so it cannot climb to uid 0 and cannot `sudo` around the egress s
 only by a human at a narrow interactive break-glass door (a password login on a separate tty).
 Together with the fail-loud seal above, that's the sovereignty invariant made real, not just declared.
 
-**Not yet:** the capability *broker* — the fine-grained layer that gates each thing the agent can *do*
-through a tool — is designed and being integrated, but not fully wired, so for now the agent is
-no-root-but-otherwise-unsandboxed: treat it as trusted for what it can already reach. Also coming: the
-agent's hands (a tool-use loop through the broker), a GUI-guest for the rare things that need a screen,
-polished onboarding. It's a foundation, not a finished product.
+**Also works (2026-08-12):** the capability *broker* — the fine-grained layer that gates each thing
+the agent can *do* through a tool — is shipped: `bin/broker` (decision pipeline), `bin/confirm` +
+`modules/confirm.nix` (the human-confirm channel), and the invoke seam are wired together in the
+sovereign module set, with green `broker-core` / `confirm-channel` / `seam-live` checks. Of the
+7 registry-declared capabilities, 3 have real implementations (`mem.recall`, `mem.remember`,
+`capabilities.list`); `file.read`, `file.write`, `net.fetch`, and `message.send` are declared in
+the registry but still stubbed pending their impls. Separately, the ambient `agos-*` hands
+(calendar, email, files, notes, web, and more) are fully live on the open variant. Also coming: a
+GUI-guest for the rare things that need a screen, polished onboarding. It's a foundation, not a
+finished product.
 
 Tested on a Dell Latitude 5440 (13th-gen Intel, 32GB, CPU inference). Modern Dells hide the NVMe
 behind Intel VMD — if boot times out looking for the disk, set **BIOS → SATA Operation → AHCI**

@@ -16,7 +16,7 @@ Post Scarcity (the MCP registry where Djinns meet on your behalf). We build it i
 
 ---
 
-## Phase 0 — BOOT (make it real). Owner: Augur. ← ACTIVE
+## Phase 0 — BOOT (make it real). Owner: Augur. **DONE (2026-07-30 — booted on the Dell; gate met).**
 Nothing else matters until it boots and the Djinn talks.
 1. Clone `github.com/dillondevoe/agent-os` onto WSL2.
 2. `nix flake check` — fix eval errors direct-to-main until it passes.
@@ -25,15 +25,18 @@ Nothing else matters until it boots and the Djinn talks.
 5. Report what boots + what broke.
 **Gate: a VM boots into the agent-shell and the mem layer works.**
 
-## Phase 1 — THE BRAIN. Owner: Augur.
+## Phase 1 — THE BRAIN. Owner: Augur. **DONE (2026-07-31 — local brain floor live; gate met).**
 1. `bin/setup-brain.sh`: install Claude Code as the login brain (cloud) → boot straight into it.
 2. Then the local-model floor: ollama + a ~14B quantized model (fits the 5440's 32GB) as the
    offline default; cloud as opt-in escalation.
 **Gate: boots and talks with the cloud brain; then talks with NO internet on the local model.**
 
-## Phase 2 — THE DJINN IS AN MCP SERVER. Owner: Augur + Rabbot design.
+## Phase 2 — THE DJINN IS AN MCP SERVER. Owner: Augur + Rabbot design. ← ACTIVE
 The Djinn exposes an MCP server representing the user's pod — scoped memory reads + a small set
 of actions the human authorizes. This is the foundation for everything social.
+Broker + confirm channel (the authorization gate for that "small set of actions") are shipped
+(`bin/broker`, `bin/confirm`, green `broker-core`/`confirm-channel`/`seam-live` checks); the
+remaining capability implementations (Step 7) are in flight.
 **Gate: another process can query "the Djinn" over MCP and get a pod-grounded answer.**
 
 ## Phase 3 — POST SCARCITY WIRING (Djinn-to-Djinn). Owner: Augur + Air (PS infra).

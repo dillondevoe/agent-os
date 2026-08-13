@@ -1,9 +1,11 @@
 # Phase 2 · Step 5 — The broker core ("the wall"): design spec
 
-Status: **SPEC — for Fable(code) review before any broker code is written.** Its own
-branch → PR → Fable; the broker implementation is a *separate* later branch. This doc
-consolidates every carry-forward accrued through Steps 1–4 and fixes the interfaces the
-broker wires so the implementation review has nothing to re-litigate.
+Status: **SHIPPED (2026-08-12 header update)** — `bin/broker` implements this spec;
+`checks.broker-core` is green. This doc remains the normative spec of record for the
+broker's decision pipeline and interfaces; read it as the as-built reference, not a
+pre-implementation proposal. This doc consolidates every carry-forward accrued through
+Steps 1–4 and fixes the interfaces the broker wires so the implementation review has
+nothing to re-litigate.
 
 Anchor: `docs/phase2-threat-model.md` §5 (tiers), §6 (taint + DATA fence), §7 (confirm),
 §8 (build-enforced invariants / no-log→no-execute), §9 (MCP surface), §12 step 5.

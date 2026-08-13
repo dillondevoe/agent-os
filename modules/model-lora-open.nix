@@ -47,12 +47,14 @@ let
   # Pinned by flat sha256, exactly like the base GGUF in model-open.nix. fetchurl verifies
   # the hash of the downloaded file, so the pin is exact and the build is reproducible.
   #
-  # UNPUBLISHED: the adapter is not on a public host yet, so this module is DOCUMENTATION
-  # + a wiring reference and is imported by nothing. `published` gates the derivation so a
-  # placeholder hash can never reach fetchurl — an unfilled placeholder produces the
+  # PUBLISHED (2026-08-05): the adapter is hosted (GGUF on a GitHub release asset; the
+  # safetensors original + training details on HF as dillondevoe/agent-os-qwen3.5-9b-lora,
+  # commit b0d13e8) and this module is imported by configuration-open.nix below. `published`
+  # still gates the derivation so a placeholder hash can never reach fetchurl — an unfilled
+  # placeholder (e.g. in a fork with its own not-yet-published adapter) produces the
   # assertion message below at EVAL time rather than an opaque hash-mismatch at BUILD time.
   #
-  # To publish:
+  # To publish (e.g. a new/different adapter):
   #   1. convert the PEFT adapter to GGUF (see WHY GGUF below):
   #        python llama.cpp/convert_lora_to_gguf.py <adapter-dir> \
   #          --base-model-id Qwen/Qwen3.5-9B --outtype f16
@@ -104,10 +106,11 @@ in {
     {
       assertion = published;
       message = ''
-        modules/model-lora-open.nix is imported but the adapter is not published yet.
-        Set adapterUrl + adapterHash and flip `published = true`, or drop this module from
-        your imports. It is opt-in precisely so the default image never depends on an
-        unpublished artifact.
+        modules/model-lora-open.nix is imported with `published = false` — this copy's
+        adapterUrl/adapterHash are still placeholders (the canonical Agent OS adapter
+        itself is published; see the header comment above). Set adapterUrl + adapterHash
+        and flip `published = true`, or drop this module from your imports. It is opt-in
+        precisely so the default image never depends on an unpublished artifact.
       '';
     }
   ];
