@@ -504,6 +504,88 @@
               python3 contract.py
               touch $out
             '';
+
+        # WP-A2 (task 287) — the pluggable brain-provider config's CONTRACT BATTERY, plus its
+        # integration wiring into agent-brain.py. Two batteries share one check because
+        # wiring-battery.py is the same K6 slice (PR #77) driving the real consumer, and both
+        # need the identical pyyaml-carrying python. providers-battery.py proves
+        # modules/providers.py standalone: floor/escalate resolve, required fields (kind,
+        # cost_tier) enforced, api_key_ref must be a secret reference (a literal key is
+        # rejected — the fleet-bleed scar, 2026-08-06), the degraded flag, fail-loud on a
+        # present-but-invalid yaml. wiring-battery.py proves agent-brain.py actually WIRES to
+        # it (env-default fallback with no config, floor model resolution, floor-without-
+        # model-key fallback) and — a HARD REQUIREMENT, not a skip — that pyyaml is importable
+        # in this python: a missing pyyaml previously let agent-brain silently degrade every
+        # boot to legacy OLLAMA_MODEL with an unseen stderr warning (K6 post-merge bug, PR
+        # #77); a battery that SKIPs on missing pyyaml would hide that exact regression. Before
+        # this check, both batteries ran in NEITHER gate. A regression fails `nix flake check`.
+        providers-contract =
+          let
+            pkgs = nixpkgs.legacyPackages.${system};
+            pyWithYaml = pkgs.python3.withPackages (ps: [ ps.pyyaml ]);
+          in pkgs.runCommand "providers-contract-check" { nativeBuildInputs = [ pyWithYaml ]; } ''
+            work="$(mktemp -d)"
+            mkdir -p "$work/modules" "$work/tests"
+            cp ${./modules/providers.py} "$work/modules/providers.py"
+            cp ${./modules/agent-brain.py} "$work/modules/agent-brain.py"
+            cp ${./tests/providers-battery.py} "$work/tests/providers-battery.py"
+            cp ${./tests/wiring-battery.py} "$work/tests/wiring-battery.py"
+            cd "$work"
+            PYTHONPATH=modules python3 tests/providers-battery.py
+            python3 tests/wiring-battery.py
+            touch $out
+          '';
+
+        # WP-A2 (task 287) — bin/mem's CONTRACT BATTERY: the memory-as-filesystem layer every
+        # other Agent OS layer is built on (remember / recall / tree / cap). `mem-cap` above
+        # covers only the A2 mem.* capability IMPLS (cap-mem-remember / cap-mem-recall); this
+        # covers the tool itself — UTC-Z timestamped writes (never local-time drift), append-
+        # never-overwrite on a repeated key, key slugification confined to MEM_ROOT (no ../
+        # traversal), the seeded home-tree structure on first use, recall's fuzzy ranked search
+        # with terminal-escape neutralization, and the cap add/list round-trip. Zero external
+        # deps (stdlib only, same as bin/mem itself); invoked via `sys.executable bin/mem`, so
+        # no chmod/shebang patching is needed here. Before this check this battery ran in
+        # NEITHER gate. A regression fails `nix flake check`.
+        mem-contract =
+          nixpkgs.legacyPackages.${system}.runCommand "mem-contract-check"
+            { nativeBuildInputs = [ nixpkgs.legacyPackages.${system}.python3 ]; } ''
+              work="$(mktemp -d)"
+              mkdir -p "$work/bin" "$work/tests"
+              cp ${./bin/mem} "$work/bin/mem"
+              cp ${./tests/mem-battery.py} "$work/tests/mem-battery.py"
+              cd "$work"
+              python3 tests/mem-battery.py
+              touch $out
+            '';
+
+        # WP-A2 (task 287) — agent-loop's TOOL-DISPATCH MECHANICS contract battery, sibling to
+        # the `agent-loop` check above (which proves chat/answer/tool-spin mechanics end to end
+        # against ollama-stub). This one isolates the dispatch primitives: discover_tools()
+        # marshals a well-formed JSON-RPC 2.0 tools/call the REAL bin/mcp accepts; dispatch()
+        # unwraps a broker data_result, and surfaces a broker deny / unknown-capability /
+        # malformed-verdict as a fail-closed deny (never an exception); the MAX_DENIALS(3) and
+        # MAX_TOOL_HOPS(8) caps; and _clean()'s terminal control/escape stripping ahead of the
+        # tty. Drives the REAL bin/mcp piped into tests/broker-stub.py (scripted verdicts, zero
+        # model needed) — same "real wall, scripted broker" shape as `agent-loop`. The battery
+        # locates bin/agent-loop and the wall relative to its own copied location, so the repo-
+        # relative bin/ + tests/ layout is reconstructed in the check's scratch dir; the
+        # AGENT_OS_MCP / AGENT_OS_BROKER / PYTHONPATH env vars are still passed explicitly per
+        # the battery's own documented contract. Before this check this battery ran in NEITHER
+        # gate. A regression fails `nix flake check`.
+        agent-loop-dispatch-contract =
+          nixpkgs.legacyPackages.${system}.runCommand "agent-loop-dispatch-contract-check"
+            { nativeBuildInputs = [ nixpkgs.legacyPackages.${system}.python3 ]; } ''
+              work="$(mktemp -d)"
+              mkdir -p "$work/bin" "$work/tests" "$work/modules"
+              cp ${./bin/agent-loop} "$work/bin/agent-loop"
+              cp ${./bin/mcp} "$work/bin/mcp"
+              cp ${./tests/agent-loop-dispatch-battery.py} "$work/tests/agent-loop-dispatch-battery.py"
+              cp ${./tests/broker-stub.py} "$work/tests/broker-stub.py"
+              cd "$work"
+              AGENT_OS_MCP="$work/bin/mcp" AGENT_OS_BROKER="$work/tests/broker-stub.py" \
+                PYTHONPATH="$work/modules" python3 tests/agent-loop-dispatch-battery.py
+              touch $out
+            '';
       };
     };
 }

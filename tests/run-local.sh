@@ -24,6 +24,10 @@
 #   audit-battery.sh              audit log (needs only bin/audit + scratch)
 #   taint-battery.sh              taint tracking (bin/taint + bin/audit + scratch)
 #   mem-cap-battery.sh            memory capability round-trip
+#   providers-battery.py          11 checks — modules/providers.py provider-config contract
+#   wiring-battery.py             8 checks — agent-brain <-> providers.py wiring (needs pyyaml)
+#   mem-battery.py                11 checks — bin/mem (memory-as-filesystem) contract
+#   agent-loop-dispatch-battery.py  8 checks — agent-loop tool-dispatch mechanics vs bin/mcp + broker-stub
 #
 # NOT COVERED HERE — these need a materialized Nix registry and/or store paths:
 #   broker-battery.sh · cap-battery.sh · confirm-battery.sh · seam-live-battery.sh
@@ -92,6 +96,19 @@ need "$T/agos-comms-shadow-contract.py" agos-comms-shadow && \
   run agos-comms-shadow "$PY" "$T/agos-comms-shadow-contract.py"
 need "$T/agos-comms-live-contract.py" agos-comms-live && \
   run agos-comms-live "$PY" "$T/agos-comms-live-contract.py"
+# providers-battery.py / wiring-battery.py both self-locate modules/ relative to
+# their own __file__ (and via cwd=$ROOT, already set above), but PYTHONPATH=modules
+# is set explicitly here too to match the documented usage exactly. wiring-battery.py
+# additionally FAILS LOUD (not skip) if pyyaml is not importable — see its header
+# (K6 post-merge bug, PR #77): a silently-missing pyyaml degrades agent-brain to
+# legacy OLLAMA_MODEL with no visible error, so the battery treats that as a hard fail.
+need "$T/providers-battery.py" providers && \
+  run providers env PYTHONPATH="$ROOT/modules" "$PY" "$T/providers-battery.py"
+need "$T/wiring-battery.py" wiring && \
+  run wiring env PYTHONPATH="$ROOT/modules" "$PY" "$T/wiring-battery.py"
+# mem-battery.py locates bin/mem via its own __file__ (../bin/mem) — no args, no env.
+need "$T/mem-battery.py" mem && \
+  run mem "$PY" "$T/mem-battery.py"
 
 # ── shell batteries: wire their positional contracts ─────────────────────────
 # agent-loop-battery.sh <agent-loop> <ollama-stub> <mcp> <broker-stub> <workdir>
@@ -115,6 +132,18 @@ fi
 # mcp-battery.sh <bin/mcp> <workdir>
 if need "$BIN/mcp" mcp; then
   run mcp bash "$T/mcp-battery.sh" "$BIN/mcp" "$SCRATCH/mcp.d"
+fi
+# agent-loop-dispatch-battery.py — env-wired, not positional: drives the REAL bin/mcp
+# piped into tests/broker-stub.py to prove agent-loop's tool-dispatch mechanics.
+# AGENT_OS_MCP / AGENT_OS_BROKER / PYTHONPATH per the battery's own header contract.
+# (bin/mcp is guarded separately above by the mcp-battery entry; gate here on the
+# other two artifacts this battery is the only one to need.)
+if need "$BIN/agent-loop" agent-loop-dispatch && need "$T/broker-stub.py" agent-loop-dispatch; then
+  run agent-loop-dispatch env \
+    AGENT_OS_MCP="$BIN/mcp" \
+    AGENT_OS_BROKER="$T/broker-stub.py" \
+    PYTHONPATH="$ROOT/modules" \
+    "$PY" "$T/agent-loop-dispatch-battery.py"
 fi
 
 echo
