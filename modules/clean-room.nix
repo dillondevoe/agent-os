@@ -24,6 +24,7 @@
 { config, pkgs, lib, ... }:
 let
   cfg = config.agentos.cleanRoom;
+  mw = config.agentos.meshWireguard or { enable = false; };
 in {
   options.agentos.cleanRoom = {
     enable = lib.mkOption {
@@ -124,6 +125,23 @@ in {
           # model, any capability) stays zero-egress. Permanent survivor: kept even sealed,
           # since drift accrues most on a long-sealed box.
           meta nfproto ipv4 meta skuid ${toString config.ids.uids.systemd-timesync} udp dport { 53, 123 } accept
+        ${lib.optionalString (mw.enable or false) ''
+          # WP-S1 mesh (mesh-wireguard-sealed.nix). Two accept classes, both REQUIRED here in
+          # THIS chain: an accept in a second additive table cannot save a packet from this
+          # chain's `policy drop` (nftables traverses all tables; drop anywhere wins).
+          # (a) INNER traffic onto the wg interface — mesh-only by construction: what egresses
+          #     via ${mw.interfaceName} can only reach the peers' allowedIPs (wg cryptokey
+          #     routing), so this is not an internet path.
+          oifname "${mw.interfaceName}" accept
+          # (b) OUTER encapsulated UDP to each peer endpoint. Kernel-generated (no owning
+          #     socket), so the skuid scoping above can never match it — pinned instead to the
+          #     exact daddr+dport of each configured peer, rendered from the module's
+          #     literal-ipv4 endpoints. No peers with endpoints => no lines => no outer egress.
+        ${lib.concatMapStringsSep "\n" (p:
+            let ep = lib.splitString ":" p.endpoint; in
+            "          meta nfproto ipv4 ip daddr ${lib.elemAt ep 0} udp dport ${lib.elemAt ep 1} accept"
+          ) (lib.filter (p: p.endpoint != null) mw.peers)}
+        ''}
         ${lib.optionalString (!cfg.sealed) ''
           # PROVISIONING (unsealed) — removed by `sealed = true` + rebuild. Lets
           # setup-brain.sh resolve + fetch the model weights (and, transiently, lets the

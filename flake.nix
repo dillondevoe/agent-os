@@ -23,6 +23,7 @@
         ./modules/confirm.nix
         ./modules/seal-check.nix
         ./modules/break-glass.nix   # PR-A: the ONE interactive root door (tty3, password-gated)
+        ./modules/mesh-wireguard-sealed.nix  # WP-S1: sealed-lane mesh (options only; enabled per-variant below)
         ./modules/system-set.nix    # PR-A: SCAFFOLD for the root-side system.set executor (impl in PR-J)
         ./modules/boot-branding.nix
       ];
@@ -59,7 +60,13 @@
       # `configuration.nix` is boring base plumbing (bootloader, user, network).
       nixosConfigurations.agentos = mkSystem [ ];
       # Same machine, egress wall sealed — the post-model-pull `switch` target.
-      nixosConfigurations.agentos-sealed = mkSystem [ { agentos.cleanRoom.sealed = true; } ];
+      nixosConfigurations.agentos-sealed = mkSystem [ {
+        agentos.cleanRoom.sealed = true;
+        # WP-S1: the sealed box meshes over WireGuard, never Tailscale. Topology (address,
+        # peers, key) is injected at deployment time — the public repo ships the mechanism
+        # with an empty mesh map (Phase-S "no credentials in the repo" constraint).
+        agentos.meshWireguard.enable = true;
+      } ];
 
       # OPEN / MESHED dev variant — intentionally permissive (see `openModules`).
       # Install:  nixos-install --flake github:dillondevoe/agent-os#agentos-open
