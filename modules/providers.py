@@ -65,4 +65,4 @@ def resolve(config, role, unavailable=frozenset()):
 
 
 def cost_tier(config, provider_name):
-    return config["providers"][provider_name].get("cost_tier", "unknown")
+    return config["providers"].get(provider_name, {}).get("cost_tier", "unknown")

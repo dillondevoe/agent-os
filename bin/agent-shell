@@ -20,7 +20,7 @@ EOF
 - os: Agent OS v0.1 (NixOS base)
 - config: /etc/nixos (the agent may rewrite this and \`nixos-rebuild switch\`)
 - brain: ${BRAIN:-auto-detect} — local Ollama floor (v0.1 is sovereign; no cloud brain on the image).
-- first_boot: $(date -u +%FT%TZ)
+- first_boot: $(date -u +%Y-%m-%dT%H:%M:%SZ)
 EOF
 fi
 
