@@ -57,6 +57,31 @@ def _floor_model():
     return cfg.get("model", env_model), name
 
 MODEL, ACTIVE_PROVIDER = _floor_model()
+
+# ── PER-TURN PROVENANCE LOG (Phase 1.5A acceptance criterion 5, task 287 slice 3) ──
+# "Audit log shows provider+model per turn." Deliberately NOT bin/audit's chain-hashed
+# broker log — that log is a tamper-evident record of capital/tool-execution security
+# decisions (DENY/ALLOW-AUTO/REQUIRE-CONFIRM); routine per-turn provenance is a different
+# class of record and doesn't belong mixed into it. Plain append-only JSONL instead, same
+# home-relative-with-env-override convention as bin/mem's MEM_ROOT.
+_TURN_LOG_PATH = os.environ.get("AGENT_OS_TURN_LOG", os.path.join(os.path.expanduser("~/memory"), "turn-log.jsonl"))
+
+def _log_turn_provenance():
+    # Scope: the 7B `turn()` loop only (the actual acting/tool-wielding brain) — the 3B
+    # frontdoor is a separate, not-yet-provider-routed model (MODEL_3B) whose turns always
+    # either answer directly or kick to turn(), which then logs. Never let this break a
+    # live turn: log failure is swallowed, not surfaced.
+    try:
+        os.makedirs(os.path.dirname(_TURN_LOG_PATH), exist_ok=True)
+        with open(_TURN_LOG_PATH, "a") as f:
+            f.write(json.dumps({
+                "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                "provider": ACTIVE_PROVIDER,
+                "model": MODEL,
+            }) + "\n")
+    except Exception:
+        pass
+
 def _think_budget():
     # OLLAMA_THINK: think-budget control for thinking models on the ~3 tok/s CPU box
     # (spec 2026-08-05 item b). off/false/0 → no thinking (fastest replies);
@@ -486,6 +511,7 @@ def _compact_for_display(text,head=4,tail=3):
     return "\n".join(shown)
 
 def turn(msgs):
+    _log_turn_provenance()
     for _ in range(6):
         msg=chat_stream_safe(msgs); msgs.append(msg)
         calls,clean=extract_tools(msg)
