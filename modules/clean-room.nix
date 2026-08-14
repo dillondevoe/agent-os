@@ -147,17 +147,38 @@ in {
           #     access"), and its dominant direction is INBOUND — a peer SSHes in, and the reply
           #     traffic is already accepted by `ct state established` at the top of this chain,
           #     not by this rule. This rule covers only box-INITIATED mesh connections, which is
-          #     admin tooling, i.e. uid 0. OPEN QUESTION for review: if any non-root sealed-box
-          #     service is ever meant to initiate over the mesh, it needs its own numeric-skuid
-          #     line here (the timesync shape), never a re-widening of this one.
-          meta skuid 0 oifname "${mw.interfaceName}" accept
+          #     admin tooling, i.e. uid 0. RULED (Fable gate, PR #86, 2026-08-14 — R1, binding):
+          #     this rule stands as scoped; if any non-root sealed-box service is ever meant to
+          #     initiate over the mesh it gets its own numeric-skuid line here (the timesync
+          #     shape), never a re-widening of this one.
+          #     `meta nfproto ipv4` added 2026-08-14 for parity with every other scoped accept in
+          #     this chain (Fable advisory 2). It cannot change behaviour here — the uid-0 +
+          #     oifname pair holds in both families — but a rule that is the lone exception to the
+          #     chain's own doctrine invites the reader to conclude the doctrine is optional.
+          meta nfproto ipv4 meta skuid 0 oifname "${mw.interfaceName}" accept
           # (b) OUTER encapsulated UDP to each peer endpoint. Kernel-generated (no owning
           #     socket), so the skuid scoping above can never match it — pinned instead to the
           #     exact daddr+dport of each configured peer, rendered from the module's
           #     literal-ipv4 endpoints. No peers with endpoints => no lines => no outer egress.
+          #     SPORT PIN (added 2026-08-14, Fable gate MEDIUM on PR #86). daddr+dport alone is
+          #     uid-blind, and "no cooperating receiver" is NOT a defence the threat model
+          #     accepts: the datagrams leave the box carrying agent-chosen bytes and are
+          #     capturable on-path and at the peer host, so departure is the exfil — the peer's
+          #     wg never has to accept anything. Pinning `udp sport <listenPort>` closes it,
+          #     because wg's kernel socket OWNS that port while the interface is up, so no
+          #     unprivileged process can bind it to source-match. Both halves are asserted
+          #     behaviourally in tests/egress-mesh-uid-scope.nix.
+          #     RESIDUAL, stated rather than implied: the pin rests on wg holding the port. With
+          #     the interface DOWN the port is free, an unprivileged process may bind it, and
+          #     these lines then permit its datagrams to the peer endpoint. That window is
+          #     narrow (mesh down => the accepts still render, since they key on config, not on
+          #     interface state) and it is the honest limit of what a stateless L3/L4 rule can
+          #     express about a socket's owner. Closing it properly wants either a cgroup/uid
+          #     match nftables cannot apply to kernel-generated packets, or teardown of the
+          #     accepts with the interface — S4/S6 territory, not this fix.
         ${lib.concatMapStringsSep "\n" (p:
             let ep = lib.splitString ":" p.endpoint; in
-            "          meta nfproto ipv4 ip daddr ${lib.elemAt ep 0} udp dport ${lib.elemAt ep 1} accept"
+            "          meta nfproto ipv4 ip daddr ${lib.elemAt ep 0} udp sport ${toString mw.listenPort} udp dport ${lib.elemAt ep 1} accept"
           ) (lib.filter (p: p.endpoint != null) mw.peers)}
         ''}
         ${lib.optionalString (!cfg.sealed) ''

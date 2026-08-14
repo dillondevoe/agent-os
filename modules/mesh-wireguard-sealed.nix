@@ -8,6 +8,13 @@
 # (public keys + endpoints) is injected at deployment time via these options; the defaults
 # ship EMPTY so the public repo carries structure, never a live mesh map.
 #
+# FIRST-BOOT EXPECTATION (Fable gate, PR #86 advisory 4, 2026-08-14): because the sealed
+# composition enables this module with an EMPTY map and no key, `wireguard-<iface>.service`
+# FAILS on a freshly imaged box until the S6 runbook provisions the key. That failure is the
+# design working — a mesh unit that came up without a key would mean a key came from the
+# image. Read a red wg unit on first hardware boot as "runbook step not run yet", not as a
+# regression. The preStart guard below says exactly that on the console.
+#
 # EGRESS-WALL INTERACTION (why clean-room.nix renders the accept lines, not this file):
 # WireGuard's encapsulated outer UDP packets are generated in-kernel with no owning socket,
 # so `meta skuid` scoping cannot match them — they need their own accept lines. Those lines
@@ -32,6 +39,11 @@ let
   # endpoint literals are enforced as "<ipv4>:<port>" so the wall lines they generate are
   # exact daddr/dport pairs — a DNS-name endpoint would need an open resolver path at
   # handshake time and an unpinnable daddr, both of which the seal exists to refuse.
+  # SHAPE GATE, NOT VALIDATION (Fable gate, PR #86 advisory 3, 2026-08-14): this matches
+  # 999.999.999.999:99999 quite happily. That is deliberate and sufficient — its job is to
+  # refuse the CLASS of value that would make the egress accept unpinnable (a hostname), and
+  # an out-of-range literal is caught at wg setup, loudly, on the box. Do not read it as
+  # "endpoints are validated".
   endpointRe = "^([0-9]{1,3}\\.){3}[0-9]{1,3}:[0-9]{1,5}$";
 in {
   options.agentos.meshWireguard = {
@@ -107,6 +119,33 @@ in {
     # Inbound handshake path (input chain — the ordinary firewall, not the egress wall).
     networking.firewall.allowedUDPPorts = [ cfg.listenPort ];
 
+    # RESOLUTION-TIME key guard (Fable gate, PR #86, 2026-08-14 — ruled: harden, don't replace).
+    # The eval-time assertion below inspects the path STRING; this inspects what that string
+    # resolves to on the running box, which is the only place the guarantee can actually live.
+    # It runs before wg touches the key and fails the unit closed, so a mis-provisioned key is a
+    # dead mesh rather than a leaked one.
+    systemd.services."wireguard-${cfg.interfaceName}".preStart = ''
+      key=${lib.escapeShellArg cfg.privateKeyFile}
+      real=$(${pkgs.coreutils}/bin/readlink -f "$key" 2>/dev/null || true)
+      if [ -z "$real" ] || [ ! -f "$real" ]; then
+        echo "meshWireguard: private key $key is absent. Provision it out-of-band (S6 runbook);" >&2
+        echo "  on a freshly imaged box this failure is EXPECTED, not a regression." >&2
+        exit 1
+      fi
+      case "$real" in
+        ${builtins.storeDir}/*)
+          echo "meshWireguard: private key $key resolves to $real, under ${builtins.storeDir}." >&2
+          echo "  Store contents are world-readable and repo-derived. Refusing to start." >&2
+          exit 1 ;;
+      esac
+      mode=$(${pkgs.coreutils}/bin/stat -L -c '%a' "$key")
+      if [ "$(( 0$mode & 077 ))" -ne 0 ]; then
+        echo "meshWireguard: private key $key has mode $mode — group or other bits are set." >&2
+        echo "  Refusing to start; chmod 0600 and chown root." >&2
+        exit 1
+      fi
+    '';
+
     assertions = [
       {
         # The whole point of this module is sealed-lane mesh access behind the wall; enabling
@@ -118,6 +157,12 @@ in {
       {
         # No credentials in the public repo, ever (Phase-S binding constraint): a store-path
         # key would be world-readable in /nix/store and likely committed.
+        # WHAT THIS LAYER ACTUALLY GUARANTEES (corrected 2026-08-14 after the Fable gate): it is
+        # a TYPO NET, not the guarantee. It compares a string prefix, so it passes on
+        # `privateKeyFile = "/etc/k"` even when `environment.etc."k"` (declared without an
+        # explicit `mode`) makes /etc/k a symlink INTO the store — the exact outcome this
+        # assertion names, reached without lying to it. The guarantee is the preStart guard
+        # above, which resolves the path. Keep both: this one fails the build at eval, cheaply.
         assertion = !(lib.hasPrefix builtins.storeDir cfg.privateKeyFile);
         message = "meshWireguard: privateKeyFile must be an on-box path (e.g. /var/lib/"
           + "wireguard/...), never a /nix/store path — store paths are world-readable and "
