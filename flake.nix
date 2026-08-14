@@ -23,6 +23,7 @@
         ./modules/confirm.nix
         ./modules/seal-check.nix
         ./modules/break-glass.nix   # PR-A: the ONE interactive root door (tty3, password-gated)
+        ./modules/mesh-wireguard-sealed.nix  # WP-S1: sealed-lane mesh (options only; enabled per-variant below)
         ./modules/system-set.nix    # PR-A: SCAFFOLD for the root-side system.set executor (impl in PR-J)
         ./modules/boot-branding.nix
       ];
@@ -59,7 +60,13 @@
       # `configuration.nix` is boring base plumbing (bootloader, user, network).
       nixosConfigurations.agentos = mkSystem [ ];
       # Same machine, egress wall sealed — the post-model-pull `switch` target.
-      nixosConfigurations.agentos-sealed = mkSystem [ { agentos.cleanRoom.sealed = true; } ];
+      nixosConfigurations.agentos-sealed = mkSystem [ {
+        agentos.cleanRoom.sealed = true;
+        # WP-S1: the sealed box meshes over WireGuard, never Tailscale. Topology (address,
+        # peers, key) is injected at deployment time — the public repo ships the mechanism
+        # with an empty mesh map (Phase-S "no credentials in the repo" constraint).
+        agentos.meshWireguard.enable = true;
+      } ];
 
       # OPEN / MESHED dev variant — intentionally permissive (see `openModules`).
       # Install:  nixos-install --flake github:dillondevoe/agent-os#agentos-open
@@ -80,6 +87,17 @@
         # so routine `nix flake check` stays fast — this boots a VM (minutes) vs the 6
         # property batteries (seconds). Run on demand:  nix build .#test-seal-faildown
         test-seal-faildown = import ./tests/seal-faildown.nix {
+          pkgs = nixpkgs.legacyPackages.${system};
+          inherit baseModules;
+        };
+
+        # WP-S1 acceptance: the scoped skuid-0 egress rules verified by PACKET FATE (agent vs
+        # root, :443 vs arbitrary port) against a real off-box peer. Same reason as above for
+        # keeping it OUT of `checks` — it boots two VMs. Run on demand:
+        #   nix build .#test-egress-uid-scope
+        # This is the ONLY evidence that distinguishes "the ruleset parses" (nft-ruleset-*, a
+        # parse gate) and "the table exists" (test-seal-faildown) from "the wall holds".
+        test-egress-uid-scope = import ./tests/egress-uid-scope.nix {
           pkgs = nixpkgs.legacyPackages.${system};
           inherit baseModules;
         };
