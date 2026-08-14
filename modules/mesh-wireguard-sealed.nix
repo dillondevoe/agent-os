@@ -14,8 +14,15 @@
 # MUST live inside the `agentos_egress` output chain itself: nftables traverses every
 # table's hook chains, so an `accept` verdict in a second additive table would NOT save a
 # packet from clean-room's `policy drop` (accept only ends processing within its own
-# table). clean-room.nix therefore renders the mesh accepts from this module's config,
-# scoped per-peer to `ip daddr <endpoint-ip> udp dport <endpoint-port>` — no blanket UDP.
+# table). clean-room.nix therefore renders the mesh accepts from this module's config.
+# There are TWO of them and this header used to describe only the second, which read as
+# "the whole mesh diff is pinned" when half of it was not:
+#   (a) INNER traffic onto the wg interface — `meta skuid 0 oifname <iface> accept`. Scoped
+#       to uid 0 because the chain's invariant is that the agent/model/capabilities stay
+#       ZERO-egress, not merely off-the-internet; a uid-blind version of this line hands the
+#       untrusted agent an all-port path to every mesh peer. See the long note at that rule.
+#   (b) OUTER encapsulated UDP — scoped per-peer to `ip daddr <endpoint-ip> udp dport
+#       <endpoint-port>`, no blanket UDP, because kernel-generated packets have no skuid.
 #
 # SECURITY SURFACE (egress wall + mesh reachability): routed branch -> PR -> Fable, never
 # direct-push, never self-merge.

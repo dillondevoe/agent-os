@@ -129,10 +129,28 @@ in {
           # WP-S1 mesh (mesh-wireguard-sealed.nix). Two accept classes, both REQUIRED here in
           # THIS chain: an accept in a second additive table cannot save a packet from this
           # chain's `policy drop` (nftables traverses all tables; drop anywhere wins).
-          # (a) INNER traffic onto the wg interface — mesh-only by construction: what egresses
-          #     via ${mw.interfaceName} can only reach the peers' allowedIPs (wg cryptokey
-          #     routing), so this is not an internet path.
-          oifname "${mw.interfaceName}" accept
+          # (a) INNER traffic onto the wg interface, SCOPED TO uid 0.
+          #     The first draft of this line was a bare `oifname "${mw.interfaceName}" accept`,
+          #     justified as "mesh-only by construction — what egresses via the wg interface can
+          #     only reach the peers' allowedIPs (wg cryptokey routing), so this is not an
+          #     internet path." That answers the INTERNET question and silently repeals the UID
+          #     one. This chain's invariant, stated at the timesync rule above, is that "every
+          #     other process (the agent, the model, any capability) stays zero-egress" — not
+          #     merely no-internet-egress. A uid-blind accept hands the untrusted agent an
+          #     all-port path to every mesh peer the moment mesh is enabled, and the mesh peers
+          #     are the machines holding creds and DBs. Exfil to a peer is exfil.
+          #     The cryptokey-routing argument is also root-mutable at RUNTIME (`wg set … allowed-ips
+          #     0.0.0.0/0` + a route, no rebuild, no ruleset change) — so it rests the wall on a
+          #     setting a compromised root rewrites, which is the exact threat the scoped skuid-0
+          #     rules above exist to bound.
+          #     Mesh access on the sealed box is HUMAN/ADMIN reachability (spec §WP-S1 "dev mesh
+          #     access"), and its dominant direction is INBOUND — a peer SSHes in, and the reply
+          #     traffic is already accepted by `ct state established` at the top of this chain,
+          #     not by this rule. This rule covers only box-INITIATED mesh connections, which is
+          #     admin tooling, i.e. uid 0. OPEN QUESTION for review: if any non-root sealed-box
+          #     service is ever meant to initiate over the mesh, it needs its own numeric-skuid
+          #     line here (the timesync shape), never a re-widening of this one.
+          meta skuid 0 oifname "${mw.interfaceName}" accept
           # (b) OUTER encapsulated UDP to each peer endpoint. Kernel-generated (no owning
           #     socket), so the skuid scoping above can never match it — pinned instead to the
           #     exact daddr+dport of each configured peer, rendered from the module's
