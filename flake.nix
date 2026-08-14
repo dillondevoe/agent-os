@@ -86,6 +86,8 @@
         # seal-failloud fail-down loop, driven headless (nixosTest). Kept OUT of `checks`
         # so routine `nix flake check` stays fast — this boots a VM (minutes) vs the 6
         # property batteries (seconds). Run on demand:  nix build .#test-seal-faildown
+        # ENFORCED by .github/workflows/vm-tests.yml (the slow lane) — out of `checks` no
+        # longer means out of CI. See that file's header for what "on demand" used to cost.
         test-seal-faildown = import ./tests/seal-faildown.nix {
           pkgs = nixpkgs.legacyPackages.${system};
           inherit baseModules;
@@ -97,6 +99,7 @@
         #   nix build .#test-egress-uid-scope
         # This is the ONLY evidence that distinguishes "the ruleset parses" (nft-ruleset-*, a
         # parse gate) and "the table exists" (test-seal-faildown) from "the wall holds".
+        # ENFORCED by .github/workflows/vm-tests.yml.
         test-egress-uid-scope = import ./tests/egress-uid-scope.nix {
           pkgs = nixpkgs.legacyPackages.${system};
           inherit baseModules;
@@ -108,6 +111,10 @@
         # uid-blind bug was (2fb94c6). Its leg 2 is the behavioural regression test for that fix.
         # Out of `checks` for the same reason as the others: it boots two VMs. Run on demand:
         #   nix build .#test-egress-mesh-uid-scope
+        # ENFORCED by .github/workflows/vm-tests.yml. Until that lane existed (2026-08-14) this
+        # said "regression test" about a file NOTHING SCHEDULED EVER RAN — a regression test that
+        # does not execute documents that someone once could have caught the bug. If you are ever
+        # tempted to move these back out of CI, that is the sentence to re-read.
         test-egress-mesh-uid-scope = import ./tests/egress-mesh-uid-scope.nix {
           pkgs = nixpkgs.legacyPackages.${system};
           inherit baseModules;
@@ -339,8 +346,20 @@
         # ruleset), NOT the whole system toplevel — so `nix flake check` stays fast, matching the
         # design that deliberately holds the seal-faildown VM out of `checks` (packages.${system}
         # comment above). We gate BOTH machines: -sealed (the shipped seal) AND -unsealed (whose
-        # provisioning accepts differ, so its ruleset is a distinct nft parse). A re-simplification
-        # of any egress rule now fails HERE, in CI — not silently at `nixos-rebuild` on the Dell.
+        # provisioning accepts differ, so its ruleset is a distinct nft parse). A MALFORMED egress
+        # rule now fails HERE, in CI — not silently at `nixos-rebuild` on the Dell.
+        #
+        # WHAT THESE DO NOT DO (corrected 2026-08-14, Fable ruling — the previous wording claimed
+        # "a re-simplification of any egress rule now fails HERE," and that is FALSE in the
+        # direction that hurts). This is a WELL-FORMEDNESS gate. `nft --check` proves a ruleset
+        # parses; it cannot know which packets you meant to drop. A WEAKENED rule parses perfectly:
+        # `oifname "wg-mesh" accept` — the uid-blind accept of 2fb94c6, which handed the untrusted
+        # agent an all-port path to every mesh peer — is valid nftables and sails through both of
+        # these green. Malformed and over-permissive are different failure modes and only the first
+        # one is caught here. SEMANTICS live in the behavioural VM tests (packages.test-egress-*),
+        # which are enforced by .github/workflows/vm-tests.yml — the slow lane. If you are reading
+        # this to decide whether an egress diff is covered: these checks are necessary, the slow
+        # lane is the one that would notice the wall getting wider.
         # GUARD-OF-THE-GUARD (Fable APPROVE_WITH_CAVEAT, #28): both checks force the module's
         # rulesScript drv to build, but that drv only actually runs `nft --check` when the module's
         # `checkRuleset` is true (nixpkgs nftables.nix — checkPhase is `lib.optionalString

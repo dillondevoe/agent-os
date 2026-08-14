@@ -8,7 +8,12 @@
 #
 # SCOPE: builds `checks.x86_64-linux` — the fast property batteries (seconds). It does NOT
 # build packages.vm / vm-sealed / test-seal-faildown; those are minutes-long nixosTests kept
-# out of `checks` on purpose. A VM-boot CI job, if ever wanted, is a separate slow lane.
+# out of `checks` on purpose. That separate slow lane now EXISTS: .github/workflows/vm-tests.yml.
+#
+# WHAT THIS LANE CANNOT TELL YOU: the egress checks it runs (nft-ruleset-sealed/-unsealed) are
+# well-formedness gates — `nft --check` proves a ruleset parses, never that a packet dies. A rule
+# weakened to `oifname "wg-mesh" accept` parses fine and goes green here. Green on this workflow
+# is NOT evidence that the wall still holds; vm-tests.yml is where that is decided.
 
 name: flake-check (sandboxed)
 
