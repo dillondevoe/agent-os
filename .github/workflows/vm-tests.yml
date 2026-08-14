@@ -1,0 +1,134 @@
+# The SLOW LANE — behavioural VM tests, the ones that prove packets actually die.
+#
+# WHY THIS EXISTS (2026-08-14). The fast lane (flake-check.yml) builds `checks`, which for the
+# egress wall means `nft-ruleset-sealed` / `nft-ruleset-unsealed`. Those are WELL-FORMEDNESS
+# gates: they run the module's own lkl-hijacked `nft --check` and prove the ruleset parses. They
+# cannot know which packets you meant to drop. A WEAKENED rule parses perfectly — `oifname
+# "wg-mesh" accept`, the uid-blind accept of 2fb94c6 that handed the untrusted agent an all-port
+# path to every mesh peer, is valid nftables and passed every gate this repo had.
+#
+# The tests that DO catch it (tests/egress-uid-scope.nix, tests/egress-mesh-uid-scope.nix) were
+# written, reviewed, merged — and lived in `packages`, which no scheduled job ever built. For the
+# window between writing them and this file, the repo's regression coverage for its most serious
+# security bug was a file that ran when a human remembered. A regression test that does not
+# execute does not prevent the regression; it documents that someone once could have caught it.
+#
+# SCOPE: the three nixosTests held out of `checks` because they boot VMs (minutes, not seconds).
+# `checks` stays fast and runs on every PR; this lane runs on the paths that can move the wall.
+#
+# RESIDUAL, stated rather than implied: the path filter means a PR that widens the wall through a
+# file NOT listed below merges without this lane ever running. The nightly cron on main is the
+# backstop for exactly that case — but it catches such a change AFTER it has landed, not before.
+# Widening the filter is cheap; if you find yourself adding an egress-relevant path anywhere,
+# add it here in the same commit.
+
+name: vm-tests (slow lane)
+
+on:
+  pull_request:
+    paths:
+      # Anything that can change what the wall does...
+      - 'modules/**'
+      - 'tests/**'
+      - 'flake.nix'
+      - 'flake.lock'
+      # ...and this file itself. A harness excluded from its own trigger set cannot object to
+      # being gutted: without this line, a PR deleting the steps below would merge green.
+      - '.github/workflows/vm-tests.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'modules/**'
+      - 'tests/**'
+      - 'flake.nix'
+      - 'flake.lock'
+      - '.github/workflows/vm-tests.yml'
+  schedule:
+    # 07:00 UTC daily. Catches drift on main from anything the path filter above missed, and from
+    # direct pushes. Nightly, not per-PR, because this lane costs ~10 minutes per test.
+    - cron: '0 7 * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: vm-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  vm-test:
+    runs-on: ubuntu-latest
+    # Generous but finite. Wall-clock for the mesh test on the dev box is ~9 min with a warm
+    # store — but measured under TCG, NOT KVM: nix builds as `nixbld*`, which is not in the `kvm`
+    # group, so /dev/kvm is root:kvm 0660 and every local VM run silently emulates. That is the
+    # exact failure this job's KVM assert exists to make loud, found by reading a QEMU line
+    # ("failed to initialize kvm: Permission denied") that the test otherwise sails past. So treat
+    # ~9 min as a conservative CEILING for a KVM runner, not a KVM measurement — the honest
+    # direction, but do not quote it as one. Nobody has yet timed these under KVM.
+    timeout-minutes: 45
+    strategy:
+      # Do NOT fail-fast: when the wall breaks, "which of the three legs went red" is the whole
+      # diagnostic. One matrix entry per test so each failure is attributable on its own.
+      fail-fast: false
+      matrix:
+        test:
+          - test-egress-uid-scope
+          - test-egress-mesh-uid-scope
+          - test-seal-faildown
+    steps:
+      - name: Checkout
+        # SHA-pinned, matching flake-check.yml: immutable commit of the newest v* release tag.
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      # GitHub's Linux runners ship /dev/kvm, but it is root:kvm 0660 and the runner user is not
+      # in the kvm group — so it exists and is unusable, which is the worst of both worlds.
+      - name: Grant access to /dev/kvm
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      # FAIL LOUD if hardware virtualisation is missing (Fable caution, 2026-08-14). QEMU falls
+      # back to TCG *silently* and still passes — it just takes an order of magnitude longer,
+      # which turns this lane into the job nobody waits for and eventually the job someone
+      # disables. A degraded lane must go RED, not slow.
+      - name: Assert KVM is usable
+        run: |
+          if [ ! -e /dev/kvm ]; then
+            echo "::error::/dev/kvm is absent. nixosTests would fall back to TCG emulation and" \
+                 "this lane would silently become ~10x slower rather than failing. Refusing."
+            exit 1
+          fi
+          if [ ! -r /dev/kvm ] || [ ! -w /dev/kvm ]; then
+            echo "::error::/dev/kvm exists but is not readable+writable by $(id -un)." \
+                 "The udev step above did not take. Same silent-TCG hazard. Refusing."
+            exit 1
+          fi
+          echo "KVM OK: $(ls -l /dev/kvm)"
+
+      # nixosTests build a full system closure per node; the mesh test builds two. Runner images
+      # ship ~25GB of toolchains this repo never touches. Precautionary, not measured from a
+      # failing run — if a test ever dies on ENOSPC, this is the step to grow.
+      - name: Reclaim runner disk
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /opt/hostedtoolcache
+          df -h /
+
+      - name: Install Nix (flakes + sandbox)
+        # SHA-pinned, matching flake-check.yml.
+        uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25  # v22
+        with:
+          extra-conf: |
+            experimental-features = nix-command flakes
+            sandbox = true
+
+      - name: Assert sandbox is enabled
+        run: test "$(nix config show sandbox)" = "true"
+
+      # `-L` streams the full VM console + testScript output. When a leg goes red, the subtest
+      # name and the assertion message are the report — do not swallow them.
+      - name: nix build .#${{ matrix.test }}
+        run: nix build --option sandbox true -L --print-build-logs '.#${{ matrix.test }}'

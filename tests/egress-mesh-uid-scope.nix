@@ -128,15 +128,40 @@ pkgs.testers.runNixOSTest {
       }];
     };
     environment.etc."wireguard-fixture.key" = { text = meshPriv; mode = "0600"; };
-    # Receiver-side observation for the sport-pin legs. See the note at leg 5: the SENDER cannot
-    # tell an accepted UDP datagram from a dropped one, so the only sound instrument is at the
-    # far end.
+    # Receiver-side observation for the sport-pin legs. NOTE (corrected 2026-08-14): this comment
+    # used to justify itself with "the SENDER cannot tell an accepted UDP datagram from a dropped
+    # one" — the same wrong premise the header now retracts. The sender CAN tell: udp_sendmsg
+    # returns the netfilter verdict, so leg 5 gets EPERM. The capture is kept anyway, because two
+    # instruments on opposite ends of the path beat one, and marker-absent-at-the-receiver is what
+    # rules out "refused for some sender-local reason." Kept for the right reason now, not the
+    # wrong one. (Carried lines are never re-verified — this one survived the header's correction
+    # by one cycle and is exactly the scar it names.)
     environment.systemPackages = [ pkgs.tcpdump ];
     systemd.services.listen-tun-443 = {
       wantedBy = [ "multi-user.target" ];
       after = [ "wireguard-wg-mesh.service" ];
       serviceConfig.ExecStart =
         "${pkgs.python3}/bin/python3 -m http.server 443 --bind ${meshTunIp}";
+    };
+    # Leg 6's instrument (Fable LOW, PR #87 gate). Without a listener on the VLAN address, a
+    # wall-PERMITTED probe to ${meshPeerVlanIp}:443 gets an instant RST and leg 6's bare fail()
+    # is satisfied by connection-refused — i.e. it would pass just as well with no wall at all.
+    # With this bound, refusal is off the table: the only way the agent gets nothing back is the
+    # drop. Leg 6 now asserts curl 28 against it.
+    systemd.services.listen-vlan-443 = {
+      wantedBy = [ "multi-user.target" ];
+      after = [ "network.target" ];
+      serviceConfig = {
+        ExecStart =
+          "${pkgs.python3}/bin/python3 -m http.server 443 --bind ${meshPeerVlanIp}";
+        # The VLAN address is configured by the test harness on eth1, and this unit can reach
+        # ExecStart before that happens — `--bind` then dies with EADDRNOTAVAIL and stays dead,
+        # which cost a VM run. Retry instead of guessing the ordering: `network.target` does not
+        # mean "addresses are up," and the sibling tunnel listener only works because it orders on
+        # wireguard-wg-mesh.service, which genuinely does imply its address exists.
+        Restart = "always";
+        RestartSec = 1;
+      };
     };
   };
 
@@ -297,9 +322,44 @@ pkgs.testers.runNixOSTest {
     with subtest("6. the agent cannot reach the peer off-tunnel either"):
         # Closes the obvious way around leg 2: if the agent were denied the tunnel but allowed the
         # VLAN, exfil-to-a-peer would still be open. Same denial, different path.
-        sealed.fail(
-            "runuser -u agent -- curl -sS --max-time 10 -o /dev/null "
-            "http://${meshPeerVlanIp}:443/"
+        #
+        # This leg used to be a bare fail() (Fable LOW, PR #87 gate — correct catch). A bare
+        # fail() here does not discriminate its failure mode: the peer's only listener bound the
+        # TUNNEL address, so a wall-PERMITTED probe to the VLAN address drew an instant RST, and
+        # connection-refused satisfies fail() exactly as well as a drop does. The property was
+        # structurally true, but the leg was not the thing proving it — the trap this file's own
+        # leg 5 note teaches, reproduced two subtests later.
+        #
+        # Fixed on both ends: meshpeer now binds ${meshPeerVlanIp}:443 (see listen-vlan-443, so
+        # refusal is impossible), and the exit code is asserted rather than merely nonzero.
+        # 28 = timed out with nothing back = the SYN died in the wall. 7 would mean refused or
+        # unreachable; a live listener rules out refused, and the wg handshake above — which
+        # crosses this same VLAN as outer UDP — rules out "no L3 path." So a 7 here is a broken
+        # fixture and MUST NOT read as a pass. Were the wall to permit this probe, the listener
+        # would answer and the exit code would be 0, which also fails the assertion: the leg now
+        # discriminates in both directions rather than accepting any nonzero.
+        #
+        # RESIDUAL, precisely: the handshake proves the VLAN carries UDP:51820, not TCP:443.
+        # A path broken for TCP-only, non-wall reasons would still read as 28. Closing that
+        # needs a permitted-TCP control, which cannot exist from `sealed` while the wall stands
+        # — the same shape as the wg-down residual named at the rules themselves.
+        # CONTROL FIRST — establish the instrument is live BEFORE taking the reading. If
+        # listen-vlan-443 were dead, the agent's timeout below would be over-attributed to the
+        # wall, which is the very error this leg is being fixed for. Run from meshpeer itself,
+        # a vantage point the wall does not touch.
+        meshpeer.wait_until_succeeds(
+            "curl -sS --max-time 5 -o /dev/null http://${meshPeerVlanIp}:443/", timeout=30
+        )
+        # NOTE on the shell form: the driver executes with `set -e`, so a bare
+        # `cmd; echo EXIT=$?` never reaches the echo — the non-zero curl aborts first and
+        # succeed() reports the raw 28. Capturing via `|| rc=$?` keeps the failure inside a
+        # `||` list, where set -e does not fire. (Cost one VM run; leaving the reason here.)
+        off = sealed.succeed(
+            "rc=0; runuser -u agent -- curl -sS --max-time 10 -o /dev/null "
+            "http://${meshPeerVlanIp}:443/ || rc=$?; echo EXIT=$rc"
+        )
+        assert "EXIT=28" in off, (
+            f"the agent's off-tunnel probe failed, but not by the wall (want EXIT=28): {off!r}"
         )
 
     # LAST — this leg takes the tunnel down and back up, so nothing may follow it.
