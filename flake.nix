@@ -101,6 +101,17 @@
           pkgs = nixpkgs.legacyPackages.${system};
           inherit baseModules;
         };
+
+        # WP-S1 increment 2: the same uid-scope question asked of the MESH accepts, over a real
+        # WireGuard tunnel. Increment 1 above composes baseModules without meshWireguard, so it
+        # says nothing about the two accepts the mesh adds — and the inner one is where the
+        # uid-blind bug was (2fb94c6). Its leg 2 is the behavioural regression test for that fix.
+        # Out of `checks` for the same reason as the others: it boots two VMs. Run on demand:
+        #   nix build .#test-egress-mesh-uid-scope
+        test-egress-mesh-uid-scope = import ./tests/egress-mesh-uid-scope.nix {
+          pkgs = nixpkgs.legacyPackages.${system};
+          inherit baseModules;
+        };
       };
 
       checks.${system} = {
