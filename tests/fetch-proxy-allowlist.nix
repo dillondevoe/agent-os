@@ -39,6 +39,14 @@
 #   6. The agent uid, same probe. Unchanged from WP-S1 and expected to pass trivially; kept
 #      because S5 rewrites the accepts around it and a rewrite is exactly when an unrelated
 #      predicate gets clipped.
+#   7. THE AGENT'S OWN WALL — the agent aiming at the PROXY, for the ALLOWED host, must time out.
+#      Added after Geist's MEDIUM on PR #89. The first version of this file recorded the agent's
+#      loopback path to the proxy as acceptable because it was "bounded by the allowlist"; the
+#      agent's invariant is zero egress, so a bounded path is a new path, not a null one. The
+#      allowed host is load-bearing: against the BLOCKED host the proxy refuses on its own and
+#      the leg stays green with the nftables guard deleted.
+#   8. The same probe against the blocked host — the second wall, asserted independently so one
+#      regression cannot open the path outright.
 #
 # NOT COVERED, and deliberately: TLS. The proxy blind-tunnels after CONNECT and never sees a
 # certificate, so there is nothing here for a TLS test to assert — trust in the fetched bytes
@@ -228,12 +236,49 @@ pkgs.testers.runNixOSTest {
             f"the agent's direct probe did not time out (want EXIT=28): {out!r}"
         )
 
-    # ---- leg 7: the agent cannot use the proxy either -------------------------------------------
-    # The proxy listens on loopback and `oifname "lo" accept` is uid-BLIND, so the agent can reach
-    # it. That is a path from the untrusted agent to the internet, bounded by the allowlist. It is
-    # not a hole in S5 — the agent is confined to the same names root is — but it is a fact worth
-    # asserting rather than discovering, so the behaviour is recorded either way.
-    with subtest("leg 7: record whether the agent can reach the proxy over loopback"):
+    # ---- leg 7: THE AGENT CANNOT REACH THE PROXY AT ALL ------------------------------------------
+    # This leg previously read "record whether the agent can reach the proxy over loopback", and
+    # tolerated the answer YES on the reasoning that the agent was then "confined to the same names
+    # root is". Geist declined that framing (MEDIUM on PR #89) and he is right: the agent's
+    # invariant is ZERO egress, not allowlisted egress, so a bounded path is still a NEW path. The
+    # egress chain now carries `oifname "lo" tcp dport <port> meta skuid != 0 drop` ahead of the
+    # general loopback accept, and this leg is what makes that rule falsifiable.
+    #
+    # The host here is the ALLOWED one, deliberately. Probing the BLOCKED host (leg 8) cannot
+    # distinguish the drop rule from tinyproxy's own filter — both refuse, and the leg would stay
+    # green with the nftables rule deleted. Only the allowlisted host separates them: the proxy
+    # would happily serve it, so anything other than success is the packet dying before arrival.
+    #
+    # EXIT=28, pinned exactly. A drop is SILENT for TCP, so the signature is curl's timeout, not
+    # its connection-refused. Accepting "any nonzero" would let EXIT=7 pass — and EXIT=7 here means
+    # tinyproxy is simply DEAD, under which every leg in this file is vacuous.
+    #
+    # GREEN-TO-RED, MEASURED (2026-08-14, dlux, TCG). Delete the proxyPortGuard interpolation
+    # from modules/clean-room.nix and this leg reports EXIT=0 — the agent really does complete a
+    # CONNECT tunnel to the allowlisted host through the proxy. So the MEDIUM was a REACHABLE path,
+    # not a hypothesis, and this leg's green is caused by the guard rather than by the agent having
+    # had no route in the first place. Passing at 15.52s against a 15s --max-time corroborates it:
+    # the exit code and the wall-clock agree on "timed out", where a refusal would return at once.
+    with subtest("leg 7: the agent cannot reach the proxy port over loopback, even for an ALLOWED host"):
+        out = sealed.succeed(
+            "rc=0; runuser -u agent -- curl -sS --max-time 15 -o /dev/null "
+            "-x http://127.0.0.1:${toString proxyPort} --proxytunnel http://${allowedHost}:443/ "
+            "2>&1 || rc=$?; echo EXIT=$rc"
+        )
+        assert "EXIT=28" in out, (
+            f"the agent's probe to the proxy did not TIME OUT (want EXIT=28, the signature of a "
+            f"silent drop). EXIT=0 means the skuid guard is absent or ordered after the general "
+            f"`oifname \"lo\" accept`, and the untrusted agent has an allowlisted path to the "
+            f"internet — including, with this module's own documented example allowlist, a "
+            f"github.com CONNECT tunnel. EXIT=7 means the proxy is not listening and this leg "
+            f"proves nothing: {out!r}"
+        )
+
+    # ---- leg 8: and the filter still applies to it if it ever does reach ------------------------
+    # Defence in depth, and the leg that used to be leg 7. If the nftables guard above regresses,
+    # tinyproxy's allowlist is the second wall — this asserts the second wall independently, so a
+    # single regression cannot open the path outright.
+    with subtest("leg 8: a non-allowlisted host is refused for the agent by the filter too"):
         out = sealed.succeed(
             "rc=0; runuser -u agent -- curl -sS --max-time 15 -o /dev/null "
             "-x http://127.0.0.1:${toString proxyPort} --proxytunnel http://${blockedHost}:443/ "
@@ -243,5 +288,12 @@ pkgs.testers.runNixOSTest {
             f"the agent tunnelled to a NON-allowlisted host through the proxy. Whatever the "
             f"loopback story, the filter must apply to every client: {out!r}"
         )
+
+    # ---- leg 9: the guard did not break the LEGITIMATE client -----------------------------------
+    # A drop rule that also killed nix-daemon would be caught by leg 1 above (root, via proxy,
+    # allowed host, EXIT=0) — which runs BEFORE the guard could be blamed for it. Named here so
+    # the control is not merely implicit: leg 1 is the reason this guard is known to be scoped to
+    # non-root rather than to everyone. There is no separate probe; adding one would assert the
+    # same fact twice and make a future reader think two things were checked.
   '';
 }

@@ -59,13 +59,16 @@ permissions:
 jobs:
   vm-test:
     runs-on: ubuntu-latest
-    # Generous but finite. Wall-clock for the mesh test on the dev box is ~9 min with a warm
-    # store — but measured under TCG, NOT KVM: nix builds as `nixbld*`, which is not in the `kvm`
-    # group, so /dev/kvm is root:kvm 0660 and every local VM run silently emulates. That is the
-    # exact failure this job's KVM assert exists to make loud, found by reading a QEMU line
-    # ("failed to initialize kvm: Permission denied") that the test otherwise sails past. So treat
-    # ~9 min as a conservative CEILING for a KVM runner, not a KVM measurement — the honest
-    # direction, but do not quote it as one. Nobody has yet timed these under KVM.
+    # Generous but finite. NOW MEASURED UNDER KVM — first green run of this lane, PR #89 head
+    # 7a6fdd7, 2026-08-14: seal-faildown 7.2 min, egress-mesh-uid-scope 5.6, egress-uid-scope 5.1,
+    # fetch-proxy-allowlist 3.3 (flake-check, fast lane, 0.9). Worst entry is 7.2 of a 45-minute
+    # ceiling, so the ceiling has ~6x headroom and is not the thing to watch.
+    #
+    # The line this replaces read "~9 min on the dev box under TCG, treat as a conservative CEILING
+    # for KVM". Do NOT now read 7.2-vs-9 as a TCG-vs-KVM ratio: different tests on different
+    # hardware (i7-8700K dev box vs a GitHub runner), so the comparison is uncontrolled and the
+    # "~10x slower under TCG" figure quoted below remains an ASSUMPTION, not a measurement here.
+    # It is still the right direction to fail on, which is why the assert stays.
     timeout-minutes: 45
     strategy:
       # Do NOT fail-fast: when the wall breaks, "which of the three legs went red" is the whole
@@ -79,8 +82,9 @@ jobs:
           # WP-S5. Added by the PR that introduces tests/fetch-proxy-allowlist.nix, in the same
           # commit as the test — because a test that lands without its matrix entry is precisely
           # the failure this whole file was written to end. It boots TWO nodes (a sealed box and a
-          # peer serving :443 and :8443), so it is the most expensive entry here; the 45-minute
-          # ceiling above is per-entry and covers it.
+          # peer serving :443 and :8443), which I predicted would make it the most expensive entry
+          # here. Measured on the first KVM run it was the CHEAPEST at 3.3 min — node count is a
+          # poor proxy for wall-clock when the other tests each build a full sealed closure.
           - test-fetch-proxy-allowlist
     steps:
       - name: Checkout
