@@ -90,6 +90,17 @@
           pkgs = nixpkgs.legacyPackages.${system};
           inherit baseModules;
         };
+
+        # WP-S1 acceptance: the scoped skuid-0 egress rules verified by PACKET FATE (agent vs
+        # root, :443 vs arbitrary port) against a real off-box peer. Same reason as above for
+        # keeping it OUT of `checks` — it boots two VMs. Run on demand:
+        #   nix build .#test-egress-uid-scope
+        # This is the ONLY evidence that distinguishes "the ruleset parses" (nft-ruleset-*, a
+        # parse gate) and "the table exists" (test-seal-faildown) from "the wall holds".
+        test-egress-uid-scope = import ./tests/egress-uid-scope.nix {
+          pkgs = nixpkgs.legacyPackages.${system};
+          inherit baseModules;
+        };
       };
 
       checks.${system} = {
