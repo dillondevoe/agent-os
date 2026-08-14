@@ -76,6 +76,12 @@ jobs:
           - test-egress-uid-scope
           - test-egress-mesh-uid-scope
           - test-seal-faildown
+          # WP-S5. Added by the PR that introduces tests/fetch-proxy-allowlist.nix, in the same
+          # commit as the test — because a test that lands without its matrix entry is precisely
+          # the failure this whole file was written to end. It boots TWO nodes (a sealed box and a
+          # peer serving :443 and :8443), so it is the most expensive entry here; the 45-minute
+          # ceiling above is per-entry and covers it.
+          - test-fetch-proxy-allowlist
     steps:
       - name: Checkout
         # SHA-pinned, matching flake-check.yml: immutable commit of the newest v* release tag.
