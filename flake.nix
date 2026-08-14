@@ -24,6 +24,7 @@
         ./modules/seal-check.nix
         ./modules/break-glass.nix   # PR-A: the ONE interactive root door (tty3, password-gated)
         ./modules/mesh-wireguard-sealed.nix  # WP-S1: sealed-lane mesh (options only; enabled per-variant below)
+        ./modules/fetch-proxy.nix   # WP-S5: hostname-allowlisted fetch path (options only; INERT unless enabled)
         ./modules/system-set.nix    # PR-A: SCAFFOLD for the root-side system.set executor (impl in PR-J)
         ./modules/boot-branding.nix
       ];
@@ -66,6 +67,25 @@
         # peers, key) is injected at deployment time — the public repo ships the mechanism
         # with an empty mesh map (Phase-S "no credentials in the repo" constraint).
         agentos.meshWireguard.enable = true;
+      } ];
+
+      # WP-S5 CANDIDATE. `agentos-sealed` above is deliberately UNCHANGED by S5 — the fetch proxy
+      # is a separate target until it has been accepted, because switching the deployed sealed
+      # variant to it would withdraw root's direct fetch path on a box whose acceptance evidence
+      # does not exist yet. Per Geist's 2026-08-14 amendment to spec §WP-S5, S5 may be BUILT while
+      # S4 is red; what is gated is what may be DECLARED. So this target exists, evaluates, and is
+      # covered by the parse gate and the VM test — and nothing calls it verified, or sealed.
+      #
+      # The allowlist below is the minimum for a box that can still rebuild itself. It is not a
+      # claim about what the Dell needs; that list is a deployment fact and gets settled at the
+      # at-the-box acceptance session the spec calls for, not here.
+      nixosConfigurations.agentos-sealed-s5 = mkSystem [ {
+        agentos.cleanRoom.sealed = true;
+        agentos.meshWireguard.enable = true;
+        agentos.fetchProxy = {
+          enable = true;
+          allowedHosts = [ "cache.nixos.org" "channels.nixos.org" ];
+        };
       } ];
 
       # OPEN / MESHED dev variant — intentionally permissive (see `openModules`).
@@ -116,6 +136,27 @@
         # does not execute documents that someone once could have caught the bug. If you are ever
         # tempted to move these back out of CI, that is the sentence to re-read.
         test-egress-mesh-uid-scope = import ./tests/egress-mesh-uid-scope.nix {
+          pkgs = nixpkgs.legacyPackages.${system};
+          inherit baseModules;
+        };
+
+        # WP-S5: the hostname allowlist, and uid 0's withdrawn direct fetch path. This is the ONLY
+        # evidence for either — nft-ruleset-sealed-s5 is blind to the allowlist (it is not in the
+        # ruleset) and fetch-proxy-filter-compiled proves only that the filter CODE exists, not
+        # that the policy is right.
+        #
+        # ENFORCED. This was written as a conditional MERGE-ORDER DEPENDENCY — the slow lane
+        # (.github/workflows/vm-tests.yml) was on branch `wp-s4-slow-lane-vm-tests` awaiting a
+        # gate, so whichever of the two landed second owed the other a matrix entry. That
+        # condition RESOLVED at 04:14:26Z on 2026-08-14: the slow lane merged as PR #88 / 5542d91.
+        # This branch is therefore the one landing second, this branch is rebased onto it, and the
+        # matrix entry is in this commit. The debt is paid, not deferred — a conditional left
+        # standing after its condition resolves reads to the next person as an open question when
+        # it is actually an unmade change.
+        #
+        # Out of `checks` like its siblings: it boots two VMs. Run on demand:
+        #   nix build .#test-fetch-proxy-allowlist
+        test-fetch-proxy-allowlist = import ./tests/fetch-proxy-allowlist.nix {
           pkgs = nixpkgs.legacyPackages.${system};
           inherit baseModules;
         };
@@ -377,6 +418,51 @@
               nixpkgs.lib.concatStringsSep " "
                 self.nixosConfigurations.agentos-sealed.config.systemd.services.nftables.serviceConfig.ExecStart
             }"
+            touch $out
+          '';
+
+        # WP-S5 parse gate. A distinct nft parse from nft-ruleset-sealed: the S5 variant renders
+        # `meta skuid 350` where the sealed one renders `meta skuid 0`, and a numeric-uid rule is
+        # exactly the kind of thing that can be malformed in a way the sealed ruleset never
+        # exercises. Same standing caveat as its siblings — see the WHAT THESE DO NOT DO block
+        # above: this proves the ruleset PARSES, never that a packet dies, and it is completely
+        # blind to the hostname allowlist, which is not in the ruleset at all.
+        nft-ruleset-sealed-s5 =
+          assert nixpkgs.lib.assertMsg
+            self.nixosConfigurations.agentos-sealed-s5.config.networking.nftables.checkRuleset
+            "nft-ruleset-sealed-s5 would false-PASS: networking.nftables.checkRuleset is false";
+          nixpkgs.legacyPackages.${system}.runCommand "nft-ruleset-sealed-s5-check" { } ''
+            echo "agentos-sealed-s5 nftables ruleset passed nft --check via: ${
+              nixpkgs.lib.concatStringsSep " "
+                self.nixosConfigurations.agentos-sealed-s5.config.systemd.services.nftables.serviceConfig.ExecStart
+            }"
+            touch $out
+          '';
+
+        # WP-S5: the allowlist is only enforced if filtering was COMPILED IN. tinyproxy wraps its
+        # entire filter block in `#ifdef FILTER_ENABLE`; built with `--disable-filter` it still
+        # ACCEPTS `Filter` and `FilterDefaultDeny` in its config file, logs nothing unusual, and
+        # proxies every host you asked it to refuse. Today nixpkgs passes no configureFlags and
+        # upstream defaults the flag to yes — an upstream default that this module's whole
+        # security property rests on, and that no other gate here would notice changing.
+        #
+        # The probe is the log string emitted on a refusal ("Proxying refused on filtered"), which
+        # lives in the same #ifdef as the filter itself and therefore cannot be present in a
+        # binary that cannot filter. Asserted on the exact derivation the module uses, not on a
+        # separately-resolved `pkgs.tinyproxy`.
+        fetch-proxy-filter-compiled =
+          let
+            p = nixpkgs.legacyPackages.${system};
+            tp = self.nixosConfigurations.agentos-sealed-s5.config.services.tinyproxy.package;
+          in
+          p.runCommand "fetch-proxy-filter-compiled-check" { } ''
+            if ${p.gnugrep}/bin/grep -q "Proxying refused on filtered" ${tp}/bin/tinyproxy; then
+              echo "ok: ${tp} has FILTER_ENABLE compiled in"
+            else
+              echo "FAIL: ${tp}/bin/tinyproxy was built WITHOUT FILTER_ENABLE." >&2
+              echo "agentos.fetchProxy.allowedHosts would be accepted and IGNORED." >&2
+              exit 1
+            fi
             touch $out
           '';
 

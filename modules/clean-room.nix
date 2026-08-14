@@ -25,6 +25,34 @@
 let
   cfg = config.agentos.cleanRoom;
   mw = config.agentos.meshWireguard or { enable = false; };
+  # WP-S5. `or` guards the case where fetch-proxy.nix is not in the module list at all, matching
+  # how `mw` is read above — clean-room must still evaluate for a variant that composes neither.
+  fp = config.agentos.fetchProxy or { enable = false; };
+
+  # The S5 rule delta, in full. Two lines become two lines; only the uid they name changes, and
+  # that is the entire security difference. Written as an EXCHANGE rendered from one option
+  # rather than as two independent toggles: a config that withdrew root's accepts without issuing
+  # the proxy's would brick nixos-rebuild, and one that issued both would be S1 with extra steps
+  # while reading, in the rendered ruleset, exactly like S5.
+  #
+  # Root does not lose its ability to fetch — it loses its ability to fetch DIRECTLY. The hop to
+  # the proxy is loopback, which `oifname "lo" accept` already covers.
+  #
+  # The proxy uid is NUMERIC and comes from config, so the rule and the user it names cannot
+  # disagree — both render from agentos.fetchProxy.uid. A NAME would resolve on the box and FAIL
+  # in the sandboxed `nft --check` gate, which has no user database; that gate is the whole reason
+  # fetch-proxy.nix pins a static uid instead of taking an auto-allocated one.
+  #
+  # What this pair does NOT do: the hostname check is not here and cannot be — nftables cannot
+  # name hosts. This grant is exactly as wide in DESTINATION as the one it replaces. It is
+  # narrower only in WHO HOLDS IT: one hardened daemon whose single job is to refuse a hostname,
+  # instead of every process running as root. The evidence that the refusal works is behavioural
+  # (tests/fetch-proxy-allowlist.nix), never this line.
+  fetchUid = if fp.enable then toString fp.uid else "0";
+  fetchAccepts = lib.concatStringsSep "\n          " [
+    "meta nfproto ipv4 meta skuid ${fetchUid} udp dport 53 accept"
+    "meta nfproto ipv4 meta skuid ${fetchUid} tcp dport { 53, 443 } accept"
+  ];
 in {
   options.agentos.cleanRoom = {
     enable = lib.mkOption {
@@ -84,6 +112,27 @@ in {
           # enforcing a hostname allowlist (cache.nixos.org + pinned flake hosts) and dropping
           # uid 0 to default-DROP. (Fable LOW-#5, 2026-07-29 — comment previously named only :443.)
           #
+          # WP-S5, 2026-08-14: PR-K is now `agentos.fetchProxy` (modules/fetch-proxy.nix), and the
+          # two accepts below are CONDITIONAL on it. With the proxy enabled they are not rendered
+          # at all — uid 0 keeps no direct path to 53 or 443, and the identical grant is re-issued
+          # to the proxy's dedicated uid a few lines down. That is the whole of the S5 rule delta:
+          # the same two ports, moved from "whoever is root" to "the one process that checks the
+          # hostname". Root still reaches the proxy, because that hop is loopback and `oifname
+          # "lo" accept` above already covers it.
+          #
+          # SCOPE, stated rather than implied: this makes the proxy root's only path to the
+          # INTERNET, not root's only path off the box. The mesh accept further down this chain
+          # (contributed by mesh-wireguard-sealed.nix, `meta skuid 0 oifname <iface> accept`) is
+          # untouched by S5, so a compromised root still reaches every mesh PEER directly, on any
+          # port, with no hostname check. That is the mesh module's own documented residual and
+          # closing it is not this work package — but "S5 landed" must not be read as "root cannot
+          # egress without the proxy", because in the rendered ruleset it plainly can.
+          #
+          # The conditional is deliberately an EXCHANGE rendered from one option rather than two
+          # independent toggles. A configuration that withdrew root's accepts without issuing the
+          # proxy's would brick nixos-rebuild; one that issued both would be S1 with extra steps
+          # and would read, in the rendered ruleset, exactly like S5.
+          #
           # nfproto ipv4 PARITY (PR-A residual): every scoped skuid accept below carries
           # `meta nfproto ipv4` so it is EXPLICITLY v4-only, matching the v4-only doctrine in the
           # IPv6 note at the bottom of this chain. Today v6 egress is already dead (NDP is
@@ -91,8 +140,10 @@ in {
           # scopes in a link-local NDP allow per that note, these bare `skuid 0 … accept` rules
           # would silently start matching v6 too and widen root egress to 443/53/123 over IPv6.
           # The predicate keeps the accepts pinned to the family they were reasoned about.
-          meta nfproto ipv4 meta skuid 0 udp dport 53 accept
-          meta nfproto ipv4 meta skuid 0 tcp dport { 53, 443 } accept
+          # `fetchAccepts` (let block) renders ONE of two pairs here: the interim skuid-0 pair, or
+          # the WP-S5 proxy-uid pair that replaces it. Read the rendered ruleset, not this file,
+          # to know which — `nix build .#nft-ruleset-sealed` prints it.
+          ${fetchAccepts}
           # DHCPv4 client (NetworkManager's, uid 0): DISCOVER/REQUEST egress as udp sport 68 →
           # dport 67 (broadcast). The scoped skuid-0 rules above do NOT cover it, so under the
           # default-DROP policy it would be dropped — and on the SEALED box on wifi (the Dell,
