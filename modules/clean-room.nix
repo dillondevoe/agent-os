@@ -53,6 +53,44 @@ let
     "meta nfproto ipv4 meta skuid ${fetchUid} udp dport 53 accept"
     "meta nfproto ipv4 meta skuid ${fetchUid} tcp dport { 53, 443 } accept"
   ];
+
+  # WP-S5 follow-up (Geist MEDIUM on PR #89, 2026-08-14). The proxy listens on loopback and
+  # `oifname "lo" accept` below is UID-BLIND, tinyproxy's `Allow 127.0.0.1` is uid-blind, and
+  # nothing else scoped the proxy port — so the untrusted agent could CONNECT through the proxy
+  # and reach every ALLOWLISTED host.
+  #
+  # I originally wrote that off as "not a hole: the agent is confined to the same names root is."
+  # That is a defence on the NAMES axis that silently repeals the invariant on the EGRESS axis.
+  # INV-2 for the agent is ZERO egress, not allowlisted egress, so "confined to the allowlist" is
+  # a strict WEAKENING of the agent's confinement, not a null change. And it is not hypothetical:
+  # fetch-proxy.nix's own option example lists `github.com`, and a CONNECT tunnel to an
+  # interactive host that reflects a request body is an exfil channel for agent-chosen bytes.
+  #
+  # So: deny non-root clients the proxy port, ahead of the general loopback accept. Legitimate
+  # clients are nix-daemon and fwupd, both uid 0; the proxy egresses OUTWARD, never to itself; and
+  # agent IPC on every other loopback port (the local brain on 11434, mem, all of it) is untouched
+  # because this names one dport.
+  #
+  # Deliberately NOT carrying the `meta nfproto ipv4` pin the accepts carry. Scoping an ACCEPT
+  # narrowly is fail-closed; scoping a DROP narrowly is fail-OPEN — a v4-only drop would leave
+  # ::1 open the day anything starts listening there. tinyproxy binds 127.0.0.1 only today, which
+  # is a reason this is currently unreachable, not a reason to write the rule as if it always will
+  # be.
+  # Rendered INCLUDING its own comment lines, so that with fetchProxy disabled this contributes
+  # literally nothing to the ruleset. PR #89 merged on the argument "agentos-sealed is
+  # byte-unchanged"; that argument stays checkable by diffing the two rendered rulesets only if
+  # the explanation travels inside the conditional with the rule. A comment emitted
+  # unconditionally is inert to nftables and still falsifies the sentence a reviewer is verifying.
+  # Joined with an explicit "\n          " the way `fetchAccepts` is, NOT written as a multi-line
+  # `''` block: interpolating a multi-line string into the ruleset only indents its FIRST line,
+  # and every line after it lands at column 0.
+  proxyPortGuard = lib.optionalString fp.enable (lib.concatStringsSep "\n          " [
+    "# WP-S5 (Geist MEDIUM on PR #89): the fetch-proxy port is carved OUT of the loopback"
+    "# accept below for every non-root uid, BEFORE that accept can match. Rationale at the"
+    "# `proxyPortGuard` binding in modules/clean-room.nix."
+    "oifname \"lo\" tcp dport ${toString fp.port} meta skuid != 0 drop"
+    ""
+  ]);
 in {
   options.agentos.cleanRoom = {
     enable = lib.mkOption {
@@ -94,7 +132,7 @@ in {
           ct state established,related accept
           ct state invalid drop
 
-          # on-box IPC: the local brain (127.0.0.1:11434), mem, everything loopback
+          ${proxyPortGuard}# on-box IPC: the local brain (127.0.0.1:11434), mem, everything loopback
           oifname "lo" accept
 
           # nixpkgs-only survivor: nix-daemon substituter fetches + fwupd, both root-initiated.
