@@ -74,8 +74,20 @@ pkgs.testers.runNixOSTest {
   testScript = ''
     start_all()
     sealed.wait_for_unit("multi-user.target")
-    peer.wait_for_unit("listen-443.service")
-    peer.wait_for_unit("listen-8080.service")
+    # Wait on the PORT, not the unit. Both listeners are Type=simple, and systemd marks a simple
+    # service ACTIVE the instant it forks — before python3 has imported, bound, or listened. So
+    # `wait_for_unit("listen-443.service")` can return with no socket in existence. That is the
+    # same family as the `Restart=always` trap documented on fetch-proxy-allowlist.nix's listeners,
+    # arriving by a different route: there the unit was active BETWEEN CRASHES, here it is active
+    # BEFORE THE BIND. Neither is an instrument.
+    #
+    # Not a silent false green today, and the distinction is worth stating rather than implying:
+    # the fixture curls at lines below are one-shot `peer.succeed`, so a pre-bind race fails LOUDLY
+    # there instead of quietly weakening a deny leg. What this replaces is therefore a FLAKE, not a
+    # hole. Fixed anyway, because a gate that is saved by the assertion after it is a gate that
+    # stops working the day someone reorders them.
+    peer.wait_for_open_port(443)
+    peer.wait_for_open_port(8080)
 
     # Resolve the peer by ADDRESS, not by name: a name would route the probe through glibc
     # resolution, and DNS egress is itself uid-scoped here — a failed lookup and a dropped
@@ -112,7 +124,42 @@ pkgs.testers.runNixOSTest {
         sealed.succeed(f"curl -sS --max-time 10 -o /dev/null http://{peer_ip}:443/")
 
     with subtest("2. uid 0 is DENIED an arbitrary port (the acceptance line: root cannot egress anywhere)"):
-        sealed.fail(f"curl -sS --max-time 10 -o /dev/null http://{peer_ip}:8080/")
+        # EXIT PINNED, not bare fail(). A bare fail() accepts ANY nonzero, so it is satisfied by
+        # connection-refused, by no-route, and by a missing curl exactly as well as by the wall —
+        # the "bare fail() does not discriminate its failure mode" defect Fable raised as LOW on
+        # PR #87 and that leg 6 of egress-mesh-uid-scope.nix was rewritten to close. This file was
+        # never swept for the same shape. 28 = timed out with nothing back = the SYN died in the
+        # chain; 7 would mean refused/unreachable, which here means a broken fixture and MUST NOT
+        # read as a pass. Refusal is off the table while the peer's firewall is off and the port is
+        # bound (asserted above), and leg 1 proves the sealed->peer L3 path carries a PERMITTED
+        # flow, so a 7 cannot be blamed on the network.
+        #
+        # Shell form: the driver runs with `set -e`, so a bare `cmd; echo EXIT=$?` never reaches
+        # the echo. Capturing via `|| rc=$?` keeps the failure inside a `||` list where set -e does
+        # not fire. (Cost a VM run on the mesh test; not re-learning it here.)
+        #
+        # MEASURED 2026-08-14 on dlux (TCG, not KVM): all three pinned legs report
+        # `curl: (28) Connection timed out after 10002 milliseconds`, and the two controls return in
+        # 0.66s (leg 1) and 0.48s (leg 3) — so a permitted flow on this fixture completes ~15x inside
+        # curl's window and a 28 cannot be blamed on emulation slowness. Read the corroborating
+        # duration off CURL's OWN message, not off the driver's subtest timing: the driver clocked
+        # this leg at 8.67s while the guest measured 10.002s, because host and guest clocks diverge
+        # under TCG. A "finished in 8.7s against a 10s --max-time" reading would look like a
+        # contradiction and is merely the wrong instrument.
+        #
+        # RESIDUAL, named rather than implied by the green: leg 1 proves a PERMITTED flow to :443
+        # returns 0, so leg 4 (same host, same port, differing only in uid) is discriminated by a
+        # real control. **:8080 has no such control** — the wall denies it for every uid, so nothing
+        # here proves sealed->peer:8080 would return 0 if permitted, and legs 2/5 rest on the peer's
+        # own fixture curl to :8080 plus the shared route leg 1 exercises. Closing it needs a
+        # permitted-TCP control that cannot exist from `sealed` while the wall stands — the same
+        # shape the mesh test names at its leg 6.
+        out = sealed.succeed(
+            f"rc=0; curl -sS --max-time 10 -o /dev/null http://{peer_ip}:8080/ || rc=$?; echo EXIT=$rc"
+        )
+        assert "EXIT=28" in out, (
+            f"uid 0's :8080 probe failed, but not demonstrably by the wall (want EXIT=28): {out!r}"
+        )
 
     with subtest("3. CONTROL — the AGENT can reach loopback (its stack works; the wall is what denies)"):
         # Proves legs 4/5 are the WALL denying, not a broken user, a missing curl, or a dead
@@ -130,9 +177,24 @@ pkgs.testers.runNixOSTest {
         # The load-bearing assertion. :443 is open to uid 0 (leg 1), so if this succeeded the
         # rule would be a PORT allow wearing a uid predicate, and every unprivileged process on
         # the box — the agent, the model, any capability — would have an HTTPS path off it.
-        sealed.fail(f"runuser -u agent -- curl -sS --max-time 10 -o /dev/null http://{peer_ip}:443/")
+        # Pinned to 28 for the reason spelled out on leg 2. This one matters most: :443 is OPEN to
+        # uid 0 (leg 1 just proved it), so a bare nonzero here is the weakest assertion in the file
+        # guarding the strongest claim.
+        out = sealed.succeed(
+            f"rc=0; runuser -u agent -- curl -sS --max-time 10 -o /dev/null http://{peer_ip}:443/ "
+            "|| rc=$?; echo EXIT=$rc"
+        )
+        assert "EXIT=28" in out, (
+            f"the agent's :443 probe failed, but not demonstrably by the wall (want EXIT=28): {out!r}"
+        )
 
     with subtest("5. the agent is DENIED an arbitrary port"):
-        sealed.fail(f"runuser -u agent -- curl -sS --max-time 10 -o /dev/null http://{peer_ip}:8080/")
+        out = sealed.succeed(
+            f"rc=0; runuser -u agent -- curl -sS --max-time 10 -o /dev/null http://{peer_ip}:8080/ "
+            "|| rc=$?; echo EXIT=$rc"
+        )
+        assert "EXIT=28" in out, (
+            f"the agent's :8080 probe failed, but not demonstrably by the wall (want EXIT=28): {out!r}"
+        )
   '';
 }
