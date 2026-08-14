@@ -350,6 +350,24 @@
             touch $out
           '';
 
+        # Phase S · WP-S2 — the file.* capability IMPLS' property battery. `capabilities` above
+        # proves the DISPATCHER (cap-invoke); this proves the two impls BEHIND file.read / file.write
+        # via DIRECT-invoke with AGENT_OS_FILE_SAFE_ROOT / AGENT_OS_FILE_WORKSPACE_ROOT = <scratch>
+        # — the DESIGNED test override (mirrors AGENT_OS_MEM_ROOT, mem-cap above). The seam strips
+        # both env vars (impl env = {PATH, AGENT_OS_REGISTRY}), so a through-seam call always uses
+        # the hardcoded /var/lib/agent-os/{safe-read,workspace} roots, which a non-root check-
+        # derivation cannot create; the direct path is the only in-sandbox home for the round-trip.
+        # Covers write->read byte-identity, path-confinement fences (nothing written/read outside
+        # the declared root), non-canonical-path rejection, symlink refusal on both read and write,
+        # and arg-schema fail-closed legs. Regression -> RED.
+        file-cap =
+          nixpkgs.legacyPackages.${system}.runCommand "file-cap-check"
+            { nativeBuildInputs = [ nixpkgs.legacyPackages.${system}.python3 ]; } ''
+            work="$(mktemp -d)"
+            bash ${./tests/file-cap-battery.sh} ${./bin/cap-file-read} ${./bin/cap-file-write} "$work"
+            touch $out
+          '';
+
         # Phase 2 · Step 7 (go-live) — the WIRED invoke-seam END-TO-END regression guard. Drives the
         # REAL broker through the REAL store-pinned cap-invoke DISPATCHER + the patchShebangs'd
         # capabilities.list impl (the EXACT artifacts modules/broker.nix now pins into production via

@@ -24,6 +24,7 @@
 #   audit-battery.sh              audit log (needs only bin/audit + scratch)
 #   taint-battery.sh              taint tracking (bin/taint + bin/audit + scratch)
 #   mem-cap-battery.sh            memory capability round-trip
+#   file-cap-battery.sh           file.read/file.write capability round-trip + confinement
 #   providers-battery.py          11 checks — modules/providers.py provider-config contract
 #   wiring-battery.py             8 checks — agent-brain <-> providers.py wiring (needs pyyaml)
 #   mem-battery.py                11 checks — bin/mem (memory-as-filesystem) contract
@@ -128,6 +129,11 @@ fi
 if need "$BIN/cap-mem-remember" mem-cap; then
   run mem-cap bash "$T/mem-cap-battery.sh" \
     "$BIN/cap-mem-remember" "$BIN/cap-mem-recall" "$SCRATCH/mem-cap.d"
+fi
+# file-cap-battery.sh <cap-file-read> <cap-file-write> <scratch>
+if need "$BIN/cap-file-read" file-cap; then
+  run file-cap bash "$T/file-cap-battery.sh" \
+    "$BIN/cap-file-read" "$BIN/cap-file-write" "$SCRATCH/file-cap.d"
 fi
 # mcp-battery.sh <bin/mcp> <workdir>
 if need "$BIN/mcp" mcp; then

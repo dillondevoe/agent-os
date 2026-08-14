@@ -1,0 +1,114 @@
+#!/usr/bin/env python3
+# cap-file-read — Phase S · WP-S2 impl for the T0 `file.read` capability.
+#
+# Security surface: branch -> PR -> Fable -> merge. Never direct-push.
+#
+# Tier T0 (AUTO — runs even under taint). Reads ONE file under a declared-safe, operator-curated
+# path and returns its exact bytes (utf-8-decoded). Origin is TRUSTED by broker fiat (docs/
+# phase2-broker-spec.md §4.5: "file.read -> TRUSTED (operator-curated, sandbox-confined path)")
+# — this impl NEVER emits an origin field; the broker derives it from the capability name alone.
+#
+# Confinement is enforced TWICE, by design (defense-in-depth, same posture as cap-mem-remember's
+# namespace re-check): the broker's `path_is_canonical`/`path_confined` already reject a request
+# whose `path` arg escapes the registry's declared `readOnlyPaths` root before this impl is ever
+# invoked; this impl re-derives the same check against its OWN hardcoded root so a contract slip
+# upstream (or a future direct-invoke bypassing the broker) can't smuggle a path outside the root.
+# The OS-level ReadOnlyPaths sandbox (Step-7 systemd unit) is the third, outermost layer.
+#
+# Seam contract (invoked by cap-invoke, the AGENT_OS_INVOKE_SEAM dispatcher):
+#   stdin  : {"capability":"file.read","arguments":{"path":<str>}}
+#   stdout : {"ok":true, "content":<file bytes as utf-8 str>, "meta":{"path":<str>}}   exit 0
+#   stdout : {"ok":false,"content":null,"meta":{}}                                     exit 3
+#            on any contract/infra failure (dispatcher then withholds, fail-closed).
+
+import json
+import os
+import sys
+
+# Sandbox-declared root (modules/capability-registry.nix "file.read".sandbox.readOnlyPaths[0]).
+# AGENT_OS_FILE_SAFE_ROOT is a TEST-ONLY override — the seam strips the impl env to exactly
+# {PATH, AGENT_OS_REGISTRY}, so it is never attacker-settable in production; it only takes effect
+# when the battery invokes the impl directly, bypassing the seam (mirrors AGENT_OS_MEM_ROOT).
+SAFE_ROOT = os.environ.get("AGENT_OS_FILE_SAFE_ROOT", "/var/lib/agent-os/safe-read")
+
+MAX_READ_BYTES = 1048576  # 1 MiB cap — bounds memory vs a giant planted/symlinked file.
+
+
+def _fail(msg):
+    sys.stderr.write("cap-file-read: %s\n" % msg)
+    sys.stdout.write(json.dumps({"ok": False, "content": None, "meta": {}},
+                                sort_keys=True, separators=(",", ":"), ensure_ascii=True))
+    sys.exit(3)
+
+
+def _path_is_canonical(p):
+    """Dumb twin of the broker's path_is_canonical (bin/broker): leading '/', no empty/'.'/'..'
+    segment, no trailing '/'."""
+    if not isinstance(p, str) or not p.startswith("/"):
+        return False
+    parts = p.split("/")
+    if parts[0] != "" or len(parts) < 2:
+        return False
+    return all(seg not in ("", ".", "..") for seg in parts[1:])
+
+
+def _path_confined(p, root):
+    """p is confined iff it EQUALS root or lies strictly under it. Textual defense-in-depth OVER
+    the Step-7 OS sandbox — symlink-escape is that layer's job (ProtectSystem/InaccessiblePaths),
+    not this one's."""
+    r = root.rstrip("/")
+    return p == r or p.startswith(r + "/")
+
+
+def main():
+    try:
+        raw = sys.stdin.buffer.read()
+    except OSError as e:
+        _fail("could not read stdin (%s)" % e)
+
+    try:
+        req = json.loads(raw.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError) as e:
+        _fail("request is not valid JSON (%s)" % e)
+    if not isinstance(req, dict):
+        _fail("request is not a JSON object")
+
+    args = req.get("arguments")
+    if not isinstance(args, dict):
+        _fail("'arguments' is not a JSON object")
+    path = args.get("path")
+    if not isinstance(path, str) or not _path_is_canonical(path):
+        _fail("'path' missing or not canonical")
+    if not _path_confined(path, SAFE_ROOT):
+        _fail("path outside cap root (confinement)")
+
+    # Reject anything that isn't a regular file BEFORE opening — no following a symlink to a
+    # device/FIFO/socket planted under the root, and no silently reading a directory's listing.
+    try:
+        st = os.lstat(path)
+    except OSError as e:
+        _fail("stat failed (%s)" % e)
+    if not os.path.isfile(path) or os.path.islink(path):
+        _fail("not a regular file (symlink or special file rejected)")
+    if st.st_size > MAX_READ_BYTES:
+        _fail("file exceeds MAX_READ_BYTES cap")
+
+    try:
+        with open(path, "rb") as f:
+            octets = f.read(MAX_READ_BYTES + 1)
+    except OSError as e:
+        _fail("could not read file (%s)" % e)
+    if len(octets) > MAX_READ_BYTES:
+        _fail("file exceeds MAX_READ_BYTES cap (grew during read)")
+    try:
+        content = octets.decode("utf-8")
+    except UnicodeDecodeError as e:
+        _fail("file is not valid utf-8 (%s)" % e)
+
+    sys.stdout.write(json.dumps({"ok": True, "content": content, "meta": {"path": path}},
+                                sort_keys=True, separators=(",", ":"), ensure_ascii=True))
+    sys.exit(0)
+
+
+if __name__ == "__main__":
+    main()
