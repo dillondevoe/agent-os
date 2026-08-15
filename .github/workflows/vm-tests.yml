@@ -13,8 +13,12 @@
 # security bug was a file that ran when a human remembered. A regression test that does not
 # execute does not prevent the regression; it documents that someone once could have caught it.
 #
-# SCOPE: the three nixosTests held out of `checks` because they boot VMs (minutes, not seconds).
+# SCOPE: the nixosTests held out of `checks` because they boot VMs (minutes, not seconds).
 # `checks` stays fast and runs on every PR; this lane runs on the paths that can move the wall.
+# It said "the three" when it was written; the matrix is the authoritative count, and it has grown
+# past the egress wall it was built for — WP-S5's allowlist and WP-S2's capability-seam mount
+# namespace are here for the same structural reason, which is that a well-formedness gate cannot
+# tell a correct-looking property from an effective one.
 #
 # RESIDUAL, stated rather than implied: the path filter means a PR that widens the wall through a
 # file NOT listed below merges without this lane ever running. The nightly cron on main is the
@@ -86,6 +90,15 @@ jobs:
           # here. Measured on the first KVM run it was the CHEAPEST at 3.3 min — node count is a
           # poor proxy for wall-clock when the other tests each build a full sealed closure.
           - test-fetch-proxy-allowlist
+          # WP-S2 / GATE #5(a). Same rule as the entry above: added in the same commit as
+          # tests/cap-sandbox-confinement.nix. Note this lane's SCOPE line says "the three
+          # nixosTests held out of `checks`" and describes them as the egress wall — this entry
+          # widens it. The wall this one watches is the capability seam's mount namespace, not
+          # nftables, but the reason it belongs here is identical: the fast lane can only assert
+          # that the derived systemd properties are the intended STRINGS, and a confinement can be
+          # cancelled by a property that is present and correct-looking (ProtectSystem=strict does
+          # exactly that — see modules/cap-sandbox.nix). Only a booted VM can tell them apart.
+          - test-cap-sandbox-confinement
     steps:
       - name: Checkout
         # SHA-pinned, matching flake-check.yml: immutable commit of the newest v* release tag.
