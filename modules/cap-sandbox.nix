@@ -41,6 +41,10 @@
 # escape leg are load-bearing rather than ceremonial: this composition failure is invisible to any
 # check that only asserts "the hardening property is present". Reported, not papered over.
 #
+# CORROBORATED on a second systemd: tests/cap-sandbox-confinement.nix boots a NixOS VM running
+# systemd 261 and every leg of the battery holds there too (first green run 2026-08-15). One
+# version agreeing with itself is a coincidence; 255 and 261 agreeing is the property.
+#
 # ── Derivation, not duplication ────────────────────────────────────────────────────────────
 # Every path below comes from `capability-registry.nix`: `sandbox.readOnlyPaths` become
 # BindReadOnlyPaths, `sandbox.readWritePaths` become BindPaths, and the registry's own
