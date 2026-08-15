@@ -50,13 +50,16 @@ def _floor_model():
     # floor role resolves to the local ollama provider; its `model:` key (if set) wins,
     # else the OLLAMA_MODEL env default (unchanged prior behavior). escalate (cloud) is
     # a later slice — for now the floor is the only model this brain serves.
+    # Third return value is the provider's `kind` (a required providers.yaml field) —
+    # the key the transport seam below dispatches on. No-config → "ollama", because the
+    # legacy env-default path has always meant a local ollama at OLLAMA.
     env_model = os.environ.get("OLLAMA_MODEL", "qwen3.5:9b")
     if not _PROVIDERS:
-        return env_model, "env-default"
+        return env_model, "env-default", "ollama"
     name, cfg, _degraded = _providers_resolve(_PROVIDERS, "floor")
-    return cfg.get("model", env_model), name
+    return cfg.get("model", env_model), name, cfg.get("kind", "ollama")
 
-MODEL, ACTIVE_PROVIDER = _floor_model()
+MODEL, ACTIVE_PROVIDER, ACTIVE_PROVIDER_KIND = _floor_model()
 
 def _escalate_status():
     # Config-only escalate-role RESOLUTION, distinct from and much smaller than the
@@ -237,6 +240,59 @@ def _spin(render, interval=0.35):
     t=threading.Thread(target=run,daemon=True); t.start()
     return stop,t
 
+# ── TRANSPORT SEAM (Phase 1.5 slice 5, task 287) ──
+# The blocker on the deferred Anthropic shim (assessed 2026-08-13) was that chat_stream
+# fused TWO jobs with no boundary between them: (a) speak Ollama's /api/chat NDJSON wire
+# protocol, and (b) render a heavily UX-tuned terminal stream (thinking blocks, word-boundary
+# soft wrap, code-fence dimming, tok/s stats). A second provider could not be added without
+# either duplicating the renderer or rewriting it — which is why the shim kept getting
+# deferred rather than rushed.
+#
+# This slice extracts (a) into a generator contract and leaves (b) untouched. A transport is
+# any generator yielding (kind, data) pairs:
+#     ("thinking",   str)   — reasoning tokens, rendered dim-italic before the answer
+#     ("content",    str)   — answer tokens
+#     ("tool_calls", list)  — Ollama-shaped tool_calls (extract_tools' input contract);
+#                             a non-Ollama transport translates INTO this shape, so the
+#                             agent loop downstream never learns which provider answered
+#     ("done",       dict)  — {"eval_count": int, "eval_seconds": float} for the stats line.
+#                             Seconds, not Ollama's nanoseconds — a transport normalizes its
+#                             own units so the renderer never carries vendor arithmetic.
+# Any of these may be yielded zero or more times; only ordering within a wire chunk is
+# preserved. Deliberately NOT shipping an Anthropic transport in the same diff: this half is
+# a pure refactor with an existing oracle (identical rendering, batteries green), and the new
+# provider is then a pure ADDITION that cannot regress the local floor path.
+def _ollama_stream_events(msgs):
+    payload={"model":MODEL,"messages":msgs,"tools":TOOLS,"stream":True,"keep_alive":-1}
+    if THINK is not None: payload["think"]=THINK
+    r=urllib.request.Request(OLLAMA,data=json.dumps(payload).encode(),headers={"Content-Type":"application/json"})
+    with urllib.request.urlopen(r,timeout=CHAT_TIMEOUT_S) as resp:
+        for line in resp:
+            line=line.strip()
+            if not line: continue
+            chunk=json.loads(line)
+            msg=chunk.get("message") or {}
+            if msg.get("thinking"): yield ("thinking", msg["thinking"])
+            if msg.get("content"): yield ("content", msg["content"])
+            if msg.get("tool_calls"): yield ("tool_calls", msg["tool_calls"])
+            if chunk.get("done"):
+                yield ("done", {"eval_count": chunk.get("eval_count") or 0,
+                                "eval_seconds": (chunk.get("eval_duration") or 0)/1e9})
+
+_TRANSPORTS={"ollama": _ollama_stream_events}
+
+def _stream_events(msgs):
+    # Dispatch on the active provider's `kind`. An unknown kind fails LOUD rather than
+    # silently falling back to ollama — same rule as the present-but-invalid providers.yaml
+    # above: a misconfigured provider is a real error, and quietly answering from a DIFFERENT
+    # provider than the config names is exactly the metered-bucket crossing providers.py
+    # exists to forbid (2026-08-06 overnight-bleed scar).
+    t=_TRANSPORTS.get(ACTIVE_PROVIDER_KIND)
+    if t is None:
+        raise RuntimeError(f"no transport for provider kind {ACTIVE_PROVIDER_KIND!r} "
+                           f"(provider {ACTIVE_PROVIDER!r}); known kinds: {sorted(_TRANSPORTS)}")
+    return t(msgs)
+
 def chat_stream(msgs):
     # Streaming + liveness indicator (P1 fix #2, same comm as above). Buffers tokens for
     # tool_calls/content-regex parsing (extract_tools) while printing as they arrive.
@@ -247,11 +303,10 @@ def chat_stream(msgs):
     # track the current visual column ourselves and emit a newline before a token that would
     # split across term width, so kitty never has to hard-wrap mid-word. Dumb on purpose: no
     # reflow on resize, just wrap-at-word going forward from turn start.
+    #
+    # Wire protocol lives in the transport (_stream_events above); everything below is
+    # rendering only, and is provider-agnostic as of the slice-5 seam.
     term_cols=shutil.get_terminal_size(fallback=(80,24)).columns
-    payload={"model":MODEL,"messages":msgs,"tools":TOOLS,"stream":True,"keep_alive":-1}
-    if THINK is not None: payload["think"]=THINK
-    body=json.dumps(payload).encode()
-    r=urllib.request.Request(OLLAMA,data=body,headers={"Content-Type":"application/json"})
     t0=time.time(); content=""; tool_calls=[]; first_token=False; eval_count=0; eval_dur=0.0
     col=0; in_code=False; thinking_seen=False
     # Code-block rendering (P1 item 3, task #265): dim everything inside a ``` fence so it
@@ -273,50 +328,45 @@ def chat_stream(msgs):
         sys.stdout.write(f"\r\033[K\033[2mthinking{'.'*(i%3+1)} (^C cancels this turn)\033[0m"); sys.stdout.flush()
     think_stop,think_t=_spin(_thinking_frame)
     try:
-        with urllib.request.urlopen(r,timeout=CHAT_TIMEOUT_S) as resp:
-            for line in resp:
-                line=line.strip()
-                if not line: continue
-                chunk=json.loads(line)
-                msg=chunk.get("message") or {}
-                # THINKING RENDER (the actual P0 fix, spec "P0 DIAGNOSIS COMPLETE" 2026-08-06):
-                # qwen3.5:9b is a thinking model on a ~3 tok/s CPU — it emits a `thinking`
-                # stream for minutes before any content. Invisible thinking == "spinning
-                # forever". Render it as dim italic rapid-fire text as it streams; when the
-                # real answer starts, close with a one-line "— thought for Xs —" separator.
-                # (True collapse of already-printed lines isn't possible in a dumb TTY
-                # stream; the dim+separator approximation keeps the client simple.)
-                tpiece=msg.get("thinking","")
-                if tpiece:
-                    if not first_token and not thinking_seen:
+        for _kind,_data in _stream_events(msgs):
+            # THINKING RENDER (the actual P0 fix, spec "P0 DIAGNOSIS COMPLETE" 2026-08-06):
+            # qwen3.5:9b is a thinking model on a ~3 tok/s CPU — it emits a `thinking`
+            # stream for minutes before any content. Invisible thinking == "spinning
+            # forever". Render it as dim italic rapid-fire text as it streams; when the
+            # real answer starts, close with a one-line "— thought for Xs —" separator.
+            # (True collapse of already-printed lines isn't possible in a dumb TTY
+            # stream; the dim+separator approximation keeps the client simple.)
+            tpiece=_data if _kind=="thinking" else ""
+            if tpiece:
+                if not first_token and not thinking_seen:
+                    think_stop.set(); think_t.join(timeout=1)
+                    sys.stdout.write("\r\033[K")
+                thinking_seen=True
+                sys.stdout.write(f"\033[2;3m{tpiece}\033[0m"); sys.stdout.flush()
+            piece=_data if _kind=="content" else ""
+            if piece:
+                if not first_token:
+                    if not thinking_seen:
                         think_stop.set(); think_t.join(timeout=1)
-                        sys.stdout.write("\r\033[K")
-                    thinking_seen=True
-                    sys.stdout.write(f"\033[2;3m{tpiece}\033[0m"); sys.stdout.flush()
-                piece=msg.get("content","")
-                if piece:
-                    if not first_token:
-                        if not thinking_seen:
-                            think_stop.set(); think_t.join(timeout=1)
-                        sys.stdout.write("\r\033[K")
-                        if thinking_seen:
-                            sys.stdout.write(f"\n\033[2m— thought for {time.time()-t0:.0f}s —\033[0m\n")
-                        first_token=True; col=0
-                    content+=piece
-                    for tok in re.findall(r'\S+\s*|\s+', piece):
-                        if '```' in tok:
-                            segs=tok.split('```')
-                            for i,seg in enumerate(segs):
-                                if seg: _emit(seg)
-                                if i<len(segs)-1: in_code=not in_code
-                        else:
-                            _emit(tok)
-                    sys.stdout.flush()
-                if msg.get("tool_calls"):
-                    tool_calls=msg["tool_calls"]
-                if chunk.get("done"):
-                    eval_count=chunk.get("eval_count") or 0
-                    eval_dur=(chunk.get("eval_duration") or 0)/1e9
+                    sys.stdout.write("\r\033[K")
+                    if thinking_seen:
+                        sys.stdout.write(f"\n\033[2m— thought for {time.time()-t0:.0f}s —\033[0m\n")
+                    first_token=True; col=0
+                content+=piece
+                for tok in re.findall(r'\S+\s*|\s+', piece):
+                    if '```' in tok:
+                        segs=tok.split('```')
+                        for i,seg in enumerate(segs):
+                            if seg: _emit(seg)
+                            if i<len(segs)-1: in_code=not in_code
+                    else:
+                        _emit(tok)
+                sys.stdout.flush()
+            if _kind=="tool_calls":
+                tool_calls=_data
+            if _kind=="done":
+                eval_count=_data.get("eval_count") or 0
+                eval_dur=_data.get("eval_seconds") or 0.0
     finally:
         if not first_token:
             think_stop.set(); think_t.join(timeout=1)  # idempotent if thinking already stopped it
