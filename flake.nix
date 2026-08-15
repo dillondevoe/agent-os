@@ -171,11 +171,10 @@
         #   sudo tests/cap-sandbox-battery.sh bin/cap-invoke \
         #        ./result-1/bin ./result-2 ./result   # (paths per the build order above)
         #
-        # ENFORCEMENT NOTE, stated plainly rather than implied: nothing scheduled runs this yet.
-        # It is a root+systemd test, so neither `nix flake check` nor the nixosTest slow lane
-        # covers it as written; the WP-S2 PR records the DVo run as its evidence. Making it a
-        # nixosTest (a VM that boots the real broker and drives the seam) is the obvious next
-        # increment and is called out in the PR body rather than left to be discovered.
+        # ENFORCED, as of `test-cap-sandbox-confinement` below: that nixosTest boots a VM and runs
+        # THIS EXACT SCRIPT as root against these same artefacts, and it is in the vm-tests.yml
+        # matrix. The packages here remain the at-a-box affordance (running the battery on a real
+        # host, e.g. the Dell after a rebuild) — they are no longer the only way it ever executes.
         cap-sandbox-policy = nixpkgs.legacyPackages.${system}.writeText "agent-os-cap-sandbox.json"
           (import ./modules/cap-sandbox.nix { lib = nixpkgs.lib; }).policyJson;
         cap-bin = (import ./modules/cap-invoke-pkg.nix {
@@ -183,6 +182,15 @@
         }).capBinDir;
         cap-registry-json = nixpkgs.legacyPackages.${system}.writeText "agent-os-registry.json"
           (builtins.toJSON (import ./modules/capability-registry.nix { lib = nixpkgs.lib; }).registry);
+
+        # The battery, in a booted VM — the SCHEDULED half of GATE #5(a)'s behavioural evidence.
+        # Out of `checks` for the same reason as its siblings (it boots a VM); in the vm-tests.yml
+        # matrix in the same commit that introduces it, per that file's own rule. Run on demand:
+        #   nix build .#test-cap-sandbox-confinement
+        test-cap-sandbox-confinement = import ./tests/cap-sandbox-confinement.nix {
+          pkgs = nixpkgs.legacyPackages.${system};
+          inherit baseModules;
+        };
       };
 
       checks.${system} = {
