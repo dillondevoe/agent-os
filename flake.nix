@@ -160,6 +160,29 @@
           pkgs = nixpkgs.legacyPackages.${system};
           inherit baseModules;
         };
+
+        # ── WP-S2 / GATE #5(a): the three inputs tests/cap-sandbox-battery.sh needs ──────────
+        # That battery is the BEHAVIOURAL half of the per-cap fs-confinement — it needs a live
+        # system systemd and root, so it can never be a check derivation. Exposing its inputs as
+        # packages means it runs against the REAL artefacts (the registry-derived policy, the
+        # patchShebangs'd impl dir, the materialized registry), not against hand-written stand-ins:
+        #
+        #   nix build .#cap-sandbox-policy .#cap-bin .#cap-registry-json
+        #   sudo tests/cap-sandbox-battery.sh bin/cap-invoke \
+        #        ./result-1/bin ./result-2 ./result   # (paths per the build order above)
+        #
+        # ENFORCEMENT NOTE, stated plainly rather than implied: nothing scheduled runs this yet.
+        # It is a root+systemd test, so neither `nix flake check` nor the nixosTest slow lane
+        # covers it as written; the WP-S2 PR records the DVo run as its evidence. Making it a
+        # nixosTest (a VM that boots the real broker and drives the seam) is the obvious next
+        # increment and is called out in the PR body rather than left to be discovered.
+        cap-sandbox-policy = nixpkgs.legacyPackages.${system}.writeText "agent-os-cap-sandbox.json"
+          (import ./modules/cap-sandbox.nix { lib = nixpkgs.lib; }).policyJson;
+        cap-bin = (import ./modules/cap-invoke-pkg.nix {
+          pkgs = nixpkgs.legacyPackages.${system};
+        }).capBinDir;
+        cap-registry-json = nixpkgs.legacyPackages.${system}.writeText "agent-os-registry.json"
+          (builtins.toJSON (import ./modules/capability-registry.nix { lib = nixpkgs.lib; }).registry);
       };
 
       checks.${system} = {
@@ -368,6 +391,69 @@
             touch $out
           '';
 
+        # Phase S · WP-S2 / GATE #5(a) — the EVAL half of the per-cap fs-confinement: the derived
+        # systemd properties are the RIGHT ones for every capability in the registry. The
+        # BEHAVIOURAL half (the kernel actually stops the escape) needs real systemd and lives in
+        # tests/cap-sandbox-battery.sh; this check is what keeps the derivation honest between
+        # runs of that battery, and it is deliberately narrow about what it claims.
+        #
+        # What it proves, per capability:
+        #   * the empty-root boundary is present — `TemporaryFileSystem=/:ro` is what makes
+        #     "everything else" ABSENT. ProtectSystem/ReadOnlyPaths only remove WRITE permission,
+        #     so asserting those alone would assert the wrong thing (the exact confusion that made
+        #     file.read fail-open in the first place);
+        #   * every declared readOnlyPath is bound read-only and every readWritePath read-write;
+        #   * NO declared path is bound with the wrong mode (a readOnlyPath must never appear as
+        #     BindPaths=);
+        #   * a non-network cap gets PrivateNetwork=yes + IPAddressDeny=any;
+        #   * every registry protectedPath that the cap does not legitimately overlap is
+        #     InaccessiblePaths.
+        # Regression -> RED at eval time, before anything is built.
+        cap-sandbox =
+          let
+            lib = nixpkgs.lib;
+            regMod = import ./modules/capability-registry.nix { inherit lib; };
+            sb = import ./modules/cap-sandbox.nix { inherit lib; };
+            reg = regMod.registry;
+            has = name: prop: lib.elem prop (sb.policy.${name});
+            capOk = name:
+              let c = reg.${name}; in
+              has name "TemporaryFileSystem=/:ro"
+              # ProtectSystem must NOT be set: measured on systemd 255, it re-exposes the host
+              # /etc and /usr over the empty root and reopens the very read this slice closes.
+              # Asserted as an ABSENCE so a well-meaning "add the standard hardening option"
+              # edit fails here instead of silently un-confining file.read.
+              && !(lib.any (p: lib.hasPrefix "ProtectSystem=" p) sb.policy.${name})
+              && has name "NoNewPrivileges=yes"
+              && lib.all (p: has name "BindReadOnlyPaths=${p}") c.sandbox.readOnlyPaths
+              && lib.all (p: has name "BindPaths=${p}") c.sandbox.readWritePaths
+              # mode is not confusable in either direction
+              && lib.all (p: !(has name "BindPaths=${p}")) c.sandbox.readOnlyPaths
+              && (c.sandbox.network
+                  || (has name "PrivateNetwork=yes" && has name "IPAddressDeny=any"))
+              && lib.all (p:
+                   let overlaps = lib.any (d: d == p || lib.hasPrefix (d + "/") p
+                                              || lib.hasPrefix (p + "/") d)
+                                    (c.sandbox.readOnlyPaths ++ c.sandbox.readWritePaths);
+                   in overlaps || has name "InaccessiblePaths=-${p}")
+                 regMod.protectedPaths;
+            bad = lib.filter (n: !(capOk n)) (lib.attrNames reg);
+          in
+          assert lib.assertMsg (bad == [ ])
+            "cap-sandbox: derived confinement is wrong for [${lib.concatStringsSep " " bad}] — see modules/cap-sandbox.nix.";
+          # file.read is the cap whose ONLY symlink boundary this is; name it explicitly so a
+          # future registry edit that drops its root fails here with a legible message.
+          assert lib.assertMsg
+            (lib.elem "BindReadOnlyPaths=/var/lib/agent-os/safe-read" sb.policy."file.read")
+            "cap-sandbox: file.read lost its safe-read bind — that bind IS its symlink boundary.";
+          assert lib.assertMsg
+            (lib.elem "BindPaths=/var/lib/agent-os/workspace" sb.policy."file.write")
+            "cap-sandbox: file.write lost its workspace bind.";
+          nixpkgs.legacyPackages.${system}.runCommand "cap-sandbox-check" { } ''
+            test -s ${nixpkgs.legacyPackages.${system}.writeText "policy.json" sb.policyJson}
+            touch $out
+          '';
+
         # Phase 2 · Step 7 (go-live) — the WIRED invoke-seam END-TO-END regression guard. Drives the
         # REAL broker through the REAL store-pinned cap-invoke DISPATCHER + the patchShebangs'd
         # capabilities.list impl (the EXACT artifacts modules/broker.nix now pins into production via
@@ -377,6 +463,13 @@
         # UNTRUSTED caps only) nor capabilities (dispatcher driven directly, no broker) exercises this
         # path — this is the ONLY check that proves the wired seam does not spuriously taint a list.
         # A regression fails `nix flake check` (verify under `--option sandbox true`).
+        #
+        # WP-S2 SCOPE NARROWING, stated so nobody reads more into a green here than is there: this
+        # drives `capInvoke.unconfinedWrapper`, which differs from the production wrapper by exactly
+        # the two systemd-confinement exports. A check derivation has no D-Bus and no PID 1, so the
+        # confined wrapper would (correctly) DENY every call and this check would go red for a
+        # reason unrelated to its question. So seam-live proves the WIRING; it proves nothing about
+        # the confinement. That evidence is tests/cap-sandbox-battery.sh, on real systemd.
         seam-live =
           let
             reg = import ./modules/capability-registry.nix { lib = nixpkgs.lib; };
@@ -386,7 +479,7 @@
           in pkgs.runCommand "seam-live-check" { nativeBuildInputs = [ pkgs.python3 ]; } ''
             work="$(mktemp -d)"
             bash ${./tests/seam-live-battery.sh} ${./bin/broker} ${./bin/taint} ${./bin/audit} \
-              ${capInvoke.wrapper}/bin/cap-invoke ${capInvoke.capBinDir}/bin ${registryJson} "$work"
+              ${capInvoke.unconfinedWrapper}/bin/cap-invoke ${capInvoke.capBinDir}/bin ${registryJson} "$work"
             touch $out
           '';
 

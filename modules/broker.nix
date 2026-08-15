@@ -44,6 +44,19 @@ let
   # AGENT_OS_REGISTRY, already exported below, and inherits the broker's env (bin/broker `_run`
   # spawns the seam with NO env= override).
   #
+  # ── GATE #5 (task-279) — (a) IS NOW BUILT (WP-S2); (b) is subsumed on the sandboxed path ──
+  # As of WP-S2 the seam wrapper pins a per-cap systemd fs-confinement DERIVED from each cap's
+  # registry `sandbox` decl (modules/cap-sandbox.nix), and cap-invoke runs every impl inside a
+  # transient unit built from it — denying, never running bare, if the policy or the launcher is
+  # missing. That closes 5(a) and makes `file.read`/`file.write` shippable, which is why they are
+  # in `shippedCaps` from this change and not before it. 5(b)'s concern (the timeout reaps only a
+  # DIRECT child, so a forked grandchild orphans) is answered more completely than killpg would:
+  # the impl and every descendant live in the unit's own cgroup, and RuntimeMaxSec + stopping the
+  # unit reap the whole cgroup. Evidence: tests/cap-sandbox-battery.sh, on real systemd.
+  #
+  # The ORIGINAL note is kept below verbatim — it is the reasoning that produced the gate, and the
+  # net.fetch (T2) half of it is still entirely open:
+  #
   # ── GATE #5 (task-279): OS confinement is a HARD PREREQUISITE before any CHILD-SPAWNING impl ──
   # cap-invoke's per-impl wall-clock timeout (AGENT_OS_CAP_TIMEOUT_S) kills+reaps only the DIRECT
   # child. The ONLY impl wired at go-live — capabilities.list — is exec-only: it reads the
@@ -94,5 +107,12 @@ in
   systemd.tmpfiles.rules = [
     "d /var/lib/agent-os        0755 root root - -"
     "d /var/lib/agent-os/broker 0700 root root - -"   # audit-head anchor lives here (not in the audit dir)
+    # WP-S2: the two file.* capability roots. They must EXIST before the seam runs, because the
+    # confinement binds them into the impl's mount namespace and systemd refuses to start a unit
+    # whose bind source is missing — a missing root is a hard deny, not a silent unconfined run.
+    # safe-read is operator-curated (0755, root-owned: the model may read it, never fill it);
+    # workspace is the model's own scratch and is the ONLY writable path any shipped cap holds.
+    "d /var/lib/agent-os/safe-read 0755 root root - -"
+    "d /var/lib/agent-os/workspace 0755 root root - -"
   ];
 }

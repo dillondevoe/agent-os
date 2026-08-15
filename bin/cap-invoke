@@ -40,6 +40,12 @@
 #     there is genuinely no blessed attacker content in play (a crashed impl's partial stdout is
 #     NEVER forwarded).
 #
+# WP-S2 UPDATE (GATE #5(a) — this slice): the dispatcher now RUNS each impl inside a transient
+# systemd unit whose confinement is DERIVED from that capability's registry `sandbox` decl
+# (modules/cap-sandbox.nix -> AGENT_OS_CAP_SANDBOX, pinned by the wrapper). A capability with no
+# derived entry is DENIED rather than run bare. Everything below this paragraph describes the
+# PRE-WP-S2 state and is kept for the historical rationale it records:
+#
 # This dispatcher applies NO OS confinement itself. Per-capability sandboxing (systemd
 # ReadWritePaths / PrivateNetwork / IPAddressDeny, DERIVED from each cap's Step-1 registry
 # `sandbox` decl) is layered at the NixOS-module level and lands with the first capability that
@@ -58,6 +64,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 
 # Exit codes (documented above). The broker collapses every nonzero to "seam-exit-N"; the split
 # is for humans + the battery.
@@ -138,6 +145,109 @@ def _meta_key_ok(key):
     return all(ord(c) >= 0x20 and ord(c) != 0x7f for c in key)
 
 
+def _load_sandbox_policy():
+    """Load the per-cap systemd confinement policy (GATE #5(a)), or None when unconfined-by-config.
+
+    AGENT_OS_CAP_SANDBOX is PINNED by the cap-invoke wrapper (modules/cap-invoke-pkg.nix) to the
+    store path of the policy DERIVED from the registry (modules/cap-sandbox.nix), exactly like
+    AGENT_OS_CAP_PATH. So in production it is always set and always authoritative. UNSET means a
+    direct `python3 bin/cap-invoke` call — the battery/dev path, which has no systemd — and the
+    impl runs unconfined, same test affordance as AGENT_OS_FILE_SAFE_ROOT.
+
+    SET-but-broken is a different case and is NOT tolerated: an unreadable or non-object policy
+    file is a confinement failure, and running the impl anyway would be precisely the fail-open
+    GATE #5 forbids. Deny."""
+    path = os.environ.get("AGENT_OS_CAP_SANDBOX")
+    if not (isinstance(path, str) and path):
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            pol = json.load(f)
+    except (OSError, ValueError) as e:
+        _fail(EXIT_REQUEST, "sandbox policy unreadable (%s) — deny (fail-closed)" % e)
+    if not isinstance(pol, dict):
+        _fail(EXIT_REQUEST, "sandbox policy is not an object — deny (fail-closed)")
+    return pol
+
+
+def _sandbox_argv(cap_name, impl_path, impl_env, timeout_s):
+    """Build the argv that runs `impl_path`, and the transient unit name to reap on timeout.
+
+    With no policy configured: argv is [impl_path] — the pre-WP-S2 direct exec.
+
+    With a policy: the impl runs inside a TRANSIENT SYSTEMD UNIT whose properties are the
+    registry-derived confinement for THIS capability. `--pipe --wait` makes systemd-run
+    transparent — the impl's stdin/stdout are ours and the unit's exit status becomes
+    systemd-run's, so the exit-code contract above is unchanged. Every env var the impl gets is
+    passed explicitly with --setenv (the unit does NOT inherit our environment), preserving the
+    "impl env is exactly {PATH, AGENT_OS_REGISTRY}" rule.
+
+    Fail-closed, three ways:
+      * a capability with NO entry in the policy is DENIED — an impl reaching the seam without
+        derived confinement is the exact GATE #5 fail-open state;
+      * an entry that is not a list of plain `Key=value` strings is DENIED (a poisoned policy must
+        not be able to inject a bare systemd-run OPTION, e.g. a `--property`-free argument);
+      * AGENT_OS_SYSTEMD_RUN missing/non-executable is DENIED — we never silently fall back to the
+        unconfined direct exec.
+
+    RuntimeMaxSec is set from the same wall-clock budget as our own timeout, so systemd bounds the
+    unit even if this dispatcher is itself killed. That also answers GATE #5(b) for the sandboxed
+    path more completely than killpg would: the impl and ANY child it forks live in the unit's own
+    cgroup, and stopping the unit reaps the whole cgroup, not just a direct child."""
+    pol = _load_sandbox_policy()
+    if pol is None:
+        return [impl_path], None
+
+    props = pol.get(cap_name)
+    if not isinstance(props, list) or not props:
+        _fail(EXIT_REQUEST,
+              "no systemd confinement derived for capability %s — deny (fail-closed)" % cap_name)
+    for p in props:
+        # A property must be a single NAME=VALUE assignment with no control characters. Anything
+        # leading with '-' could be read by systemd-run as an option rather than a property value.
+        if not (isinstance(p, str) and p and "=" in p and not p.startswith("-")
+                and all(ord(c) >= 0x20 and ord(c) != 0x7f for c in p)):
+            _fail(EXIT_REQUEST,
+                  "sandbox policy for %s has a malformed property — deny (fail-closed)" % cap_name)
+
+    runner = os.environ.get("AGENT_OS_SYSTEMD_RUN")
+    if not (isinstance(runner, str) and runner
+            and os.path.isfile(runner) and os.access(runner, os.X_OK)):
+        _fail(EXIT_REQUEST,
+              "AGENT_OS_SYSTEMD_RUN missing or not executable — cannot confine %s, deny "
+              "(fail-closed; NEVER fall back to an unconfined exec)" % cap_name)
+
+    # Deterministic, collision-free unit name so a timeout can name the unit it must stop.
+    unit = "agent-os-cap-%d-%d" % (os.getpid(), time.monotonic_ns())
+    argv = [runner, "--quiet", "--pipe", "--wait", "--collect", "--service-type=exec",
+            "--unit=" + unit, "--property=RuntimeMaxSec=%d" % timeout_s]
+    for p in props:
+        argv.append("--property=" + p)
+    for k, v in sorted(impl_env.items()):
+        argv.append("--setenv=%s=%s" % (k, v))
+    argv.append("--")
+    argv.append(impl_path)
+    return argv, unit
+
+
+def _reap_unit(unit):
+    """Stop the transient unit after a dispatcher-side timeout. `--collect` plus RuntimeMaxSec
+    already bound it; this makes the kill immediate rather than deferred, and it reaps the unit's
+    ENTIRE cgroup (impl + any descendant), which the old direct-child kill could not do. Best
+    effort by construction — if it fails, RuntimeMaxSec still ends the unit."""
+    if not unit:
+        return
+    runner = os.environ.get("AGENT_OS_SYSTEMD_RUN") or ""
+    systemctl = os.path.join(os.path.dirname(runner), "systemctl")
+    if not (systemctl and os.path.isfile(systemctl) and os.access(systemctl, os.X_OK)):
+        return
+    try:
+        subprocess.run([systemctl, "stop", "--quiet", unit + ".service"],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+
 def main():
     raw = sys.stdin.buffer.read()
     try:
@@ -195,10 +305,13 @@ def main():
     # field. No shell; argv is [impl_path] only, so the impl name/args can inject nothing.
     payload = json.dumps({"capability": cap_name, "arguments": arguments},
                          sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
+
+    argv, unit = _sandbox_argv(cap_name, impl_path, impl_env, timeout_s)
     try:
-        proc = subprocess.run([impl_path], input=payload, stdout=subprocess.PIPE,
+        proc = subprocess.run(argv, input=payload, stdout=subprocess.PIPE,
                               stderr=subprocess.DEVNULL, env=impl_env, timeout=timeout_s)
     except subprocess.TimeoutExpired:
+        _reap_unit(unit)
         _fail(EXIT_IMPL, "impl timed out after %ds (killed) — fail-closed" % timeout_s)
     except OSError as e:
         _fail(EXIT_IMPL, "impl could not be executed (%s)" % e)
