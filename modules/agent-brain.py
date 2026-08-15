@@ -58,6 +58,23 @@ def _floor_model():
 
 MODEL, ACTIVE_PROVIDER = _floor_model()
 
+def _escalate_status():
+    # Config-only escalate-role RESOLUTION, distinct from and much smaller than the
+    # deferred Anthropic shim (task 287, 2026-08-13 assessment): this answers "is a
+    # cloud escalate provider configured and named" without touching chat_stream's
+    # wire protocol at all — summon_claude remains the sole way a turn actually
+    # reaches cloud Claude (explicit user consent required). Never used to auto-route
+    # a turn; purely a status signal for future wiring / diagnostics.
+    if not _PROVIDERS:
+        return {"configured": False, "provider": None, "reason": "no providers.yaml"}
+    roles = _PROVIDERS.get("roles", {})
+    if "escalate" not in roles:
+        return {"configured": False, "provider": None, "reason": "no escalate role in providers.yaml"}
+    name, cfg, degraded = _providers_resolve(_PROVIDERS, "escalate")
+    return {"configured": not degraded, "provider": name, "reason": None if not degraded else "escalate unavailable, degraded to floor"}
+
+ESCALATE_STATUS = _escalate_status()
+
 # ── PER-TURN PROVENANCE LOG (Phase 1.5A acceptance criterion 5, task 287 slice 3) ──
 # "Audit log shows provider+model per turn." Deliberately NOT bin/audit's chain-hashed
 # broker log — that log is a tamper-evident record of capital/tool-execution security

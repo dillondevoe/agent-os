@@ -1,0 +1,134 @@
+#!/usr/bin/env python3
+# cap-file-write — Phase S · WP-S2 impl for the T1 `file.write` capability.
+#
+# Security surface: branch -> PR -> Fable -> merge. Never direct-push.
+#
+# Tier T1 (reversible local side effect). Writes ONE file, atomically, under the sandboxed
+# workspace root and returns the exact stored octets. Unlike `file.read`, `file.write`'s origin
+# is NOT declared TRUSTED anywhere in docs/phase2-broker-spec.md §4.5's fixed table — it falls to
+# the fail-closed default (UNTRUSTED) there, so the confirm-channel gate (Step 6) is what actually
+# authorizes each write; this impl performs the write once the broker has already cleared it and
+# never asserts an origin of its own.
+#
+# Confinement is enforced TWICE, by design (defense-in-depth, same posture as cap-file-read and
+# cap-mem-remember's namespace re-check): the broker's `path_is_canonical`/`path_confined` already
+# reject a request whose `path` arg escapes the registry's declared `readWritePaths` root before
+# this impl is ever invoked; this impl re-derives the same check against its OWN hardcoded root.
+# The OS-level ReadWritePaths sandbox (Step-7 systemd unit) is the third, outermost layer.
+#
+# Seam contract (invoked by cap-invoke, the AGENT_OS_INVOKE_SEAM dispatcher):
+#   stdin  : {"capability":"file.write","arguments":{"path":<str>,"content":<str>}}
+#   stdout : {"ok":true, "content":<stored octets, verbatim>, "meta":{"path":<str>}}   exit 0
+#   stdout : {"ok":false,"content":null,"meta":{}}                                     exit 3
+#            on any contract/infra failure (dispatcher then withholds, fail-closed).
+#
+# INTEGRITY: the on-disk bytes are the EXACT seam-content octets — no appended newline, no
+# transformation. Same posture as cap-mem-remember's PIN-2: return-octets == file-octets, so a
+# caller that reads the write's own `content` field back learns exactly what landed on disk.
+
+import json
+import os
+import sys
+
+# Sandbox-declared root (modules/capability-registry.nix "file.write".sandbox.readWritePaths[0]).
+# AGENT_OS_FILE_WORKSPACE_ROOT is a TEST-ONLY override — the seam strips the impl env to exactly
+# {PATH, AGENT_OS_REGISTRY}, so it is never attacker-settable in production; it only takes effect
+# when the battery invokes the impl directly, bypassing the seam (mirrors AGENT_OS_MEM_ROOT).
+WORKSPACE_ROOT = os.environ.get("AGENT_OS_FILE_WORKSPACE_ROOT", "/var/lib/agent-os/workspace")
+
+MAX_WRITE_BYTES = 1048576  # 1 MiB cap — matches cap-file-read's MAX_READ_BYTES.
+
+
+def _fail(msg):
+    sys.stderr.write("cap-file-write: %s\n" % msg)
+    sys.stdout.write(json.dumps({"ok": False, "content": None, "meta": {}},
+                                sort_keys=True, separators=(",", ":"), ensure_ascii=True))
+    sys.exit(3)
+
+
+def _path_is_canonical(p):
+    """Dumb twin of the broker's path_is_canonical (bin/broker): leading '/', no empty/'.'/'..'
+    segment, no trailing '/'."""
+    if not isinstance(p, str) or not p.startswith("/"):
+        return False
+    parts = p.split("/")
+    if parts[0] != "" or len(parts) < 2:
+        return False
+    return all(seg not in ("", ".", "..") for seg in parts[1:])
+
+
+def _path_confined(p, root):
+    """p is confined iff it EQUALS root or lies strictly under it. Textual defense-in-depth OVER
+    the Step-7 OS sandbox — symlink-escape is that layer's job (ProtectSystem/InaccessiblePaths),
+    not this one's."""
+    r = root.rstrip("/")
+    return p == r or p.startswith(r + "/")
+
+
+def main():
+    try:
+        raw = sys.stdin.buffer.read()
+    except OSError as e:
+        _fail("could not read stdin (%s)" % e)
+
+    try:
+        req = json.loads(raw.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError) as e:
+        _fail("request is not valid JSON (%s)" % e)
+    if not isinstance(req, dict):
+        _fail("request is not a JSON object")
+
+    args = req.get("arguments")
+    if not isinstance(args, dict):
+        _fail("'arguments' is not a JSON object")
+    path = args.get("path")
+    content = args.get("content")
+    if not isinstance(path, str) or not _path_is_canonical(path):
+        _fail("'path' missing or not canonical")
+    if not _path_confined(path, WORKSPACE_ROOT):
+        _fail("path outside cap root (confinement)")
+    if not isinstance(content, str):
+        _fail("'content' is not a string")
+
+    octets = content.encode("utf-8")
+    if len(octets) > MAX_WRITE_BYTES:
+        _fail("content exceeds MAX_WRITE_BYTES cap")
+
+    # Refuse to write over anything that already exists and is not a regular file (symlink,
+    # device, directory) — no following a planted symlink out of the sandbox root, no clobbering
+    # a directory. A plain nonexistent target (the common case) is fine.
+    try:
+        st = os.lstat(path)
+        if not os.path.isfile(path) or os.path.islink(path):
+            _fail("refusing to overwrite a non-regular-file target (symlink or special file)")
+    except FileNotFoundError:
+        pass
+    except OSError as e:
+        _fail("stat failed (%s)" % e)
+
+    # Atomic write of the EXACT octets: temp + os.replace so a concurrent reader never observes a
+    # half-written file. The temp lives in the SAME directory as the target so the rename stays
+    # inside the sandbox's single readWritePath and is atomic (same pattern as cap-mem-remember).
+    parent = os.path.dirname(path)
+    tmp = path + ".tmp"
+    try:
+        os.makedirs(parent, exist_ok=True)
+        with open(tmp, "wb") as f:
+            f.write(octets)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except OSError as e:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        _fail("could not persist file (%s)" % e)
+
+    sys.stdout.write(json.dumps({"ok": True, "content": content, "meta": {"path": path}},
+                                sort_keys=True, separators=(",", ":"), ensure_ascii=True))
+    sys.exit(0)
+
+
+if __name__ == "__main__":
+    main()
