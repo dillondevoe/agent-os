@@ -153,7 +153,12 @@ let
   # Non-canonical paths bypass the textual overlap check but systemd canonicalizes
   # them at unit-load, so a declared "/mem/session/../trusted" WOULD grant trusted
   # writes — reject at eval instead. (Symlink aliasing can't be caught here; that is
-  # a Step-7 obligation — ProtectSystem + protected paths as InaccessiblePaths.)
+  # a Step-7 obligation, discharged by modules/cap-sandbox.nix: an EMPTY root
+  # (TemporaryFileSystem=/:ro) with only the declared roots bound back, plus protected
+  # paths as InaccessiblePaths. This comment used to say "ProtectSystem + ..."; that was
+  # wrong and pointed the next reader at the one option that CANCELS the boundary — it
+  # remounts the host /etc and /usr read-only over the empty root, and read-only is not
+  # unreadable. Measured on systemd 255 and 261; see cap-sandbox.nix's header.)
   pathIsCanonical = p:
     let parts = lib.splitString "/" p;
     in (builtins.head parts == "")            # leading slash present

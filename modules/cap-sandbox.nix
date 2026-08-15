@@ -70,6 +70,56 @@ let
     (a == "/") || (b == "/")
     || (a == b) || (lib.hasPrefix (a + "/") b) || (lib.hasPrefix (b + "/") a);
 
+  # ── runtimePaths is an UNVALIDATED SECURITY INPUT. Validate it. ──────────────────────────
+  # Everything in `runtimePaths` is emitted as `BindReadOnlyPaths=` into EVERY cap's namespace,
+  # so this argument can hand back exactly what `TemporaryFileSystem=/:ro` took away. Two ways,
+  # both of which look reasonable at the call site:
+  #
+  #   runtimePaths = [ "/" ]      -> binds the whole host read-only over the empty root. This is
+  #                                  the ProtectSystem=strict failure IDENTICALLY, arrived at
+  #                                  through a legitimate-looking parameter instead of a
+  #                                  hardening option. Read-only is not unreadable; file.read's
+  #                                  threat is a READ, and this makes /etc/shadow readable again.
+  #   runtimePaths = [ "/etc" ]   -> narrower, same class: it re-binds a tree that CONTAINS
+  #                                  /etc/agent-os/broker, a protected-READ path. The bind is
+  #                                  applied to every cap, so it would grant credentials.read
+  #                                  (a T3 forbidden op) to caps the registry proved cannot have it.
+  #
+  # Neither is hypothetical: the header above explicitly invites a non-NixOS host to override this
+  # with its distro libdirs, so a human WILL edit this argument, and the failure is silent — the
+  # derived properties all look correct and `checks.cap-sandbox` (which evaluates the DEFAULT) is
+  # blind to it. So the guard belongs HERE, at eval, where every caller passes through it.
+  #
+  # Rejected: non-canonical paths (same shape the registry's check 3c enforces, and for the same
+  # reason — systemd canonicalizes at unit-load, so a textual guard that skips it is bypassable),
+  # and any path conflicting with a protected or protected-read path. The legitimate overrides all
+  # pass: /nix/store, /usr, /lib, /lib64, /usr/lib — none of them contain /etc/agent-os or
+  # /var/lib/agent-os.
+  pathIsCanonical = p:
+    let parts = lib.splitString "/" p;
+    in (builtins.head parts == "")
+       && (lib.length parts >= 2)
+       && (lib.all (seg: seg != "" && seg != "." && seg != "..") (builtins.tail parts));
+
+  runtimeBad = lib.filter (p: !(pathIsCanonical p)) runtimePaths;
+  runtimeCollides = lib.filter
+    (p: lib.any (q: pathConflicts p q) (protectedPaths ++ protectedReadPaths))
+    runtimePaths;
+
+  runtimeOk =
+    assert lib.assertMsg (runtimeBad == [ ]) ''
+      cap-sandbox: runtimePaths contains a non-canonical path [${lib.concatStringsSep " " runtimeBad}].
+      Each must be absolute with no empty, '.' or '..' segment and no trailing '/' — and never "/",
+      which would bind the entire host back over TemporaryFileSystem=/:ro and undo this boundary.
+    '';
+    assert lib.assertMsg (runtimeCollides == [ ]) ''
+      cap-sandbox: runtimePaths [${lib.concatStringsSep " " runtimeCollides}] overlap a protected or
+      protected-read path. These are bound read-only into EVERY capability namespace, so the overlap
+      would hand every cap a readable broker config / credentials store / audit log — the exact reads
+      the registry's build-time invariants deny. Bind a narrower runtime path.
+    '';
+    true;
+
   # ── Base hardening applied to EVERY capability, regardless of declaration ──────────────
   # The fs half is the load-bearing part; the rest is the standard systemd hardening set, kept
   # uniform so a new cap cannot be born less confined than its siblings.
@@ -122,8 +172,11 @@ let
       (lib.filter (p: !(lib.any (d: pathConflicts d p) (declared c)))
         (lib.unique (protectedPaths ++ protectedReadPaths)));
 
+  # `runtimeOk` is FORCED here, on the one code path that consumes runtimePaths — an assertion
+  # bound in a `let` and never referenced is not an assertion, it is a comment that costs eval time.
   fsProps = c:
-    map (p: "BindReadOnlyPaths=${p}") (runtimePaths ++ c.sandbox.readOnlyPaths)
+    lib.optionals runtimeOk
+      (map (p: "BindReadOnlyPaths=${p}") (runtimePaths ++ c.sandbox.readOnlyPaths))
     ++ map (p: "BindPaths=${p}") c.sandbox.readWritePaths
     ++ inaccessible c;
 

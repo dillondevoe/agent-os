@@ -457,6 +457,33 @@
           assert lib.assertMsg
             (lib.elem "BindPaths=/var/lib/agent-os/workspace" sb.policy."file.write")
             "cap-sandbox: file.write lost its workspace bind.";
+          # NEGATIVE CONTROL for the runtimePaths guard. Everything above asserts what the DEFAULT
+          # runtimePaths produces, and would stay green if the guard were deleted outright — the
+          # default is legal either way. So force the other direction: each hostile override must
+          # FAIL to evaluate. `tryEval` catches the assert; `deepSeq` is required because policyJson
+          # is a thunk and a lazily-unforced assertion is an assertion that never fires.
+          #
+          # The list is not decorative. "/" is the whole host bound back over the empty root (the
+          # ProtectSystem failure, reached through a parameter). "/etc" contains the protected-READ
+          # broker config, so it would grant credentials.read to every cap. The last two are
+          # non-canonical forms that systemd canonicalizes at unit-load, which is exactly how a
+          # textual guard gets bypassed if it only checks the pretty spelling.
+          assert
+            let
+              denies = rtp:
+                let r = builtins.tryEval
+                          (builtins.deepSeq
+                            (import ./modules/cap-sandbox.nix { inherit lib; runtimePaths = rtp; }).policyJson
+                            true);
+                in !r.success;
+              hostile = [ [ "/" ] [ "/etc" ] [ "/nix/store" "/var/lib/agent-os" ]
+                          [ "/usr/lib/" ] [ "/nix/store/../etc" ] ];
+              leaked = lib.filter (rtp: !(denies rtp)) hostile;
+            in lib.assertMsg (leaked == [ ])
+              ("cap-sandbox: runtimePaths guard did not reject "
+               + "[${lib.concatStringsSep " | " (map (r: lib.concatStringsSep "," r) leaked)}]. "
+               + "That argument is bound read-only into EVERY cap namespace, so an unguarded value "
+               + "hands back what TemporaryFileSystem=/:ro took away.");
           nixpkgs.legacyPackages.${system}.runCommand "cap-sandbox-check" { } ''
             test -s ${nixpkgs.legacyPackages.${system}.writeText "policy.json" sb.policyJson}
             touch $out
