@@ -1,0 +1,138 @@
+# Phase 2 · Step 7 / Phase S · WP-S2 — per-capability systemd fs-confinement, DERIVED from the
+# Step-1 registry `sandbox` declaration. This is GATE #5(a).
+#
+# Security surface (this file IS a security boundary — for `file.read` it is the ONLY symlink
+# boundary that exists): branch -> PR -> Fable(code) -> merge. Never direct-push.
+#
+# ── Why this file exists ────────────────────────────────────────────────────────────────────
+# `cap-invoke` direct-execs a capability impl. Two shipped impls take a CALLER-SUPPLIED path:
+#
+#   * `file.read`  validates the path STRING only. Its own comment delegates symlink-escape to
+#     "that layer" — this layer. Without it, a symlink planted in SAFE_ROOT passes the textual
+#     check and `open()` follows it: arbitrary-file read. FAIL-OPEN.
+#   * `file.write` refuses to overwrite a non-regular TARGET, but the check is target-only: a
+#     symlinked PARENT component still redirects the write, and lstat->open is a TOCTOU window.
+#
+# Neither is closable in the impl (a userspace path check can never win a TOCTOU race against
+# the filesystem). Both are closed HERE, by the kernel, via a mount namespace.
+#
+# ── Why `TemporaryFileSystem=/:ro` and not `ProtectSystem=strict` alone ─────────────────────
+# `ProtectSystem=strict` makes the filesystem READ-ONLY. It does not make it UNREADABLE — under
+# it alone, `SAFE_ROOT/evil -> /etc/shadow` still reads /etc/shadow. `ReadOnlyPaths=` likewise
+# only removes write permission; it grants nothing and denies no reads elsewhere. The only shape
+# that makes "everything else" genuinely absent is to start from an EMPTY root
+# (`TemporaryFileSystem=/:ro`) and bind back exactly the declared roots plus the runtime paths
+# the interpreter needs. A symlink out of the sandbox then resolves to a path that does not
+# exist in the namespace -> ENOENT, for reads and writes alike, with no race to lose.
+# ── MEASURED, and it contradicts the brief: `ProtectSystem=strict` is DELIBERATELY ABSENT ──
+# The WP-S2 routing asked for `ProtectSystem=strict` alongside the empty root. It is not here,
+# because on real systemd (255.4, the DVo test host) adding it does not harden the namespace —
+# it CANCELS it. Bisected, both orderings, with and without the other hardening options:
+#
+#   TemporaryFileSystem=/:ro                          -> /etc/passwd absent   (boundary holds)
+#   TemporaryFileSystem=/:ro + ProtectSystem=strict   -> /etc/passwd READABLE (boundary GONE)
+#   ProtectSystem=strict + TemporaryFileSystem=/:ro   -> /etc/passwd READABLE (order irrelevant)
+#   TemporaryFileSystem=/:ro + all other base props   -> /etc/passwd absent   (boundary holds)
+#
+# ProtectSystem=strict works by remounting the HOST's /usr, /boot, /efi and /etc read-only, which
+# reintroduces the host tree the empty root had removed. Read-only is not unreadable, and for
+# `file.read` the threat is a READ. So the option that reads like extra defence is, in this exact
+# combination, the one that reopens the hole — which is why the battery's negative control and its
+# escape leg are load-bearing rather than ceremonial: this composition failure is invisible to any
+# check that only asserts "the hardening property is present". Reported, not papered over.
+#
+# ── Derivation, not duplication ────────────────────────────────────────────────────────────
+# Every path below comes from `capability-registry.nix`: `sandbox.readOnlyPaths` become
+# BindReadOnlyPaths, `sandbox.readWritePaths` become BindPaths, and the registry's own
+# `protectedPaths`/`protectedReadPaths` become InaccessiblePaths. Nothing is hand-listed, so a
+# registry edit moves the confinement with it and the registry's `assert ok` gates this file too
+# (reading `.registry` forces every mechanism-3 invariant).
+{ lib
+, # The paths bound back read-only into EVERY cap namespace, because the impl's interpreter
+  # lives there. On NixOS this is exactly the store: impls are patchShebangs'd to an absolute
+  # store-path python3, so the store is the whole runtime. Overridable so a non-NixOS host
+  # (the WP-S2 battery runs on a WSL2 Ubuntu box) can bind its distro libdirs instead.
+  runtimePaths ? [ "/nix/store" ]
+}:
+
+let
+  regModule = import ./capability-registry.nix { inherit lib; };
+  reg = regModule.registry;   # forces `assert ok` — no confinement is derived from an invalid registry
+  inherit (regModule) protectedPaths protectedReadPaths;
+
+  # Same containment relation the registry uses for its protected-path invariant: two paths
+  # conflict if either contains the other.
+  pathConflicts = a: b:
+    (a == "/") || (b == "/")
+    || (a == b) || (lib.hasPrefix (a + "/") b) || (lib.hasPrefix (b + "/") a);
+
+  # ── Base hardening applied to EVERY capability, regardless of declaration ──────────────
+  # The fs half is the load-bearing part; the rest is the standard systemd hardening set, kept
+  # uniform so a new cap cannot be born less confined than its siblings.
+  baseProps = [
+    "TemporaryFileSystem=/:ro"   # empty root — see header. THE symlink boundary.
+    # NO ProtectSystem= here. See the header: on systemd 255 it re-exposes the host /etc and /usr
+    # over the empty root. Do not "restore" it without re-running tests/cap-sandbox-battery.sh.
+    "ProtectHome=yes"
+    "PrivateTmp=yes"
+    "PrivateDevices=yes"
+    "ProtectProc=invisible"
+    "ProcSubset=pid"
+    "ProtectKernelTunables=yes"
+    "ProtectKernelModules=yes"
+    "ProtectKernelLogs=yes"
+    "ProtectControlGroups=yes"
+    "ProtectClock=yes"
+    "ProtectHostname=yes"
+    "NoNewPrivileges=yes"
+    "RestrictSUIDSGID=yes"
+    "RestrictRealtime=yes"
+    "RestrictNamespaces=yes"
+    "LockPersonality=yes"
+    "SystemCallArchitectures=native"
+    "UMask=0077"
+  ];
+
+  # ── Network confinement, derived ───────────────────────────────────────────────────────
+  # network=false (every cap shipped today) gets a hard PrivateNetwork — an impl that is not
+  # declared network-capable gets no stack at all, so an exfil attempt cannot even resolve.
+  # network=true is NOT shipped yet (cap-invoke-pkg's build gate refuses it); the deny-list
+  # translation is written here so the T2 slice starts from the registry, not from scratch.
+  netProps = c:
+    if c.sandbox.network
+    then [ "IPAddressAllow=any" ] ++ map (cidr: "IPAddressDeny=${cidr}") c.sandbox.egressDeny
+    else [ "PrivateNetwork=yes" "IPAddressDeny=any" "RestrictAddressFamilies=AF_UNIX" ];
+
+  # ── Filesystem confinement, derived ────────────────────────────────────────────────────
+  declared = c: c.sandbox.readOnlyPaths ++ c.sandbox.readWritePaths;
+
+  # A protected path is made explicitly inaccessible UNLESS the cap's own declaration overlaps
+  # it. The overlap case is not a hole: the registry's build-time invariants already prove no
+  # cap holds a protected path in WRITABLE scope and none holds a protected-READ path at all.
+  # The one legitimate overlap is `mem.recall`'s readOnlyPaths=/var/lib/agent-os/mem containing
+  # the write-protected /var/lib/agent-os/mem/trusted — recall-of-trusted is by design (the
+  # registry says so explicitly), and it stays READ-only here because the bind is
+  # BindReadOnlyPaths. Blanket-InaccessiblePaths would break that by-design read.
+  inaccessible = c:
+    map (p: "InaccessiblePaths=-${p}")
+      (lib.filter (p: !(lib.any (d: pathConflicts d p) (declared c)))
+        (lib.unique (protectedPaths ++ protectedReadPaths)));
+
+  fsProps = c:
+    map (p: "BindReadOnlyPaths=${p}") (runtimePaths ++ c.sandbox.readOnlyPaths)
+    ++ map (p: "BindPaths=${p}") c.sandbox.readWritePaths
+    ++ inaccessible c;
+
+  propsFor = c: baseProps ++ fsProps c ++ netProps c;
+
+  # cap name -> ordered list of `systemd-run --property=` arguments.
+  policy = lib.mapAttrs (_name: c: propsFor c) reg;
+
+in {
+  inherit policy propsFor baseProps;
+
+  # The materialized policy, as the dispatcher consumes it. cap-invoke looks a capability up by
+  # name and refuses to run an impl whose name is ABSENT (fail-closed): a cap that reaches the
+  # seam with no derived confinement is exactly the state GATE #5 forbids.
+  policyJson = builtins.toJSON policy;
+}
