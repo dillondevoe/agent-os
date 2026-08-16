@@ -23,8 +23,15 @@
 # RESIDUAL, stated rather than implied: the path filter means a PR that widens the wall through a
 # file NOT listed below merges without this lane ever running. The nightly cron on main is the
 # backstop for exactly that case — but it catches such a change AFTER it has landed, not before.
-# Widening the filter is cheap; if you find yourself adding an egress-relevant path anywhere,
-# add it here in the same commit.
+# Widening the filter is cheap; if you find yourself adding a path that can change what these VMs
+# BOOT or what the wall DOES, add it here in the same commit.
+#
+# That sentence used to read "an egress-relevant path", and the wording was itself the bug: it
+# invited the reader to ask "does my change touch egress?" when the question that matters is
+# "does my change reach these VMs?". `configuration.nix` is the first entry in baseModules and is
+# booted by every test in the matrix, yet it went unlisted here for as long as this file has
+# existed — because nobody edits it thinking "egress". A filter is a claim about what is covered,
+# and a claim narrower than the thing it guards reads exactly like full coverage.
 
 name: vm-tests (slow lane)
 
@@ -36,6 +43,15 @@ on:
       - 'tests/**'
       - 'flake.nix'
       - 'flake.lock'
+      # ...including the two TOP-LEVEL configs. `./configuration.nix` is the FIRST entry in
+      # flake.nix's `baseModules`, so it is booted by every VM in the matrix below — it decides
+      # what those VMs actually are. Omitting it meant a PR could change the base every slow-lane
+      # VM boots and merge with only the fast lane having run. That is not hypothetical: PR #102
+      # (2026-08-16) edited configuration.nix and configuration-open.nix, and `gh pr view 102`
+      # listed exactly one check, `flake-check`. Found by editing the file and noticing the lane
+      # stayed quiet.
+      - 'configuration.nix'
+      - 'configuration-open.nix'
       # ...and this file itself. A harness excluded from its own trigger set cannot object to
       # being gutted: without this line, a PR deleting the steps below would merge green.
       - '.github/workflows/vm-tests.yml'
@@ -46,6 +62,8 @@ on:
       - 'tests/**'
       - 'flake.nix'
       - 'flake.lock'
+      - 'configuration.nix'
+      - 'configuration-open.nix'
       - '.github/workflows/vm-tests.yml'
   schedule:
     # 07:00 UTC daily. Catches drift on main from anything the path filter above missed, and from
