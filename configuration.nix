@@ -41,6 +41,39 @@
   hardware.graphics.extraPackages = with pkgs; [ intel-media-driver ];
   services.thermald.enable = true;                 # Intel thermal daemon (laptop)
   services.fwupd.enable = true;                     # firmware updates
+
+  # --- survivability: the hardware watchdog ------------------------------------
+  # DELIBERATELY IDENTICAL to the stanza in configuration-open.nix, and landed in the
+  # SAME commit as it. The header of that file warns that this hardware block is a
+  # mirror rather than a shared module, so "a future Dell-boot fix can never land in
+  # one variant and miss the other" — and this is exactly such a fix. Splitting it
+  # across two changes is how the miss happens.
+  #
+  # WHY (measured, 2026-08-11 → 2026-08-16): the Dell hard-hung at the firmware/EC
+  # layer and stayed dark for FIVE DAYS. Journal for that boot ends mid-sentence in
+  # ACPI Embedded Controller timeouts; no crash loop, disk 22%, thermals normal, zero
+  # failed units. The hang is not ours to prevent. The five days were: the box has an
+  # iTCO_wdt at /dev/watchdog0 and it was UNARMED (RuntimeWatchdogUSec=0), so nothing
+  # could notice it had stopped responding. RebootWatchdogSec alone only covers the
+  # shutdown path — it guards a reboot we asked for, not a hang we didn't.
+  #
+  # This variant needs it MORE than the open one, not less. The sovereign posture is
+  # the harder box to get back into by hand: rootless agent, sealed egress, no
+  # passwordless sudo. An unattended sealed box that wedges with no watchdog is a box
+  # that waits for someone to physically walk to it.
+  #
+  # 120s rather than tighter: this machine does nix builds, and heavy IO can briefly
+  # starve PID 1. A watchdog that fires during a normal build is a watchdog someone
+  # disables — which returns us to five days, now carrying the belief that we are
+  # covered.
+  #
+  # Written as systemd.settings.Manager.*, NOT the older systemd.watchdog.*. Both
+  # evaluate on nixpkgs 26.11, the latter via a rename shim that warns. That shim is
+  # the hazard: if a future nixpkgs drops the alias, the watchdog silently stops being
+  # configured while this file still READS protective, and we learn about it from the
+  # next outage.
+  systemd.settings.Manager.RuntimeWatchdogSec = "120s";
+  systemd.settings.Manager.RebootWatchdogSec = "10min";
   # 32GB RAM = the local-model floor is real here (phase 1.5): a quantized 13-14B runs
   # comfortably. setup-brain.sh will install ollama/llama.cpp against the iGPU + CPU.
 
