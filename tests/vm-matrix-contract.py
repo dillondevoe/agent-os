@@ -16,13 +16,20 @@ goes red. `nix flake check` stays green because nixosTests are deliberately held
 (they boot VMs; minutes, not seconds), so the fast lane never touches them either. The test is
 present in every sense except the one that matters.
 
-BOTH DIRECTIONS ARE CHECKED, because they fail differently:
+THREE THINGS ARE CHECKED, because they fail differently:
 
-  * a test-* package with NO matrix entry  -> the test silently never runs. This is the
-    dangerous direction, and it is silent by construction.
+  * a tests/*.nix file that flake.nix never references -> it has no package at all, so it is
+    absent from BOTH lists below and comparing them to each other passes. The file is
+    committed and reads as coverage. This is the most silent of the three, and it was missed
+    by the first version of this very file, which checked only the two below.
+  * a test-* package with NO matrix entry  -> the test silently never runs. Silent by
+    construction.
   * a matrix entry with NO test-* package  -> the job fails at `nix build` with a confusing
     attribute error. Not dangerous, but it should fail here with a sentence that says what is
     wrong instead of there with a resolution trace.
+
+Note the progression: each check covers the gap left by the one after it. Comparing two derived
+lists to each other cannot tell you that something never entered either.
 
 DELIBERATELY NOT SILENT-SKIPPABLE. If PyYAML is missing this exits non-zero rather than passing.
 A check that quietly degrades to a no-op when a dependency is absent is precisely the class of
@@ -31,16 +38,30 @@ bug it was written to catch — see docs/cancelled-boundaries.md, members 3, 8 a
 Local use:
     python3 tests/vm-matrix-contract.py
 
-Control arm (this MUST fail — if it does not, the check is not a check):
+Control arms (each MUST fail — if one does not, that check is not a check):
     python3 tests/vm-matrix-contract.py --packages-json '["test-does-not-exist"]'
+    touch tests/orphan.nix && python3 tests/vm-matrix-contract.py ; rm tests/orphan.nix
 """
 import argparse
+import glob
 import json
+import os
 import subprocess
 import sys
 
 WORKFLOW = ".github/workflows/vm-tests.yml"
+FLAKE = "flake.nix"
+TESTS_DIR = "tests"
 SYSTEM = "x86_64-linux"
+
+# tests/*.nix files that are deliberately NOT wired into flake.nix as a test package —
+# shared helpers, libraries, fixtures. Empty today: every .nix in tests/ is a test.
+#
+# This list is the opt-out, and it is explicit ON PURPOSE. The alternative — inferring
+# "probably a helper" from a filename — would make the check quietly stop covering things
+# as the tree grows, which is the exact failure this file exists to prevent. Adding an
+# entry here should be a visible decision in a diff, not a pattern that swallows files.
+UNWIRED_BY_DESIGN = frozenset()
 
 
 def matrix_entries(path):
@@ -58,6 +79,36 @@ def matrix_entries(path):
         return set(wf["jobs"]["vm-test"]["strategy"]["matrix"]["test"])
     except (KeyError, TypeError) as exc:
         sys.exit(f"FAIL: could not read the matrix from {path}: {exc!r}")
+
+
+def unwired_test_files(tests_dir, flake_path):
+    """tests/*.nix files that flake.nix never references.
+
+    THE GAP THIS CLOSES. The matrix check below compares the flake's `test-*` packages against
+    the workflow matrix — but a test file that was never added to flake.nix at all has no
+    package, so it is absent from BOTH sides and the comparison passes. The file exists, it is
+    committed, it reviews as coverage, and it runs nowhere. That is the same failure as a
+    missing matrix entry, one level further up, and it is the one that survives a check that
+    only compares the two downstream lists to each other.
+
+    Written after noticing the omission in this very file — see docs/cancelled-boundaries.md,
+    which is a ledger of guards that did not cover what they appeared to.
+    """
+    try:
+        with open(flake_path) as fh:
+            flake_src = fh.read()
+    except OSError as exc:
+        sys.exit(f"FAIL: could not read {flake_path}: {exc!r}")
+
+    unwired = []
+    for path in sorted(glob.glob(os.path.join(tests_dir, "*.nix"))):
+        name = os.path.basename(path)[: -len(".nix")]
+        if name in UNWIRED_BY_DESIGN:
+            continue
+        # Match the path as flake.nix would write it (./tests/foo.nix or tests/foo.nix).
+        if f"{tests_dir}/{name}.nix" not in flake_src:
+            unwired.append(path)
+    return unwired
 
 
 def flake_test_packages(system):
@@ -78,6 +129,8 @@ def main():
     # repo. The doctrine this file serves says a guard whose red path has never been seen is a
     # comment with a CI badge, so the guard ships with a way to see it red.
     ap.add_argument("--workflow", default=WORKFLOW)
+    ap.add_argument("--flake", default=FLAKE)
+    ap.add_argument("--tests-dir", default=TESTS_DIR)
     ap.add_argument("--packages-json", default=None,
                     help="JSON array of package names, for testing the failing arm")
     args = ap.parse_args()
@@ -88,13 +141,28 @@ def main():
 
     unlisted = sorted(tests - matrix)
     dangling = sorted(matrix - tests)
+    unwired = unwired_test_files(args.tests_dir, args.flake)
 
-    if not unlisted and not dangling:
+    if not unlisted and not dangling and not unwired:
         print(f"OK: {len(tests)} test-* package(s), all present in the vm-tests matrix:")
         for name in sorted(tests):
             print(f"  {name}")
+        print(f"OK: every .nix in {args.tests_dir}/ is referenced by {args.flake}.")
         return 0
 
+    if unwired:
+        print(f"FAIL: test file(s) in {args.tests_dir}/ that {args.flake} never references —",
+              file=sys.stderr)
+        print("      these have no package, so they run NOWHERE and no other check sees them:",
+              file=sys.stderr)
+        for path in unwired:
+            print(f"  {path}", file=sys.stderr)
+        print(f"  -> wire each into {args.flake} as a test-* package and add its matrix entry,",
+              file=sys.stderr)
+        print("     or, if it is a shared helper rather than a test, add it to",
+              file=sys.stderr)
+        print("     UNWIRED_BY_DESIGN in this file so the exemption is visible in a diff.",
+              file=sys.stderr)
     if unlisted:
         print("FAIL: test-* package(s) with NO vm-tests matrix entry — these NEVER RUN in CI:",
               file=sys.stderr)

@@ -55,6 +55,7 @@ exercised is a comment with a CI badge.
 | 10 | `GUARDED_LABELS` naming labels that did not exist | The label guard named six labels; **five of them did not exist in the repository**, so those five could never be *applied* and the guard could never be invoked through them — correct code keyed on values nobody could supply. Inert for three of the four original names since the watcher shipped. | same file + repo label set (all labels created; the watcher now verifies them at runtime) |
 | 11 | A `seal-` prefix in a guarded-path list | The guarded-prefix list named `seal-`, which reads as "the seal surface is covered" — but the file is `mesh-wireguard-**sealed**.nix`, and the matcher is component-based, so it never matched. Unlike member 8, the entry was **present**: an auditor reading the list ticks the box. A prefix that covers a concept in one spelling of it. Same file: `secret` did not match `mail-secret-open.nix` for the same reason. | `agentos_merge_gate_watcher.py` (operational; found and fixed by Page) |
 | 12 | `flake.lock` guarded, `flake.nix` open | The same list guarded the **pinned inputs** but not the **build definition**. The lock file is derived from the nix file; guarding it while leaving its source open protects the manifest and not the thing that writes it. The list read as "the build is covered" because a build-related path was in it. | `agentos_merge_gate_watcher.py` (operational; found and fixed by Page) |
+| 13 | A contract that compared two derived lists | `tests/vm-matrix-contract.py` (member 8's fix) asserted the flake's `test-*` packages and the vm-tests matrix were the same set, both directions — and could not see a `tests/*.nix` that was never wired into `flake.nix` at all. With no package, the file is absent from **both** lists, so comparing them passes. The file is committed and reviews as coverage; it runs nowhere. | `tests/vm-matrix-contract.py` (found by Mirror auditing his own gate; fixed same PR) |
 
 Members 6–7 are recorded here as in-flight rather than merged. If those PRs change shape in
 review, this table is wrong until someone fixes it — which is itself an instance of the class,
@@ -138,6 +139,28 @@ Page confirmed both arms on live PRs: `flake.nix` and `cap-sandbox` changes now 
 `docs/`, `README.md` and `tests/run-local.sh` still pass. **Widening a guard is a change that needs
 its control arm re-run, not just its failing arm.**
 
+### Member 13: comparing two derived lists cannot find what entered neither
+
+Member 8 was a test package with no matrix entry. The fix — a contract asserting packages and
+matrix are the same set — was written to make that class of gap impossible, and it does close it.
+It also inherited the shape it was closing, one level further up.
+
+Both sides of that comparison are *derived from* `flake.nix`. A test file that was never referenced
+there produces no package, so it appears on neither side, and a check that only asks whether the two
+sides agree returns green. The failure is more silent than member 8's: member 8 at least had a
+package someone could `nix build`.
+
+The generalisation is worth more than the instance. **A consistency check between two derived
+artifacts is blind to anything that never entered the pipeline that derives them.** Whenever a guard
+compares A to B, ask what produces A and B, and whether something can skip that producer entirely.
+The check you need is against the *source of truth on disk* — here, the files in `tests/` — not
+against another view of the same upstream.
+
+Note also what the fix does not do: it does not infer "probably a helper" from a filename. Exempt
+files go in an explicit `UNWIRED_BY_DESIGN` set, so an exemption is a visible line in a diff rather
+than a pattern that quietly widens as the tree grows. That is member 8's lesson applied to the
+escape hatch instead of the rule.
+
 ### Member 8 is the clearest specimen we have
 
 It is worth singling out because it caught itself in public. PR #103 (which widens the filter)
@@ -168,6 +191,9 @@ When adding or reviewing anything protective:
   narrower than its subject. Coverage lists age badly, and they age silently.
 - **Match the coverage list against the tree, do not read it.** An entry that matches nothing
   reads exactly like an entry that matches the file you had in mind. Members 11 and 12.
+- **Ask what a consistency check is blind to.** Comparing two artifacts derived from the same
+  source cannot see something that never entered that source — it is missing from both sides and
+  the comparison agrees. Check against the tree, not against another view. Member 13.
 - **Re-run the control arm after widening a guard, not just the failing arm.** A guard that
   refuses everything is as useless as one that guards nothing, and it gets routed around instead
   of reported.
@@ -192,7 +218,7 @@ When adding or reviewing anything protective:
 
 ## Why this file is in the repo
 
-The class had accumulated roughly twelve members across commit messages, inline comments, and
+The class had accumulated roughly thirteen members across commit messages, inline comments, and
 brain-comms, with exactly one reference anywhere in the tree (`flake.nix`). Scattered like
 that it is not a checklist anyone can apply — it is a thing you have to have been present for.
 The instances are product knowledge; the comms that carried them are not shipped, and should
