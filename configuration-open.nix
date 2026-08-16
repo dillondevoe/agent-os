@@ -286,12 +286,22 @@ in {
   # live; the rest is the usual agent toolbox.
   environment.systemPackages = with pkgs; [
     git curl jq ripgrep fd bat neovim python3 rsync tmux htop
+    ethtool                                # NIC/WoL introspection — see note below
     # Claude Code CLI (Dillon msg 9280: "talk claude through this box"). Unfree —
     # whitelisted in gaming-open.nix's allowUnfreePredicate (single shared predicate;
     # a second definition elsewhere would conflict). Auth is per-user OAuth (`claude`
     # → browser login with the Max account) — no secrets baked into the image.
     claude-code
   ];
+
+  # ethtool is here for a specific reason, not for completeness. After the 2026-08-11 hard
+  # hang the recovery story was "Wake-on-LAN" — and WoL could not be *checked* on the box,
+  # because `ethtool -- ` reported nothing and an empty output reads identically to "WoL is
+  # off." It was a missing binary (rc=127). A recovery path you cannot query is a recovery
+  # path you are assuming, which is the whole class in docs/cancelled-boundaries.md.
+  # Note the standing caveat: this Dell's ethernet (enp0s31f6) is NO-CARRIER — it runs on
+  # wifi — so WoL is inert here until it is plugged in. ethtool makes that inertness
+  # *visible* rather than leaving it indistinguishable from working coverage.
 
   # The box rebuilds itself from nixpkgs (and here the operator has full sudo to do so).
   nix.settings.experimental-features = [ "nix-command" "flakes" ];
