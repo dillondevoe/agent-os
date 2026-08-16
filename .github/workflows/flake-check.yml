@@ -54,6 +54,23 @@ jobs:
       - name: Assert sandbox is enabled
         run: test "$(nix config show sandbox)" = "true"
 
+      # Cheap (evaluates attribute NAMES, builds nothing) so it runs BEFORE the batteries and
+      # fails in seconds. It lives in THIS lane, not vm-tests.yml, on purpose: this workflow has
+      # no `paths:` filter, so it runs on every PR and cannot be dodged by a change that happens
+      # to touch none of the slow lane's listed paths. A contract about what CI runs should not
+      # itself be skippable by a path filter.
+      #
+      # It asserts that the flake's `test-*` packages and the vm-tests matrix are the same set.
+      # vm-tests.yml states that rule twice in prose — "a test that lands without its matrix
+      # entry is precisely the failure this whole file was written to end" — and until now it was
+      # enforced by whoever remembered. A test package with no matrix entry runs nowhere: the
+      # nixosTests are held out of `checks` deliberately, so the fast lane does not build it
+      # either, and nothing anywhere goes red.
+      - name: vm-tests matrix covers every test-* package
+        # Run under a nix-provided python rather than the runner image's: if PyYAML were merely
+        # assumed present, an image change would turn this check into a no-op or a spurious red.
+        run: nix shell nixpkgs#python3Packages.pyyaml --command python3 tests/vm-matrix-contract.py
+
       # `--option sandbox true` is the whole point: it reproduces the clean-room build
       # (no /usr/bin/env, patchShebangs load-bearing) that a laptop's non-sandbox check hides.
       # `-L` prints full build logs so a battery failure is legible in the run output.
