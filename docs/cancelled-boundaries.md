@@ -52,7 +52,7 @@ exercised is a comment with a CI badge.
 | 7 | `systemd.watchdog.*` rename-shim alias | A deprecated alias that still evaluates today and could silently stop applying later, while continuing to read as a correct setting. Avoided by writing the modern option name. | `configuration.nix`, `configuration-open.nix` *(in flight — PR #102)* |
 | 8 | The `vm-tests` path filter | A coverage claim **narrower than the thing it guards**: the filter omitted the two files every VM in the lane boots, so a boot-affecting change ran only `flake-check`. | `.github/workflows/vm-tests.yml` *(merged — PR #103)* |
 | 9 | Draft status as a merge-gate mitigation | A draft PR reports `mergeStateStatus=CLEAN`, **not** `DRAFT`, and the auto-merge watcher never requested `isDraft` at all — so draft was not merely unchecked, it was *invisible*. The mitigation whose only job was to be an independent second barrier was a silent no-op. | `agentos_merge_gate_watcher.py` (operational; fixed by Page) |
-| 10 | `GUARDED_LABELS` naming labels that did not exist | The label guard listed `must-ask` / `needs-human`, but neither label existed in the repository, so the guard could never be *invoked* — correct code keyed on a value nobody could supply. | same file + repo label set (labels created) |
+| 10 | `GUARDED_LABELS` naming labels that did not exist | The label guard named six labels; **five of them did not exist in the repository**, so those five could never be *applied* and the guard could never be invoked through them — correct code keyed on values nobody could supply. Inert for three of the four original names since the watcher shipped. | same file + repo label set (all labels created; the watcher now verifies them at runtime) |
 
 Members 6–7 are recorded here as in-flight rather than merged. If those PRs change shape in
 review, this table is wrong until someone fixes it — which is itself an instance of the class,
@@ -77,10 +77,35 @@ was written correctly and tested correctly at the function level — `must-ask` 
 it. A guard keyed on an unavailable input is a guard that never fires, and it looks identical in
 source review to one that works.
 
+**And member 10 turned out to be older and larger than the two labels that exposed it.** The fix
+for it was not to create the two missing labels but to make the watcher *ask the supplier* on
+every run whether each guarded label resolves. The first live run of that check reported three
+more — `breaking`, `human-gate`, `wip` — none of which had ever existed. Of the four original
+guarded labels, only `hold` was real. That guard had been roughly 75% inert **for its entire
+life**, and nothing surfaced it, because an inert guard and a working guard emit identical output
+on every PR that does not need them. The two we added were the newest instances, not the first;
+we walked into a standing condition rather than creating one.
+
+That is the most useful thing in this file about detection cost. Members 9 and 10 were both found
+in under a day *because someone was actively testing a mitigation*. The three older labels sat
+unnoticed from the day the watcher shipped, because nobody was.
+
 The general lesson, stated to be reusable: **verifying that a guard contains the right rule is
 not verifying that the guard can ever be reached.** Member 3 is the same asymmetry in a variable,
 member 8 in a path list, member 10 in a label. Ask what supplies the input, not just what the
 rule says about it.
+
+Sharpened into a rule worth applying beyond this repo:
+
+> **A guard that names an external identifier should verify, at runtime, that the identifier
+> resolves.**
+
+Labels here; elsewhere a webhook URL, a queue name, a systemd unit, a file path, a message
+recipient. The 2026-08-12 recipient-namespace gap was this same shape — a sender addressing a name
+that routed to nobody. The check belongs in the guard itself, because that is the only place that
+knows the full list, and it should **warn rather than halt**: an unresolvable identifier makes the
+mechanism unavailable, but it does not make any particular subject unsafe, and failing closed on a
+transient lookup error would take down the very thing the guard exists to provide.
 
 ### Member 8 is the clearest specimen we have
 
@@ -120,6 +145,11 @@ When adding or reviewing anything protective:
 - **Ask what supplies the guard's input.** Members 3, 8, and 10 are all correct rules that could
   not be reached — an unset variable, an omitted path, a label that did not exist. Reviewing the
   rule tells you nothing about whether anything can ever hand it the value that trips it.
+- **Make the guard check its own identifiers at runtime, and warn.** Where a guard names something
+  external — a label, a unit, a path, a recipient — have it verify on each run that the name
+  resolves, and say which ones do not. This is the only member of the class that a *running system*
+  can report about itself, which is why it is worth wiring rather than remembering. Warn rather
+  than halt: an unresolvable name disables the mechanism, it does not make the subject unsafe.
 - **Never retire a barrier on the strength of its replacement being written.** Retire it once you
   have watched the replacement refuse the real thing. Member 9 was trusted for a full day on the
   strength of it being plausible.
