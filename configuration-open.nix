@@ -31,6 +31,22 @@ let
   # NOT in the repo — it is passed as $TS_AUTHKEY to install.sh and written to
   # authKeyFile on the target at install time (see install.sh, VARIANT=agentos-open).
   meshPubKey = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKJTAziP2h4A1uPJeQ4++F8f+Uw3vLzjV7sGSylxA2RH rabbot-mini-to-agentos-20260731";
+
+  # PUBLIC key — DVo's (Mirror's) key, same rationale and same safety as the line
+  # above: a public key is safe to commit, a private one never appears here.
+  #
+  # WHY THIS IS DECLARED RATHER THAN INSTALLED. During the 2026-08-11 outage recovery
+  # this key existed ONLY as a hand-appended line in /root/.ssh/authorized_keys,
+  # typed in at the console by Dillon because the box was otherwise unreachable. That
+  # survives `nixos-rebuild` but NOT a reinstall — and a reinstall is exactly the
+  # moment you most need to get in. Access that lives only in mutable state is access
+  # you lose on the day it matters. Declaring it here means the box comes up
+  # reachable by the brain that has to rebuild it, from a fresh install, with no
+  # console step.
+  mirrorPubKey = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIK7lWcmQXeBX6cgzMIQeLjZwqGgg/z1w7MkkswrV4DKf dvo-wsl";
+
+  # Both mesh brains. Root SSH stays KEY-ONLY (prohibit-password) either way.
+  meshPubKeys = [ meshPubKey mirrorPubKey ];
 in {
   # Phase 2 ambient substrate (Augur, OS build lead). Each app is a self-contained,
   # OPEN-only module so it can never perturb the sealed surface.
@@ -104,6 +120,51 @@ in {
   services.thermald.enable = true;                 # Intel thermal daemon (laptop)
   services.fwupd.enable = true;                     # firmware updates
 
+  # --- survivability: the hardware watchdog ------------------------------------
+  # MEASURED FROM AN OUTAGE, not added speculatively. On 2026-08-11 04:05:36 CDT the
+  # Dell went dark for FIVE DAYS. The journal for boot -3 ends mid-sentence in a burst
+  # of ACPI Embedded Controller timeouts:
+  #
+  #     ACPI Error: AE_TIME, Returned by Handler for [EmbeddedControl] (evregion-303)
+  #     ACPI Error: Timeout from EC hardware or EC device driver (evregion-313)
+  #     ACPI Error: Aborting method \_SB.PC00.LPCB.ECDV.ECW1 due to previous error
+  #
+  # Triage cleared every software cause: no crash loop (that boot ran a healthy 8h),
+  # disk 22% used, thermals normal (CPU 41C / ambient 28C), 24GB RAM available, zero
+  # failed units. The kernel hard-hung below the OS, at the firmware/EC layer.
+  #
+  # The five days are the part worth fixing. The hang is a hardware fault we cannot
+  # prevent from here; staying dark until a human walks over to the box IS preventable.
+  # This machine has an iTCO_wdt at /dev/watchdog0 and it was sitting UNARMED --
+  # RuntimeWatchdogUSec=0. RebootWatchdogUSec was 10min, which only covers the
+  # shutdown path: it guards a reboot we asked for, not a hang we didn't.
+  #
+  # So: PID 1 now pets the hardware watchdog, and a kernel that stops responding gets
+  # the box power-cycled by silicon instead of by a person. Five days becomes two
+  # minutes.
+  #
+  # WHY 120s AND NOT SOMETHING TIGHTER. This box does nix builds -- heavy IO that can
+  # briefly starve PID 1. The cost asymmetry is lopsided: a spurious reboot on a dev
+  # box is an annoyance, but a watchdog that fires during a normal build teaches
+  # whoever hits it to disable the watchdog, and then we are back to five days. A
+  # recovery mechanism people switch off is worse than none, because it also carries
+  # the belief that the box is protected. 120s is chosen to be boring.
+  #
+  # NOTE FOR WHOEVER READS THIS AFTER THE NEXT HANG: this does NOT fix the EC fault.
+  # It bounds the outage. If the reboots start recurring, the fault is the thing to
+  # chase (BIOS/EC firmware via the fwupd above), and this stanza is what bought you
+  # the uptime to chase it from.
+  # Written as systemd.settings.Manager.*, NOT the older systemd.watchdog.*. Both
+  # evaluate on nixpkgs 26.11 — the latter through a rename shim that emits a
+  # deprecation warning — and that shim is the hazard. A watchdog configured through
+  # an alias that a future nixpkgs drops would stop being applied while this file
+  # still READS as if the box were protected, and the way we would find out is the
+  # next five-day outage. Same failure shape this repo keeps meeting elsewhere: a
+  # boundary cancelled by something that still looks like a configuration. Use the
+  # name the module actually defines.
+  systemd.settings.Manager.RuntimeWatchdogSec = "120s";
+  systemd.settings.Manager.RebootWatchdogSec = "10min";
+
   # --- identity + network ------------------------------------------------------
   networking.hostName = "agent-os";
   networking.networkmanager.enable = true;         # wifi/ethernet without a GUI
@@ -116,6 +177,28 @@ in {
   networking.firewall.enable = true;
   networking.firewall.trustedInterfaces = [ "tailscale0" ];
 
+  # Wake-on-LAN on the wired NIC (Geist's ask in the 2026-08-16 recovery plan).
+  #
+  # The MAC deliberately is NOT here. Enabling WoL is a property of the machine; the
+  # MAC is only needed by whoever SENDS the magic packet, so it is an operational fact
+  # about one person's hardware rather than a fact about the OS. It lives with the
+  # senders, in the mesh's own host records — this repo is public and is the product,
+  # not the inventory.
+  #
+  # SCOPE, STATED HONESTLY, because this is easy to over-trust: WoL wakes a machine
+  # that is powered OFF or suspended. It does NOT recover the failure we actually had
+  # on 2026-08-11 — an EC-level hang leaves the box powered ON and frozen, with no
+  # kernel left to process a magic packet. The watchdog above is what covers that
+  # case; this covers a genuinely different one (clean shutdown / suspend, wake it
+  # remotely). Both are worth having; neither substitutes for the other.
+  #
+  # SECOND CAVEAT: as of 2026-08-16 the Dell runs WIFI-ONLY — enp0s31f6 has no
+  # carrier and no address, and the box lives on DHCP over wlp0s20f3 (which is why
+  # its LAN IP churns). Until someone plugs in ethernet this setting is INERT. It is
+  # declared now so the capability exists the moment the cable does, rather than
+  # being remembered during the next outage.
+  networking.interfaces.enp0s31f6.wakeOnLan.enable = true;
+
   # --- the human: FULL power (this variant ONLY) -------------------------------
   # Real user, real bash login shell (NOT the agent-shell memory-floor REPL), in
   # wheel with PASSWORDLESS sudo. This is the deliberate opposite of the sovereign
@@ -126,11 +209,11 @@ in {
     description = "Agent OS (open/meshed dev variant)";
     extraGroups = [ "wheel" "networkmanager" ];
     shell = pkgs.bash;
-    openssh.authorizedKeys.keys = [ meshPubKey ];
+    openssh.authorizedKeys.keys = meshPubKeys;
   };
   # mini's key also lands in root's authorized_keys (Rabbot's ask) — root SSH is
   # KEY-ONLY (prohibit-password), never a password.
-  users.users.root.openssh.authorizedKeys.keys = [ meshPubKey ];
+  users.users.root.openssh.authorizedKeys.keys = meshPubKeys;
 
   security.sudo.enable = true;
   security.sudo.wheelNeedsPassword = false;   # passwordless sudo — OPEN variant only
