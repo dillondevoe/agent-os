@@ -27,6 +27,8 @@
 #   file-cap-battery.sh           file.read/file.write capability round-trip + confinement
 #   providers-battery.py          11 checks — modules/providers.py provider-config contract
 #   wiring-battery.py             8 checks — agent-brain <-> providers.py wiring (needs pyyaml)
+#   transport-battery.py          23 checks — provider transport seam + ollama transport
+#   anthropic-transport-battery.py 34 checks — anthropic SSE transport + translation
 #   mem-battery.py                11 checks — bin/mem (memory-as-filesystem) contract
 #   agent-loop-dispatch-battery.py  8 checks — agent-loop tool-dispatch mechanics vs bin/mcp + broker-stub
 #
@@ -107,6 +109,12 @@ need "$T/providers-battery.py" providers && \
   run providers env PYTHONPATH="$ROOT/modules" "$PY" "$T/providers-battery.py"
 need "$T/wiring-battery.py" wiring && \
   run wiring env PYTHONPATH="$ROOT/modules" "$PY" "$T/wiring-battery.py"
+# Transport seam (task 287 slices 5-6). Both were written but neither was registered here —
+# an unexecuted regression test is documentation, so they ran only when someone remembered to.
+need "$T/transport-battery.py" transport && \
+  run transport env PYTHONPATH="$ROOT/modules" "$PY" "$T/transport-battery.py"
+need "$T/anthropic-transport-battery.py" anthropic-transport && \
+  run anthropic-transport env PYTHONPATH="$ROOT/modules" "$PY" "$T/anthropic-transport-battery.py"
 # mem-battery.py locates bin/mem via its own __file__ (../bin/mem) — no args, no env.
 need "$T/mem-battery.py" mem && \
   run mem "$PY" "$T/mem-battery.py"

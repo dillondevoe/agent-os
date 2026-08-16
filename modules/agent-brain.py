@@ -262,7 +262,7 @@ def _spin(render, interval=0.35):
 # preserved. Deliberately NOT shipping an Anthropic transport in the same diff: this half is
 # a pure refactor with an existing oracle (identical rendering, batteries green), and the new
 # provider is then a pure ADDITION that cannot regress the local floor path.
-def _ollama_stream_events(msgs):
+def _ollama_stream_events(msgs, provider=None):
     payload={"model":MODEL,"messages":msgs,"tools":TOOLS,"stream":True,"keep_alive":-1}
     if THINK is not None: payload["think"]=THINK
     r=urllib.request.Request(OLLAMA,data=json.dumps(payload).encode(),headers={"Content-Type":"application/json"})
@@ -279,7 +279,180 @@ def _ollama_stream_events(msgs):
                 yield ("done", {"eval_count": chunk.get("eval_count") or 0,
                                 "eval_seconds": (chunk.get("eval_duration") or 0)/1e9})
 
-_TRANSPORTS={"ollama": _ollama_stream_events}
+# ── ANTHROPIC TRANSPORT (Phase 1.5 slice 6, task 287) ──
+# The `escalate` role's wire protocol, implemented against the seam contract above. This is
+# the shim that was deferred twice: it is bounded now only because the seam exists — the
+# renderer is untouched by this file's second protocol.
+#
+# stdlib urllib, not the `anthropic` SDK, and that is a deliberate constraint rather than a
+# preference (Dillon's call, 2026-08-15). `genesis-open.nix` seals brainPython to
+# `[prompt-toolkit, pyyaml]`; adding the SDK is a dependency change to a sealed, offline-first
+# OS that cannot be built or tested on the machine this was written on. stdlib keeps the
+# dependency surface unchanged and keeps this transport testable today, at the cost of
+# hand-rolling SSE and the tool-call translation below.
+_ANTHROPIC_URL = "https://api.anthropic.com/v1/messages"
+_ANTHROPIC_VERSION = "2023-06-01"
+_ANTHROPIC_MAX_TOKENS = 64000   # streaming, so the ~16k non-streaming timeout ceiling doesn't apply
+
+def _resolve_secret(ref):
+    # providers.py REJECTS literal keys — api_key_ref must be a scheme://reference, so the
+    # key never sits in the config file. Resolving it is this function's job.
+    # `op://` needs the 1Password CLI, which is NOT in the sealed image; rather than shell out
+    # to a binary that won't exist, fail loud with the exact remedy. Same rule as the
+    # present-but-invalid providers.yaml path: refuse, don't silently degrade.
+    if not ref:
+        raise RuntimeError("escalate provider has no api_key_ref")
+    scheme, _, rest = ref.partition("://")
+    if scheme == "env":
+        v = os.environ.get(rest)
+        if not v:
+            raise RuntimeError(f"api_key_ref env://{rest} is unset in this process")
+        return v
+    if scheme == "file":
+        try:
+            return open(os.path.expanduser(rest), encoding="utf-8").read().strip()
+        except OSError as e:
+            raise RuntimeError(f"api_key_ref file://{rest} unreadable: {e}")
+    raise RuntimeError(
+        f"unsupported api_key_ref scheme {scheme!r} — the sealed image ships no secret-manager "
+        f"CLI, so use env://VAR or file://PATH (a systemd LoadCredential= or EnvironmentFile= "
+        f"is the intended delivery path for {ref!r})")
+
+def _anthropic_translate_tools(tools):
+    # Ollama: {"type":"function","function":{name, description, parameters}}
+    # Anthropic: {name, description, input_schema}
+    out = []
+    for t in tools or []:
+        fn = t.get("function") or {}
+        if not fn.get("name"):
+            continue
+        out.append({"name": fn["name"],
+                    "description": fn.get("description", ""),
+                    "input_schema": fn.get("parameters") or {"type": "object", "properties": {}}})
+    return out
+
+def _anthropic_translate_messages(msgs):
+    """Ollama message list → (system_string, anthropic_messages).
+
+    Two shape mismatches have to be reconciled here, and the second is the awkward one:
+
+    1. Ollama carries the system prompt as a `role: "system"` message; Anthropic takes it as a
+       top-level `system` parameter. Hoist and join.
+    2. Anthropic REQUIRES every `tool_result` to carry the `tool_use_id` it answers — but this
+       codebase appends bare `{"role":"tool","content":res}` with no id at all (agent-brain.py's
+       tool loop). The pairing is therefore positional: when an assistant turn requests N tools,
+       synthesize N ids, then bind the next N `role:"tool"` messages to them in order. That
+       matches how the loop actually appends results (one per call, in call order) and is the
+       only information available — there is no id to recover.
+    """
+    system_parts, out, pending_ids = [], [], []
+    for m in msgs:
+        role = m.get("role")
+        if role == "system":
+            if m.get("content"):
+                system_parts.append(m["content"])
+        elif role == "user":
+            out.append({"role": "user", "content": [{"type": "text", "text": m.get("content", "")}]})
+        elif role == "assistant":
+            blocks = []
+            if m.get("content"):
+                blocks.append({"type": "text", "text": m["content"]})
+            pending_ids = []
+            for i, tc in enumerate(m.get("tool_calls") or []):
+                fn = tc.get("function") or {}
+                args = fn.get("arguments")
+                if isinstance(args, str):
+                    try: args = json.loads(args or "{}")
+                    except ValueError: args = {}
+                tid = tc.get("id") or f"toolu_{len(out)}_{i}"
+                pending_ids.append(tid)
+                blocks.append({"type": "tool_use", "id": tid, "name": fn.get("name", ""), "input": args or {}})
+            if blocks:
+                out.append({"role": "assistant", "content": blocks})
+        elif role == "tool":
+            tid = pending_ids.pop(0) if pending_ids else f"toolu_orphan_{len(out)}"
+            block = {"type": "tool_result", "tool_use_id": tid, "content": str(m.get("content", ""))}
+            # Anthropic wants every tool_result for one assistant turn in a SINGLE user message;
+            # splitting them across messages trains the model out of parallel tool calls.
+            if out and out[-1]["role"] == "user" and all(
+                    b.get("type") == "tool_result" for b in out[-1]["content"]):
+                out[-1]["content"].append(block)
+            else:
+                out.append({"role": "user", "content": [block]})
+    return "\n\n".join(system_parts), out
+
+def _anthropic_stream_events(msgs, provider=None):
+    # `provider` is the name the DISPATCHER resolved, not a module-level global. Reading
+    # ACTIVE_PROVIDER here would be wrong the moment a transport serves any role other than
+    # floor: ACTIVE_PROVIDER is the floor provider by construction, so an escalate-served turn
+    # would look up the local ollama entry and find no api_key_ref. Caught by the battery.
+    cfg = (_PROVIDERS or {}).get("providers", {}).get(provider or ACTIVE_PROVIDER, {})
+    key = _resolve_secret(cfg.get("api_key_ref"))
+    model = cfg.get("model", MODEL)
+    system, amsgs = _anthropic_translate_messages(msgs)
+    payload = {"model": model, "max_tokens": _ANTHROPIC_MAX_TOKENS, "stream": True,
+               "messages": amsgs,
+               # display defaults to "omitted" on current models, which would stream empty
+               # thinking blocks — the renderer's thinking pane would sit blank through a long
+               # pause. Ask for summaries so it has something to show.
+               "thinking": {"type": "adaptive", "display": "summarized"}}
+    if system:
+        payload["system"] = system
+    tools = _anthropic_translate_tools(TOOLS)
+    if tools:
+        payload["tools"] = tools
+    r = urllib.request.Request(_ANTHROPIC_URL, data=json.dumps(payload).encode(),
+                               headers={"content-type": "application/json",
+                                        "x-api-key": key,
+                                        "anthropic-version": _ANTHROPIC_VERSION})
+    # SSE, not NDJSON: `event:` / `data:` line pairs, blank-line separated. Tool calls arrive as
+    # a content_block_start naming the tool, then input_json_delta fragments that have to be
+    # concatenated and parsed at content_block_stop — the input is NOT valid JSON until the
+    # block closes, so it cannot be emitted incrementally.
+    tool_calls, cur, buf, out_tokens = [], None, "", 0
+    t0 = time.time()
+    with urllib.request.urlopen(r, timeout=CHAT_TIMEOUT_S) as resp:
+        for raw in resp:
+            line = raw.decode("utf-8", "replace").strip()
+            if not line.startswith("data:"):
+                continue
+            try:
+                ev = json.loads(line[5:].strip())
+            except ValueError:
+                continue
+            et = ev.get("type")
+            if et == "content_block_start":
+                cb = ev.get("content_block") or {}
+                if cb.get("type") == "tool_use":
+                    cur, buf = {"function": {"name": cb.get("name", "")}}, ""
+            elif et == "content_block_delta":
+                d = ev.get("delta") or {}
+                dt = d.get("type")
+                if dt == "text_delta" and d.get("text"):
+                    yield ("content", d["text"])
+                elif dt == "thinking_delta" and d.get("thinking"):
+                    yield ("thinking", d["thinking"])
+                elif dt == "input_json_delta":
+                    buf += d.get("partial_json") or ""
+            elif et == "content_block_stop":
+                if cur is not None:
+                    try: cur["function"]["arguments"] = json.loads(buf) if buf.strip() else {}
+                    except ValueError: cur["function"]["arguments"] = {}
+                    tool_calls.append(cur)
+                    cur, buf = None, ""
+            elif et == "message_delta":
+                out_tokens = ((ev.get("usage") or {}).get("output_tokens")) or out_tokens
+                # A refusal is a normal 200 with stop_reason "refusal" — surface it as text
+                # rather than ending the turn silently with an empty response.
+                if ((ev.get("delta") or {}).get("stop_reason")) == "refusal":
+                    yield ("content", "\n[declined by safety classifier]")
+            elif et == "error":
+                raise RuntimeError(f"anthropic stream error: {(ev.get('error') or {}).get('message', ev)}")
+    if tool_calls:
+        yield ("tool_calls", tool_calls)
+    yield ("done", {"eval_count": out_tokens, "eval_seconds": time.time() - t0})
+
+_TRANSPORTS={"ollama": _ollama_stream_events, "claude": _anthropic_stream_events}
 
 def _stream_events(msgs):
     # Dispatch on the active provider's `kind`. An unknown kind fails LOUD rather than
@@ -291,7 +464,11 @@ def _stream_events(msgs):
     if t is None:
         raise RuntimeError(f"no transport for provider kind {ACTIVE_PROVIDER_KIND!r} "
                            f"(provider {ACTIVE_PROVIDER!r}); known kinds: {sorted(_TRANSPORTS)}")
-    return t(msgs)
+    # Pass the resolved provider NAME through: a transport must configure itself from the
+    # provider the dispatcher actually chose, never from a module-level global (see
+    # _anthropic_stream_events). Today that is always the floor provider; the escalate role is
+    # still unwired, and this argument is what lets that slice land without touching transports.
+    return t(msgs, ACTIVE_PROVIDER)
 
 def chat_stream(msgs):
     # Streaming + liveness indicator (P1 fix #2, same comm as above). Buffers tokens for
