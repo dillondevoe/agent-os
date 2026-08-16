@@ -179,6 +179,11 @@
     git curl jq ripgrep fd bat            # the agent's hands
     neovim                                 # text-editing capability
     python3                                # mem's interpreter + a general agent tool
+    ethtool                                # NIC/WoL introspection: a recovery path you
+                                           # cannot query is one you are assuming. Added
+                                           # after `ethtool` returned empty on the Dell and
+                                           # the empty output was read as "WoL off" when it
+                                           # was actually a missing binary (rc=127).
     # chromium (the "GUI guest") is deferred to the compositor module — with no X/wayland
     # session it can't launch, so it'd be ~500MB of dead closure. Comes with cage/weston.
     # NOTE: the brain (Claude Code CLI, or a local-model runner) is installed by
