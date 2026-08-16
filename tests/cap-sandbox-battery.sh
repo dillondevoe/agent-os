@@ -180,4 +180,90 @@ LEAKED="$(systemctl list-units --all --no-legend 'agent-os-cap-*' 2>/dev/null | 
 [ "$LEAKED" = 0 ] || fail "6: $LEAKED transient agent-os-cap-* unit(s) leaked (--collect not working)"
 echo "cap-sandbox 6 OK  (transient units collected, none left behind)"
 
+# ── 7. the NETWORK half of the confinement is real, not just a string ─────────────────────
+# Legs 0-6 are all filesystem. The network boundary has had exactly ONE gate: flake.nix asserts
+# the DERIVED POLICY CONTAINS the string "PrivateNetwork=yes" for every non-network cap. That is
+# the same shape of evidence `ProtectSystem=strict` already defeated once in this very module — a
+# property can be present, correct-looking, and cancelled by composition. Nothing had ever
+# observed a confined impl failing to open a socket.
+#
+# The properties come FROM the materialized policy for a SHIPPED cap (file.read,
+# sandbox.network=false) — never hand-written here, or this leg would test the string it exists
+# to stop trusting.
+#
+# WHY ONLY THE NETWORK PROPERTIES, and not the whole list: the first version of this leg applied
+# the FULL policy and was VACUOUS. The fs confinement (TemporaryFileSystem=/:ro + InaccessiblePaths)
+# stops an arbitrary probe binary from executing at all, so the unit exited non-zero for reasons
+# having nothing to do with networking — and a non-zero exit was being counted as "network
+# blocked". It passed with PrivateNetwork=no. Caught by mutation-testing, which is the only reason
+# it is not still sitting here looking like coverage.
+#
+# The fix is the marker below, not the subsetting: the probe PRINTS before it dials, and both arms
+# assert the marker appeared. A probe that never ran can no longer be mistaken for a probe that
+# was refused. Subsetting to the net properties is what lets the probe run at all.
+NETDIR="$(mktemp -d)"
+NETPORT=""
+NETPID=""
+"$PY" - <<'PYEOF' > "$NETDIR/netport" 2>/dev/null &
+import socket, sys, time
+s = socket.socket(); s.bind(("127.0.0.1", 0)); s.listen(8)
+sys.stdout.write(str(s.getsockname()[1])); sys.stdout.flush()
+time.sleep(60)
+PYEOF
+NETPID=$!
+netcleanup() { kill "$NETPID" 2>/dev/null || true; rm -rf "$NETDIR"; }
+# Wait for the port to be published rather than sleeping a guessed interval.
+for _ in $(seq 1 50); do
+  NETPORT="$(cat "$NETDIR/netport" 2>/dev/null || true)"
+  [ -n "$NETPORT" ] && break
+  sleep 0.1
+done
+[ -n "$NETPORT" ] || { netcleanup; fail "7: probe listener never published a port — harness broken, not a finding"; }
+
+# The NETWORK properties, taken from the materialized policy for file.read. Absent, empty, or
+# carrying no PrivateNetwork at all is a hard fail: an empty property list would make the confined
+# arm identical to the control arm and this leg would "pass" by proving nothing.
+NETPROPS="$("$PY" - "$POLICY" <<'PYEOF'
+import json, sys
+pol = json.load(open(sys.argv[1]))
+props = pol.get("file.read")
+if not props:
+    sys.stderr.write("file.read absent from the materialized policy\n"); sys.exit(1)
+net = [p for p in props
+       if p.split("=")[0] in ("PrivateNetwork", "IPAddressAllow", "IPAddressDeny",
+                              "RestrictAddressFamilies")]
+if not any(p.startswith("PrivateNetwork") for p in net):
+    sys.stderr.write("file.read policy carries no PrivateNetwork property at all\n"); sys.exit(1)
+sys.stdout.write(" ".join("--property=" + p for p in net))
+PYEOF
+)" || { netcleanup; fail "7: could not derive network properties for file.read from $POLICY"; }
+
+# The probe prints RAN before it dials, then exits 0 on connect / 7 on refusal. Written once, run
+# twice — the ONLY difference between the arms is $NETPROPS.
+NETPROBE_SRC="import socket,sys
+print('PROBE-RAN', flush=True)
+try:
+    socket.create_connection(('127.0.0.1', $NETPORT), timeout=3).close()
+except Exception:
+    sys.exit(7)"
+
+# 7a. CONTROL ARM FIRST, unconfined. MUST print the marker and connect — otherwise the listener is
+# wrong or the port is stale, and 7b's "blocked" would be meaningless.
+NETOUT="$("$PY" -c "$NETPROBE_SRC" 2>&1)"; NETRC=$?
+case "$NETOUT" in *PROBE-RAN*) : ;; *) netcleanup; fail "7a: control probe never ran ($NETOUT)" ;; esac
+[ "$NETRC" = 0 ] || { netcleanup; fail "7a: unconfined control could not reach the listener on 127.0.0.1:$NETPORT (rc=$NETRC) — a blocked confined arm would prove nothing"; }
+
+# 7b. Same probe, under the real derived network properties.
+NETOUT="$("$SYSTEMD_RUN" --quiet --pipe --wait --collect $NETPROPS "$PY" -c "$NETPROBE_SRC" 2>&1)"; NETRC=$?
+# The marker is the load-bearing assertion. Without it, "the probe was refused" and "the probe
+# never executed" are the same observation — which is exactly how the first version of this leg
+# passed against a cancelled confinement.
+case "$NETOUT" in
+  *PROBE-RAN*) : ;;
+  *) netcleanup; fail "7b: probe never executed under the derived network properties, so this leg proved NOTHING about the network (rc=$NETRC, out=$NETOUT)" ;;
+esac
+[ "$NETRC" != 0 ] || { netcleanup; fail "7b: a cap with sandbox.network=false REACHED the network under its own derived policy — PrivateNetwork is in the string list but not in effect"; }
+netcleanup
+echo "cap-sandbox 7 OK  (network=false cap has NO stack under its real derived properties — control arm connected, confined arm RAN and was refused)"
+
 echo "cap-sandbox: ALL PROPERTIES HOLD"
