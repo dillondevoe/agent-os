@@ -206,6 +206,79 @@ too.** Truncating pipes (`head`, `grep -q`), `set -o pipefail` interactions, tim
 output-capturing wrappers all terminate the process under test in ways that look like the process
 under test misbehaving.
 
+## The sibling catch: control-arm the *instrument*, not just the guard
+
+The canonical catch above is about **guards** — make the check reject something, or you do not
+know it is a check. This section is about **instruments**: the commands you run to find out
+what is true. They fail in a way that is harder to notice, because a broken guard lets a bad
+thing through, while a broken instrument invents a finding that was never there.
+
+> **An instrument that reports nothing is indistinguishable from a world that contains nothing.
+> Before believing a negative, run the instrument against a case you know is positive.**
+
+The guard version and the instrument version are the same discipline pointed at different
+objects, and the instrument version comes up far more often — it applies every time anyone
+types a shell command to check something.
+
+The shape is always the same: **the tool discards part of the input, then reports the remainder
+as if it were complete.** No error, no exit code, no marker. Silence is the output format of a
+working instrument reporting absence *and* of a broken one reporting nothing.
+
+### Specimens, all from a single day
+
+| Instrument | Looked like | Actually was |
+|---|---|---|
+| `ethtool <iface>` → empty | "Wake-on-LAN is disabled" | binary not installed (`rc=127`) |
+| `ls -lL /proc/<pid>/fd \| grep gguf` → empty | "the download is not running" | the fd belonged to root; permissions, not absence |
+| `grep -c "suspect the harness"` | a count of occurrences | case-sensitive; the real ones were capitalised |
+| `pgrep -af "curl.*Qwen3.5"` | "curl restarted, throughput zero" | matched *its own sampling shell* — the pattern was in the loop's command line |
+| `nix flake show \| grep <name>` | the attribute to build | the tree context was stripped; the attribute lived under a different parent, so the build failed and looked like a test failure |
+| `<cmd> \| head -3` | the first three lines | SIGPIPE killed the producer; the rest never ran |
+| `tr -d " -'"` | delete those three characters | a character *range*, silently deleting far more |
+| `cmd; echo "RC=$?"` after a pipeline | the command's status | the status of `echo`, or of the last pipeline stage — not the stage that mattered |
+
+Two of these deserve naming separately.
+
+**The instrument that observes itself.** `pgrep -af "curl.*Qwen3.5"` matched the shell running the
+`pgrep` loop, because that shell's own command line contains the pattern. The elapsed time being
+read as the subject's was the observer's. This is not a broken tool; it is a tool correctly
+reporting the observation apparatus as though it were the subject. Anything that matches on
+process command lines, log lines, or file contents can do this.
+
+**The exit code of the wrong thing.** `${PIPESTATUS[0]}` exists because `$?` after a pipeline
+answers a different question than the one being asked, and `echo` between the command and the
+check silently resets it. A verification whose status came from the wrong process is not a weak
+verification — it is decoration.
+
+### The rule, stated for use
+
+When a command's output is going to become a claim, and especially a **negative** claim:
+
+1. **Run the positive control first.** Same instrument, same flags, against something you already
+   know is present. If the control also comes back empty, the instrument is broken and the
+   original result carries no information.
+2. **Distinguish "empty" from "failed."** Check the exit status of the stage you care about —
+   `${PIPESTATUS[n]}`, not `$?` after an intervening command. `rc=1` (looked, found nothing) and
+   `rc=127` (never ran) both print nothing.
+3. **Ask whether the instrument is inside the population it is measuring.** Process greps, log
+   greps and recursive searches frequently are.
+4. **Do not let a filter delete the context that gives the output meaning.** `grep` on a tree,
+   a table, or an indented listing returns rows stripped of the thing that made them addressable.
+
+### Why this belongs in this file rather than a style guide
+
+A boundary cancelled by something that reads like it belongs is the class. An instrument error is
+that class applied to the *act of looking*: the verification step is present, it is written, it
+reads like diligence — and it does not verify. Every gate stays green, because the gate is a
+person reading output that was never capable of saying "no."
+
+It also has this file's signature failure mode. A single instrument error is usually caught,
+because one wrong answer stands out against everything else. The dangerous case is an instrument
+error that indicts *everything at once* — the plausible-looking sweeping result. **A finding that
+indicts everything is usually about the instrument.** A single-item false positive has no such
+tell, which is precisely why the control arm has to be routine rather than reserved for
+suspicious results.
+
 ## Working against the class
 
 When adding or reviewing anything protective:
