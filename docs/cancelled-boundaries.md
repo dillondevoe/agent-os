@@ -50,11 +50,37 @@ exercised is a comment with a CI badge.
 | 5 | `nc -z` / bash `/dev/tcp` as a readiness probe | A TCP connect is satisfied by a process that is merely *starting*, so the probe answers a weaker question than the one it appears to ask. | `modules/brain.nix`, `tests/fetch-proxy-allowlist.nix` |
 | 6 | Leg 7 v1 of the cap-sandbox battery | The leg passed against a confinement that had already been cancelled — it proved the probe ran, not that the wall held. Fixed with a run-marker and a control-arm-first ordering. | `tests/cap-sandbox-battery.sh` *(in flight — PR #101)* |
 | 7 | `systemd.watchdog.*` rename-shim alias | A deprecated alias that still evaluates today and could silently stop applying later, while continuing to read as a correct setting. Avoided by writing the modern option name. | `configuration.nix`, `configuration-open.nix` *(in flight — PR #102)* |
-| 8 | The `vm-tests` path filter | A coverage claim **narrower than the thing it guards**: the filter omitted the two files every VM in the lane boots, so a boot-affecting change ran only `flake-check`. | `.github/workflows/vm-tests.yml` *(in flight — PR #103)* |
+| 8 | The `vm-tests` path filter | A coverage claim **narrower than the thing it guards**: the filter omitted the two files every VM in the lane boots, so a boot-affecting change ran only `flake-check`. | `.github/workflows/vm-tests.yml` *(merged — PR #103)* |
+| 9 | Draft status as a merge-gate mitigation | A draft PR reports `mergeStateStatus=CLEAN`, **not** `DRAFT`, and the auto-merge watcher never requested `isDraft` at all — so draft was not merely unchecked, it was *invisible*. The mitigation whose only job was to be an independent second barrier was a silent no-op. | `agentos_merge_gate_watcher.py` (operational; fixed by Page) |
+| 10 | `GUARDED_LABELS` naming labels that did not exist | The label guard listed `must-ask` / `needs-human`, but neither label existed in the repository, so the guard could never be *invoked* — correct code keyed on a value nobody could supply. | same file + repo label set (labels created) |
 
-Members 6–8 are recorded here as in-flight rather than merged. If those PRs change shape in
+Members 6–7 are recorded here as in-flight rather than merged. If those PRs change shape in
 review, this table is wrong until someone fixes it — which is itself an instance of the class,
 so it is worth being pedantic about.
+
+### Members 9 and 10 are the class biting its own cataloguers
+
+Both were found *while building the mitigation for a must-ask PR in this very repo* — which is
+worth recording plainly, because it is the strongest available evidence that reading the class
+does not confer immunity to it.
+
+Member 9 is the purer specimen. Draft status is a real GitHub feature, it was deliberately
+applied, it was visible in the UI, and everyone involved — the author of the mitigation and the
+author of the watcher — independently believed it held. It enforced nothing. The reasoning that
+produced it ("draft can only prevent a merge, never cause one") is true of draft in general and
+false of draft *against this consumer*, which is exactly step 2 of the shape: the boundary was
+cancelled not by an error but by an adjacent mechanism that did not happen to read it.
+
+Member 10 is the follow-on, and it shows the class survives its own fix. The replacement guard
+was written correctly and tested correctly at the function level — `must-ask` really was in
+`GUARDED_LABELS` — but the label did not exist in the repository, so nothing could ever carry
+it. A guard keyed on an unavailable input is a guard that never fires, and it looks identical in
+source review to one that works.
+
+The general lesson, stated to be reusable: **verifying that a guard contains the right rule is
+not verifying that the guard can ever be reached.** Member 3 is the same asymmetry in a variable,
+member 8 in a path list, member 10 in a label. Ask what supplies the input, not just what the
+rule says about it.
 
 ### Member 8 is the clearest specimen we have
 
@@ -91,10 +117,16 @@ When adding or reviewing anything protective:
 - **Verify on the running system, not in the diff.** Several members were only visible by
   asking the live machine. A diff cannot tell you that the interface a config protects has no
   cable in it.
+- **Ask what supplies the guard's input.** Members 3, 8, and 10 are all correct rules that could
+  not be reached — an unset variable, an omitted path, a label that did not exist. Reviewing the
+  rule tells you nothing about whether anything can ever hand it the value that trips it.
+- **Never retire a barrier on the strength of its replacement being written.** Retire it once you
+  have watched the replacement refuse the real thing. Member 9 was trusted for a full day on the
+  strength of it being plausible.
 
 ## Why this file is in the repo
 
-The class had accumulated roughly eight members across commit messages, inline comments, and
+The class had accumulated roughly ten members across commit messages, inline comments, and
 brain-comms, with exactly one reference anywhere in the tree (`flake.nix`). Scattered like
 that it is not a checklist anyone can apply — it is a thing you have to have been present for.
 The instances are product knowledge; the comms that carried them are not shipped, and should

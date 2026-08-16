@@ -52,6 +52,21 @@ on:
       # stayed quiet.
       - 'configuration.nix'
       - 'configuration-open.nix'
+      # ...and the capability binaries, for the same reason one level down.
+      # tests/cap-sandbox-confinement.nix executes `${../bin/cap-invoke}` directly (line 89), and
+      # modules/cap-invoke-pkg.nix copies `../bin/<impl>` into the package for every shipped cap
+      # (line 134). So bin/ is not adjacent to the slow lane — it is the payload the confinement
+      # VM runs. Editing a cap impl changes what test-cap-sandbox-confinement actually exercises.
+      #
+      # Stated honestly: nothing has slipped through yet. Every historical bin/ change also
+      # touched flake.nix, modules/, or tests/ and so triggered this lane anyway — 46a079c
+      # (bin/cap-invoke) and d83ed81 (bin/cap-file-read, bin/cap-file-write) both did. That is
+      # exactly the problem worth fixing BEFORE it bites: the coverage is real but INCIDENTAL,
+      # standing only on the habit of shipping impls alongside their registry and battery. A
+      # bin-only change — a shebang fix, a permissions change, a one-line bugfix in an impl —
+      # is the normal shape of a follow-up commit, and it would run zero VM tests while altering
+      # the binary under confinement. Coverage that depends on a commit's habits is not coverage.
+      - 'bin/**'
       # ...and this file itself. A harness excluded from its own trigger set cannot object to
       # being gutted: without this line, a PR deleting the steps below would merge green.
       - '.github/workflows/vm-tests.yml'
@@ -64,6 +79,7 @@ on:
       - 'flake.lock'
       - 'configuration.nix'
       - 'configuration-open.nix'
+      - 'bin/**'
       - '.github/workflows/vm-tests.yml'
   schedule:
     # 07:00 UTC daily. Catches drift on main from anything the path filter above missed, and from
