@@ -191,6 +191,24 @@
           pkgs = nixpkgs.legacyPackages.${system};
           inherit baseModules;
         };
+
+        # The COMPOSED path — real broker -> real (confined) wrapper -> real impl, in a VM. The
+        # third leg of GATE #5(a)'s evidence and the only RUNTIME witness that the two exports in
+        # mkWrapper's `lib.optionalString confined` block actually deliver the confinement:
+        #
+        #   checks.cap-wrapper-pinned    build-time, wrapper TEXT   — production is WIRED to confine
+        #   test-cap-sandbox-confinement runtime, pins AS ENV       — the confinement WORKS
+        #   test-cap-composed-path       runtime, pins FROM WRAPPER — the wiring DELIVERS it
+        #
+        # It scrubs AGENT_OS_CAP_SANDBOX / AGENT_OS_SYSTEMD_RUN from its own environment and
+        # asserts their absence, so everything under test must arrive from broker.nix's wrapper.
+        # Out of `checks` for the same reason as its siblings (it boots a VM); added to the
+        # vm-tests.yml matrix in the same commit, per that file's own rule. Run on demand:
+        #   nix build .#test-cap-composed-path
+        test-cap-composed-path = import ./tests/cap-composed-path.nix {
+          pkgs = nixpkgs.legacyPackages.${system};
+          inherit baseModules;
+        };
       };
 
       checks.${system} = {
