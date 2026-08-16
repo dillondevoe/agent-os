@@ -209,6 +209,27 @@
           pkgs = nixpkgs.legacyPackages.${system};
           inherit baseModules;
         };
+
+        # The watchdog is ARMED. Every test above watches a wall that keeps something out; this
+        # one watches the mechanism that gets the box back when the walls are irrelevant because
+        # the kernel has stopped responding (lived: 2026-08-11, five days dark).
+        #
+        # Out of `checks` for the usual reason — it boots a VM — but ALSO because it genuinely
+        # cannot be a fast-lane check. The configured value is visible at eval time; whether
+        # systemd actually OPENED a watchdog device is not. `RuntimeWatchdogUSec=2min` reads
+        # identically on a box that armed one and a box that has no watchdog at all, so a
+        # build-time assertion here would be a guard that permits everything. The guest is given
+        # `-device i6300esb` so /sys/class/watchdog/watchdog0/state has a real answer to give.
+        #
+        # Verified to DISCRIMINATE before landing, not merely to pass: the same test against a
+        # guest with RuntimeWatchdogSec forced to 0 fails on `state is 'inactive'`. A test whose
+        # negative case was never run is the instrument-error sibling of this repo's own class.
+        # Added to the vm-tests.yml matrix in the same commit, per that file's own rule.
+        #   nix build .#test-watchdog-armed
+        test-watchdog-armed = import ./tests/watchdog-armed.nix {
+          pkgs = nixpkgs.legacyPackages.${system};
+          inherit baseModules;
+        };
       };
 
       checks.${system} = {
