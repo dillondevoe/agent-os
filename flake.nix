@@ -505,6 +505,69 @@
         # confined wrapper would (correctly) DENY every call and this check would go red for a
         # reason unrelated to its question. So seam-live proves the WIRING; it proves nothing about
         # the confinement. That evidence is tests/cap-sandbox-battery.sh, on real systemd.
+        # WP-S2 / GATE #5(a) — the WRAPPER PIN check. The confinement only ever reaches production
+        # through two `export` lines in `mkWrapper`'s `lib.optionalString confined` block
+        # (modules/cap-invoke-pkg.nix), and until this check NOTHING asserted they were there.
+        #
+        # WHY THAT WAS A HOLE, and why it is the same class as the ProtectSystem and runtimePaths
+        # findings — a boundary cancelled by something that reads like it belongs, here by an
+        # ABSENCE: cap-invoke treats an UNSET `AGENT_OS_CAP_SANDBOX` as "unconfined by config" and
+        # direct-execs the impl. That affordance is deliberate and stays (it is the dev/battery path,
+        # which has no D-Bus or PID 1). But it means deleting those two export lines does not error
+        # anywhere — it silently ships an UNCONFINED seam. And every existing gate stays green:
+        #
+        #   checks.cap-sandbox        validates the policy's CONTENT, not that anything consumes it
+        #   checks.seam-live          drives unconfinedWrapper ON PURPOSE — it cannot notice
+        #   cap-sandbox-battery.sh    passes both variables explicitly, so it never reads the wrapper
+        #   test-cap-sandbox-confinement  runs that same battery, same explicit env
+        #
+        # Note the asymmetry this closes: a missing AGENT_OS_SYSTEMD_RUN is a runtime DENY ("NEVER
+        # fall back to an unconfined exec"), while a missing policy is a silent unconfined exec. Both
+        # arrive from the same two lines. Rather than remove the documented UNSET affordance, assert
+        # at BUILD time that production actually pins them.
+        #
+        # Asserted in BOTH directions on purpose. Requiring the pins in `wrapper` catches deletion;
+        # requiring their ABSENCE from `unconfinedWrapper` catches the opposite drift, where someone
+        # "fixes" seam-live by confining the test wrapper and the documented delta between the two
+        # builds — exactly two exports and nothing else — quietly stops being true.
+        cap-wrapper-pinned =
+          let
+            pkgs = nixpkgs.legacyPackages.${system};
+            capInvoke = import ./modules/cap-invoke-pkg.nix { inherit pkgs; };
+          in pkgs.runCommand "cap-wrapper-pinned-check" { } ''
+            prod=${capInvoke.wrapper}/bin/cap-invoke
+            test=${capInvoke.unconfinedWrapper}/bin/cap-invoke
+
+            for v in AGENT_OS_CAP_SANDBOX AGENT_OS_SYSTEMD_RUN; do
+              grep -q "export $v=/nix/store/" "$prod" || {
+                echo "cap-wrapper-pinned: the PRODUCTION cap-invoke wrapper does not pin $v to a" \
+                     "store path. cap-invoke reads an unset AGENT_OS_CAP_SANDBOX as" \
+                     "'unconfined by config' and direct-execs the impl, so this ships a seam with" \
+                     "NO fs confinement and no error anywhere. See modules/cap-invoke-pkg.nix." >&2
+                exit 1
+              }
+              grep -q "$v" "$test" && {
+                echo "cap-wrapper-pinned: the UNCONFINED wrapper sets $v. That wrapper exists for" \
+                     "checks.seam-live only, and its whole justification is that it differs from" \
+                     "production by exactly these two exports. If it confines, seam-live goes red" \
+                     "in a nix sandbox (no D-Bus, no PID 1) and the documented delta is a lie." >&2
+                exit 1
+              }
+            done
+
+            # The pinned policy must be the one DERIVED from the registry, not any old JSON: same
+            # store path checks.cap-sandbox and the battery are built from.
+            grep -q "export AGENT_OS_CAP_SANDBOX=${
+              pkgs.writeText "agent-os-cap-sandbox.json"
+                (import ./modules/cap-sandbox.nix { lib = nixpkgs.lib; }).policyJson
+            }$" "$prod" || {
+              echo "cap-wrapper-pinned: the production wrapper pins AGENT_OS_CAP_SANDBOX to" \
+                   "something other than the registry-derived policy." >&2
+              exit 1
+            }
+            touch $out
+          '';
+
         seam-live =
           let
             reg = import ./modules/capability-registry.nix { lib = nixpkgs.lib; };
