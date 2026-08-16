@@ -144,6 +144,34 @@ disp '{"capability":"nope.nope","arguments":{}}' "$REGREAL" "$BIN"
 [ "$RC" != 0 ] || fail "3: unknown capability must exit nonzero"
 [ "$(jf "$OUT" 'o["ok"]')" = "false" ] || fail "3: unknown capability ok must be false"
 
+# ── 3b. ADVERTISED but NOT SHIPPED -> deny at resolution, impl never runs ─────
+# Leg 3 covers an UNKNOWN capability, which dies at the registry lookup. This is the OTHER
+# branch, and it is the one with teeth: `net.fetch` and `message.send` ARE in the registry —
+# leg 2 above asserts capabilities.list ADVERTISES them to the model — but they are absent
+# from `shippedCaps` (modules/cap-invoke-pkg.nix) because they declare sandbox.network=true
+# and the Step-7 net-confinement does not exist yet. So the model is told about two T2 egress
+# capabilities whose impls are deliberately not in capBinDir, and the ONLY thing standing
+# between a model calling one and it running is cap-invoke's impl-resolution check.
+#
+# That check is currently correct. Nothing pinned it. A future convenience — resolving via
+# PATH as a fallback, or deriving shippedCaps from the registry instead of an explicit list —
+# would make an UNCONFINED network capability reachable through the seam, and every existing
+# leg here would stay green, because leg 3 exercises a different branch and leg 2 only asserts
+# the cap is ADVERTISED. The dangerous absence is the one that resembles a configuration.
+#
+# The control arm is leg 1: capabilities.list succeeds through this same harness. Without it a
+# dispatcher that refused EVERYTHING would pass the two asserts below and look like a working
+# fail-closed resolver. (Measured 2026-08-16: control rc=0/ok:true; both legs below rc=2,
+# ok:false, "impl binary not found/executable", no impl executed.)
+for unshipped in net.fetch message.send; do
+  disp "{\"capability\":\"$unshipped\",\"arguments\":{}}" "$REGREAL" "$BIN"
+  [ "$RC" != 0 ] || fail "3b: registry-advertised but unshipped cap $unshipped must exit nonzero"
+  [ "$(jf "$OUT" 'o["ok"]')" = "false" ] || fail "3b: $unshipped ok must be false"
+  # No impl ran, so there is nothing to forward. A non-null content here would mean some impl
+  # DID execute and its bytes reached the caller.
+  [ "$(jf "$OUT" 'o["content"]')" = "None" ] || fail "3b: $unshipped must forward no content"
+done
+
 # ── 4. malformed stdin -> fail closed ─────────────────────────────────────────
 disp 'this is not json' "$REGREAL" "$BIN"
 [ "$RC" != 0 ] || fail "4: malformed request must exit nonzero"
