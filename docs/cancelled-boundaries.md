@@ -56,6 +56,7 @@ exercised is a comment with a CI badge.
 | 11 | A `seal-` prefix in a guarded-path list | The guarded-prefix list named `seal-`, which reads as "the seal surface is covered" — but the file is `mesh-wireguard-**sealed**.nix`, and the matcher is component-based, so it never matched. Unlike member 8, the entry was **present**: an auditor reading the list ticks the box. A prefix that covers a concept in one spelling of it. Same file: `secret` did not match `mail-secret-open.nix` for the same reason. | `agentos_merge_gate_watcher.py` (operational; found and fixed by Page) |
 | 12 | `flake.lock` guarded, `flake.nix` open | The same list guarded the **pinned inputs** but not the **build definition**. The lock file is derived from the nix file; guarding it while leaving its source open protects the manifest and not the thing that writes it. The list read as "the build is covered" because a build-related path was in it. | `agentos_merge_gate_watcher.py` (operational; found and fixed by Page) |
 | 13 | A contract that compared two derived lists | `tests/vm-matrix-contract.py` (member 8's fix) asserted the flake's `test-*` packages and the vm-tests matrix were the same set, both directions — and could not see a `tests/*.nix` that was never wired into `flake.nix` at all. With no package, the file is absent from **both** lists, so comparing them passes. The file is committed and reviews as coverage; it runs nowhere. | `tests/vm-matrix-contract.py` (found by Mirror auditing his own gate; fixed same PR) |
+| 14 | A verification harness that manufactured the symptom it was looking for | Running a watcher piped to `\| head -3` closed the pipe; the process took **SIGPIPE** on a later `print()` and died before `_save_state`. The dedupe state was never written, and the result presented as a **dedupe bug in the feature under test**. Every other member here is a guard that failed to guard; this is a *harness* that produced a finding about code that was correct. | `agentos_merge_gate_watcher.py` (operational; found by Page while shipping the main-red alert) |
 
 Members 6–7 are recorded here as in-flight rather than merged. If those PRs change shape in
 review, this table is wrong until someone fixes it — which is itself an instance of the class,
@@ -177,6 +178,34 @@ the changed file happened to appear in a list. Nothing was broken, nothing was m
 and no one had made a mistake — the filter was a thoughtful, scoped list that simply did not
 mention two files. That is the class exactly.
 
+
+### Member 14: the harness can be the thing that is cancelled
+
+Members 1–13 are all protective mechanisms that stopped protecting. 14 is a different organ
+failing the same way, and it is worth separating because the tell is inverted.
+
+While shipping the main-branch red alert, the watcher was run live and piped to `| head -3` to
+keep the output readable. `head` exited after three lines, closed the pipe, and the process took
+`SIGPIPE` on its next `print()` — dying before `_save_state`. The alert had already fired. The
+dedupe state had not been written.
+
+The next run therefore re-reported the same red, and the obvious reading was **"the dedupe I just
+wrote is broken."** That reading is wrong in an interesting way: the feature was correct, and the
+*observation apparatus* had removed the evidence of its correctness. An absence (unwritten state)
+wearing the costume of a configuration (a dedupe that does not dedupe).
+
+What makes this a member rather than a shell-scripting footnote is the direction of the error.
+The rest of the ledger is about mechanisms that report success they have not earned. This is a
+harness reporting a **failure that did not happen** — and a false red in a verification step is
+not the safe direction, because the natural response is to "fix" working code until the harness
+goes quiet. Had the dedupe been rewritten to satisfy it, the repair would have been to a
+non-existent defect, and the SIGPIPE would still have been there to break the next thing.
+
+The general form: **when a verification step disagrees with the code, the harness is a suspect
+too.** Truncating pipes (`head`, `grep -q`), `set -o pipefail` interactions, timeouts, and
+output-capturing wrappers all terminate the process under test in ways that look like the process
+under test misbehaving.
+
 ## Working against the class
 
 When adding or reviewing anything protective:
@@ -197,6 +226,7 @@ When adding or reviewing anything protective:
 - **Re-run the control arm after widening a guard, not just the failing arm.** A guard that
   refuses everything is as useless as one that guards nothing, and it gets routed around instead
   of reported.
+- **Suspect the harness when the harness reports the failure.** A truncating pipe (`head`, `grep -q`) can kill the process under test with `SIGPIPE` mid-run, so work it did after that point simply never happens — and it presents as a defect in the code, not in the observation. Re-run without the pipe before believing the finding. Member 14.
 - **Prefer absence that fails loudly.** Where an unset variable currently means "skip the
   protection", consider making it mean "deny". Note the asymmetry recorded in `flake.nix`: a
   missing `AGENT_OS_SYSTEMD_RUN` is a runtime deny, while a missing policy was a silent
@@ -218,8 +248,17 @@ When adding or reviewing anything protective:
 
 ## Why this file is in the repo
 
-The class had accumulated roughly thirteen members across commit messages, inline comments, and
+The class had accumulated roughly fourteen members across commit messages, inline comments, and
 brain-comms, with exactly one reference anywhere in the tree (`flake.nix`). Scattered like
 that it is not a checklist anyone can apply — it is a thing you have to have been present for.
 The instances are product knowledge; the comms that carried them are not shipped, and should
 not be. This file is the durable half.
+
+One caveat about this document as an artifact: **the count in the paragraph above is a
+hand-maintained claim, and it drifts silently.** Two branches each appending a row conflict in the
+table and get reconciled; neither one touches the count line, so git takes whichever side it
+already had and reports a clean merge. The result is a summary that no longer matches the rows,
+with no marker and no warning, wrong in the direction that still reads plausibly. That is member
+11's shape — *a list reads as complete because the entries are present* — applied to the list of
+entries. It is not a fifteenth member; a prose summary drifting is not the weight of a guard that
+does not guard. But if you add a row, count the rows.
