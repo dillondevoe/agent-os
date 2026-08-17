@@ -141,6 +141,15 @@ jobs:
           # itself). This is the only scheduled thing that drives the REAL broker wrapper and so
           # the only one that can observe the wiring rather than the mechanism.
           - test-cap-composed-path
+          # SURVIVABILITY. Same rule a fourth time: added in the same commit as
+          # tests/watchdog-armed.nix. Different subject from every entry above — those watch a
+          # wall that keeps something OUT, this watches the mechanism that gets the box BACK.
+          # It earns a VM slot rather than a fast-lane check for the reason this file exists:
+          # `systemctl show RuntimeWatchdogUSec` reports the configured value whether or not a
+          # device was ever opened, so the only assertion that distinguishes "armed" from
+          # "configured and inert" is /sys/class/watchdog/watchdog0/state on a booted guest with
+          # a real emulated watchdog. Boots one small node with `-device i6300esb`.
+          - test-watchdog-armed
     steps:
       - name: Checkout
         # SHA-pinned, matching flake-check.yml: immutable commit of the newest v* release tag.
