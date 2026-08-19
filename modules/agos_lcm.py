@@ -37,6 +37,20 @@
 # + first/last actors). Whether a MODEL writes the summary — and whose token budget pays
 # for it — is policy, it collides with the cost-cap breaker, and it is not mine to default
 # on. Wire it, don't switch it on. Same call as the advisor's judge in slice 4.
+#
+# ⚠️ CONSTRAINT ON THAT WIRING (Augur, 2026-08-19, re #114): if a MODEL ever writes these
+# summaries, route the call through `chat_stream`. The `_out_tokens` accounting the
+# cost-cap breaker enforces lives in the transport's return value, so a summariser that
+# goes through the transport inherits the turn limits for free — and one that bypasses it
+# gets a parallel, UNCAPPED budget, which is precisely the runaway the breaker exists to
+# stop. A compaction pass runs over history, i.e. potentially many spans per turn, so this
+# is the worst possible place to leak an unmetered provider call.
+#
+# INGEST SOURCES: this module is source-agnostic (compact() takes events; compact_log()
+# takes an EventLog). Per Augur, #114 appends `cost_cap_breaker` events to a SEPARATE
+# provenance turn-log (`AGENT_OS_TURN_LOG`, default ~/memory/turn-log.jsonl), append-only.
+# That log is a legitimate future ingest source; the raw-column losslessness covers those
+# events unchanged. No conflict with agos_events — different file, different writer.
 
 import json
 import os

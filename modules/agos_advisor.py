@@ -30,6 +30,13 @@
 # defaulting to cheap deterministic rules that cost nothing. Wiring a real model in is a caller's
 # choice made deliberately, not a default someone inherits by importing this.
 #
+# ⚠️ CONSTRAINT ON THAT WIRING (Augur, 2026-08-19, re #114): a real judge must be routed
+# through `chat_stream`. The `_out_tokens` accounting the cost-cap breaker enforces lives in the
+# transport's return value, so a judge that goes through the transport inherits the turn limits
+# for free; one that calls a provider directly gets a parallel, UNCAPPED budget. A watcher fires
+# on every turn by design, so an unmetered judge here is exactly the runaway the breaker exists
+# to stop — the failure would be a watcher that bankrupts the loop it was added to protect.
+#
 # ADVICE SHAPE — kind=`note`, threaded by the corr_id it is about:
 #   payload={"level": "aside"|"concern"|"blocker", "rule": "<rule name>", "detail": "<text>",
 #            "about": {"corr_id": ..., "topic": ...}, "key": "<dedup key>"}
