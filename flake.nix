@@ -923,6 +923,32 @@
               touch $out
             '';
 
+        # Self-improvement loop · phase OBSERVE (+COMPARE) — CONTRACT BATTERY (agos_observe).
+        # Instantiation B of HARNESS-SELFIMPROVE, DELIBERATELY PARTIAL: no PROPOSE, no APPLY,
+        # because APPLY means the loop edits its own harness and the auto-merge question is open
+        # with Dillon. Case G asserts that limit STRUCTURALLY (no apply/propose entry point, no
+        # subprocess/shutil import) so the read-only half cannot quietly grow the ability to act.
+        # The load-bearing rule: RE-OBSERVATION MUST NOT MANUFACTURE RECURRENCE — a cadence
+        # observer re-reads overlapping history, and a naive counter would promote a ONE-time
+        # failure to a LESSON by seeing it twice, i.e. fabricate the evidence for its own
+        # proposals. Case A proves re-observing is a no-op; case A2 is its CONTROL ARM (a store
+        # that recorded NOTHING would pass case A identically) and proves a genuinely distinct
+        # second occurrence does count and does promote. Also asserted: the event log and
+        # turn-log are byte-unchanged (read-only); the multi-writer turn-log is filtered on
+        # `event` per Augur's frozen schema; unparseable lines are COUNTED, never swallowed.
+        # Zero external deps; a regression fails `nix flake check`.
+        agos-observe-contract =
+          nixpkgs.legacyPackages.${system}.runCommand "agos-observe-contract-check"
+            { nativeBuildInputs = [ nixpkgs.legacyPackages.${system}.python3 ]; } ''
+              work="$(mktemp -d)"
+              cp ${./modules/agos_events.py} "$work/agos_events.py"
+              cp ${./modules/agos_observe.py} "$work/agos_observe.py"
+              cp ${./tests/agos-observe-contract.py} "$work/contract.py"
+              cd "$work"
+              python3 contract.py
+              touch $out
+            '';
+
         # Orchestration engine · Phase 1 part 2 — the SHADOW brain-comms migration's CONTRACT BATTERY
         # (agos_comms_shadow, atop agos_events). Observes + parallel-emits, changes NO routing (the live
         # `_done/`+dispatch-watchers stay truth). Proves the migration is faithful BEFORE any cutover:
