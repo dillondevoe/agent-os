@@ -29,6 +29,8 @@
 #   wiring-battery.py             8 checks — agent-brain <-> providers.py wiring (needs pyyaml)
 #   transport-battery.py          23 checks — provider transport seam + ollama transport
 #   anthropic-transport-battery.py 34 checks — anthropic SSE transport + translation
+#   bip340-battery.py             48 checks — vendored BIP-340 signer vs the OFFICIAL vectors,
+#                                 must-fail half included, control-armed
 #   mem-battery.py                11 checks — bin/mem (memory-as-filesystem) contract
 #   agent-loop-dispatch-battery.py  8 checks — agent-loop tool-dispatch mechanics vs bin/mcp + broker-stub
 #
@@ -115,6 +117,8 @@ need "$T/transport-battery.py" transport && \
   run transport env PYTHONPATH="$ROOT/modules" "$PY" "$T/transport-battery.py"
 need "$T/anthropic-transport-battery.py" anthropic-transport && \
   run anthropic-transport env PYTHONPATH="$ROOT/modules" "$PY" "$T/anthropic-transport-battery.py"
+need "$T/bip340-battery.py" bip340 && \
+  run bip340 "$PY" "$T/bip340-battery.py"
 # mem-battery.py locates bin/mem via its own __file__ (../bin/mem) — no args, no env.
 need "$T/mem-battery.py" mem && \
   run mem "$PY" "$T/mem-battery.py"
