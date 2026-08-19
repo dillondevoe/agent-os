@@ -871,6 +871,34 @@
               touch $out
             '';
 
+        # Orchestration engine · HARNESS-MAP slice 4 — THE ADVISOR / WATCHER (agos_advisor, atop
+        # agos_events). HARNESS-MAP records the merge-queue stall as a watcher GAP: work went quiet and
+        # nothing was watching for quiet. Every other failure we have announces itself; silence does
+        # not, and a queue with nothing moving looks exactly like a queue with nothing to do. The
+        # governing risk is that **a watcher that never fires is indistinguishable from a healthy
+        # system** — the instrument error with the stakes inverted, since the false all-clear is the
+        # answer everyone hoped for. So NO rule is tested in one direction only: the scar rule fires as
+        # a blocker on a quiet open request AND stays silent on a completed run, a young request, and
+        # corr_id-less chatter; error-rate fires at threshold AND is quiet under it. Also proves:
+        # progress is not a stall (quiet measured from the LAST event, so a slow run is left alone);
+        # idempotency across a FRESH advisor, deduped from the log rather than memory, because a spammy
+        # watcher gets muted and a muted watcher is the original gap; a raising rule becomes a loud
+        # `rule-failure` blocker instead of a silent skip; `examined` separates "nothing is wrong" from
+        # "I looked at nothing", which are otherwise the same empty finding list; rules get a read-only
+        # view with no emit/log/cursor reachable; and advice lands on a SEPARATE `<topic>-advice` topic
+        # so the watcher never observes its own output. Zero external deps; a regression fails check.
+        agos-advisor-contract =
+          nixpkgs.legacyPackages.${system}.runCommand "agos-advisor-contract-check"
+            { nativeBuildInputs = [ nixpkgs.legacyPackages.${system}.python3 ]; } ''
+              work="$(mktemp -d)"
+              cp ${./modules/agos_events.py} "$work/agos_events.py"
+              cp ${./modules/agos_advisor.py} "$work/agos_advisor.py"
+              cp ${./tests/agos-advisor-contract.py} "$work/contract.py"
+              cd "$work"
+              python3 contract.py
+              touch $out
+            '';
+
         # Orchestration engine · Phase 1 part 2 — the SHADOW brain-comms migration's CONTRACT BATTERY
         # (agos_comms_shadow, atop agos_events). Observes + parallel-emits, changes NO routing (the live
         # `_done/`+dispatch-watchers stay truth). Proves the migration is faithful BEFORE any cutover:
