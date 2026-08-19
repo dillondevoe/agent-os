@@ -20,7 +20,13 @@
 #      exact class providers.py exists to forbid — 2026-08-06 overnight-bleed scar)
 #   G. tool_calls pass through in Ollama shape (extract_tools' input contract is unchanged,
 #      so the agent loop downstream never learns which provider answered)
-import importlib.util, io, os, py_compile, sys, tempfile
+#   I. EVERY registered transport takes `provider` as a parameter, and the dispatcher passes
+#      the resolved provider name to it. Slice 6 fixed one transport that read the module-level
+#      ACTIVE_PROVIDER (the FLOOR provider by construction — correct only while claude IS the
+#      floor); nothing prevented the next transport from doing the same. This pins the CLASS,
+#      not the instance: a new transport that configures itself from a global fails here at
+#      registration time rather than on the first escalate-role turn.
+import importlib.util, inspect, io, os, py_compile, sys, tempfile
 
 MOD = "modules/agent-brain.py"
 EX = 0
@@ -159,6 +165,31 @@ check("H. renderer still prints the thinking stream", "hmm" in rendered)
 check("H. renderer still prints the thought-for separator", "thought for" in rendered)
 check("H. tok/s stats computed from normalized seconds (42 tok / 2.5s == 17 tok/s)",
       "17 tok/s" in stats)
+
+
+# ── I. class-level: a transport configures itself from an ARGUMENT, never a global ──
+# Geist's PR-#98 verdict follow-up. The slice-6 bug was a transport reading module-level
+# ACTIVE_PROVIDER; the fix threaded the resolved name through the dispatcher, but corrected
+# only that instance. These two checks make the contract structural.
+for _kind, _fn in sorted(b._TRANSPORTS.items()):
+    _params = inspect.signature(_fn).parameters
+    check("I. transport %r accepts a `provider` parameter" % _kind, "provider" in _params)
+
+_seen = {}
+def _spy(msgs, provider=None):
+    _seen["provider"] = provider
+    if False: yield None
+    return
+_saved = dict(b._TRANSPORTS)
+try:
+    b._TRANSPORTS["spy"] = _spy
+    b.ACTIVE_PROVIDER_KIND = "spy"
+    b.ACTIVE_PROVIDER = "some-escalate-provider"
+    list(b._stream_events([{"role": "user", "content": "hi"}]))
+finally:
+    b._TRANSPORTS = _saved
+check("I. dispatcher passes the RESOLVED provider name to the transport",
+      _seen.get("provider") == "some-escalate-provider")
 
 print("transport-battery: " + ("PASS" if EX == 0 else "FAIL"))
 sys.exit(EX)
