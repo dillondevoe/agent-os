@@ -912,9 +912,13 @@
             cp ${./modules/agent-brain.py} "$work/modules/agent-brain.py"
             cp ${./tests/providers-battery.py} "$work/tests/providers-battery.py"
             cp ${./tests/wiring-battery.py} "$work/tests/wiring-battery.py"
+            cp ${./tests/cost-cap-battery.py} "$work/tests/cost-cap-battery.py"
             cd "$work"
             PYTHONPATH=modules python3 tests/providers-battery.py
             python3 tests/wiring-battery.py
+            # cost-cap breaker (HARNESS-MAP guardrail 3): limits validation, yaml>env>default
+            # precedence, token-trip refusal + transcript stubs, loud hop exhaustion.
+            python3 tests/cost-cap-battery.py
             touch $out
           '';
 

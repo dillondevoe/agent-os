@@ -78,6 +78,38 @@ def _escalate_status():
 
 ESCALATE_STATUS = _escalate_status()
 
+# ── COST-CAP BREAKER (HARNESS-MAP guardrail 3) ──────────────────────────────────
+# Hard per-turn ceilings on the tool loop: model hops (chat calls) and cumulative
+# output tokens. A runaway tool loop is a cost event on a metered provider and a
+# latency event on the 3 tok/s floor — either way the turn must HALT LOUDLY, never
+# spin quietly. Config comes from providers.yaml's optional `limits:` block
+# (validated in providers.py — invalid fails boot, same as the rest of that file);
+# the env vars below serve the legacy no-yaml path. Precedence: yaml > env > default.
+# Defaults preserve prior behavior exactly: 6 hops (the old hard literal) and no
+# token ceiling — the breaker only bites where a config turns it on, except that
+# hop exhaustion, which was always enforced, now REPORTS instead of ending silently.
+def _turn_limits():
+    limits = (_PROVIDERS or {}).get("limits") or {}
+    def _pick(yaml_key, env_key, default):
+        if yaml_key in limits:
+            return limits[yaml_key]
+        v = os.environ.get(env_key, "").strip()
+        if not v:
+            return default
+        try:
+            n = int(v)
+            if n <= 0: raise ValueError
+            return n
+        except ValueError:
+            # Same refuse-don't-repoint rule as a present-but-invalid providers.yaml:
+            # a garbled cost ceiling is a real config error, not a silent default.
+            sys.stderr.write(f"\n\033[1;31m⛔ {env_key} must be a positive integer, got {v!r} — I am not starting.\033[0m\n")
+            sys.exit(1)
+    return (_pick("max_hops_per_turn", "AGENT_OS_MAX_TURN_HOPS", 6),
+            _pick("max_output_tokens_per_turn", "AGENT_OS_MAX_TURN_TOKENS", None))
+
+MAX_TURN_HOPS, MAX_TURN_TOKENS = _turn_limits()
+
 # ── PER-TURN PROVENANCE LOG (Phase 1.5A acceptance criterion 5, task 287 slice 3) ──
 # "Audit log shows provider+model per turn." Deliberately NOT bin/audit's chain-hashed
 # broker log — that log is a tamper-evident record of capital/tool-execution security
@@ -554,7 +586,9 @@ def chat_stream(msgs):
     elapsed=time.time()-t0
     tps=f", {eval_count/eval_dur:.0f} tok/s" if eval_count and eval_dur else ""
     sys.stderr.write(f"\033[2m[{elapsed:.1f}s{tps}]\033[0m\n")
-    return {"role":"assistant","content":content,"tool_calls":tool_calls}
+    # _out_tokens feeds the cost-cap breaker in turn(), which pop()s it before the msg
+    # joins the transcript — the key never reaches a transport.
+    return {"role":"assistant","content":content,"tool_calls":tool_calls,"_out_tokens":eval_count}
 
 def chat(msgs):
     # non-streaming fallback, kept for --once callers that want a single return value only
@@ -754,15 +788,44 @@ def _compact_for_display(text,head=4,tail=3):
     shown=lines[:head]+[f"\033[2m… ({hidden} more lines, :expand {idx} to see)\033[0m"]+lines[-tail:]
     return "\n".join(shown)
 
+def _trip_cost_breaker(kind, spent, hops, msgs=None, pending=0):
+    # Fail-LOUD half of the cost-cap breaker. LOUD here means: red banner on the tty, a
+    # breaker event in the provenance log, and (on a token trip) tool-result stubs so the
+    # transcript stays well-formed for BOTH transports — the anthropic translator pairs
+    # role:"tool" messages positionally to the pending tool_use blocks, so each unexecuted
+    # call gets exactly one stub. NOT sys.exit: the interactive brain must never die to a
+    # runaway turn (the tty1-traceback rule); the turn halts, the brain survives.
+    ceiling=(f"token ceiling {MAX_TURN_TOKENS}" if kind=="token" else f"hop ceiling {MAX_TURN_HOPS}")
+    line=(f"COST-CAP BREAKER: turn halted at {ceiling} ({hops} model call(s), ~{spent} output tokens)"
+          +(f"; {pending} pending tool call(s) NOT executed" if pending else ""))
+    print(f"\n\033[1;31m⛔ {line}\033[0m")
+    if msgs is not None:
+        for _ in range(pending):
+            msgs.append({"role":"tool","content":line+" — this tool call was refused; the turn is over. Answer with what you have."})
+    try:
+        with open(_TURN_LOG_PATH,"a") as f:
+            f.write(json.dumps({"ts":datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                                "provider":ACTIVE_PROVIDER,"model":MODEL,"event":"cost_cap_breaker",
+                                "kind":kind,"hops":hops,"output_tokens":spent})+"\n")
+    except Exception:
+        pass  # same rule as _log_turn_provenance: a log failure never breaks a live turn
+
 def turn(msgs):
     _log_turn_provenance()
-    for _ in range(6):
-        msg=chat_stream_safe(msgs); msgs.append(msg)
+    spent=0; hops=0
+    while hops<MAX_TURN_HOPS:
+        msg=chat_stream_safe(msgs)
+        spent+=msg.pop("_out_tokens",0) or 0; hops+=1
+        msgs.append(msg)
         calls,clean=extract_tools(msg)
         if not calls:
             if clean and not msg.get("content"): print(clean)  # regex-extracted clean text wasn't already streamed
             return
         if clean and not msg.get("content"): print(clean)
+        # Token check sits between "model asked for tools" and "tools run": once over
+        # budget the pending calls are refused, not executed — halting spend is the point.
+        if MAX_TURN_TOKENS is not None and spent>=MAX_TURN_TOKENS:
+            _trip_cost_breaker("token",spent,hops,msgs,len(calls)); return
         for name,args in calls:
             # summon gets its own cloud dressing — visually distinct from local ⚡ work.
             if name=="summon_claude":
@@ -787,6 +850,11 @@ def turn(msgs):
             elif preview!=res or "\n" in preview:
                 print(f"\033[2m{preview}\033[0m")
             msgs.append({"role":"tool","content":res})
+    # Hop ceiling reached with the model still mid-task (its last hop's tools DID run and
+    # their results are in the transcript — nothing is left unpaired). This exhaustion has
+    # always ended the turn; before the breaker it ended SILENTLY, reading as a finished
+    # answer. Now it reports.
+    _trip_cost_breaker("hop",spent,hops)
 
 # ── 3B FRONT-DOOR → 7B KICK SIGNAL (A-with-a-wall, interim) ────────────────────
 # Dillon picked Design A (msg 9272); Rabbot's wall shape governs; Augur's spec is
