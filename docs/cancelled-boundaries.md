@@ -265,6 +265,46 @@ When a command's output is going to become a claim, and especially a **negative*
 4. **Do not let a filter delete the context that gives the output meaning.** `grep` on a tree,
    a table, or an indented listing returns rows stripped of the thing that made them addressable.
 
+### The inverse specimen: an instrument that cries wolf
+
+Everything above is about an instrument that says **nothing** when it should speak. The mirror
+image is an instrument that speaks when it should be silent, and keeps doing it. It looks like the
+opposite problem. It is the same one, with the damage deferred.
+
+**2026-08-19 — `infra_health_sweep.py` reported `~/agent-os` as "4 commits ahead of its remote
+(unpushed)".** The four commits were already on `origin/main`. The sweep counted `HEAD` against the
+*local remote-tracking ref*, and nothing ever fetched in that checkout; because the commits landed
+by PR merge rather than a local push, the tracking ref stayed frozen. The check was reporting the
+age of its own bookmark and calling it unpushed work. It could not distinguish **"unpushed"** from
+**"not fetched"** — two states that produce identical output, which is the same defect as `rc=1`
+versus `rc=127`, wearing the opposite sign.
+
+The reason to file this with the silent instruments is what it costs. A false negative loses one
+finding. A false positive that **recurs on a schedule** spends something that does not come back:
+
+> A monitor that cries wolf on a schedule trains its readers to ignore it. The next alarm from that
+> check is true, and it looks exactly like the last two that weren't.
+
+So a repeat false positive is not an annoyance to be dismissed faster each time. It is the check
+**decaying into decoration** while still appearing in every sweep as evidence of coverage — a
+boundary cancelled by something that reads like it belongs, which is this file's whole subject.
+Note also which way the recurrence points: two identical false alarms from one check is a finding
+about **the instrument**, not about the thing it keeps accusing.
+
+The tell is available and cheap. Before acting on an alarm, ask what the instrument would print if
+it were broken in the most boring way available to it — here, "never fetched" — and check whether
+that is distinguishable from what it *did* print. It was not, and one `git fetch` settled it.
+
+**Two more from the same day, for the pattern rather than the incidents.** A CI poller read a blank
+status field and concluded the run was finished: it exited because it could not *read* the checks,
+not because they had completed, and reported that as a final answer. And a merge was nearly taken
+on a green rollup that did not establish the new battery had run at all — the check that would have
+failed was inside `nix flake check`, so its absence and its success looked identical from outside.
+Three specimens in a day, in the tooling being used to verify the work rather than in the work.
+
+That is the direction this class tends. Once a codebase has real guards, the cheapest remaining
+place to hide a cancelled boundary is the thing you look through.
+
 ### Why this belongs in this file rather than a style guide
 
 A boundary cancelled by something that reads like it belongs is the class. An instrument error is
