@@ -899,6 +899,30 @@
               touch $out
             '';
 
+        # Orchestration engine · HARNESS-MAP slice 5 — the LCM COMPACTION LAYER's CONTRACT BATTERY
+        # (agos_lcm, atop agos_events). Sells exactly one hard guarantee: compaction is LOSSLESS —
+        # a compacted record must reconstruct EXACTLY what it replaced, or it is deletion wearing
+        # compaction's name. Enforced structurally (the digest stores verbatim events; the summary is
+        # derived and disposable, so a bad summariser cannot make the store lossy) and by test: the
+        # battery CORRUPTS a store on purpose and asserts the round-trip check FIRES, because a
+        # losslessness test that cannot detect a lossy store would pass against a module that stored
+        # nothing at all. Also pinned: the event log is READ-ONLY here (byte hashes of every .jsonl
+        # asserted unchanged across a compaction — a log something else prunes is not append-only);
+        # corr_id-less events are grouped, never dropped; duplicate sids are refused rather than
+        # silently overwriting history; a raising summariser loses the index line, never the data.
+        # Zero external deps; a regression fails `nix flake check`.
+        agos-lcm-contract =
+          nixpkgs.legacyPackages.${system}.runCommand "agos-lcm-contract-check"
+            { nativeBuildInputs = [ nixpkgs.legacyPackages.${system}.python3 ]; } ''
+              work="$(mktemp -d)"
+              cp ${./modules/agos_events.py} "$work/agos_events.py"
+              cp ${./modules/agos_lcm.py} "$work/agos_lcm.py"
+              cp ${./tests/agos-lcm-contract.py} "$work/contract.py"
+              cd "$work"
+              python3 contract.py
+              touch $out
+            '';
+
         # Orchestration engine · Phase 1 part 2 — the SHADOW brain-comms migration's CONTRACT BATTERY
         # (agos_comms_shadow, atop agos_events). Observes + parallel-emits, changes NO routing (the live
         # `_done/`+dispatch-watchers stay truth). Proves the migration is faithful BEFORE any cutover:
