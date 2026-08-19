@@ -845,6 +845,32 @@
               touch $out
             '';
 
+        # Orchestration engine · HARNESS-MAP slice 3 — SUBAGENT FAN-OUT WITH TYPED YIELDS
+        # (agos_subagents, atop agos_events). The point of the module is that a worker's yield is not
+        # a result until it TYPE-CHECKS, so the battery proves the validator BOTH ways: malformed
+        # yields (missing field, wrong type, bad list element, undeclared extra, not-a-dict) become
+        # loud `error` events with specific reasons — never silent skips, never half-trusted results —
+        # AND a known-good yield is ACCEPTED (the control arm, without which a reject-everything
+        # validator would pass the negative half and be worthless). Also proves: the concurrency cap
+        # is real (observed max in flight, plus a check that the run actually overlapped, so the cap
+        # assertion cannot pass trivially on a serial run); a raising worker is isolated from its
+        # siblings; Geist PIN #1 — a deferred unit emits no result, no error, and the run emits NO
+        # `done`, control-armed against a clean run that does; the run budget returns in wall-clock
+        # (it caught a real defect — the pool's context manager joined the abandoned thread); gather()
+        # replays a run from the log alone, isolated by corr_id; bool does not pass as int; and a bad
+        # schema raises before any work runs. Zero external deps; a regression fails `nix flake check`.
+        agos-subagents-contract =
+          nixpkgs.legacyPackages.${system}.runCommand "agos-subagents-contract-check"
+            { nativeBuildInputs = [ nixpkgs.legacyPackages.${system}.python3 ]; } ''
+              work="$(mktemp -d)"
+              cp ${./modules/agos_events.py} "$work/agos_events.py"
+              cp ${./modules/agos_subagents.py} "$work/agos_subagents.py"
+              cp ${./tests/agos-subagents-contract.py} "$work/contract.py"
+              cd "$work"
+              python3 contract.py
+              touch $out
+            '';
+
         # Orchestration engine · Phase 1 part 2 — the SHADOW brain-comms migration's CONTRACT BATTERY
         # (agos_comms_shadow, atop agos_events). Observes + parallel-emits, changes NO routing (the live
         # `_done/`+dispatch-watchers stay truth). Proves the migration is faithful BEFORE any cutover:
