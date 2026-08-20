@@ -97,7 +97,25 @@ def _assert_recorded_name(name):
     """
     pp = _participant_path(name)
     if not os.path.exists(pp):
-        return  # no registry entry — an orphan key is preflight's problem, not a collision
+        # FAIL CLOSED. The earlier version returned here, reasoning that an orphan key is
+        # preflight's problem — but preflight only checks MODES, so nothing owned this case and
+        # the guard silently passed. Measured: with `alice.md` removed, `sign_as("Alice")` signed
+        # with alice's key on a case-insensitive fs and the signature verified against her pubkey
+        # — the exact outcome this guard exists to prevent, reached through the guard's own
+        # precondition rather than around it.
+        #
+        # Reachable without an attacker: mint() writes the key (O_EXCL) and THEN the registry, so
+        # any interruption between the two leaves a key with no entry. A key that cannot be
+        # attributed to a participant must not sign; refusing is recoverable, a mis-attributed
+        # signature in an audit trail is not. Repair is deliberate (re-mint or restore the entry)
+        # rather than automatic, because on a case-insensitive fs we cannot tell whether an orphan
+        # `alice.key` belongs to "alice" or "Alice" — and guessing attribution is the failure.
+        if os.path.exists(_key_path(name)):
+            raise IdentityError(
+                "key for %r exists with no participant registry entry (%s) — refusing to use an "
+                "unattributable key. Restore the entry or re-mint under a distinct name."
+                % (name, pp))
+        return  # no key and no entry — simply not a participant yet; callers raise their own error
     recorded = None
     for line in open(pp):
         if line.startswith("name: "):
