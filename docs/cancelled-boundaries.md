@@ -336,6 +336,13 @@ So:
 > **A clearance must be something someone asserted. It must never be something you concluded from
 > the absence of an objection.**
 
+Provenance, because this file is read as an origin and should not become one by accident: the
+positive-marker requirement is **Geist's rule and predates this section** — it was already governing
+the security surface when the truncated review happened, which is why the merge held. Page's
+contribution was noticing *why* it held under this particular failure, and naming the contrast with
+the "merge unless there are open findings" phrasing. Nobody invented the fix in response to the
+incident; the incident revealed what an existing rule was already doing.
+
 This is the same property as the rest of the file, moved one layer later. The earlier sections say:
 do not let a silent instrument speak for the world. This one says: even when a silent instrument
 *does* fool you, the gate downstream should still hold, because the gate is not listening for
