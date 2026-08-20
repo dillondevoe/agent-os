@@ -116,10 +116,26 @@ def _assert_recorded_name(name):
                 "unattributable key. Restore the entry or re-mint under a distinct name."
                 % (name, pp))
         return  # no key and no entry — simply not a participant yet; callers raise their own error
+    # Decode explicitly: a registry entry is a file on disk and can hold arbitrary bytes. The
+    # implicit-text-mode read raised UnicodeDecodeError straight out of the guard — loud, but off
+    # this module's contract, which is that every refusal is an IdentityError. Recorded as an
+    # accepted path at the round-5 gate; making it uniform now that the file is open anyway.
+    try:
+        entry = open(pp, "rb").read().decode("utf-8")
+    except UnicodeDecodeError:
+        raise IdentityError(
+            "participant registry entry %s is not valid UTF-8 — refusing to use a key whose "
+            "attribution cannot be read. Restore the entry or re-mint under a distinct name." % pp)
     recorded = None
-    for line in open(pp):
+    for line in entry.splitlines():
         if line.startswith("name: "):
             recorded = line[len("name: "):].strip(); break
+    # An EMPTY or whitespace-only name field is unreadable, not a collision against "". Both fail
+    # closed, so this is not a hole — but the old path reported `collision: 'alice' resolves to
+    # the existing key for ''`, which points whoever is debugging a half-written registry at the
+    # wrong cause. An error that fails closed with the wrong reason still costs the reader time.
+    if recorded == "":
+        recorded = None
     if recorded is None:
         # FAIL CLOSED here too: "precondition absent" includes "present but unreadable". A
         # zero-length or truncated entry comes out of the SAME mint() crash window as the orphan
@@ -170,13 +186,25 @@ def mint(name, role):
         os.close(fd)
 
     npub = bech32.npub_encode(pub)
-    with open(_participant_path(name), "w") as f:
+    # Write the entry atomically (temp file + os.replace, which is atomic on POSIX). Rounds 4 and
+    # 5 of this review chain were both partial states out of THIS window: crash after the key
+    # write leaves an orphan key; crash mid-entry leaves a truncated one. The guard now fails
+    # closed on every such state — but guarding each member of a class one round at a time is the
+    # pattern the chain's own scar names. An atomic rename means a crash leaves either no entry or
+    # a whole one, and the truncated state stops existing rather than being caught.
+    #
+    # The orphan-key state remains possible by construction (two files cannot be written in one
+    # atomic step) and is exactly what C4's fail-closed covers. Suggested at the round-5 gate as
+    # future hardening; shipping it here because eliminating a state beats detecting it.
+    _tmp_entry = _participant_path(name) + ".tmp"
+    with open(_tmp_entry, "w") as f:
         f.write("---\nname: %s\nrole: %s\nnpub: %s\npubkey_hex: %s\ncreated_at: %s\n"
                 "key_type: secp256k1-schnorr-bip340\n---\n\n"
                 "Participant `%s` (%s). Public identity only — the secret key lives outside this\n"
                 "registry, in the agent-only key dir, and is never rendered here.\n"
                 % (name, role, npub, pub.hex(),
                    time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), name, role))
+    os.replace(_tmp_entry, _participant_path(name))
     preflight()
     return npub
 

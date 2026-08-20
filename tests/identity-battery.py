@@ -199,6 +199,57 @@ finally:
     open(_orphan, "w").write(_c5_backup)
 check("C5. guard passes again once the entry is restored", identity.pubkey_of("alice") is not None)
 
+# -- C6. review of a4f4152 (round 5) + the class fix the chain kept deferring --
+# a4f4152 holds: every precondition STATE I could construct fails closed (absent, zero-length,
+# truncated, indented name line, CRLF-well-formed signs correctly). Three things remained.
+_good_entry = open(os.path.join(_tmp, "participants", "alice.md")).read()
+_c6msg = bip340.tagged_hash("AgentOS/test", b"\x0a" * 32)
+
+def _with_entry(content, binary=False):
+    pp = os.path.join(_tmp, "participants", "alice.md")
+    mode = "wb" if binary else "w"
+    with open(pp, mode) as f: f.write(content)
+    try:
+        return _raised(lambda: identity.sign_as("alice", _c6msg))
+    finally:
+        with open(pp, "w") as f: f.write(_good_entry)
+
+# 1. An empty/whitespace name field is UNREADABLE, not a collision against "". Both fail closed —
+#    but the old text read `collision: 'alice' resolves to the existing key for ''`, pointing a
+#    reader debugging a half-written registry at the wrong cause. Failing closed with the wrong
+#    reason still costs whoever reads it.
+check("C6. empty name field reports UNREADABLE, not a phantom collision",
+      "no readable name" in _with_entry(_good_entry.replace("name: alice", "name: ")))
+check("C6. whitespace-only name field likewise",
+      "no readable name" in _with_entry(_good_entry.replace("name: alice", "name:    ")))
+# 2. Non-UTF8 bytes raised UnicodeDecodeError — loud, but off this module's contract that every
+#    refusal is an IdentityError. Recorded as accepted at the round-5 gate; made uniform.
+_utf8_err = _with_entry(b"---\nname: alice\xff\n---\n", binary=True)
+check("C6. non-UTF8 registry entry raises IdentityError naming the cause",
+      "not valid UTF-8" in _utf8_err)
+check("C6. ...and NOT a raw UnicodeDecodeError (every refusal is on-contract)",
+      "codec can't decode" not in _utf8_err and _utf8_err != "")
+# 3. The class fix: mint() now writes the entry via temp + os.replace, so the TRUNCATED state
+#    stops existing rather than being caught. Rounds 4 and 5 were both partial states out of this
+#    one window; guarding each member one round at a time is the pattern the chain's scar names.
+_src = open(os.path.join(ROOT, "modules", "identity.py")).read()
+check("C6. registry entry written atomically (temp + os.replace)",
+      "os.replace(_tmp_entry" in _src)
+check("C6. no .tmp residue after a mint",
+      not any(f.endswith(".tmp") for f in os.listdir(os.path.join(_tmp, "participants"))))
+# The orphan-key state REMAINS possible by construction — two files cannot be written in one
+# atomic step — which is precisely what C4 covers. Assert the pair still holds together.
+# `or True` would make this decoration — the exact defect I flagged one round ago and then
+# wrote again. Assert the real thing: plant an orphan key and confirm C4's refusal still fires.
+_ghost_key = os.path.join(_tmp, "keys", "ghost.key")
+_fd = os.open(_ghost_key, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+os.write(_fd, (b"11" * 32)); os.close(_fd)
+try:
+    check("C6. orphan-key fail-closed still holds after the atomic-write change",
+          "no participant registry entry" in _raised(lambda: identity.pubkey_of("ghost")))
+finally:
+    os.remove(_ghost_key)
+
 # -- D. sign / verify --
 msg = bip340.tagged_hash("AgentOS/test", b"\x02" * 32)
 sig = identity.sign_as("alice", msg)
