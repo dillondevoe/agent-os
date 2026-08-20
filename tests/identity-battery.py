@@ -30,6 +30,12 @@ def raises(fn, exc=Exception):
     try: fn(); return False
     except exc: return True
 
+def _raised(fn):
+    """Return the exception TEXT, so a check can assert on what an error says (and what it must
+    not say) rather than only that one occurred."""
+    try: fn(); return ""
+    except Exception as e: return str(e)
+
 # -- A. compile + markers --
 for f in ("modules/identity.py", "modules/bech32.py"):
     try:
@@ -145,6 +151,54 @@ except identity.IdentityError as _e3:
     check("C3. sign path (sign_as) fails loud on case-collision, never signs with another's key",
           raises(lambda: identity.sign_as("Alice", _c3_msg), identity.IdentityError))
 
+# -- C4. review of the gate-authored completion f21ea5e: the guard's OWN precondition --
+# Geist's extracted lesson ("what OTHER path resolves this same input?") applied to his own fix.
+# The call sites are genuinely complete — an AST audit confirms all six name->key resolvers reach
+# _assert_recorded_name. The hole was one level in: the guard returned early when no registry
+# entry existed, which is a FAIL-OPEN on its own precondition, reachable by an interrupted mint()
+# (key written with O_EXCL, registry written after). Measured before the fix: sign_as("Alice")
+# with alice.md removed produced a signature that verified against ALICE's pubkey.
+import shutil as _shutil
+_c4msg = bip340.tagged_hash("AgentOS/test", b"\x09" * 32)  # local: section D's `msg` is defined below
+_orphan = os.path.join(_tmp, "participants", "alice.md")
+_backup = _orphan + ".bak"
+_shutil.copy(_orphan, _backup)
+os.remove(_orphan)
+try:
+    check("C4. orphan key (no registry entry) REFUSES to sign — fail closed, not open",
+          raises(lambda: identity.sign_as("alice", _c4msg), identity.IdentityError))
+    check("C4. orphan key refuses on the read path too",
+          raises(lambda: identity.pubkey_of("alice"), identity.IdentityError))
+    check("C4. the refusal names the missing entry, never key material",
+          _alice_secret not in _raised(lambda: identity.sign_as("alice", _c4msg)))
+finally:
+    _shutil.move(_backup, _orphan)
+check("C4. guard passes again once the registry entry is restored",
+      identity.pubkey_of("alice") is not None)
+# A name with neither key nor entry is simply not a participant — the guard must NOT swallow that
+# into a collision error, or "unknown participant" becomes unreportable.
+check("C4. wholly unknown name still raises 'no such participant', not a collision error",
+      "no such participant" in str(_raised(lambda: identity.pubkey_of("nobody-at-all"))))
+
+# -- C5. round 5 (found gating PR #124): "precondition absent" includes "present but UNREADABLE" --
+# The C4 fix failed closed on a MISSING entry but the parse loop still left recorded=None on an
+# entry with no readable name field — a zero-length/truncated alice.md, produced by the SAME
+# mint() crash window (registry write interrupted mid-file). Measured before the fix:
+# sign_as("Alice") signed with alice's key straight through the parse loop's None.
+_c5_backup = open(_orphan).read()
+open(_orphan, "w").close()  # zero-length: exists, carries nothing
+try:
+    check("C5. truncated registry entry REFUSES to sign — unreadable attribution is no attribution",
+          raises(lambda: identity.sign_as("alice", _c4msg), identity.IdentityError))
+    check("C5. truncated entry refuses on the read path too",
+          raises(lambda: identity.pubkey_of("alice"), identity.IdentityError))
+    check("C5. the refusal names the entry, never key material",
+          "no readable name field" in _raised(lambda: identity.pubkey_of("alice"))
+          and _alice_secret not in _raised(lambda: identity.pubkey_of("alice")))
+finally:
+    open(_orphan, "w").write(_c5_backup)
+check("C5. guard passes again once the entry is restored", identity.pubkey_of("alice") is not None)
+
 # -- D. sign / verify --
 msg = bip340.tagged_hash("AgentOS/test", b"\x02" * 32)
 sig = identity.sign_as("alice", msg)
@@ -191,7 +245,7 @@ check("E. real verifiers restored",
 os.chmod(kp, 0o644)
 check("F. control arm: world-readable KEY FILE is caught", raises(identity.preflight, identity.IdentityError))
 check("F. loose key file also blocks signing (the guard is on the path, not just the check)",
-      raises(lambda: identity.sign_as("alice", msg), identity.IdentityError))
+      raises(lambda: identity.sign_as("alice", _c4msg), identity.IdentityError))
 os.chmod(kp, 0o600)
 os.chmod(os.path.join(_tmp, "keys"), 0o755)
 check("F. control arm: group/world-accessible KEY DIR is caught",

@@ -97,12 +97,41 @@ def _assert_recorded_name(name):
     """
     pp = _participant_path(name)
     if not os.path.exists(pp):
-        return  # no registry entry — an orphan key is preflight's problem, not a collision
+        # FAIL CLOSED. The earlier version returned here, reasoning that an orphan key is
+        # preflight's problem — but preflight only checks MODES, so nothing owned this case and
+        # the guard silently passed. Measured: with `alice.md` removed, `sign_as("Alice")` signed
+        # with alice's key on a case-insensitive fs and the signature verified against her pubkey
+        # — the exact outcome this guard exists to prevent, reached through the guard's own
+        # precondition rather than around it.
+        #
+        # Reachable without an attacker: mint() writes the key (O_EXCL) and THEN the registry, so
+        # any interruption between the two leaves a key with no entry. A key that cannot be
+        # attributed to a participant must not sign; refusing is recoverable, a mis-attributed
+        # signature in an audit trail is not. Repair is deliberate (re-mint or restore the entry)
+        # rather than automatic, because on a case-insensitive fs we cannot tell whether an orphan
+        # `alice.key` belongs to "alice" or "Alice" — and guessing attribution is the failure.
+        if os.path.exists(_key_path(name)):
+            raise IdentityError(
+                "key for %r exists with no participant registry entry (%s) — refusing to use an "
+                "unattributable key. Restore the entry or re-mint under a distinct name."
+                % (name, pp))
+        return  # no key and no entry — simply not a participant yet; callers raise their own error
     recorded = None
     for line in open(pp):
         if line.startswith("name: "):
             recorded = line[len("name: "):].strip(); break
-    if recorded is not None and recorded != name:
+    if recorded is None:
+        # FAIL CLOSED here too: "precondition absent" includes "present but unreadable". A
+        # zero-length or truncated entry comes out of the SAME mint() crash window as the orphan
+        # key — the registry write interrupted mid-file — and an entry whose name field cannot be
+        # read attributes nothing. Measured before this fix: with alice.md truncated to zero
+        # bytes, sign_as("Alice") signed with alice's key through the parse loop's None.
+        # (Found gating PR #124, 2026-08-19 — round 5, the guard's OTHER precondition.)
+        raise IdentityError(
+            "participant registry entry %s exists but carries no readable name field — refusing "
+            "to use a key whose attribution cannot be read. Restore the entry or re-mint under a "
+            "distinct name." % pp)
+    if recorded != name:
         raise IdentityError(
             "participant name collision: %r resolves to the existing key for %r "
             "(case-insensitive filesystem). Refusing to return another participant's "
