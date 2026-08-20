@@ -305,6 +305,60 @@ Three specimens in a day, in the tooling being used to verify the work rather th
 That is the direction this class tends. Once a codebase has real guards, the cheapest remaining
 place to hide a cancelled boundary is the thing you look through.
 
+### The structural fix: clearance is a positive assertion, never an inference from silence
+
+Every specimen above is diagnostic — it tells you how to catch an instrument that has gone quiet.
+None of them tells you how to build a gate that survives one. There is a fix, and it is not
+vigilance.
+
+The specimen that produced it: a security review ran against a signing change and emitted
+**nothing**. Not a clean verdict — nothing. Eleven user entries, fifteen assistant entries, and
+inside them five thinking blocks and ten tool calls, all `Read` and `Grep`. Zero text blocks. No
+structured finding. The session was cut off partway through reading the code, before it could form
+a judgement, by an unrelated quota wall. The reviewer was mid-thought when the lights went out.
+
+From outside, that session and a thorough review finding no vulnerabilities are the same
+observation: a review ran, no findings exist.
+
+What saved the merge was not that anyone noticed. It was the shape of the rule. The gate on that
+surface requires a **positive marker** on the PR — an explicit `MERGE-OK @<sha>` from the human who
+owns the gate. Absence of the marker means do-not-merge, and it means that regardless of *why* it is
+absent: reviewer never ran, reviewer ran and died, reviewer ran and disagreed, digest lied about who
+reviewed. All of those produce the same absence, and the rule treats the absence itself as the
+answer.
+
+Phrase the same gate the natural way — *merge unless there are open findings* — and it fails OPEN on
+precisely this input. A reviewer that emitted nothing produces no findings. Silence is read as
+assent, and the truncated review becomes a clean bill of health at the moment it matters most.
+
+So:
+
+> **A clearance must be something someone asserted. It must never be something you concluded from
+> the absence of an objection.**
+
+This is the same property as the rest of the file, moved one layer later. The earlier sections say:
+do not let a silent instrument speak for the world. This one says: even when a silent instrument
+*does* fool you, the gate downstream should still hold, because the gate is not listening for
+objections — it is looking for a signature.
+
+Two limits worth stating plainly, because a rule described only where it works is its own kind of
+instrument error:
+
+- **It is scoped.** On this repo the marker requirement covers the security-surface file set only.
+  Ordinary PRs carry no such requirement, so on those the failure mode is unmitigated — a truncated
+  review there really does read as clean. Extending it costs latency on every routine merge, which
+  is a real trade and someone's call to make, not a thing to assume.
+- **It does not detect the truncation.** It only refuses to be fooled by it. The verdict-less
+  session is still worth failing loud on at the source, because a gate that holds and a review that
+  happened are different goods, and only one of them tells you the code was actually examined.
+
+And the detector lesson underneath, which generalizes past reviews entirely: the first pass at
+proving that session emitted no verdict counted only assistant *text* blocks — and those reviews can
+report through a structured tool instead. A text-only reader returns "no verdict" whether or not one
+exists. **A detector that can see one channel reports 'nothing' about every channel it cannot see**,
+and it reports it in exactly the same words it would use if it had looked everywhere. The count only
+became evidence after checking the tool-call channel too.
+
 ### Why this belongs in this file rather than a style guide
 
 A boundary cancelled by something that reads like it belongs is the class. An instrument error is
