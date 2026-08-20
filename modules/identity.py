@@ -44,7 +44,12 @@ class IdentityError(RuntimeError):
 # construction (charset, no separators, no leading dot — "../x" or "a/b" can never form). The
 # 2026-08-14 WP-S2 ruling is the boundary law here: self-enforced-root only holds when the impl
 # controls the whole path, and a caller-supplied name is caller-supplied path bytes without this.
-_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+# `\Z`, NOT `$`: in Python `$` also matches immediately BEFORE a trailing newline, so the first
+# version of this gate accepted "alice\n" and produced a distinct key file `alice\n.key`. Not
+# traversal — but on a module whose job is attributing actions to distinct keys, a name that
+# RENDERS identically to another while resolving to a different key is the worse failure mode.
+# (Found reviewing the gate's own fix, 2026-08-19.)
+_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
 
 def _validated(name):
     if not isinstance(name, str) or not _NAME_RE.match(name):
@@ -92,6 +97,24 @@ def mint(name, role):
     kp = _key_path(name)
     if os.path.exists(kp):
         preflight()
+        # The idempotency branch resolves by FILE EXISTENCE, and file existence is a
+        # filesystem-semantics question, not a name-equality one. On macOS (case-insensitive,
+        # the dev box) mint("Alice") hits alice.key and would silently hand back ALICE's key and
+        # role; on the case-sensitive deployment target the same call mints a second, distinct
+        # identity. Same code, two different meanings for "who is this" — so assert the recorded
+        # name matches the requested one and fail loud on the divergence rather than picking a
+        # winner. (Found reviewing the gate's own fix, 2026-08-19.)
+        pp = _participant_path(name)
+        if os.path.exists(pp):
+            recorded = None
+            for line in open(pp):
+                if line.startswith("name: "):
+                    recorded = line[len("name: "):].strip(); break
+            if recorded is not None and recorded != name:
+                raise IdentityError(
+                    "participant name collision: %r resolves to the existing key for %r "
+                    "(case-insensitive filesystem). Refusing to return another participant's "
+                    "key — pick a distinct name." % (name, recorded))
         return npub_of(name)
 
     # secrets.token_bytes is the CSPRNG; BIP-340 requires 1 <= d <= n-1, so reject the

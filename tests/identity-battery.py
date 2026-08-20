@@ -101,6 +101,29 @@ check("C. control arm: the validator actually admits a normal name",
 check("C. traversal mint left NOTHING outside keys/ (keys/../evil.key resolves here)",
       not os.path.exists(os.path.join(_tmp, "evil.key")))
 
+# -- C2. adversarial review of the gate-authored fix dc0c823 (Geist's lines, my review) --
+# The gate does not get to be its own gate. Two defects found in dc0c823 and fixed 2026-08-19;
+# both are pinned here so the review leaves evidence rather than an opinion.
+check("C2. trailing-newline name REJECTED (Python `$` matches before a final \\n; `\\Z` does not)",
+      raises(lambda: identity._key_path("alice\n"), identity.IdentityError))
+check("C2. embedded-newline name rejected",
+      raises(lambda: identity._key_path("al\nice"), identity.IdentityError))
+# Case collision: mint() resolves idempotency by FILE EXISTENCE, which means different things on
+# a case-insensitive dev box and a case-sensitive deployment target. Assert we fail loud rather
+# than silently handing back another participant's key. On a case-SENSITIVE filesystem "Alice" is
+# simply a new participant and mints cleanly — both outcomes are correct, silence is not.
+_alice_secret = open(os.path.join(_tmp, "keys", "alice.key")).read().strip()
+try:
+    _other = identity.mint("Alice", "os-agent")
+    check("C2. case-variant name minted a DISTINCT identity (case-sensitive fs)", _other != npub)
+except identity.IdentityError as _e:
+    check("C2. case-variant name FAILS LOUD rather than returning another participant's key "
+          "(case-insensitive fs)", "collision" in str(_e))
+    # An error message is a leak surface like any other. Asserting `True` here would have been
+    # decoration — the check has to be able to fail.
+    check("C2. the collision error names both participants but NEVER key material",
+          "Alice" in str(_e) and "alice" in str(_e) and _alice_secret not in str(_e))
+
 # -- D. sign / verify --
 msg = bip340.tagged_hash("AgentOS/test", b"\x02" * 32)
 sig = identity.sign_as("alice", msg)

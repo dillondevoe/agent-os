@@ -31,7 +31,7 @@
 #   anthropic-transport-battery.py 34 checks — anthropic SSE transport + translation
 #   bip340-battery.py             47 checks — vendored BIP-340 signer vs the OFFICIAL vectors,
 #                                 must-fail half included, control-armed
-#   identity-battery.py           37 checks — participant keypairs, NIP-19 npub, 0600/0700
+#   identity-battery.py           41 checks — participant keypairs, NIP-19 npub, 0600/0700
 #                                 preflight, boot self-test, name-namespace confinement;
 #                                 perms + markers + traversal control-armed
 #   mem-battery.py                11 checks — bin/mem (memory-as-filesystem) contract
