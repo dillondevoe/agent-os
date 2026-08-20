@@ -1865,6 +1865,7 @@
             cp ${./tests/wiring-battery.py} "$work/tests/wiring-battery.py"
             cp ${./tests/cost-cap-battery.py} "$work/tests/cost-cap-battery.py"
             cp ${./tests/summon-consent-battery.py} "$work/tests/summon-consent-battery.py"
+            cp ${./tests/ttsr-battery.py} "$work/tests/ttsr-battery.py"
             cd "$work"
             PYTHONPATH=modules python3 tests/providers-battery.py
             python3 tests/wiring-battery.py
@@ -2015,6 +2016,9 @@
             SHIPPED_OVERRIDES=${b shippedOverrides} \
             DETECTOR_ARMED=${b detectorArmed} \
             bash ${./tests/escalate-preflight-battery.sh}
+            # think-twice stream rules (HARNESS-MAP guardrail 4): drives the REAL
+            # chat_stream_safe→chat_stream seam with only the transport scripted.
+            python3 tests/ttsr-battery.py
             touch $out
           '';
 
