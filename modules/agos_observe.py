@@ -35,6 +35,31 @@
 # Recurrence = COUNT(DISTINCT occ_key) per sig_id. Same failure twice = 2. Same event read
 # twice = 1.
 #
+# ═══ WHAT MAY BE A SOURCE — AND THE LIMIT OF THE RECURRENCE GUARD ═══
+# An OBSERVE source must be a LOG OF THINGS THAT HAPPENED, not a CLASSIFIER'S OPINION about what
+# happened. This is a real limit of the guarantee above, and it is worth stating precisely because
+# the guarantee sounds stronger than it is.
+#
+# The occ_key rule stops the same event being counted twice. It does NOT stop a source that
+# systematically mislabels. A biased extractor emits genuinely DISTINCT occurrences — different
+# events, different ids, correctly deduped — that are all wrong in the same direction. Two of them
+# is exactly the promotion rule, so the loop forms a LESSON and is right by its own lights.
+# Dedup cannot fix a biased extractor. Nothing downstream of here can.
+#
+# Not hypothetical (2026-08-19): the `claude-ingest` mesh digests emit USER_CORRECTION and
+# TOOL_FAILURE — this module's vocabulary — and one arrived tagged `USER_CORRECTION: rejected` for a
+# session containing ZERO human turns. The classifier had keyword-matched "reject" inside a code diff
+# pasted into the prompt: a comment in a bech32 module about rejecting bech32m checksums. Two
+# different sessions reviewing similar code would produce two distinct, well-formed, correctly
+# deduped occurrences of that phantom — and a LESSON built on a word inside a source comment.
+#
+# So, for anyone adding a source:
+#   OK    — append-only event logs, the turn-log, anything recording an event that occurred.
+#   NOT OK — a classifier's labels ingested as if they were events.
+# If a classified stream must be used, it has to arrive marked unverified and be barred from
+# promoting on its own; that machinery does not exist here, and adding a source without it silently
+# converts this module from an observer into a laundry for someone else's false positives.
+
 # ═══ SOURCES ARE READ-ONLY, AND HETEROGENEOUS ═══
 # Reads `agos_events` topics and the provenance turn-log. Never writes either.
 # Per Augur (2026-08-19), the turn-log at AGENT_OS_TURN_LOG (default ~/memory/turn-log.jsonl)
