@@ -6,8 +6,10 @@ No codec logic originated here — same standard as modules/bip340.py, and Geist
 against upstream, so the only edits are subtractions and this header:
   1. dropped `decode()`/`encode()` — those are segwit ADDRESS helpers (witness programs), a
      different job from encoding a Nostr pubkey; carrying them would invite misuse;
-  2. kept `Encoding`, `CHARSET`, `bech32_polymod`, `bech32_hrp_expand`, `bech32_verify_checksum`,
-     `bech32_create_checksum`, `bech32_encode`, `bech32_decode`, `convertbits` byte-for-byte;
+  2. kept `Encoding`, `CHARSET`, `BECH32M_CONST`, `bech32_polymod`, `bech32_hrp_expand`,
+     `bech32_verify_checksum`, `bech32_create_checksum`, `bech32_encode`, `bech32_decode`,
+     `convertbits` byte-for-byte — all TEN, counted against the file rather than from memory
+     (Geist's #120 nit: the first version of this list said nine and omitted `BECH32M_CONST`);
   3. added this header and `npub_encode`/`npub_decode` below, which are OURS — thin NIP-19
      wrappers containing no codec arithmetic.
 
