@@ -88,6 +88,18 @@ check("C. registry carries npub + role + created_at",
       npub in reg_txt and "role: owner-human" in reg_txt and "created_at:" in reg_txt)
 check("C. mint is idempotent — an existing key is never replaced",
       identity.mint("alice", "owner-human") == npub and open(kp).read().strip() == secret)
+# The name is a path component; without charset confinement "../x" escapes the identity root
+# entirely (the WP-S2 caller-supplied-path class). Confined by construction, mem.* precedent.
+check("C. path-traversal participant name is REJECTED at mint",
+      raises(lambda: identity.mint("../evil", "x"), identity.IdentityError))
+check("C. separator in participant name is REJECTED on the read path too",
+      raises(lambda: identity.pubkey_of("a/b"), identity.IdentityError))
+check("C. leading-dot participant name is REJECTED",
+      raises(lambda: identity.mint(".hidden", "x"), identity.IdentityError))
+check("C. control arm: the validator actually admits a normal name",
+      identity.mint("carol-2", "os-agent").startswith("npub1"))
+check("C. traversal mint left NOTHING outside keys/ (keys/../evil.key resolves here)",
+      not os.path.exists(os.path.join(_tmp, "evil.key")))
 
 # -- D. sign / verify --
 msg = bip340.tagged_hash("AgentOS/test", b"\x02" * 32)

@@ -23,7 +23,7 @@ Layout, per spec §2.2 (path-is-meaning — the registry is memory a human can r
                                logs, never rendered, never copied into the registry
       participants/<name>.md   0644, frontmatter: npub + role + created_at
 """
-import os, secrets, stat, sys, time
+import os, re, secrets, stat, sys, time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import bip340, bech32
@@ -40,8 +40,21 @@ class IdentityError(RuntimeError):
     """Fail loud. Never carries key material in its message — only paths and modes."""
 
 
-def _key_path(name): return os.path.join(KEYS_DIR, name + ".key")
-def _participant_path(name): return os.path.join(PARTICIPANTS_DIR, name + ".md")
+# A participant name is a PATH COMPONENT, so it gets the mem.* namespace treatment: confined by
+# construction (charset, no separators, no leading dot — "../x" or "a/b" can never form). The
+# 2026-08-14 WP-S2 ruling is the boundary law here: self-enforced-root only holds when the impl
+# controls the whole path, and a caller-supplied name is caller-supplied path bytes without this.
+_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+
+def _validated(name):
+    if not isinstance(name, str) or not _NAME_RE.match(name):
+        raise IdentityError("participant name %r is not a valid namespace "
+                            "(need ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ — the name becomes a path "
+                            "component, so separators and a leading dot are rejected)" % (name,))
+    return name
+
+def _key_path(name): return os.path.join(KEYS_DIR, _validated(name) + ".key")
+def _participant_path(name): return os.path.join(PARTICIPANTS_DIR, _validated(name) + ".md")
 
 
 def preflight():
