@@ -31,8 +31,8 @@
 #   anthropic-transport-battery.py 34 checks — anthropic SSE transport + translation
 #   bip340-battery.py             47 checks — vendored BIP-340 signer vs the OFFICIAL vectors,
 #                                 must-fail half included, control-armed
-#   identity-battery.py           48 checks measured on a case-INsensitive fs; 47 DERIVED for
-#                                 case-sensitive (Geist measured 43/42 pre-C4, and C4's 5 checks
+#   identity-battery.py           52 checks measured on a case-INsensitive fs; 51 DERIVED for
+#                                 case-sensitive (the ±1 is the collision arms; C4's 5 and C5's 4
 #                                 are fs-independent). Derived, not measured — this box cannot
 #                                 run the other branch, and saying so beats typing a number that
 #                                 looks measured. The collision arms branch on what the fs does;

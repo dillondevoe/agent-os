@@ -180,6 +180,25 @@ check("C4. guard passes again once the registry entry is restored",
 check("C4. wholly unknown name still raises 'no such participant', not a collision error",
       "no such participant" in str(_raised(lambda: identity.pubkey_of("nobody-at-all"))))
 
+# -- C5. round 5 (found gating PR #124): "precondition absent" includes "present but UNREADABLE" --
+# The C4 fix failed closed on a MISSING entry but the parse loop still left recorded=None on an
+# entry with no readable name field — a zero-length/truncated alice.md, produced by the SAME
+# mint() crash window (registry write interrupted mid-file). Measured before the fix:
+# sign_as("Alice") signed with alice's key straight through the parse loop's None.
+_c5_backup = open(_orphan).read()
+open(_orphan, "w").close()  # zero-length: exists, carries nothing
+try:
+    check("C5. truncated registry entry REFUSES to sign — unreadable attribution is no attribution",
+          raises(lambda: identity.sign_as("alice", _c4msg), identity.IdentityError))
+    check("C5. truncated entry refuses on the read path too",
+          raises(lambda: identity.pubkey_of("alice"), identity.IdentityError))
+    check("C5. the refusal names the entry, never key material",
+          "no readable name field" in _raised(lambda: identity.pubkey_of("alice"))
+          and _alice_secret not in _raised(lambda: identity.pubkey_of("alice")))
+finally:
+    open(_orphan, "w").write(_c5_backup)
+check("C5. guard passes again once the entry is restored", identity.pubkey_of("alice") is not None)
+
 # -- D. sign / verify --
 msg = bip340.tagged_hash("AgentOS/test", b"\x02" * 32)
 sig = identity.sign_as("alice", msg)

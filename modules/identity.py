@@ -120,7 +120,18 @@ def _assert_recorded_name(name):
     for line in open(pp):
         if line.startswith("name: "):
             recorded = line[len("name: "):].strip(); break
-    if recorded is not None and recorded != name:
+    if recorded is None:
+        # FAIL CLOSED here too: "precondition absent" includes "present but unreadable". A
+        # zero-length or truncated entry comes out of the SAME mint() crash window as the orphan
+        # key — the registry write interrupted mid-file — and an entry whose name field cannot be
+        # read attributes nothing. Measured before this fix: with alice.md truncated to zero
+        # bytes, sign_as("Alice") signed with alice's key through the parse loop's None.
+        # (Found gating PR #124, 2026-08-19 — round 5, the guard's OTHER precondition.)
+        raise IdentityError(
+            "participant registry entry %s exists but carries no readable name field — refusing "
+            "to use a key whose attribution cannot be read. Restore the entry or re-mint under a "
+            "distinct name." % pp)
+    if recorded != name:
         raise IdentityError(
             "participant name collision: %r resolves to the existing key for %r "
             "(case-insensitive filesystem). Refusing to return another participant's "
