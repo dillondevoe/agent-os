@@ -52,7 +52,8 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import agos_observe as O          # noqa: E402
-import agos_propose as P          # noqa: E402
+import agos_propose as P
+import agos_surface as S          # noqa: E402
 
 READ = "read"
 MISSING = "missing"
@@ -188,19 +189,65 @@ def render(report, proposals=()):
     return "\n".join(lines)
 
 
-def main(argv=None):
-    argv = list(sys.argv[1:] if argv is None else argv)
-    lesson_db = argv[0] if argv else os.path.expanduser("~/.agent-os/lessons.db")
-    prop_db = argv[1] if len(argv) > 1 else os.path.expanduser("~/.agent-os/proposals.db")
-    os.makedirs(os.path.dirname(lesson_db), exist_ok=True)
+# ─── THE CALLER, AGAIN ────────────────────────────────────────────────────────
+# This module was written because OBSERVE, COMPARE and PROPOSE each had a green
+# battery and NOTHING CALLED ANY OF THEM. The same defect then recurred one level
+# up and I did not notice for two days: agos_cycle became the caller they lacked,
+# agos_surface shipped with 30 green checks — and nothing called agos_cycle, and
+# nothing called agos_surface at all. A runner that nothing runs is the identical
+# bug wearing the fix's clothes.
+#
+# So main() now runs the WHOLE loop, surfacing included, and the battery drives
+# main() itself rather than its parts. That is the actual lesson: the untested
+# entry point is where the caller goes missing, because every piece below it is
+# green and the gap is the thing nobody wrote a test for.
+#
+# Note what is NOT here: APPLY. main() observes, compares, proposes, refuses and
+# writes a digest a human reads. It changes no file the loop proposed against.
+# That boundary is agos_surface.emit()'s to enforce and it is enforced there, not
+# by this function remembering to be careful.
+
+
+def run(lesson_db, prop_db, digest, sources=None):
+    """The whole loop, once. Returns (report, digest_path, digest_text).
+
+    digest_path is None when surfacing was refused or impossible — the caller
+    must not read "no path" as "nothing to say", so run() raises nothing and
+    reports the state instead.
+    """
+    d = os.path.dirname(lesson_db)
+    if d:
+        os.makedirs(d, exist_ok=True)
     ls = O.LessonStore(lesson_db)
     ps = P.ProposalStore(prop_db)
     try:
-        report = cycle(ls, ps, [turnlog_source()])
-        print(render(report, ps.by_status(P.EMITTED)))
+        report = cycle(ls, ps, sources if sources is not None else [turnlog_source()])
+        try:
+            path, text = S.surface(digest, ls, ps, cycle_report=report)
+        except S.ApplyBoundary as exc:
+            # A refused destination is a REPORTABLE state, not a crash and not a
+            # silent skip. Surfacing onto a proposal's target is exactly the
+            # confusion this loop exists to keep straight, so say so out loud.
+            return report, None, "SURFACING REFUSED — %s" % exc
+        return report, path, text
     finally:
         ls.close()
         ps.close()
+
+
+def main(argv=None):
+    argv = list(sys.argv[1:] if argv is None else argv)
+    home = os.path.expanduser("~/.agent-os")
+    lesson_db = argv[0] if argv else os.path.join(home, "lessons.db")
+    prop_db = argv[1] if len(argv) > 1 else os.path.join(home, "proposals.db")
+    digest = argv[2] if len(argv) > 2 else os.path.join(home, "digest.md")
+    report, path, text = run(lesson_db, prop_db, digest)
+    print(render(report, []))
+    print("")
+    if path is None:
+        print(text)
+        return 1
+    print("digest: %s" % path)
     return 0
 
 

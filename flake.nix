@@ -1020,6 +1020,7 @@
               mkdir -p "$work/modules" "$work/tests"
               cp ${./modules/agos_observe.py} "$work/modules/agos_observe.py"
               cp ${./modules/agos_propose.py} "$work/modules/agos_propose.py"
+              cp ${./modules/agos_surface.py} "$work/modules/agos_surface.py"
               cp ${./modules/agos_cycle.py}   "$work/modules/agos_cycle.py"
               cp ${./tests/agos-cycle-contract.py} "$work/tests/agos-cycle-contract.py"
               cd "$work"

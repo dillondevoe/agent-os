@@ -208,6 +208,81 @@ with tempfile.TemporaryDirectory() as tmp:
     ls.close(); ps.close()
 
 
+# ─── F. THE ENTRY POINT ITSELF ────────────────────────────────────────────────
+# These are the cases whose ABSENCE let the caller go missing twice. Every part
+# below main() was green while the loop never ran end to end, because the battery
+# tested the parts. So: drive run()/main(), assert a digest actually lands on
+# disk, and control-arm it so a green here cannot mean "wrote nothing, quietly."
+print("F. run() drives the WHOLE loop and a digest reaches disk")
+with tempfile.TemporaryDirectory() as tmp:
+    path = turnlog(tmp, "t.jsonl", [SPIKE, dict(SPIKE, hops=4)])
+    dest = os.path.join(tmp, "digest.md")
+    src = [C.Source("t", lambda: O.signals_from_turnlog(path), lambda: True)]
+    rep, out, text = C.run(os.path.join(tmp, "l.db"), os.path.join(tmp, "p.db"), dest, src)
+    check("F: run() returned a digest path", out == dest)
+    check("F: the digest EXISTS on disk", os.path.exists(dest))
+    body = open(dest).read()
+    check("F: digest is non-empty", len(body) > 0)
+    check("F: digest names the pending proposal's target", "docs/lessons.md" in body)
+    check("F: digest does not claim anything was applied", "APPLY is not implemented" in body)
+    check("F: the proposal TARGET was not created", not os.path.exists(os.path.join(tmp, "docs")))
+    check("F: returned text is what was written", text == body)
+
+print("F2. CONTROL — a blind run must still write, and must say it was blind")
+with tempfile.TemporaryDirectory() as tmp:
+    dest = os.path.join(tmp, "digest.md")
+    gone = C.Source("t", lambda: O.signals_from_turnlog(os.path.join(tmp, "nope.jsonl")),
+                    lambda: False)
+    rep, out, text = C.run(os.path.join(tmp, "l.db"), os.path.join(tmp, "p.db"), dest, [gone])
+    check("F2: blind run STILL produced a digest", out == dest and os.path.exists(dest))
+    check("F2: report says blind", rep["blind"])
+    check("F2: the DIGEST says cannot-assess", "CANNOT-ASSESS" in open(dest).read())
+    check("F2: and does not read as a clean empty cycle",
+          "Sources read: 1 of 1" not in open(dest).read())
+
+print("F3. run() reports a refused destination instead of crashing or lying")
+# The boundary is "this destination IS the proposal's target", and the target is
+# carried repo-relative. So the case must be run repo-relative too. My first pass
+# handed it /tmp/<x>/docs/lessons.md and expected a refusal — that is a DIFFERENT
+# FILE that merely ends in the same three components, and refusing it would mean
+# refusing on suffix. A writer stricter than the rule it enforces makes the honest
+# path fail and trains you to route around the writer, which is the failure mode
+# the whole guard exists to prevent. The suffix case is asserted allowed in F3b,
+# deliberately, so nobody "hardens" it later without reading this.
+with tempfile.TemporaryDirectory() as tmp:
+    path = turnlog(tmp, "t.jsonl", [SPIKE, dict(SPIKE, hops=4)])
+    src = [C.Source("t", lambda: O.signals_from_turnlog(path), lambda: True)]
+    cwd = os.getcwd()
+    try:
+        os.chdir(tmp)
+        rep, out, text = C.run("l.db", "p.db", os.path.join("docs", "lessons.md"), src)
+        check("F3: no path returned", out is None)
+        check("F3: the state is stated, not swallowed", "SURFACING REFUSED" in text)
+        check("F3: the target file was NOT written",
+              not os.path.exists(os.path.join("docs", "lessons.md")))
+    finally:
+        os.chdir(cwd)
+
+print("F3b. CONTROL — a different file that merely ENDS in the target path is allowed")
+with tempfile.TemporaryDirectory() as tmp:
+    path = turnlog(tmp, "t.jsonl", [SPIKE, dict(SPIKE, hops=4)])
+    src = [C.Source("t", lambda: O.signals_from_turnlog(path), lambda: True)]
+    elsewhere = os.path.join(tmp, "docs", "lessons.md")
+    rep, out, text = C.run(os.path.join(tmp, "l.db"), os.path.join(tmp, "p.db"),
+                           elsewhere, src)
+    check("F3b: written — suffix resemblance is not identity", out == elsewhere)
+    check("F3b: and it is a digest, not the proposal enacted",
+          "APPLY is not implemented" in open(elsewhere).read())
+
+print("F4. CONTROL — main() returns 0 on a healthy run and 1 when it cannot surface")
+with tempfile.TemporaryDirectory() as tmp:
+    turnlog(tmp, "turns.jsonl", [SPIKE, dict(SPIKE, hops=4)])
+    rc_ok = C.main([os.path.join(tmp, "l.db"), os.path.join(tmp, "p.db"),
+                    os.path.join(tmp, "d.md")])
+    check("F4: main() rc=0 when the digest lands", rc_ok == 0)
+    check("F4: main() actually wrote it", os.path.exists(os.path.join(tmp, "d.md")))
+
+
 print()
 print("%d checks, %d failures" % (CHECKS, len(FAILS)))
 for f in FAILS:
