@@ -829,6 +829,71 @@
               touch $out
             '';
 
+
+        # SEALED lane — the same DROPPED-IMPORT guard, for the SHIPPED machine.
+        #
+        # WHY THIS EXISTS (measured, not assumed — Mirror 2026-08-20): `agentos-open-imports` above
+        # closes this hole for the OPEN variant only. The sealed variant's module list is `baseModules`,
+        # inline in this file, and nothing asserted over it. I control-armed the gap rather than
+        # arguing it: commented `./modules/mcp.nix` out of baseModules and ran the ship gate. Result —
+        # `all checks passed!`, rc=0. The sealed machine would have shipped with no MCP surface and
+        # `nix flake check` would have called it green.
+        #
+        # WHY THE VM TESTS DO NOT COVER IT: they `inherit baseModules`, so they DO see a drop — but
+        # they are deliberately OUT of `checks` (they boot VMs) and run in the separate vm-tests.yml
+        # matrix. The ship gate is `nix flake check`. A guarantee that lives only in the other lane is
+        # not a guarantee at the gate, and only some of the fourteen are observed by a VM test at all.
+        # Same seam lesson as the engine: green batteries per component say nothing about whether the
+        # component is IN the machine.
+        #
+        # GUARD-OF-THE-GUARD (inherited from the open guard, and it bites harder here): each marker
+        # must be UNIQUE to exactly one module. Package markers below are matched by EXACT name, not
+        # infix — `audit`/`taint`/`mcp`/`confirm` are short enough that `hasInfix` would happily match
+        # an unrelated package and mask the very drop this is meant to catch.
+        #
+        # Two of the fourteen are options-only in the sealed base by design (mesh-wireguard-sealed and
+        # fetch-proxy ship INERT, enabled per-variant), so their fingerprint is the OPTION EXISTING,
+        # not a service running. Asserting `.enable` there would assert the variant, not the import.
+        agentos-sealed-imports =
+          let
+            pkgs = nixpkgs.legacyPackages.${system};
+            lib  = nixpkgs.lib;
+            cfg  = self.nixosConfigurations.agentos-sealed.config;
+            hasPkg = n: lib.any (p: (p.pname or p.name or "") == n) cfg.environment.systemPackages;
+          in
+            assert lib.assertMsg (hasPkg "agent-shell")
+              "agentos-sealed-imports: agent-shell.nix is NOT imported — `agent-shell` missing from systemPackages. That module is the part that makes this Agent OS rather than a NixOS box.";
+            assert lib.assertMsg (builtins.hasAttr "agent-os-pull-model" cfg.systemd.timers)
+              "agentos-sealed-imports: brain.nix is NOT imported — the agent-os-pull-model timer is absent, so the sealed image has no path to a model.";
+            assert lib.assertMsg (builtins.hasAttr "cleanRoom" cfg.agentos)
+              "agentos-sealed-imports: clean-room.nix is NOT imported — options.agentos.cleanRoom is absent. The egress wall would be missing from the SEALED image, which is the one property the sealed variant exists to have.";
+            assert lib.assertMsg (hasPkg "audit")
+              "agentos-sealed-imports: audit.nix is NOT imported — `audit` missing from systemPackages.";
+            assert lib.assertMsg (hasPkg "taint")
+              "agentos-sealed-imports: taint.nix is NOT imported — `taint` missing from systemPackages.";
+            assert lib.assertMsg (hasPkg "mcp")
+              "agentos-sealed-imports: mcp.nix is NOT imported — `mcp` missing from systemPackages. This is the exact drop that was measured to ship green before this guard existed.";
+            assert lib.assertMsg (hasPkg "broker")
+              "agentos-sealed-imports: broker.nix is NOT imported — `broker` missing from systemPackages. Capability invocation would have no front door.";
+            assert lib.assertMsg (hasPkg "confirm")
+              "agentos-sealed-imports: confirm.nix is NOT imported (or its sandbox precondition went false) — the confirm wrapper is missing from systemPackages.";
+            assert lib.assertMsg (builtins.hasAttr "agentos-seal-check" cfg.systemd.services)
+              "agentos-sealed-imports: seal-check.nix is NOT imported — the agentos-seal-check service is absent, so a broken seal would fail SILENT instead of loud (the whole point of that module).";
+            assert lib.assertMsg (cfg.users.users.root.hashedPasswordFile == "/etc/agent-os/break-glass.hash")
+              "agentos-sealed-imports: break-glass.nix is NOT imported — root's hashedPasswordFile is not the break-glass hash, so the ONE interactive root door (tty3) is gone.";
+            assert lib.assertMsg (builtins.hasAttr "meshWireguard" cfg.agentos)
+              "agentos-sealed-imports: mesh-wireguard-sealed.nix is NOT imported — options.agentos.meshWireguard is absent (WP-S1 sealed-lane mesh; options-only here by design).";
+            assert lib.assertMsg (builtins.hasAttr "fetchProxy" cfg.agentos)
+              "agentos-sealed-imports: fetch-proxy.nix is NOT imported — options.agentos.fetchProxy is absent (WP-S5; options-only and INERT here by design).";
+            assert lib.assertMsg (builtins.hasAttr "agent-os-system-set" cfg.systemd.services)
+              "agentos-sealed-imports: system-set.nix is NOT imported — the agent-os-system-set unit is absent.";
+            assert lib.assertMsg cfg.boot.plymouth.enable
+              "agentos-sealed-imports: boot-branding.nix is NOT imported — boot.plymouth.enable is false.";
+            pkgs.runCommand "agentos-sealed-imports-check" { } ''
+              echo "agentos-sealed imports all fourteen baseModules: agent-shell brain clean-room(options) audit taint mcp broker confirm seal-check break-glass mesh-wireguard-sealed(options) fetch-proxy(options) system-set boot-branding"
+              touch $out
+            '';
+
         # Orchestration engine · Phase 1 — the `agos-events` append-only event-log library's CONTRACT
         # BATTERY. Proves, against the MULTI-WRITER-across-SyncThing reality Geist ruled load-bearing
         # (per-(topic,machine) single-writer files; merge-read ordered by ts→machine→id; per-(consumer,
