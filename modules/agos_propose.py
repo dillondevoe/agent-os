@@ -189,6 +189,13 @@ def draft(lesson, drafts=None):
     Augur warned about. Injecting the table lets the battery drive a forbidden target
     through the REAL propose() path and watch it go red, rather than testing denied() in
     isolation and calling the end-to-end path proven.
+
+    IF YOU ADD A DRAFT SHAPE HERE, READ THIS. The first entry whose target is NOT under
+    `docs/` makes the deny list live for real traffic, and it must ship with its own
+    E-variant in the battery — a case that drives THAT target class through propose() and
+    asserts the outcome. Otherwise the injected-table case silently becomes the only armed
+    arm again: the guardrail would be covered only where the TEST supplies its own input,
+    and uncovered exactly where PRODUCTION supplies it. (Augur, 2026-08-20, on #129.)
     """
     kind = (drafts if drafts is not None else _DRAFTS).get(lesson.get("type"))
     if kind is None:
