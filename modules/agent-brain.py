@@ -110,6 +110,41 @@ def _turn_limits():
 
 MAX_TURN_HOPS, MAX_TURN_TOKENS = _turn_limits()
 
+# ── THINK-TWICE STREAM RULES (HARNESS-MAP guardrail 4, TTSR) ──
+# Regexes from providers.yaml `stream_rules:` watched against the assistant's STREAMING
+# content buffer (chat_stream). On a match the attempt is aborted and chat_stream_safe
+# retries with the rule injected as an EPHEMERAL role:system message on the wire copy
+# only — the caller's msgs (the transcript) is never appended to, so the rule can neither
+# be compacted away nor persisted. Both transports hoist role:system wherever it sits
+# (ollama natively; _anthropic_translate_messages joins it into `system`). Aborted
+# attempts still cost tokens: their estimate rides on the final msg's _out_tokens so the
+# cost-cap breaker in turn() sees the whole call, not just the surviving attempt.
+# Yaml-only (no env path) — validated at boot in providers.py, invalid refuses to start.
+MAX_TTSR_ABORTS_PER_CALL = 3   # across all rules per chat_stream_safe call — hard stop
+def _stream_rules():
+    return [{"id": r["id"], "rx": re.compile(r["pattern"]), "rule": r["rule"],
+             "max_retries": r.get("max_retries", 1)}
+            for r in ((_PROVIDERS or {}).get("stream_rules") or [])]
+STREAM_RULES = _stream_rules()
+
+class TTSRAbort(Exception):
+    # Raised inside chat_stream when a stream rule matches. Carries the partial content
+    # (already rendered to the tty) and an output-token ESTIMATE (len/4 — the transport's
+    # `done` event with the real eval_count never arrives on an aborted stream).
+    def __init__(self, rule, partial):
+        super().__init__(f"TTSR rule {rule['id']!r} fired")
+        self.rule=rule; self.partial=partial; self.est_tokens=max(1, len(partial)//4)
+
+def _log_ttsr_abort(rule_id, fire_n, gave_up, est_tokens):
+    try:
+        with open(_TURN_LOG_PATH,"a") as f:
+            f.write(json.dumps({"ts":datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                                "provider":ACTIVE_PROVIDER,"model":MODEL,"event":"ttsr_abort",
+                                "rule":rule_id,"fire_n":fire_n,"gave_up":gave_up,
+                                "output_tokens_est":est_tokens})+"\n")
+    except Exception:
+        pass  # a log failure never breaks a live turn (same rule as the other log writers)
+
 # ── PER-TURN PROVENANCE LOG (Phase 1.5A acceptance criterion 5, task 287 slice 3) ──
 # "Audit log shows provider+model per turn." Deliberately NOT bin/audit's chain-hashed
 # broker log — that log is a tamper-evident record of capital/tool-execution security
@@ -502,7 +537,7 @@ def _stream_events(msgs):
     # still unwired, and this argument is what lets that slice land without touching transports.
     return t(msgs, ACTIVE_PROVIDER)
 
-def chat_stream(msgs):
+def chat_stream(msgs, rules=None):
     # Streaming + liveness indicator (P1 fix #2, same comm as above). Buffers tokens for
     # tool_calls/content-regex parsing (extract_tools) while printing as they arrive.
     #
@@ -536,8 +571,9 @@ def chat_stream(msgs):
     def _thinking_frame(i):
         sys.stdout.write(f"\r\033[K\033[2mthinking{'.'*(i%3+1)} (^C cancels this turn)\033[0m"); sys.stdout.flush()
     think_stop,think_t=_spin(_thinking_frame)
+    _events=_stream_events(msgs)
     try:
-        for _kind,_data in _stream_events(msgs):
+        for _kind,_data in _events:
             # THINKING RENDER (the actual P0 fix, spec "P0 DIAGNOSIS COMPLETE" 2026-08-06):
             # qwen3.5:9b is a thinking model on a ~3 tok/s CPU — it emits a `thinking`
             # stream for minutes before any content. Invisible thinking == "spinning
@@ -562,6 +598,12 @@ def chat_stream(msgs):
                         sys.stdout.write(f"\n\033[2m— thought for {time.time()-t0:.0f}s —\033[0m\n")
                     first_token=True; col=0
                 content+=piece
+                # TTSR: search the WHOLE buffer, not the piece — a pattern may straddle
+                # chunk boundaries. Raise before rendering the matching piece; the partial
+                # already on screen is the model's, the abort line below explains the rest.
+                for _r in (rules or ()):
+                    if _r["rx"].search(content):
+                        raise TTSRAbort(_r, content)
                 for tok in re.findall(r'\S+\s*|\s+', piece):
                     if '```' in tok:
                         segs=tok.split('```')
@@ -577,6 +619,8 @@ def chat_stream(msgs):
                 eval_count=_data.get("eval_count") or 0
                 eval_dur=_data.get("eval_seconds") or 0.0
     finally:
+        try: _events.close()   # on TTSRAbort this closes the transport's response → upstream stops generating
+        except Exception: pass
         if not first_token:
             think_stop.set(); think_t.join(timeout=1)  # idempotent if thinking already stopped it
             if thinking_seen:
@@ -741,7 +785,7 @@ def _agos(name,args):
 CHAT_LOCK=threading.Lock()  # serializes chat_stream calls (warmup thread vs interactive turns)
                             # onto ollama's single inference slot, and protects the shared msgs list.
 
-def chat_stream_safe(msgs, retries=1):
+def _chat_stream_locked(msgs, rules, retries):
     # Never crash to a raw traceback on tty1 (P1 fix #1). A cold-boot prefill can outrun even the
     # 600s timeout under heavy load; on timeout/connection failure, tell the user and retry once —
     # the KV slot is already cached from the failed attempt, so retry #2 is cheap (live-verified:
@@ -761,7 +805,7 @@ def chat_stream_safe(msgs, retries=1):
                     busy_stop.set(); busy_t.join(timeout=1)
                     sys.stdout.write("\r\033[K"); sys.stdout.flush()
             try:
-                return chat_stream(msgs)
+                return chat_stream(msgs, rules)
             finally:
                 CHAT_LOCK.release()
         except (TimeoutError, urllib.error.URLError, ConnectionError) as e:
@@ -771,6 +815,34 @@ def chat_stream_safe(msgs, retries=1):
             else:
                 print(f"  \033[31m(model isn't responding right now — try again in a moment: {e})\033[0m")
                 return {"role":"assistant","content":"","tool_calls":[]}
+
+def chat_stream_safe(msgs, retries=1):
+    # TTSR loop (HARNESS-MAP guardrail 4) around the timeout-retry loop above. `wire` is
+    # what the transport sees; `msgs` — the caller's transcript — is read here and NEVER
+    # appended to, so an injected rule lives only for the retry request that needs it.
+    wire=msgs; fired={}; order=[]; aborted_tokens=0; n_aborts=0
+    while True:
+        try:
+            msg=_chat_stream_locked(wire, STREAM_RULES, retries)
+        except TTSRAbort as e:
+            n_aborts+=1; aborted_tokens+=e.est_tokens
+            rid=e.rule["id"]; fired[rid]=fired.get(rid,0)+1
+            if rid not in order: order.append(rid)
+            gave_up = fired[rid] > e.rule["max_retries"] or n_aborts > MAX_TTSR_ABORTS_PER_CALL
+            _log_ttsr_abort(rid, fired[rid], gave_up, e.est_tokens)
+            sys.stdout.write("\r\033[K")
+            if gave_up:
+                # Bounded by construction: per-rule max_retries AND a per-call total. The
+                # partial is returned (it was already on screen; hiding it would make the
+                # transcript lie) with NO tool calls — an aborted attempt never executes.
+                print(f"\n\033[1;31m⛔ THINK-TWICE: rule {rid!r} kept firing ({fired[rid]}x) — giving up on this turn's answer; no tools run.\033[0m")
+                return {"role":"assistant","content":e.partial,"tool_calls":[],"_out_tokens":aborted_tokens}
+            print(f"\n  \033[2m(think-twice: rule {rid!r} fired — retrying with the rule in view)\033[0m")
+            by_id={r["id"]:r for r in STREAM_RULES}
+            wire=list(msgs)+[{"role":"system","content":by_id[r]["rule"]} for r in order]
+            continue
+        msg["_out_tokens"]=(msg.get("_out_tokens") or 0)+aborted_tokens
+        return msg
 
 EXPAND_BUFFERS=[]  # tool-call full outputs kept for the :expand N command (item 2, task #265)
 

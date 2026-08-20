@@ -28,6 +28,7 @@
 #   providers-battery.py          11 checks — modules/providers.py provider-config contract
 #   wiring-battery.py             8 checks — agent-brain <-> providers.py wiring (needs pyyaml)
 #   cost-cap-battery.py           22 checks — cost-cap breaker: limits config + turn() trips (needs pyyaml)
+#   ttsr-battery.py               43 checks — think-twice stream rules: real chat_stream seam (needs pyyaml)
 #   transport-battery.py          23 checks — provider transport seam + ollama transport
 #   anthropic-transport-battery.py 34 checks — anthropic SSE transport + translation
 #   mem-battery.py                11 checks — bin/mem (memory-as-filesystem) contract
@@ -113,6 +114,8 @@ need "$T/wiring-battery.py" wiring && \
 
 need "$T/cost-cap-battery.py" cost-cap && \
   run cost-cap env PYTHONPATH="$ROOT/modules" "$PY" "$T/cost-cap-battery.py"
+need "$T/ttsr-battery.py" ttsr && \
+  run ttsr env PYTHONPATH="$ROOT/modules" "$PY" "$T/ttsr-battery.py"
 # Transport seam (task 287 slices 5-6). Both were written but neither was registered here —
 # an unexecuted regression test is documentation, so they ran only when someone remembered to.
 need "$T/transport-battery.py" transport && \
