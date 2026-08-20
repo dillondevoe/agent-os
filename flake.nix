@@ -894,6 +894,66 @@
               touch $out
             '';
 
+
+        # The engine MANIFEST, read off the BUILT ARTIFACT — not off the comment that claims it.
+        #
+        # selfimprove-open.nix's header used to say it installs "every `agos_*` module". That was
+        # false by two: there are ten `agos_*.py` and the module ships eight, deliberately (the
+        # comms pair is the stack-side brain-comms shadow migration, which nothing in the engine
+        # imports). Nobody would have noticed from CI, because the claim lived in a comment and
+        # comments are not gated. I corrected the comment in the same commit as this check — but a
+        # corrected comment can drift again tomorrow, which is exactly the status-word defect this
+        # whole engine was written to end. So the scope claim is now a MECHANISM.
+        #
+        # It reads the shipped `agos-selfimprove` wrapper, extracts the engine store path out of its
+        # PYTHONPATH line, and lists what is actually in there. That is the artifact a running
+        # machine would import — not the source tree, and not the file's prose about itself. Add a
+        # ninth module or drop one of the eight and this goes red with a diff.
+        #
+        # It deliberately asserts BOTH directions. Presence alone would stay green if the comms pair
+        # were quietly added later, and absence alone would stay green if the engine shipped empty.
+        agos-engine-manifest =
+          let
+            pkgs = nixpkgs.legacyPackages.${system};
+            lib  = nixpkgs.lib;
+            cfg  = self.nixosConfigurations.agentos-open.config;
+            sip  = lib.head (lib.filter (p: (p.pname or p.name or "") == "agos-selfimprove")
+                     cfg.environment.systemPackages);
+          in
+            pkgs.runCommand "agos-engine-manifest-check" { buildInputs = [ sip ]; } ''
+              set -euo pipefail
+              engine=$(sed -n 's|.*PYTHONPATH="\(/nix/store/[^"]*\)/lib/agos.*|\1|p' \
+                         ${sip}/bin/agos-selfimprove | head -1)
+              if [ -z "$engine" ]; then
+                echo "agos-engine-manifest: BLIND — could not extract the engine store path from the"
+                echo "agos-selfimprove wrapper. That is not a pass. The wrapper's PYTHONPATH line"
+                echo "changed shape, so this check no longer reads the artifact it claims to read."
+                exit 1
+              fi
+              got=$(cd "$engine/lib/agos" && ls *.py | sort | tr '\n' ' ')
+              want="agos_advisor.py agos_cycle.py agos_events.py agos_lcm.py agos_observe.py agos_propose.py agos_subagents.py agos_surface.py "
+              if [ "$got" != "$want" ]; then
+                echo "agos-engine-manifest: the shipped engine is NOT the eight modules it claims."
+                echo "  want: $want"
+                echo "  got:  $got"
+                echo "If you ADDED a module on purpose, update \$want here and the SCOPE paragraph in"
+                echo "modules/selfimprove-open.nix — both, or the next reader inherits the same"
+                echo "mismatch between what ships and what the file says ships."
+                exit 1
+              fi
+              for f in agos_comms_shadow.py agos_comms_live.py; do
+                if [ -e "$engine/lib/agos/$f" ]; then
+                  echo "agos-engine-manifest: $f is shipping in the product image. It is the stack-side"
+                  echo "brain-comms shadow migration (a live-mesh observer), nothing in the engine"
+                  echo "imports it, and it has no business in a machine image. Remove it, or if this is"
+                  echo "intentional, say so in selfimprove-open.nix's SCOPE paragraph first."
+                  exit 1
+                fi
+              done
+              echo "agos-engine-manifest: the shipped engine is exactly the eight ($want) and the comms pair is absent"
+              touch $out
+            '';
+
         # Orchestration engine · Phase 1 — the `agos-events` append-only event-log library's CONTRACT
         # BATTERY. Proves, against the MULTI-WRITER-across-SyncThing reality Geist ruled load-bearing
         # (per-(topic,machine) single-writer files; merge-read ordered by ts→machine→id; per-(consumer,
