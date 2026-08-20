@@ -150,6 +150,18 @@ jobs:
           # "configured and inert" is /sys/class/watchdog/watchdog0/state on a booted guest with
           # a real emulated watchdog. Boots one small node with `-device i6300esb`.
           - test-watchdog-armed
+          # THE LOOP ITSELF. First entry here that is not a wall and not a recovery mechanism —
+          # it watches the agent OS doing its own work. Every HARNESS-MAP row read "BUILT +
+          # MERGED + INSTALLED, NEVER RUN", and that was accurate: the self-improvement loop had
+          # never executed anywhere, and the open lane had no VM coverage at all (every entry
+          # above composes baseModules; the engine ships open-lane only). The existing gates are
+          # exactly the well-formedness gates this file's header warns about — they prove the
+          # package builds, not that the timer is armed or that a digest lands, and
+          # modules/selfimprove-open.nix says so in its own header. Only a booted guest can tell
+          # "scheduled" from "installed and inert", which is the same distinction as
+          # RuntimeWatchdogUSec vs /sys/class/watchdog/watchdog0/state one entry up. Boots the
+          # OPEN image, so it is the heaviest node in this matrix.
+          - test-selfimprove-loop-runs
     steps:
       - name: Checkout
         # SHA-pinned, matching flake-check.yml: immutable commit of the newest v* release tag.
