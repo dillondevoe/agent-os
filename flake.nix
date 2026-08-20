@@ -976,6 +976,30 @@
               touch $out
             '';
 
+        # Self-improvement loop · the CADENCE RUNNER (agos_cycle) — the seam OBSERVE→COMPARE→PROPOSE.
+        # The three phases each had a green battery and NO CALLER; three libraries are not a loop, and
+        # the seam between them had never executed. So this battery drives the REAL agos_observe into
+        # the REAL agos_propose — nothing at the seam is faked, since a composition test that fakes the
+        # composition just re-proves the halves. Load-bearing rule: AN EMPTY CYCLE MUST SAY WHY IT WAS
+        # EMPTY — healthy / source MISSING / source UNREADABLE are three facts, and a self-improvement
+        # loop that reports perfect health while blind never stops looking fine. Case C pins the exact
+        # instance (the read half returns ([],0) for a missing file, identical to a clean log) and C2/E2
+        # are its control arms. D asserts the COMPOSITION is idempotent across cadence re-runs, which is
+        # a different claim from each half being idempotent. Contains no APPLY. Zero external deps.
+        agos-cycle-contract =
+          nixpkgs.legacyPackages.${system}.runCommand "agos-cycle-contract-check"
+            { nativeBuildInputs = [ nixpkgs.legacyPackages.${system}.python3 ]; } ''
+              work="$(mktemp -d)"
+              mkdir -p "$work/modules" "$work/tests"
+              cp ${./modules/agos_observe.py} "$work/modules/agos_observe.py"
+              cp ${./modules/agos_propose.py} "$work/modules/agos_propose.py"
+              cp ${./modules/agos_cycle.py}   "$work/modules/agos_cycle.py"
+              cp ${./tests/agos-cycle-contract.py} "$work/tests/agos-cycle-contract.py"
+              cd "$work"
+              python3 tests/agos-cycle-contract.py
+              touch $out
+            '';
+
         # Orchestration engine · Phase 1 part 2 — the SHADOW brain-comms migration's CONTRACT BATTERY
         # (agos_comms_shadow, atop agos_events). Observes + parallel-emits, changes NO routing (the live
         # `_done/`+dispatch-watchers stay truth). Proves the migration is faithful BEFORE any cutover:
