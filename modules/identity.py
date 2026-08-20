@@ -84,6 +84,31 @@ def preflight():
             raise IdentityError("key file %s is mode %o, must be %o" % (p, m, KEY_MODE))
 
 
+def _assert_recorded_name(name):
+    """Fail loud when the filesystem's answer to `name` is another participant's files.
+
+    File paths resolve by FILESYSTEM semantics, not name equality: on macOS (case-insensitive,
+    the dev box) "Alice" hits alice's key file; on the case-sensitive deployment target it does
+    not. PR #123 closed this for mint(); the read paths (pubkey_of, sign_as) had the same defect
+    — a case-variant name silently SIGNED WITH another participant's key, which is strictly worse
+    than handing back her npub. So the recorded-name assertion guards every path that resolves a
+    name to a key, not just the minting one. (Found gating PR #123, 2026-08-19 — the same class
+    the PR itself names, fixed on one path of three.)
+    """
+    pp = _participant_path(name)
+    if not os.path.exists(pp):
+        return  # no registry entry — an orphan key is preflight's problem, not a collision
+    recorded = None
+    for line in open(pp):
+        if line.startswith("name: "):
+            recorded = line[len("name: "):].strip(); break
+    if recorded is not None and recorded != name:
+        raise IdentityError(
+            "participant name collision: %r resolves to the existing key for %r "
+            "(case-insensitive filesystem). Refusing to return another participant's "
+            "key — pick a distinct name." % (name, recorded))
+
+
 def mint(name, role):
     """Mint a participant keypair + registry entry. Idempotent: an existing key is NEVER replaced.
 
@@ -97,24 +122,7 @@ def mint(name, role):
     kp = _key_path(name)
     if os.path.exists(kp):
         preflight()
-        # The idempotency branch resolves by FILE EXISTENCE, and file existence is a
-        # filesystem-semantics question, not a name-equality one. On macOS (case-insensitive,
-        # the dev box) mint("Alice") hits alice.key and would silently hand back ALICE's key and
-        # role; on the case-sensitive deployment target the same call mints a second, distinct
-        # identity. Same code, two different meanings for "who is this" — so assert the recorded
-        # name matches the requested one and fail loud on the divergence rather than picking a
-        # winner. (Found reviewing the gate's own fix, 2026-08-19.)
-        pp = _participant_path(name)
-        if os.path.exists(pp):
-            recorded = None
-            for line in open(pp):
-                if line.startswith("name: "):
-                    recorded = line[len("name: "):].strip(); break
-            if recorded is not None and recorded != name:
-                raise IdentityError(
-                    "participant name collision: %r resolves to the existing key for %r "
-                    "(case-insensitive filesystem). Refusing to return another participant's "
-                    "key — pick a distinct name." % (name, recorded))
+        _assert_recorded_name(name)
         return npub_of(name)
 
     # secrets.token_bytes is the CSPRNG; BIP-340 requires 1 <= d <= n-1, so reject the
@@ -153,6 +161,7 @@ def pubkey_of(name):
     if not os.path.exists(kp):
         raise IdentityError("no such participant: %s (expected %s)" % (name, kp))
     preflight()
+    _assert_recorded_name(name)
     return bip340.pubkey_gen(bytes.fromhex(open(kp).read().strip()))
 
 
@@ -161,6 +170,7 @@ def sign_as(name, msg):
     if len(msg) != 32:
         raise IdentityError("BIP-340 signs a 32-byte digest, got %d bytes" % len(msg))
     preflight()
+    _assert_recorded_name(name)
     sk = bytes.fromhex(open(_key_path(name)).read().strip())
     return bip340.schnorr_sign(msg, sk, secrets.token_bytes(32))
 

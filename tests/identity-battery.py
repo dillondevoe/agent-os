@@ -124,6 +124,27 @@ except identity.IdentityError as _e:
     check("C2. the collision error names both participants but NEVER key material",
           "Alice" in str(_e) and "alice" in str(_e) and _alice_secret not in str(_e))
 
+# -- C3. the SAME class on the READ paths (found gating PR #123 — mint was one path of three) --
+# pubkey_of("Alice") and sign_as("Alice") resolve the key file by filesystem semantics too; on a
+# case-insensitive fs the unguarded versions returned/signed-with ALICE's key, and silently
+# signing as another participant is strictly worse than handing back her npub. Branch-armed the
+# same way as C2: on a case-sensitive fs "Alice" is her own participant and both calls succeed
+# against her OWN key; on a case-insensitive fs both must fail loud.
+_c3_msg = bip340.tagged_hash("AgentOS/test-c3", b"\x04" * 32)
+try:
+    _pk_case = identity.pubkey_of("Alice")
+    check("C3. read path resolves case-variant to its OWN distinct key (case-sensitive fs)",
+          _pk_case != identity.pubkey_of("alice"))
+    _sig_case = identity.sign_as("Alice", _c3_msg)
+    check("C3. sign path: case-variant signature verifies ONLY against its own npub",
+          identity.verify(bech32.npub_encode(_pk_case), _c3_msg, _sig_case)
+          and not identity.verify(identity.npub_of("alice"), _c3_msg, _sig_case))
+except identity.IdentityError as _e3:
+    check("C3. read path (pubkey_of) fails loud on case-collision, never returns another's key",
+          "collision" in str(_e3))
+    check("C3. sign path (sign_as) fails loud on case-collision, never signs with another's key",
+          raises(lambda: identity.sign_as("Alice", _c3_msg), identity.IdentityError))
+
 # -- D. sign / verify --
 msg = bip340.tagged_hash("AgentOS/test", b"\x02" * 32)
 sig = identity.sign_as("alice", msg)
