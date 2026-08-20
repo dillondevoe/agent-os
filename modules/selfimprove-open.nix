@@ -1,11 +1,21 @@
 # modules/selfimprove-open.nix — install the orchestration engine and RUN the loop.
 #
 # ═══ WHY THIS FILE EXISTS ═══
-# Every `agos_*` module — events, subagents, advisor, lcm, observe, propose, cycle,
+# The eight engine modules — events, subagents, advisor, lcm, observe, propose, cycle,
 # surface — existed only as a CI FIXTURE. Each is referenced exactly once in flake.nix,
 # inside a `runCommand` test gate that copies it into a temp dir, runs its battery and
 # throws the copy away. Nothing installed any of them. Slices 3-6 of the HARNESS-MAP
 # build order were merged, gated, green, and ABSENT FROM EVERY RUNNING MACHINE.
+#
+# SCOPE — "the eight", not "every agos_*". There are TEN `agos_*.py`; `agos_comms_shadow.py`
+# and `agos_comms_live.py` are deliberately NOT shipped here. They are the brain-comms
+# SHADOW-migration onto agos-events (Rabbot's before/after readout, stack-side), nothing in
+# the engine imports them, and agos_cycle never reaches them. Installing them would package a
+# live-mesh observer into the product image for no reason. This paragraph exists because the
+# header originally read "Every `agos_*` module", which was false by two and would have let a
+# reader conclude the comms pair ships. Same status-word defect this module was written to end
+# — a line that means less than the reader assumes — so it gets corrected here rather than
+# excused.
 #
 # The give-away phrasing was "Dell deploy-verify pending", which implies something is on
 # the box waiting to be verified. Nothing was. A green battery proves a module WORKS; it
