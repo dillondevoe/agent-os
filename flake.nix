@@ -976,6 +976,33 @@
               touch $out
             '';
 
+        # Self-improvement loop · the SURFACING half of STORE (agos_surface). HARNESS-SELFIMPROVE
+        # instantiation B specifies the store as "markdown + SQLite mirror, SURFACED AS A BRAIN-COMM";
+        # the SQLite half shipped with OBSERVE, this is the surfacing half. It is the ONLY module in
+        # the loop that writes a file, so the battery's job is proving that write cannot become APPLY:
+        # writing `docs/lessons.md` (a proposal's TARGET) ENACTS the proposal, while writing a digest
+        # that SAYS a proposal is pending reports on it. emit() refuses any destination matching a
+        # carried proposal's target — including ./, //, .. and case variants, which is exactly how the
+        # check gets bypassed — and any deny-listed path, reusing PROPOSE's list rather than copying it.
+        # A2/B2 control-arm both guards (same basename allowed when nothing targets it; benign paths
+        # still written). Case C carries the third state to the layer a HUMAN reads: a blind cycle must
+        # not render as a quiet one, and an ABSENT cycle report is its own state rather than assumed
+        # healthy. E runs it against the real stores and asserts the proposal's target was never created
+        # on disk. Contains no APPLY. Zero external deps.
+        agos-surface-contract =
+          nixpkgs.legacyPackages.${system}.runCommand "agos-surface-contract-check"
+            { nativeBuildInputs = [ nixpkgs.legacyPackages.${system}.python3 ]; } ''
+              work="$(mktemp -d)"
+              mkdir -p "$work/modules" "$work/tests"
+              cp ${./modules/agos_observe.py} "$work/modules/agos_observe.py"
+              cp ${./modules/agos_propose.py} "$work/modules/agos_propose.py"
+              cp ${./modules/agos_surface.py} "$work/modules/agos_surface.py"
+              cp ${./tests/agos-surface-contract.py} "$work/tests/agos-surface-contract.py"
+              cd "$work"
+              python3 tests/agos-surface-contract.py
+              touch $out
+            '';
+
         # Self-improvement loop · the CADENCE RUNNER (agos_cycle) — the seam OBSERVE→COMPARE→PROPOSE.
         # The three phases each had a green battery and NO CALLER; three libraries are not a loop, and
         # the seam between them had never executed. So this battery drives the REAL agos_observe into
