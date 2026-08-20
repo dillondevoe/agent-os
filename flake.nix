@@ -782,6 +782,10 @@
               "agentos-open-imports: model-3b-open.nix is NOT imported — the additive NON-DEFAULT 2nd brain (agos-seed-model-3b, qwen2.5:3b-augur) is absent.";
             assert lib.assertMsg (hasPkg "agent-brain")
               "agentos-open-imports: genesis-open.nix is NOT imported — agent-brain (the genesis-locked soul-reading brain) missing from systemPackages.";
+            assert lib.assertMsg (hasPkg "agos-selfimprove")
+              "agentos-open-imports: selfimprove-open.nix is NOT imported — agos-selfimprove missing from systemPackages. The whole orchestration engine (observe/propose/cycle/surface/lcm/advisor/subagents) then exists ONLY as CI fixtures, green and absent from every machine, which is exactly the state this module was written to end.";
+            assert lib.assertMsg (builtins.hasAttr "agos-selfimprove" cfg.systemd.timers)
+              "agentos-open-imports: selfimprove-open.nix installs the engine but NOTHING RUNS IT — the agos-selfimprove timer is absent. A package nothing invokes is the same defect one step later.";
             assert lib.assertMsg (hasPkg "agos-calc")
               "agentos-open-imports: calculator-open.nix is NOT imported — agos-calc missing from systemPackages.";
             assert lib.assertMsg (hasPkg "agos-files")

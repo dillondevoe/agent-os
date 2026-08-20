@@ -81,6 +81,7 @@ in {
     ./modules/model-3b-open.nix   # additive, NON-DEFAULT 2nd brain (qwen2.5:3b-augur); default unchanged
     ./modules/model-lora-open.nix # seeds qwen3.5:9b-agentos (base + fine-tuned adapter); selected below
     ./modules/genesis-open.nix
+    ./modules/selfimprove-open.nix
     ./modules/calculator-open.nix
     ./modules/files-open.nix
     ./modules/email-open.nix
