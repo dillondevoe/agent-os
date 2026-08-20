@@ -22,6 +22,9 @@
 #   agos-comms-shadow-contract.py shadow-mode comms contract
 #   agos-comms-live-contract.py   live comms contract (exactly-once wake)
 #   audit-battery.sh              audit log (needs only bin/audit + scratch)
+#   audit-signing-battery.py      37 checks — BIP-340 signed audit records + every
+#                                 downgrade path (mid-chain drop, prefix strip + re-chain,
+#                                 uncheckable signer); control-armed both directions
 #   taint-battery.sh              taint tracking (bin/taint + bin/audit + scratch)
 #   mem-cap-battery.sh            memory capability round-trip
 #   file-cap-battery.sh           file.read/file.write capability round-trip + confinement
@@ -144,6 +147,10 @@ fi
 # audit-battery.sh <bin/audit> <scratch>
 if need "$BIN/audit" audit; then
   run audit bash "$T/audit-battery.sh" "$BIN/audit" "$SCRATCH/audit.d"
+fi
+# audit-signing-battery.py <bin/audit> <scratch>
+if need "$BIN/audit" audit-signing; then
+  run audit-signing "$PY" "$T/audit-signing-battery.py" "$BIN/audit" "$SCRATCH/audit-sig.d"
 fi
 # taint-battery.sh <bin/taint> <bin/audit> <scratch>
 if need "$BIN/taint" taint; then

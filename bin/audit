@@ -28,6 +28,29 @@ Commands:
 Directory is $AGENT_OS_AUDIT_DIR (default /var/lib/agent-os/audit).
 Exit codes: 0 ok; NON-ZERO on ANY failure (fail-closed). The broker MUST gate
 execution on `append` returning 0 — a non-zero exit means the action must not run.
+
+SIGNING (Phase 1.5B slice 3, task 287) — $AGENT_OS_AUDIT_SIGNER
+--------------------------------------------------------------
+Set $AGENT_OS_AUDIT_SIGNER=<participant> and every appended record is BIP-340
+signed by that participant (modules/identity.py) over the canonical record bytes,
+carrying `signer` + `sig`. Both are RESERVED, so a caller cannot supply either.
+
+What this adds that the chain alone cannot give: the chain has NO SECRET in it, so
+an actor who can write the file may drop the tail and re-fabricate a valid canonical
+chained suffix. Signatures close that — a suffix-rewriter cannot produce signatures
+that verify against the participants' registered pubkeys. The chain hash covers the
+FINAL line (signature included), so the two compose rather than layer.
+
+Downgrade is the obvious way to defeat this, so verify guards it WITHOUT config:
+once any record in the chain is signed, every LATER record must be signed too. An
+attacker who rewrites a signed suffix with unsigned records is caught by that rule,
+not by an operator having remembered to set a flag. $AGENT_OS_AUDIT_REQUIRE_SIGNED=1
+additionally demands signatures from genesis (for a log born signed).
+
+Signing is FAIL-CLOSED end to end: with a signer configured, an unimportable identity
+module, an unknown/unattributable participant, or any signing error means the record
+is not written and the action does not run. An audit record that silently lost its
+signature is the same breach as one that was never written.
 """
 import sys
 import os
@@ -37,7 +60,60 @@ import time
 import fcntl
 
 GENESIS = "0" * 64          # prev-hash of the first record
-RESERVED = ("seq", "prev", "ts", "hash")   # broker-stamped; never caller-supplied
+# Broker-stamped; never caller-supplied. `signer`/`sig` are here for the same reason as
+# seq/prev: a record that can name its own signer can name someone else's.
+RESERVED = ("seq", "prev", "ts", "hash", "signer", "sig")
+
+# BIP-340 signs a 32-byte digest. Tagged-hash the canonical record bytes so an audit
+# signature can never be replayed as a signature over anything else in this system
+# (the boot self-test uses its own tag for the same reason).
+SIG_TAG = "AgentOS/audit-record-v1"
+
+SIGNER_ENV = "AGENT_OS_AUDIT_SIGNER"
+REQUIRE_SIGNED_ENV = "AGENT_OS_AUDIT_REQUIRE_SIGNED"
+
+
+class SigningUnavailable(RuntimeError):
+    """The identity layer could not be reached or used. Never carries key material."""
+
+
+def _identity():
+    """Import modules/identity.py, or raise. NEVER returns a stub that no-ops.
+
+    bin/audit ships to the Nix store as a LONE FILE (modules/audit-pkg.nix installs
+    `${../bin/audit}`), so `../modules` relative to this file does not exist in
+    production — the wrapper pins $AGENT_OS_MODULES. The repo-relative path is the
+    development/battery fallback, tried second so a pinned production path always wins.
+    """
+    import importlib
+    cands = []
+    env = os.environ.get("AGENT_OS_MODULES")
+    if env:
+        cands.append(env)
+    cands.append(os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))),
+                              "modules"))
+    for d in cands:
+        if os.path.isfile(os.path.join(d, "identity.py")):
+            if d not in sys.path:
+                sys.path.insert(0, d)
+            try:
+                return importlib.import_module("identity"), importlib.import_module("bip340")
+            except Exception as e:                       # noqa: BLE001 — fail closed on ANY
+                raise SigningUnavailable("identity module at %s is unusable: %s" % (d, e))
+    raise SigningUnavailable(
+        "identity module not found (looked in: %s) — set $AGENT_OS_MODULES" % ", ".join(cands))
+
+
+def record_digest(rec):
+    """32-byte digest over the record WITHOUT its signature fields.
+
+    Signing covers seq/prev/ts as well as the payload: a signature over the payload
+    alone would still verify after an actor moved the record to a different position
+    in the chain, which is precisely the reorder the chain exists to catch.
+    """
+    _, bip340 = _identity()
+    unsigned = {k: v for k, v in rec.items() if k not in ("signer", "sig")}
+    return bip340.tagged_hash(SIG_TAG, canonical(unsigned).encode("utf-8"))
 
 
 def log_path():
@@ -136,6 +212,32 @@ def cmd_append(argv):
         rec["seq"] = seq + 1
         rec["prev"] = prev
         rec["ts"] = utc_now()
+
+        # Sign BEFORE the line is formed: the signature is part of the record, and the
+        # chain hash below covers the signed line. Any failure here returns without
+        # writing — an action whose record cannot be signed is as unaudited as one whose
+        # record cannot be written, and no-log->no-execute does not distinguish them.
+        signer = os.environ.get(SIGNER_ENV)
+        if signer is not None:
+            signer = signer.strip()
+            # A SET-but-empty $AGENT_OS_AUDIT_SIGNER is refused rather than read as
+            # "unsigned". Treating it as unsigned would turn a mis-exported variable into
+            # a silent downgrade of every subsequent record — the one failure this whole
+            # slice exists to make impossible.
+            if not signer:
+                sys.stderr.write("audit append: %s is set but empty — refusing to append "
+                                 "unsigned under a configured signer\n" % SIGNER_ENV)
+                return 5
+            try:
+                identity, _bip = _identity()
+                sig = identity.sign_as(signer, record_digest(rec))
+            except Exception as e:                       # noqa: BLE001 — fail closed on ANY
+                sys.stderr.write("audit append: signing failed as %r (no-log->no-execute): "
+                                 "%s\n" % (signer, e))
+                return 5
+            rec["signer"] = signer
+            rec["sig"] = sig.hex()
+
         line = canonical(rec)
         h = line_hash(line)
         # O_APPEND: kernel positions each write at EOF atomically; never O_TRUNC, never
@@ -185,6 +287,12 @@ def cmd_verify(argv):
     prev = GENESIS
     expect_seq = 0
     n = 0
+    signed_n = 0
+    # No-downgrade rule: once the log is signed it stays signed. This needs no operator
+    # config on purpose — a suffix-rewrite whose fabricated records simply omit `sig`
+    # would otherwise verify clean, which would make the signatures decorative.
+    require_signed = os.environ.get(REQUIRE_SIGNED_ENV, "").strip() not in ("", "0")
+    seen_signed = False
     with open(path, "r", encoding="utf-8") as f:
         for lineno, raw in enumerate(f, 1):
             line = raw.rstrip("\n")
@@ -208,10 +316,47 @@ def cmd_verify(argv):
             if canonical(rec) != line:
                 sys.stderr.write("audit verify: line %d is not canonical form — edited\n" % lineno)
                 return 1
+            has_sig, has_signer = ("sig" in rec), ("signer" in rec)
+            if has_sig != has_signer:
+                sys.stderr.write("audit verify: line %d carries %s without %s — a half-signed "
+                                 "record is not a signed record\n"
+                                 % (lineno, "sig" if has_sig else "signer",
+                                    "signer" if has_sig else "sig"))
+                return 1
+            if has_sig:
+                if not isinstance(rec["signer"], str) or not isinstance(rec["sig"], str):
+                    sys.stderr.write("audit verify: line %d signer/sig are not strings\n" % lineno)
+                    return 1
+                try:
+                    identity, _bip = _identity()
+                    ok = identity.verify(identity.npub_of(rec["signer"]),
+                                         record_digest(rec), bytes.fromhex(rec["sig"]))
+                except Exception as e:                   # noqa: BLE001 — fail closed on ANY
+                    # Includes: identity layer unreachable, unknown participant, an
+                    # unattributable key (identity's own fail-closed guards), malformed hex.
+                    # An unCHECKABLE signature is treated as a failed one — the opposite
+                    # would let an actor pass verify by deleting the signer's registry entry.
+                    sys.stderr.write("audit verify: line %d signature could not be checked "
+                                     "for signer %r: %s\n" % (lineno, rec.get("signer"), e))
+                    return 1
+                if not ok:
+                    sys.stderr.write("audit verify: BAD SIGNATURE at line %d (seq %s, signer %r)\n"
+                                     % (lineno, rec.get("seq"), rec["signer"]))
+                    return 1
+                seen_signed = True
+                signed_n += 1
+            elif seen_signed or require_signed:
+                sys.stderr.write("audit verify: UNSIGNED record at line %d (seq %s) — %s\n"
+                                 % (lineno, rec.get("seq"),
+                                    "the log is signed from an earlier record; signing cannot "
+                                    "be dropped mid-chain" if seen_signed else
+                                    "%s demands a signature on every record" % REQUIRE_SIGNED_ENV))
+                return 1
             prev = line_hash(line)
             expect_seq += 1
             n += 1
-    print("audit verify: OK — %d records, chain intact" % n)
+    print("audit verify: OK — %d records, chain intact%s"
+          % (n, ", %d signed" % signed_n if signed_n else ""))
     return 0
 
 
