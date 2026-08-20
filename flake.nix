@@ -949,6 +949,33 @@
               touch $out
             '';
 
+        # Self-improvement loop · phase PROPOSE — CONTRACT BATTERY (agos_propose).
+        # Phase 3 of 4 for instantiation B, and a SEPARATE module from agos_observe on purpose:
+        # OBSERVE's header forbids growing an act-path inside the read half, and this file honours
+        # the same rule one level down. APPLY is NOT here — Dillon's open Q1 (does APPLY ever
+        # auto-merge?) governs APPLY, not this; a PROPOSE that emits a record and stops is inside
+        # EVERY possible answer to Q1, which is why it is shippable now.
+        # The load-bearing rule: A PROPOSAL IS A DOCUMENT, NEVER AN ACTION — case A asserts that
+        # STRUCTURALLY (no subprocess/shutil/urllib/socket import, no apply/merge/commit/push entry
+        # point, no file opened for writing). Case B is the blast-radius floor, with the gate
+        # definition ITSELF on the deny list and traversal normalised so it cannot be walked around.
+        # Case E drives a FORBIDDEN target through the REAL propose() path and watches it go red —
+        # Augur's insistence that a green security leg needs the run where it fails — and E2 is its
+        # control arm (an allowed target on the same path must emit, or "refused" is just what the
+        # module does to everything). Case C proves REJECTED is TERMINAL and keyed on CONTENT hash,
+        # so trivial rewording cannot resurrect a rejected proposal by attrition. Case D control-arms
+        # the drafter itself. Zero external deps; a regression fails `nix flake check`.
+        agos-propose-contract =
+          nixpkgs.legacyPackages.${system}.runCommand "agos-propose-contract-check"
+            { nativeBuildInputs = [ nixpkgs.legacyPackages.${system}.python3 ]; } ''
+              work="$(mktemp -d)"
+              cp ${./modules/agos_propose.py} "$work/agos_propose.py"
+              cp ${./tests/agos-propose-contract.py} "$work/contract.py"
+              cd "$work"
+              python3 contract.py
+              touch $out
+            '';
+
         # Orchestration engine · Phase 1 part 2 — the SHADOW brain-comms migration's CONTRACT BATTERY
         # (agos_comms_shadow, atop agos_events). Observes + parallel-emits, changes NO routing (the live
         # `_done/`+dispatch-watchers stay truth). Proves the migration is faithful BEFORE any cutover:
