@@ -230,6 +230,19 @@
           pkgs = nixpkgs.legacyPackages.${system};
           inherit baseModules;
         };
+
+        # The self-improvement loop, RUN on a booted machine. This is the only evidence in the
+        # tree that `agos_cycle.main()` has ever been called by anything other than a battery
+        # calling it directly: the engine shipped with a module manifest, an import guard and
+        # 74 green contract checks while never once executing on any machine.
+        # NOTE it composes `openModules`, not `baseModules` — the engine ships in the open
+        # image only, and this is the first behavioural VM test the open lane has.
+        # Out of `checks` for the same reason as its siblings: it boots a VM.
+        #   nix build .#test-selfimprove-loop-runs
+        test-selfimprove-loop-runs = import ./tests/selfimprove-loop-runs.nix {
+          pkgs = nixpkgs.legacyPackages.${system};
+          inherit openModules;
+        };
       };
 
       checks.${system} = {

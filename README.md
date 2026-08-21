@@ -142,6 +142,53 @@ under the flake check.
 
 ---
 
+## The open variant does not build on your machine
+
+Stated plainly because it is not otherwise discoverable, and someone will otherwise lose a CI
+run finding out (2026-08-20, PR #136, dead at 2m25s having never booted a VM).
+
+`nixosConfigurations.agentos-open` — and therefore any VM test that composes `openModules` —
+**cannot be built on a machine that has not staged a particular GGUF by hand.**
+`modules/model-3b-open.nix` pins the 3B Augur switchboard weights as a fixed-output derivation
+with **no fetcher**: its builder's whole job is to print the staging command and exit 1.
+
+```
+nix-store --add-fixed sha256 /path/to/qwen2.5-3b-augur-q4_k_m.gguf
+```
+
+`configuration-open.nix` imports that module unconditionally, so the blob is in the closure of
+the whole open system. Evaluation succeeds; the **build** fails. `modules/model-open.nix` is a
+milder version of the same thing — buildable, but it pulls a multi-gigabyte 9B from HuggingFace
+on any store that lacks it.
+
+**The consequence, which matters more than the inconvenience.** The sealed lane has seven
+behavioural VM tests in the slow lane. The open lane — which is where the *entire Agent OS
+engine* ships, since `modules/selfimprove-open.nix` and the `agos_*` engine are open-lane only —
+had none, and structurally could not have any, because no CI runner can build the image. That
+asymmetry looked like a gap in effort. It was a gap in *possibility*, and nothing in this repo
+said so.
+
+**Working around it, if you are writing an open-lane test.** Disable the seed units in your test
+node, which drops the weights from the closure because they are referenced only through the unit
+scripts (`tests/selfimprove-loop-runs.nix` does this; qwen paths in its derivation closure go
+6 → 0):
+
+```nix
+systemd.services.agos-seed-model-3b.enable = false;
+systemd.services.agos-seed-model.enable    = false;
+systemd.services.agos-seed-lora.enable     = false;
+```
+
+That makes *your test* runnable anywhere. It does **not** mean the open image as shipped is
+covered by CI — it is not, and a green from such a test must not be read as saying otherwise.
+Say so in the test file, as that one does.
+
+Whether to fix this properly — publish the 3B GGUF as a release asset and use `fetchurl` (the
+precedent exists in-repo: `modules/model-lora-open.nix` already does exactly that for the LoRA
+adapter), or gate the model modules behind an option — is an open decision, tracked as task 317.
+
+---
+
 ## License
 
 MIT — see [LICENSE](LICENSE). Take it, fork it, build your own. That's the point.

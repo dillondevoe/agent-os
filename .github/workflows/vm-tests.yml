@@ -33,6 +33,16 @@
 # existed — because nobody edits it thinking "egress". A filter is a claim about what is covered,
 # and a claim narrower than the thing it guards reads exactly like full coverage.
 
+# OPEN-LANE CONSTRAINT, at the point of use. Before adding an open-lane entry to the matrix
+# below: `agentos-open` does NOT build on a runner. modules/model-3b-open.nix pins the 3B
+# weights as a fixed-output derivation with no fetcher — its builder prints a
+# `nix-store --add-fixed` command and exits 1 — and configuration-open.nix imports it
+# unconditionally, so the blob is in the closure of the whole open system. Evaluation passes,
+# the build fails; PR #136's first run died there at 2m25s having never booted. Disable the
+# seed units in your test node (see tests/selfimprove-loop-runs.nix, DEVIATION 2), and do not
+# let the resulting green be read as coverage of the shipped open image. Full write-up in
+# README.md; the real fix is task 317.
+
 name: vm-tests (slow lane)
 
 on:
@@ -150,6 +160,18 @@ jobs:
           # "configured and inert" is /sys/class/watchdog/watchdog0/state on a booted guest with
           # a real emulated watchdog. Boots one small node with `-device i6300esb`.
           - test-watchdog-armed
+          # THE LOOP ITSELF. First entry here that is not a wall and not a recovery mechanism —
+          # it watches the agent OS doing its own work. Every HARNESS-MAP row read "BUILT +
+          # MERGED + INSTALLED, NEVER RUN", and that was accurate: the self-improvement loop had
+          # never executed anywhere, and the open lane had no VM coverage at all (every entry
+          # above composes baseModules; the engine ships open-lane only). The existing gates are
+          # exactly the well-formedness gates this file's header warns about — they prove the
+          # package builds, not that the timer is armed or that a digest lands, and
+          # modules/selfimprove-open.nix says so in its own header. Only a booted guest can tell
+          # "scheduled" from "installed and inert", which is the same distinction as
+          # RuntimeWatchdogUSec vs /sys/class/watchdog/watchdog0/state one entry up. Boots the
+          # OPEN image, so it is the heaviest node in this matrix.
+          - test-selfimprove-loop-runs
     steps:
       - name: Checkout
         # SHA-pinned, matching flake-check.yml: immutable commit of the newest v* release tag.
