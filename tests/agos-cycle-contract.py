@@ -283,6 +283,68 @@ with tempfile.TemporaryDirectory() as tmp:
     check("F4: main() actually wrote it", os.path.exists(os.path.join(tmp, "d.md")))
 
 
+print("G. ADVISOR SOURCE — row 4's runtime caller: findings flow through OBSERVE, read-only")
+import agos_events as E          # noqa: E402 — deliberately late: only these arms need it
+with tempfile.TemporaryDirectory() as tmp:
+    edir = os.path.join(tmp, "events")
+    log = E.EventLog(edir, "testbox")
+    # One stalled corr: an open request, quiet since well past the 900s threshold.
+    log.emit("work", "request", {"what": "x"}, corr_id="c-1", actor="t",
+             ts="2026-01-01T00:00:00Z")
+    ls, ps = stores(tmp, "g")
+    rep = C.cycle(ls, ps, [C.advisor_source(edir, "work")])
+    check("G: source read", rep["sources"]["advisor"]["state"] == "read")
+    check("G: the stall arrived as a signal", rep["observed"]["examined"] >= 1)
+    check("G: recorded as new", rep["observed"]["new"] >= 1)
+    check("G: read-only — no advice topic was written",
+          not os.path.exists(os.path.join(edir, "work-advice.jsonl"))
+          and not any("advice" in n for n in os.listdir(edir)))
+    # Same stall re-observed = the SAME ongoing incident: a no-op, not recurrence.
+    rep2 = C.cycle(ls, ps, [C.advisor_source(edir, "work")])
+    check("G: persistent stall does not fabricate recurrence",
+          rep2["observed"]["new"] == 0 and rep2["observed"]["promoted"] == [])
+    # A SECOND stalled corr_id is a distinct occurrence of the pattern → promotion at 2.
+    log.emit("work", "request", {"what": "y"}, corr_id="c-2", actor="t",
+             ts="2026-01-01T00:00:00Z")
+    rep3 = C.cycle(ls, ps, [C.advisor_source(edir, "work")])
+    check("G: two distinct stalls promote the pattern", len(rep3["observed"]["promoted"]) == 1)
+    ls.close(); ps.close()
+
+print("G2. CONTROL — no events dir: the source is MISSING, not silently empty")
+with tempfile.TemporaryDirectory() as tmp:
+    ls, ps = stores(tmp, "g2")
+    rep = C.cycle(ls, ps, [C.advisor_source(os.path.join(tmp, "nope"), "work")])
+    check("G2: state is missing", rep["sources"]["advisor"]["state"] == "missing")
+    check("G2: and the cycle says it was blind", rep["blind"])
+    ls.close(); ps.close()
+
+print("G3. CONTROL — a healthy stream fires nothing: read, zero signals")
+with tempfile.TemporaryDirectory() as tmp:
+    edir = os.path.join(tmp, "events")
+    log = E.EventLog(edir, "testbox")
+    log.emit("work", "request", {"what": "x"}, corr_id="c-1", actor="t")
+    log.emit("work", "done", {}, corr_id="c-1", actor="t")
+    ls, ps = stores(tmp, "g3")
+    rep = C.cycle(ls, ps, [C.advisor_source(edir, "work")])
+    check("G3: read", rep["sources"]["advisor"]["state"] == "read")
+    check("G3: zero signals from a healthy stream", rep["sources"]["advisor"]["signals"] == 0)
+    ls.close(); ps.close()
+
+print("G4. run() defaults include the advisor source alongside turnlog")
+with tempfile.TemporaryDirectory() as tmp:
+    turnlog(tmp, "turns.jsonl", [SPIKE, dict(SPIKE, hops=4)])
+    os.environ["AGENT_OS_TURN_LOG"] = os.path.join(tmp, "turns.jsonl")
+    os.environ["AGOS_EVENTS_DIR"] = os.path.join(tmp, "events")  # absent → MISSING
+    try:
+        rep, path, text = C.run(os.path.join(tmp, "l.db"), os.path.join(tmp, "p.db"),
+                                os.path.join(tmp, "d.md"))
+        check("G4: advisor is in the default source table", "advisor" in rep["sources"])
+        check("G4: absent events dir reads MISSING, and the cycle is NOT blind",
+              rep["sources"]["advisor"]["state"] == "missing" and not rep["blind"])
+    finally:
+        del os.environ["AGENT_OS_TURN_LOG"]
+        del os.environ["AGOS_EVENTS_DIR"]
+
 print()
 print("%d checks, %d failures" % (CHECKS, len(FAILS)))
 for f in FAILS:

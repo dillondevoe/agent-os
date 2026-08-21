@@ -89,6 +89,56 @@ def turnlog_source(path=None):
     )
 
 
+def advisor_source(events_dir=None, topic=None):
+    """The advisor's findings as an OBSERVE input. READ ONLY, and that is load-bearing.
+
+    This is HARNESS-MAP row 4's first runtime caller. It runs the advisor's RULES over the
+    events stream directly — it does NOT call Advisor.observe(), because observe() emits
+    advice events, and cycle() promises to write nothing. The advice topic stays the
+    Advisor's own channel for whenever an orchestration runtime runs one live; this source
+    only lets the self-improvement loop SEE what the rules see.
+
+    Two shapes here are deliberate:
+    - Signal.detail is STABLE PER RULE (no corr_id, no ages). sig_id hashes type+detail, so
+      per-incident detail would give every stall its own signal and recurrence could never
+      be detected. The specific corr_id lives in the occ_key instead — that is exactly the
+      pattern-vs-occurrence split agos_observe.Signal documents.
+    - occ_key is the Finding's own dedup key. A stall that persists across two cadence runs
+      is ONE ongoing incident, not two occurrences of the pattern — re-reading it must be a
+      no-op. Recurrence (promotion at threshold 2) therefore requires two DISTINCT stalled
+      corr_ids, not one stall observed twice.
+    """
+    events_dir = events_dir or os.environ.get("AGOS_EVENTS_DIR", "/var/lib/agos-events")
+    topic = topic or os.environ.get("AGOS_ADVISOR_TOPIC", "work")
+
+    def read():
+        import time as _time
+        import agos_events as E
+        import agos_advisor as A
+        log = E.EventLog(events_dir)
+        stream = A.Stream(topic, log.read(topic), _time.time())
+        signals = []
+        for rule in A.DEFAULT_RULES:
+            # A raising rule is UNREADABLE-by-proxy: let it propagate so collect() records
+            # this source unreadable rather than presenting a half-run rule set as healthy.
+            for f in rule(stream) or []:
+                sig_type = O.STALLED_WORK if f.rule == "stalled-work" \
+                    else f.rule.upper().replace("-", "_")
+                signals.append(O.Signal(
+                    sig_type,
+                    "advisor rule %s fired (%s)" % (f.rule, f.level),
+                    O._occ_key("advisor", "local", f.key),
+                    source="advisor",
+                ))
+        return signals, 0
+
+    return Source(
+        "advisor",
+        read,
+        lambda: os.path.isdir(events_dir),
+    )
+
+
 def collect(sources):
     """Read every source. Returns (signals, per-source status dict).
 
@@ -221,7 +271,8 @@ def run(lesson_db, prop_db, digest, sources=None):
     ls = O.LessonStore(lesson_db)
     ps = P.ProposalStore(prop_db)
     try:
-        report = cycle(ls, ps, sources if sources is not None else [turnlog_source()])
+        report = cycle(ls, ps, sources if sources is not None
+                       else [turnlog_source(), advisor_source()])
         try:
             path, text = S.surface(digest, ls, ps, cycle_report=report)
         except S.ApplyBoundary as exc:
