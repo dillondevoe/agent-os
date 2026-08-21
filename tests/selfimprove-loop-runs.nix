@@ -103,6 +103,24 @@ pkgs.testers.runNixOSTest {
     # so the only thing that unit contributes here is five minutes of wall clock and a
     # screenful of DNS failures. The DAEMON stays enabled; only the auto-join is stubbed.
     systemd.services.tailscaled-autoconnect.enable = false;
+
+    # DEVIATION 2, and the reason this test could not run in CI at all until it was made.
+    # The open image bundles three model-seed units. `agos-seed-model-3b` pulls in a
+    # HASH-PINNED FIXED-OUTPUT GGUF that has no fetcher: its builder's only job is to print
+    # `nix-store --add-fixed sha256 ...` and exit 1. The blob is staged by hand, and it is
+    # staged in exactly one Nix store on earth — DVo's. So the open image is UNBUILDABLE on
+    # any machine that does not already have it, GitHub runners included; the first CI run of
+    # this test died there in 2m25s, having never booted anything. `agos-seed-model` is
+    # buildable but fetches a multi-gigabyte 9B from HuggingFace on every cold runner.
+    #
+    # Disabling the units drops the store paths from the closure, because the weights are
+    # referenced only through the unit scripts. That is the honest scope of this test: the
+    # subject is the SELF-IMPROVEMENT LOOP, which neither loads a model nor talks to ollama.
+    # It is NOT a claim that the open image as shipped builds in CI — it does not, and that
+    # is a real gap in the open lane rather than a property of this file. Filed separately.
+    systemd.services.agos-seed-model-3b.enable = false;
+    systemd.services.agos-seed-model.enable = false;
+    systemd.services.agos-seed-lora.enable = false;
   };
 
   testScript = ''
