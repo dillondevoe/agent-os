@@ -250,6 +250,50 @@ rec = json.loads(lines()[0])
 check("H. a caller cannot override WHO signed", rec["signer"] == "broker")
 check("H. the forged-attribution log still verifies", verify().returncode == 0)
 
+# -- I. signer PIN: AGENT_OS_AUDIT_REQUIRE_SIGNED=<participant> (PR #126 finding A) --
+# Unpinned verify accepts a signature from ANY registered participant, so an actor holding
+# a low-trust participant's key AND log write can drop the tail and re-sign a fabricated
+# suffix as themselves. This arm REPRODUCES that attack (it must still pass under `=1`,
+# which is the finding) and then shows the pin rejecting it. No arm covered this before.
+identity.mint("lowtrust", "os-agent")
+
+
+def truncate_to(n):
+    keep = lines()[:n]
+    with open(LOG, "w") as f:
+        f.write("".join(ln + "\n" for ln in keep))
+
+
+reset()
+for c in ("a", "b", "c"):
+    run({"cap": c}, signer="broker")
+check("I. control arm: the honest 3-record broker log verifies under the pin",
+      verify(require="broker").returncode == 0 and len(lines()) == 3)
+
+truncate_to(1)                                   # drop the tail...
+r = run({"cap": "forged"}, signer="lowtrust")    # ...and re-sign a suffix as ANOTHER participant
+check("I. the attacker's suffix appends cleanly (chain is re-derived, not secret)",
+      r.returncode == 0 and len(lines()) == 2)
+check("I. finding A reproduced: the rewritten log passes UNPINNED verify",
+      verify().returncode == 0)
+check("I. finding A reproduced: ...and still passes with =1 ('signed by anyone')",
+      verify(require="1").returncode == 0)
+out = verify(require="broker")
+check("I. THE FIX: =broker rejects the suffix, naming the wrong signer",
+      out.returncode != 0 and "WRONG SIGNER" in out.stderr and "lowtrust" in out.stderr)
+
+truncate_to(1)                                   # same tamper shape, SAME signer
+run({"cap": "honest-suffix"}, signer="broker")
+check("I. control arm: a same-signer suffix still passes the pin — the pin tests WHO "
+      "signed, not that the tail was rewritten",
+      verify(require="broker").returncode == 0)
+
+reset()                                          # an unsigned record under a pin
+run({"cap": "a"})
+check("I. a pin also demands signatures from genesis (unsigned log rejected)",
+      verify(require="broker").returncode != 0)
+check("I. control arm: that same log passes with the pin unset", verify().returncode == 0)
+
 if os.environ.get("AUDIT_SIG_KEEP_SCRATCH") != "1" and len(sys.argv) <= 2:
     shutil.rmtree(SCRATCH, ignore_errors=True)
 print("audit-signing-battery: " + ("PASS" if EX == 0 else "FAIL"))

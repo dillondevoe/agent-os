@@ -24,6 +24,17 @@
 # unreachable rather than merely off, and a control that cannot fire is a claim, not a control.
 # Signing stays OFF unless the operator sets $AGENT_OS_AUDIT_SIGNER; WHICH participant the
 # broker signs as is a deploy decision, deliberately not baked in here.
+#
+# DEPLOY-COUPLING RULE (PR #126 finding G, Geist): any deployment that sets
+# $AGENT_OS_AUDIT_SIGNER MUST also set $AGENT_OS_AUDIT_REQUIRE_SIGNED, and should set it to
+# the SAME participant name rather than to `1`. Reason, both measured on PR head:
+#   - Without the flag, a whole-log rewrite to all-unsigned FROM GENESIS verifies clean
+#     (the no-downgrade rule has no earlier signed record left to anchor on).
+#   - With `=1`, an actor holding ANY registered participant's key can drop the tail and
+#     re-sign a fabricated suffix as themselves; `=<participant>` is what rejects that.
+# It is not exported here because it is not this wrapper's decision to make: the signer name
+# is a deploy input, and a hardcoded pin that disagreed with $AGENT_OS_AUDIT_SIGNER would
+# fail verify on a correct log. The rule belongs with whoever wires the signer.
 pkgs.writeShellScriptBin "audit" ''
   export AGENT_OS_AUDIT_DIR=/var/lib/agent-os/audit
   export AGENT_OS_MODULES=${../modules}

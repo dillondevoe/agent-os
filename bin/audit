@@ -45,7 +45,21 @@ Downgrade is the obvious way to defeat this, so verify guards it WITHOUT config:
 once any record in the chain is signed, every LATER record must be signed too. An
 attacker who rewrites a signed suffix with unsigned records is caught by that rule,
 not by an operator having remembered to set a flag. $AGENT_OS_AUDIT_REQUIRE_SIGNED=1
-additionally demands signatures from genesis (for a log born signed).
+additionally demands signatures from genesis (for a log born signed), and
+$AGENT_OS_AUDIT_REQUIRE_SIGNED=<participant> demands that every record be signed BY
+THAT participant. `0`/empty (off) and `1` (by anyone) are therefore reserved values
+and cannot name a participant.
+
+The pin exists because unpinned verify accepts a signature from ANY registered
+participant, and the docstring here used to overclaim on exactly that point (Geist,
+PR #126 finding A): the sentence above is true only of a rewriter holding NO
+registered key. An actor who holds a low-trust participant's key AND log write can
+drop the tail and re-sign a fabricated suffix as themselves — clean rc=0, even under
+`=1`. This design has the broker sign as ONE env-configured participant, so pinning
+verify to that same name is cheap and closes it. DEPLOY-COUPLING RULE (finding G):
+any deployment that sets $AGENT_OS_AUDIT_SIGNER MUST also set
+$AGENT_OS_AUDIT_REQUIRE_SIGNED, ideally to that signer's name — a whole-log rewrite
+to all-unsigned-from-genesis verifies clean without it.
 
 Signing is FAIL-CLOSED end to end: with a signer configured, an unimportable identity
 module, an unknown/unattributable participant, or any signing error means the record
@@ -291,7 +305,12 @@ def cmd_verify(argv):
     # No-downgrade rule: once the log is signed it stays signed. This needs no operator
     # config on purpose — a suffix-rewrite whose fabricated records simply omit `sig`
     # would otherwise verify clean, which would make the signatures decorative.
-    require_signed = os.environ.get(REQUIRE_SIGNED_ENV, "").strip() not in ("", "0")
+    _require_raw = os.environ.get(REQUIRE_SIGNED_ENV, "").strip()
+    require_signed = _require_raw not in ("", "0")
+    # A value other than the reserved "1" names the participant every record must be
+    # signed BY. Without this, verify accepts any registered signer — see the module
+    # docstring (PR #126 finding A).
+    pinned_signer = _require_raw if require_signed and _require_raw != "1" else None
     seen_signed = False
     with open(path, "r", encoding="utf-8") as f:
         for lineno, raw in enumerate(f, 1):
@@ -342,6 +361,12 @@ def cmd_verify(argv):
                 if not ok:
                     sys.stderr.write("audit verify: BAD SIGNATURE at line %d (seq %s, signer %r)\n"
                                      % (lineno, rec.get("seq"), rec["signer"]))
+                    return 1
+                if pinned_signer is not None and rec["signer"] != pinned_signer:
+                    sys.stderr.write("audit verify: WRONG SIGNER at line %d (seq %s): signed by %r, "
+                                     "but %s pins every record to %r\n"
+                                     % (lineno, rec.get("seq"), rec["signer"],
+                                        REQUIRE_SIGNED_ENV, pinned_signer))
                     return 1
                 seen_signed = True
                 signed_n += 1
