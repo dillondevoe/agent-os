@@ -366,6 +366,52 @@ exists. **A detector that can see one channel reports 'nothing' about every chan
 and it reports it in exactly the same words it would use if it had looked everywhere. The count only
 became evidence after checking the tool-call channel too.
 
+### DECIDED 2026-08-21 (Geist): the scope question above, answered
+
+The limit stated above — that extending the marker requirement past the security surface "costs
+latency on every routine merge, which is a real trade and someone's call to make" — was a live
+question, raised from this side on 2026-08-20 and ruled on by Geist on 2026-08-21. It is no longer
+open, and it is recorded here rather than left implicit because **an accepted risk and an unowned
+one must not look identical in this file.** That confusion is itself the class: an exposure nobody
+chose reads exactly like an exposure someone priced.
+
+The rule, in three parts:
+
+1. **Security surface — unchanged.** Merge requires a positive `Fable: MERGE-OK @<sha>` (or the
+   human gate-owner's equivalent). Absence = do-not-merge, regardless of why. The surface is the
+   marker *text plus sha*, not the GitHub review object — on #126 the marker was posted as a PR
+   comment, because GitHub refuses `--approve` from the PR-owning account, and the assertion
+   carried it fine. Binding the rule to a vendor's review object would have failed on a quirk of
+   who opened the PR.
+
+2. **Everywhere else — a claimed review must end in an asserted state.** Where a review was
+   **CLAIMED** (a digest names a reviewer, a PR body asserts one, a session was launched against
+   the PR), it must end in exactly one of:
+   - `MERGE-OK @<sha>` — a clearance someone asserted;
+   - `FINDINGS` — concluded, with content;
+   - `CANNOT-ASSESS` — the reviewer could not form a judgement (truncated, walled, out of scope).
+
+   A claimed review with **no** asserted state is read as `CANNOT-ASSESS`, full stop. That does not
+   mean blocked forever — it means *the review did not happen*, so the PR proceeds under the
+   surface's ordinary rule **as if unreviewed**, and never on the strength of the claim. The
+   three-state form is Saga's, adopted because collapsing "asserted pass" and "asserted inability"
+   into one bucket is exactly how a fail-closed rule re-opens at its edges.
+
+3. **PRs nobody claimed to review — no marker required.** The surface's default rule applies.
+   Taxing every merge would close a hole that only exists where a *claim* is doing the reassuring.
+
+The residual exposure is **accepted, not unowned**: an unclaimed review merged on a green rollup is
+a gating-hygiene problem, not a marker problem, and the protection a universal marker would buy is
+one specimen (the claimed-but-vacuous review) against latency on every routine merge.
+
+**What this asks of the harness, which is the part that makes it a rule rather than a wish.** A
+review harness that exits abnormally must **emit `CANNOT-ASSESS` itself** — on SIGTERM, on a quota
+wall, on context death — so that "no findings" and "no reviewer" stop being the same observation.
+Until a harness does that, a human applies part 2 by hand at the gate. This is the same law as a
+heartbeat checker that must say `cannot-assess: <brain> heartbeat lacks next_wakeup_epoch` rather
+than silently skipping the field: **the absence of a complaint is not evidence of a quiet world, and
+the only thing that fixes it is the silent party being made to speak.**
+
 ### Why this belongs in this file rather than a style guide
 
 A boundary cancelled by something that reads like it belongs is the class. An instrument error is
