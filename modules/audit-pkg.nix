@@ -17,7 +17,15 @@
 # redirect the PRODUCTION binary to a different log (append would exit 0 writing the WRONG
 # ledger). The env override survives only as a TEST affordance via a DIRECT `python3
 # bin/audit` invocation — exactly how the batteries drive it.
+# AGENT_OS_MODULES is pinned for the SAME reason the ledger is, and is what makes record
+# signing reachable at all in production: bin/audit lands in the store as a LONE FILE, so its
+# repo-relative `../modules` fallback does not exist here. Without this pin a deployment that
+# sets $AGENT_OS_AUDIT_SIGNER would fail closed on every append — the feature would be
+# unreachable rather than merely off, and a control that cannot fire is a claim, not a control.
+# Signing stays OFF unless the operator sets $AGENT_OS_AUDIT_SIGNER; WHICH participant the
+# broker signs as is a deploy decision, deliberately not baked in here.
 pkgs.writeShellScriptBin "audit" ''
   export AGENT_OS_AUDIT_DIR=/var/lib/agent-os/audit
+  export AGENT_OS_MODULES=${../modules}
   exec ${pkgs.python3}/bin/python3 ${../bin/audit} "$@"
 ''
