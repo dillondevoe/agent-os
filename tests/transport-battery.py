@@ -133,12 +133,12 @@ with tempfile.TemporaryDirectory() as d:
 
 # ── seam sanity: the renderer no longer speaks the wire ──
 src = open(MOD).read()
-cs = src[src.index("\ndef chat_stream(msgs):"):src.index("\ndef chat(msgs):")]
+cs = src[src.index("\ndef chat_stream(msgs, route=None):"):src.index("\ndef chat(msgs):")]
 check("seam: chat_stream contains no urlopen (wire protocol fully in transport)",
       "urlopen" not in cs)
 check("seam: chat_stream contains no json.loads of wire chunks",
       "json.loads" not in cs)
-check("seam: chat_stream drives the transport dispatcher", "_stream_events(msgs)" in cs)
+check("seam: chat_stream drives the transport dispatcher", "_stream_events(msgs, route)" in cs)
 
 # ── H. end-to-end equivalence: chat_stream over the seam still returns the same message ──
 # The refactor's real risk is the renderer half, which no other battery drives (ollama-stub
