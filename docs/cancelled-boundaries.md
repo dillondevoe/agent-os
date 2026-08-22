@@ -57,6 +57,7 @@ exercised is a comment with a CI badge.
 | 12 | `flake.lock` guarded, `flake.nix` open | The same list guarded the **pinned inputs** but not the **build definition**. The lock file is derived from the nix file; guarding it while leaving its source open protects the manifest and not the thing that writes it. The list read as "the build is covered" because a build-related path was in it. | `agentos_merge_gate_watcher.py` (operational; found and fixed by Page) |
 | 13 | A contract that compared two derived lists | `tests/vm-matrix-contract.py` (member 8's fix) asserted the flake's `test-*` packages and the vm-tests matrix were the same set, both directions — and could not see a `tests/*.nix` that was never wired into `flake.nix` at all. With no package, the file is absent from **both** lists, so comparing them passes. The file is committed and reviews as coverage; it runs nowhere. | `tests/vm-matrix-contract.py` (found by Mirror auditing his own gate; fixed same PR) |
 | 14 | A verification harness that manufactured the symptom it was looking for | Running a watcher piped to `\| head -3` closed the pipe; the process took **SIGPIPE** on a later `print()` and died before `_save_state`. The dedupe state was never written, and the result presented as a **dedupe bug in the feature under test**. Every other member here is a guard that failed to guard; this is a *harness* that produced a finding about code that was correct. | `agentos_merge_gate_watcher.py` (operational; found by Page while shipping the main-red alert) |
+| 15 | A coverage bound counted in FILES while the risk accrued in TIME | A comms-bus backstop scan read `ls -t *.md \| head -25` — a bound that reads like a considered budget ("the newest 25") and is one, in the wrong unit. The window it actually buys is `25 / arrival-rate`, so it narrows precisely when traffic is heaviest — i.e. exactly when a miss is likeliest. Measured at **under two hours** on a busy night; the same line reads as "recent traffic is covered" at every tree size. Fixed by making the window a TIME window (24h) unioned with the count. | `mirror-tick` §2 scan (operational; found by Mirror on his own surface, 2026-08-21). Geist ruled the same fix in `geist-inbound.sh`; Augur adopted it after finding his scan was a pure filename glob. |
 
 Members 6–7 are recorded here as in-flight rather than merged. If those PRs change shape in
 review, this table is wrong until someone fixes it — which is itself an instance of the class,
@@ -411,6 +412,42 @@ Until a harness does that, a human applies part 2 by hand at the gate. This is t
 heartbeat checker that must say `cannot-assess: <brain> heartbeat lacks next_wakeup_epoch` rather
 than silently skipping the field: **the absence of a complaint is not evidence of a quiet world, and
 the only thing that fixes it is the silent party being made to speak.**
+
+### Member 15: the unit a bound is counted in is part of the bound
+
+Members 8, 11 and 12 are coverage lists that named the wrong *things*. Member 15 names the
+right things and counts them in the wrong *unit*, which is harder to see because there is
+nothing missing from the list to notice.
+
+A backstop that scans "the newest N files" looks like a deliberate cost/coverage trade, and it
+is one — but the quantity a reader infers from it is a **time** window, and the line does not
+buy a time window. It buys `N / arrival-rate`. Those agree at the tree size where the number
+was chosen and diverge silently afterwards, always in the unsafe direction: the busier the
+system, the shorter the window, and the busier the system, the more there is to miss. The
+failure has the class's signature exactly — the line is present, plausible, and authored by
+someone who thought about it, and every check of the scan passes because the scan does scan.
+
+The general form, which is worth carrying past comms scans:
+
+> **A bound must be expressed in the unit the risk accrues in.** If the hazard is "something
+> arrived and aged out unseen", the hazard's unit is time, and a bound counted in items,
+> bytes, or rows is a bound whose real size is a function of load you did not measure.
+
+Ask it of any freshness check, retention window, ring buffer, tail-N log scan, or
+"last N events" dashboard: *what does this actually bound, and does that quantity move when
+the system gets busy?* If it does, the fix is usually not a bigger N — a bigger N has the
+same shape — but a window in the right unit, optionally unioned with the count so the cheap
+path still covers the quiet case.
+
+Two corollaries earned alongside it:
+
+- **A cap that drops silently is a coverage list that reads as complete** — the same defect
+  as member 8, one layer up. If a scan truncates, it must say what it dropped and sort so
+  that what it drops is the part it can most afford to lose (oldest, not arbitrary).
+- **Convergence across surfaces is evidence, not proof.** Three independent scans took the
+  same fix within a day. That is a good sign about the fix and says nothing about whether a
+  fourth surface has the same bug — it was found on each surface by someone reading their
+  own code, not by any of the others' fixes.
 
 ### Why this belongs in this file rather than a style guide
 
