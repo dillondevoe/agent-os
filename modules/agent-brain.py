@@ -78,6 +78,80 @@ def _escalate_status():
 
 ESCALATE_STATUS = _escalate_status()
 
+# ── ESCALATE CONSENT + PER-TURN ROUTE (task 323, Geist ruling 2026-08-22) ──
+# "Escalation to a metered cloud provider is a human act, never an inference." The
+# `escalate` role being CONFIGURED (ESCALATE_STATUS above) means the capability exists;
+# it does not arm it. Nothing here consults difficulty, model confidence, or turn length
+# — there is deliberately no heuristic that can route a turn to a metered provider.
+#
+# Two consent sources, and only two:
+#   turn    — an explicit operator act this turn (`:escalate <msg>` at the prompt), the
+#             same class of act as saying yes to a summon_claude offer. One-shot.
+#   session — the operator granted it at session start (AGENT_OS_ESCALATE_CONSENT=session).
+#             Expires with the process; shown as armed in the status surface.
+# `always` is NOT offered in this phase and is refused loudly rather than silently
+# downgraded — a config that thinks it armed spending forever, and didn't, is worse than
+# one that fails to start.
+_ESCALATE_UNAVAILABLE = set()   # escalate providers rate-limited/unreachable THIS session
+
+class _EscalateConsent:
+    def __init__(self, raw=None):
+        v = (raw if raw is not None else os.environ.get("AGENT_OS_ESCALATE_CONSENT", "")).strip().lower()
+        self.rejected_always = (v == "always")
+        self.session = (v == "session")
+        self._turn = False
+    def arm_turn(self):
+        self._turn = True
+    def consume(self):
+        """Consent source for THIS turn, or None. A per-turn grant is one-shot: reading it
+        disarms it, so the turn after an escalated turn falls back to floor by default."""
+        if self._turn:
+            self._turn = False
+            return "turn"
+        return "session" if self.session else None
+    def armed(self):
+        return "session" if self.session else None
+
+CONSENT = _EscalateConsent()
+if CONSENT.rejected_always:
+    sys.stderr.write("\n\033[1;31m⛔ AGENT_OS_ESCALATE_CONSENT=always is not offered in this phase "
+                     "(Geist ruling 2026-08-22) — use `session`, or grant per turn with `:escalate`.\033[0m\n")
+    sys.exit(1)
+
+def _floor_route(degraded=None):
+    return {"role": "floor", "provider": ACTIVE_PROVIDER, "model": MODEL,
+            "kind": ACTIVE_PROVIDER_KIND, "consent_source": None, "degraded": degraded}
+
+def _route_for_turn(consent_source=None):
+    """Resolve which provider answers this turn. No consent → floor, unconditionally.
+
+    Never-spill (spec rule, 2026-08-06 overnight-bleed scar): if the escalate provider is
+    unavailable this session we degrade to the LOCAL FLOOR and say so — never to another
+    metered provider. providers.resolve() enforces that; the `name != wanted` check below is
+    what turns its degrade into a visible one rather than a silent re-route."""
+    if not consent_source:
+        return _floor_route()
+    roles = (_PROVIDERS or {}).get("roles") or {}
+    if "escalate" not in roles:
+        return _floor_route("no escalate role configured — answering on the local floor")
+    wanted = roles["escalate"]
+    name, cfg, _degraded = _providers_resolve(_PROVIDERS, "escalate",
+                                              unavailable=frozenset(_ESCALATE_UNAVAILABLE))
+    if name != wanted:
+        return _floor_route(f"escalate provider {wanted!r} unavailable — degraded to the local "
+                            f"floor (never to another metered provider)")
+    return {"role": "escalate", "provider": name, "model": cfg.get("model", MODEL),
+            "kind": cfg.get("kind", "claude"), "consent_source": consent_source, "degraded": None}
+
+def escalate_status_line():
+    """One line for the status surface: is escalation armed, and on what."""
+    if not ESCALATE_STATUS["configured"]:
+        return "escalate: not configured (" + (ESCALATE_STATUS["reason"] or "unavailable") + ")"
+    armed = CONSENT.armed()
+    if armed:
+        return f"escalate: ARMED for this session → {ESCALATE_STATUS['provider']} (metered cloud; every escalated turn prints its cost)"
+    return f"escalate: unarmed → {ESCALATE_STATUS['provider']} available; `:escalate <msg>` sends ONE turn to the cloud"
+
 # ── PER-TURN PROVENANCE LOG (Phase 1.5A acceptance criterion 5, task 287 slice 3) ──
 # "Audit log shows provider+model per turn." Deliberately NOT bin/audit's chain-hashed
 # broker log — that log is a tamper-evident record of capital/tool-execution security
@@ -86,18 +160,29 @@ ESCALATE_STATUS = _escalate_status()
 # home-relative-with-env-override convention as bin/mem's MEM_ROOT.
 _TURN_LOG_PATH = os.environ.get("AGENT_OS_TURN_LOG", os.path.join(os.path.expanduser("~/memory"), "turn-log.jsonl"))
 
-def _log_turn_provenance():
+def _log_turn_provenance(route=None, tokens=None):
     # Scope: the 7B `turn()` loop only (the actual acting/tool-wielding brain) — the 3B
     # frontdoor is a separate, not-yet-provider-routed model (MODEL_3B) whose turns always
     # either answer directly or kick to turn(), which then logs. Never let this break a
     # live turn: log failure is swallowed, not surfaced.
+    #
+    # `role` + `consent_source` are task 323's acceptance criterion 5: an escalated turn is
+    # only legible after the fact if the record says WHY it was allowed to spend. A floor
+    # turn logs consent_source: null, which is the honest value — no consent was needed.
+    # `tokens` is output tokens as reported by the transport, or null when the transport
+    # reported none (an unknown count is written as null, never as 0 — a 0 would read as a
+    # free turn).
+    route = route or _floor_route()
     try:
         os.makedirs(os.path.dirname(_TURN_LOG_PATH), exist_ok=True)
         with open(_TURN_LOG_PATH, "a") as f:
             f.write(json.dumps({
                 "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-                "provider": ACTIVE_PROVIDER,
-                "model": MODEL,
+                "provider": route["provider"],
+                "model": route["model"],
+                "role": route["role"],
+                "consent_source": route["consent_source"],
+                "tokens": tokens,
             }) + "\n")
     except Exception:
         pass
@@ -454,23 +539,27 @@ def _anthropic_stream_events(msgs, provider=None):
 
 _TRANSPORTS={"ollama": _ollama_stream_events, "claude": _anthropic_stream_events}
 
-def _stream_events(msgs):
-    # Dispatch on the active provider's `kind`. An unknown kind fails LOUD rather than
+def _stream_events(msgs, route=None):
+    # Dispatch on the ROUTE's provider `kind` (task 323). The route is resolved once per turn
+    # from consent (_route_for_turn); with no consent it is the floor route, which is exactly
+    # the pre-323 behavior. Reading module globals here instead would make the escalate role
+    # unroutable no matter what consent said. An unknown kind fails LOUD rather than
     # silently falling back to ollama — same rule as the present-but-invalid providers.yaml
     # above: a misconfigured provider is a real error, and quietly answering from a DIFFERENT
     # provider than the config names is exactly the metered-bucket crossing providers.py
     # exists to forbid (2026-08-06 overnight-bleed scar).
-    t=_TRANSPORTS.get(ACTIVE_PROVIDER_KIND)
+    route = route or _floor_route()
+    t=_TRANSPORTS.get(route["kind"])
     if t is None:
-        raise RuntimeError(f"no transport for provider kind {ACTIVE_PROVIDER_KIND!r} "
-                           f"(provider {ACTIVE_PROVIDER!r}); known kinds: {sorted(_TRANSPORTS)}")
+        raise RuntimeError(f"no transport for provider kind {route['kind']!r} "
+                           f"(provider {route['provider']!r}); known kinds: {sorted(_TRANSPORTS)}")
     # Pass the resolved provider NAME through: a transport must configure itself from the
     # provider the dispatcher actually chose, never from a module-level global (see
     # _anthropic_stream_events). Today that is always the floor provider; the escalate role is
-    # still unwired, and this argument is what lets that slice land without touching transports.
-    return t(msgs, ACTIVE_PROVIDER)
+    # wired as of task 323, and this argument is what let that land without touching transports.
+    return t(msgs, route["provider"])
 
-def chat_stream(msgs):
+def chat_stream(msgs, route=None):
     # Streaming + liveness indicator (P1 fix #2, same comm as above). Buffers tokens for
     # tool_calls/content-regex parsing (extract_tools) while printing as they arrive.
     #
@@ -483,6 +572,12 @@ def chat_stream(msgs):
     #
     # Wire protocol lives in the transport (_stream_events above); everything below is
     # rendering only, and is provider-agnostic as of the slice-5 seam.
+    route = route or _floor_route()
+    if route["degraded"]:
+        # A never-spill degrade is USER-VISIBLE by rule: silently answering a consented cloud
+        # turn on the local floor is the same class of lie as answering it on a different
+        # metered provider. Say which way it went.
+        print(f"  \033[33m(↓ {route['degraded']})\033[0m")
     term_cols=shutil.get_terminal_size(fallback=(80,24)).columns
     t0=time.time(); content=""; tool_calls=[]; first_token=False; eval_count=0; eval_dur=0.0
     col=0; in_code=False; thinking_seen=False
@@ -505,7 +600,7 @@ def chat_stream(msgs):
         sys.stdout.write(f"\r\033[K\033[2mthinking{'.'*(i%3+1)} (^C cancels this turn)\033[0m"); sys.stdout.flush()
     think_stop,think_t=_spin(_thinking_frame)
     try:
-        for _kind,_data in _stream_events(msgs):
+        for _kind,_data in _stream_events(msgs, route):
             # THINKING RENDER (the actual P0 fix, spec "P0 DIAGNOSIS COMPLETE" 2026-08-06):
             # qwen3.5:9b is a thinking model on a ~3 tok/s CPU — it emits a `thinking`
             # stream for minutes before any content. Invisible thinking == "spinning
@@ -553,8 +648,19 @@ def chat_stream(msgs):
                 sys.stdout.write("\r\033[K")
     elapsed=time.time()-t0
     tps=f", {eval_count/eval_dur:.0f} tok/s" if eval_count and eval_dur else ""
-    sys.stderr.write(f"\033[2m[{elapsed:.1f}s{tps}]\033[0m\n")
-    return {"role":"assistant","content":content,"tool_calls":tool_calls}
+    # Ruling §2: "every escalated turn still prints provider/model/token cost inline."
+    # Inline and unmissable, not buried in the audit log — the operator paying for it is the
+    # one who has to see it.
+    if route["role"]=="escalate":
+        sys.stderr.write(f"\033[2m[{elapsed:.1f}s{tps}] \033[0m\033[33m[cloud: {route['provider']}/"
+                         f"{route['model']}, {eval_count or 0} output tokens, consent={route['consent_source']}]\033[0m\n")
+    else:
+        sys.stderr.write(f"\033[2m[{elapsed:.1f}s{tps}]\033[0m\n")
+    # `_usage` is an INTERNAL key for the audit record's token count, not part of the message
+    # wire shape. turn() is the only caller that appends the result to a history, and it pops
+    # this before appending — armed by the consent battery, because an internal key leaking into
+    # a provider payload is the kind of thing that fails only on the metered side.
+    return {"role":"assistant","content":content,"tool_calls":tool_calls,"_usage":eval_count or None}
 
 def chat(msgs):
     # non-streaming fallback, kept for --once callers that want a single return value only
@@ -707,7 +813,7 @@ def _agos(name,args):
 CHAT_LOCK=threading.Lock()  # serializes chat_stream calls (warmup thread vs interactive turns)
                             # onto ollama's single inference slot, and protects the shared msgs list.
 
-def chat_stream_safe(msgs, retries=1):
+def chat_stream_safe(msgs, retries=1, route=None):
     # Never crash to a raw traceback on tty1 (P1 fix #1). A cold-boot prefill can outrun even the
     # 600s timeout under heavy load; on timeout/connection failure, tell the user and retry once —
     # the KV slot is already cached from the failed attempt, so retry #2 is cheap (live-verified:
@@ -727,9 +833,32 @@ def chat_stream_safe(msgs, retries=1):
                     busy_stop.set(); busy_t.join(timeout=1)
                     sys.stdout.write("\r\033[K"); sys.stdout.flush()
             try:
-                return chat_stream(msgs)
+                msg=chat_stream(msgs, route)
             finally:
                 CHAT_LOCK.release()
+            # Tag the message with the route that actually SERVED it (gate finding F1, PR #141):
+            # after an in-flight degrade below, that is the floor route, not the one turn() asked
+            # for — and turn() must log the served one or the audit record claims a cloud spend
+            # that never happened. Internal key, popped by turn() like `_usage`.
+            msg["_route"]=route
+            return msg
+        except urllib.error.HTTPError as e:
+            # Rate-limited / overloaded on the ESCALATE provider → mark it unavailable for the
+            # rest of the session and re-resolve. _route_for_turn degrades to the LOCAL FLOOR,
+            # never to another metered provider (providers.resolve enforces it). A floor-role
+            # HTTPError is not ours to reinterpret — fall through to the generic handler.
+            if route and route["role"]=="escalate" and e.code in (401,403,429,500,502,503,529):
+                sys.stdout.write("\r\033[K")
+                _ESCALATE_UNAVAILABLE.add(route["provider"])
+                route=_route_for_turn(route["consent_source"])
+                # Re-enter with the DEGRADED route and a FRESH retry budget (gate finding F2):
+                # a degrade is a re-route, not a failed attempt, so it must not consume one — a
+                # timeout-then-429 pair would otherwise exhaust the `for` and fall off the end
+                # returning None, which turn() then .pop()s → traceback on tty1. Bounded: the
+                # re-resolved route is the floor, and a floor-role HTTPError re-raises, so this
+                # recurses at most once.
+                return chat_stream_safe(msgs, retries=retries, route=route)
+            raise
         except (TimeoutError, urllib.error.URLError, ConnectionError) as e:
             sys.stdout.write("\r\033[K")
             if attempt < retries:
@@ -754,10 +883,21 @@ def _compact_for_display(text,head=4,tail=3):
     shown=lines[:head]+[f"\033[2m… ({hidden} more lines, :expand {idx} to see)\033[0m"]+lines[-tail:]
     return "\n".join(shown)
 
-def turn(msgs):
-    _log_turn_provenance()
+def turn(msgs, consent_source=None):
+    # The route is resolved ONCE per turn, from consent, before any model call — so a turn
+    # cannot drift onto a metered provider partway through its tool loop.
+    route=_route_for_turn(consent_source)
     for _ in range(6):
-        msg=chat_stream_safe(msgs); msgs.append(msg)
+        msg=chat_stream_safe(msgs, route=route)
+        # The route that actually SERVED the call wins the audit record and the rest of the
+        # turn (gate finding F1): chat_stream_safe may have degraded an escalate route to the
+        # floor in flight (provider 429/5xx). Logging the route we ASKED for would record a
+        # cloud spend that never happened — criterion 5 inverted in the one case it exists for —
+        # and re-asking the marked-unavailable provider on every tool-loop iteration is a hammer.
+        # Monotone: a served route is the asked route or its floor degrade, never more metered.
+        route=msg.pop("_route", route)
+        _log_turn_provenance(route, msg.pop("_usage", None))
+        msgs.append(msg)
         calls,clean=extract_tools(msg)
         if not calls:
             if clean and not msg.get("content"): print(clean)  # regex-extracted clean text wasn't already streamed
@@ -839,12 +979,18 @@ def _frontdoor_available():
             _FRONTDOOR_OK=False
     return _FRONTDOOR_OK
 
-def frontdoor_turn(msgs):
+def frontdoor_turn(msgs, consent_source=None):
     """Interactive entry: 3B first, kick to the 7B turn() on any action shape.
     Fail-open to turn() (the status-quo 7B path) if the 3B is absent or errors — the
     wall protects against the 3B ACTING, not against its absence. --once and the
     warmup thread call turn() directly and are deliberately untouched (boot prewarm
     warms the 7B KV prefix; front-dooring them would change prewarm semantics)."""
+    # An explicitly-consented escalate turn skips the 3B entirely: the operator asked for the
+    # cloud brain on THIS turn, and letting the local front-door answer it instead would silently
+    # discard the consent act. (Consent is never inferred in the other direction either — a turn
+    # the 3B can't handle is kicked to the local 7B floor, exactly as before.)
+    if consent_source:
+        return turn(msgs, consent_source)
     if not _frontdoor_available():
         return turn(msgs)
     stop,t=_spin(lambda i: (sys.stdout.write(f"\r\033[K\033[2mrouting{'.'*(i%3+1)}\033[0m"),sys.stdout.flush()))
@@ -915,6 +1061,7 @@ def main():
     if len(sys.argv)>2 and sys.argv[1]=="--once":
         msgs=[sysmsg(),user_turn(sys.argv[2])]; turn(msgs); return
     print("  \033[1mAgent OS brain\033[0m — I have hands, and I know the real now. Ask me to do things.")
+    print(f"  \033[2m{escalate_status_line()}\033[0m")
     print("  \033[2mLost a window? Alt+Tab cycles them, or Super+/ opens the keybind cheatsheet.\033[0m")
     msgs=[sysmsg()]
     threading.Thread(target=warmup_greeting, args=(msgs,), daemon=True).start()
@@ -957,9 +1104,26 @@ def main():
             if 1<=n<=len(EXPAND_BUFFERS): print(EXPAND_BUFFERS[n-1])
             else: print(f"  \033[2m(no such buffer — have 1..{len(EXPAND_BUFFERS)})\033[0m")
             continue
+        # ── `:escalate` — the per-turn consent act (task 323, Geist ruling 2026-08-22) ──
+        # Typing it IS the consent; there is no other path from this prompt to the metered
+        # provider. Bare `:escalate` reports status rather than arming anything, so a
+        # half-typed command can never spend money.
+        if u.split()[0]==":escalate":
+            rest=u[len(":escalate"):].strip()
+            if not rest:
+                print(f"  \033[2m{escalate_status_line()}\033[0m")
+                continue
+            if not ESCALATE_STATUS["configured"]:
+                print(f"  \033[33m(can't — {ESCALATE_STATUS['reason'] or 'escalate unavailable'})\033[0m")
+                continue
+            CONSENT.arm_turn()
+            u=rest
+        # Resolved BEFORE the turn and consumed here, so a per-turn grant can never leak into
+        # the next turn even if this one raises.
+        _turn_consent=CONSENT.consume()
         msgs.append(user_turn(u))
         try:
-            frontdoor_turn(msgs)
+            frontdoor_turn(msgs, _turn_consent)
         except KeyboardInterrupt:
             sys.stdout.write("\r\033[K")
             print("\033[2m(interrupted)\033[0m")
