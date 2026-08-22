@@ -21,10 +21,18 @@
 #   G. NEGATIVE CONTROL: the transport dispatcher honors the route it is handed, not the
 #      module-level floor globals — the bug that would make every arm above pass while the
 #      escalate role stayed unroutable.
+#   H. the internal `_usage`/`_route` keys never survive into the message history.
+#   I. NEGATIVE CONTROL (Geist gate, PR #141 F1): an in-flight 429 on the escalate provider
+#      degrades to the floor AND the audit record says so — the record names the route that
+#      SERVED the call, not the one turn() asked for. On the pre-gate code this arm fails:
+#      the record claims a cloud spend (role=escalate, consent_source set) that never happened.
+#   J. NEGATIVE CONTROL (Geist gate, PR #141 F2): timeout-then-429 on the escalate provider
+#      still returns a message. Pre-gate, the degrade consumed a retry attempt, the loop fell
+#      off the end, chat_stream_safe returned None and turn() crashed on msg.pop.
 #
 # Zero network, zero model: _stream_events is exercised through a stub transport table.
 # Run: PYTHONPATH=modules python3 tests/escalate-consent-battery.py
-import importlib.util, json, os, subprocess, sys, tempfile, textwrap
+import importlib.util, json, os, subprocess, sys, tempfile, textwrap, urllib.error
 
 MOD = os.path.join(os.path.dirname(__file__), "..", "modules", "agent-brain.py")
 EX = 0
@@ -156,9 +164,50 @@ bh.chat_stream_safe = lambda msgs, retries=1, route=None: {
 hist = []
 bh.turn(hist)
 check("H: turn() strips _usage before the message enters the history",
-      hist and all("_usage" not in m for m in hist), repr(hist))
+      hist and all("_usage" not in m and "_route" not in m for m in hist), repr(hist))
 check("H: and the stripped count reaches the audit record",
       json.loads(open(os.path.join(tmp, "h.jsonl")).readline())["tokens"] == 7)
+
+# ── I. NEGATIVE CONTROL: in-flight degrade → the audit record names the SERVED route ─────
+# Simulates the escalate provider answering 429 on the first call of a session-consented
+# turn. chat_stream_safe must degrade to the floor (never-spill), and turn() must log the
+# floor route — logging the escalate route it asked for would be an audit record that claims
+# money was spent on a turn the local model answered.
+ilog = os.path.join(tmp, "i.jsonl")
+bi = load_brain(consent="session", providers_yaml=cfg, turn_log=ilog)
+calls = []
+def _cs_429_then_floor(msgs, route=None):
+    calls.append(route["role"])
+    if route["role"] == "escalate":
+        raise urllib.error.HTTPError("https://api.example/", 429, "rate limited", {}, None)
+    return {"role": "assistant", "content": "ok", "tool_calls": [], "_usage": 3}
+bi.chat_stream = _cs_429_then_floor
+hist = []
+bi.turn(hist, "session")
+irec = json.loads(open(ilog).readline())
+check("I: in-flight 429 on escalate → audit record says FLOOR, not cloud",
+      irec["role"] == "floor" and irec["provider"] == "local-ollama", repr(irec))
+check("I: ... and consent_source is null for the floor-served call", irec["consent_source"] is None, repr(irec))
+check("I: ... and the floor's token count is what got recorded", irec["tokens"] == 3, repr(irec))
+check("I: escalate provider is marked unavailable for the session", "cloud-claude" in bi._ESCALATE_UNAVAILABLE)
+check("I: exactly one cloud attempt, then the floor — no hammering", calls == ["escalate", "floor"], repr(calls))
+check("I: _route never enters the history", hist and all("_route" not in m for m in hist), repr(hist))
+
+# ── J. NEGATIVE CONTROL: timeout-then-429 must not fall off the retry loop ───────────────
+bj = load_brain(consent="session", providers_yaml=cfg)
+seq = ["timeout", "429", "ok"]
+def _cs_seq(msgs, route=None):
+    s = seq.pop(0)
+    if s == "timeout": raise TimeoutError("cold prefill")
+    if s == "429": raise urllib.error.HTTPError("https://api.example/", 429, "rate limited", {}, None)
+    return {"role": "assistant", "content": "ok", "tool_calls": []}
+bj.chat_stream = _cs_seq
+mj = bj.chat_stream_safe([], route=bj._route_for_turn("session"))
+check("J: timeout-then-429 on escalate still returns a message (not None)",
+      isinstance(mj, dict) and mj.get("content") == "ok", repr(mj))
+check("J: ... served by the floor (degraded, never spilled)",
+      isinstance(mj, dict) and (mj.get("_route") or {}).get("role") == "floor"
+      and (mj.get("_route") or {}).get("provider") == "local-ollama", repr(mj))
 
 print("  " + ("ALL PASS" if EX == 0 else "FAILURES"))
 sys.exit(EX)

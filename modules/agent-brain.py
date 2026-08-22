@@ -833,9 +833,15 @@ def chat_stream_safe(msgs, retries=1, route=None):
                     busy_stop.set(); busy_t.join(timeout=1)
                     sys.stdout.write("\r\033[K"); sys.stdout.flush()
             try:
-                return chat_stream(msgs, route)
+                msg=chat_stream(msgs, route)
             finally:
                 CHAT_LOCK.release()
+            # Tag the message with the route that actually SERVED it (gate finding F1, PR #141):
+            # after an in-flight degrade below, that is the floor route, not the one turn() asked
+            # for — and turn() must log the served one or the audit record claims a cloud spend
+            # that never happened. Internal key, popped by turn() like `_usage`.
+            msg["_route"]=route
+            return msg
         except urllib.error.HTTPError as e:
             # Rate-limited / overloaded on the ESCALATE provider → mark it unavailable for the
             # rest of the session and re-resolve. _route_for_turn degrades to the LOCAL FLOOR,
@@ -845,7 +851,13 @@ def chat_stream_safe(msgs, retries=1, route=None):
                 sys.stdout.write("\r\033[K")
                 _ESCALATE_UNAVAILABLE.add(route["provider"])
                 route=_route_for_turn(route["consent_source"])
-                continue
+                # Re-enter with the DEGRADED route and a FRESH retry budget (gate finding F2):
+                # a degrade is a re-route, not a failed attempt, so it must not consume one — a
+                # timeout-then-429 pair would otherwise exhaust the `for` and fall off the end
+                # returning None, which turn() then .pop()s → traceback on tty1. Bounded: the
+                # re-resolved route is the floor, and a floor-role HTTPError re-raises, so this
+                # recurses at most once.
+                return chat_stream_safe(msgs, retries=retries, route=route)
             raise
         except (TimeoutError, urllib.error.URLError, ConnectionError) as e:
             sys.stdout.write("\r\033[K")
@@ -877,6 +889,13 @@ def turn(msgs, consent_source=None):
     route=_route_for_turn(consent_source)
     for _ in range(6):
         msg=chat_stream_safe(msgs, route=route)
+        # The route that actually SERVED the call wins the audit record and the rest of the
+        # turn (gate finding F1): chat_stream_safe may have degraded an escalate route to the
+        # floor in flight (provider 429/5xx). Logging the route we ASKED for would record a
+        # cloud spend that never happened — criterion 5 inverted in the one case it exists for —
+        # and re-asking the marked-unavailable provider on every tool-loop iteration is a hammer.
+        # Monotone: a served route is the asked route or its floor degrade, never more metered.
+        route=msg.pop("_route", route)
         _log_turn_provenance(route, msg.pop("_usage", None))
         msgs.append(msg)
         calls,clean=extract_tools(msg)
