@@ -320,6 +320,44 @@
             touch $out
           '';
 
+        # WP-C3 — the boot label actually carries the CONFIG rev, on EVERY variant.
+        #
+        # ADDED AFTER THE FACT, and the reason is the lesson task 324 step 1 just taught at cost:
+        # `revModule` was correct and nothing asserted that it REACHED anything. Worse, when I
+        # first control-armed this change I injected a throw into `revModule` and watched the
+        # `modules-parse` check stay GREEN — that check does not consume `revModule`, so the
+        # fixture never reached the code under test and a green sweep would have been reported as
+        # control-armed while the control was inert. A negative result from an instrument not
+        # wired to the thing under test proves nothing.
+        #
+        # So this asserts the SURFACE a human reads (`system.nixos.label`), not the input, and on
+        # all four variants rather than the one that happens to be checked. Eval-only: zero
+        # realization, no model FOD, DVo-cheap. Drop the tag from revModule and this throws.
+        #
+        # It asserts the `cfg-` PREFIX, not merely that the rev appears. Two hashes on one line
+        # with one of them unlabelled is precisely what got misread on 2026-08-08, so the prefix
+        # IS the change and an assertion that ignored it would pass a regression that undid it.
+        boot-label-carries-config-rev =
+          let
+            pkgs = nixpkgs.legacyPackages.${system};
+            lib  = nixpkgs.lib;
+            rev  = self.shortRev or self.dirtyShortRev or "dirty";
+            want = "cfg-" + rev;
+            labelOf = n: self.nixosConfigurations.${n}.config.system.nixos.label;
+            variants = [ "agentos" "agentos-sealed" "agentos-sealed-s5" "agentos-open" ];
+            bad = lib.filter (n: !(lib.hasInfix want (labelOf n))) variants;
+          in
+            assert lib.assertMsg (bad == [ ])
+              ("boot-label-carries-config-rev: these variants do NOT carry `${want}` in system.nixos.label: "
+               + lib.concatStringsSep " " bad
+               + ". The boot menu would show only the nixpkgs pin, which READS like an answer to "
+               + "\"what config is this box running?\" and is an answer to a different question.");
+            pkgs.runCommand "boot-label-check" { } ''
+              echo "all four variants carry ${want} in system.nixos.label:"
+              ${lib.concatStringsSep "\n" (map (n: "  echo '  ${n}: ${labelOf n}'") variants)}
+              touch $out
+            '';
+
         # Phase 1.5B · task 324 step 1 — the first-boot identity WIRING battery. The layer
         # itself is covered by tests/identity-battery.py; this one covers what was actually
         # broken, which is that nothing called it and nothing agreed where the keys live. Its
