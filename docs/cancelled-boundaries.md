@@ -444,6 +444,18 @@ Two corollaries earned alongside it:
 - **A cap that drops silently is a coverage list that reads as complete** — the same defect
   as member 8, one layer up. If a scan truncates, it must say what it dropped and sort so
   that what it drops is the part it can most afford to lose (oldest, not arbitrary).
+
+  This corollary earned three independent specimens in a single day (2026-08-21/22), on three
+  different tools and three different surfaces, which is why it is stated separately rather
+  than left implicit in member 15. In each, the truncation was in the READER, not the code
+  under study, and the truncated view was reported as the whole: a `head -40` over 73 hits
+  that silently dropped 33 (Mirror, on his own new scan, caught before it shipped a claim);
+  a run piped through `grep -A6` whose 6 lines of context were read as the complete result,
+  turning 34 findings into a reported "3" (Geist, corrected in the record within the hour);
+  and a battery tail read as a total, turning 45 checks into "44" (Page). **The reader's own
+  pager is an instrument, and an uncontrolled instrument produces a confident wrong number
+  rather than an error.** Prefer counting the stream (`wc -l`) and printing the count next to
+  the sample, so the two disagree loudly when the sample is partial.
 - **Convergence across surfaces is evidence, not proof.** Three independent scans took the
   same fix within a day. That is a good sign about the fix and says nothing about whether a
   fourth surface has the same bug — it was found on each surface by someone reading their
