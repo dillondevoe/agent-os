@@ -40,7 +40,41 @@
       #
       # Read it back on the box with:  nixos-version --configuration-revision
       # `dirtyShortRev` covers the build-on-the-Dell-live path, where the tree is uncommitted.
-      revModule = { system.configurationRevision = self.shortRev or self.dirtyShortRev or "dirty"; };
+      # WP-C3: put that same revision where a human actually LOOKS.
+      #
+      # `system.configurationRevision` below is only readable via
+      # `nixos-version --configuration-revision` — a flag nobody types under pressure. The string
+      # on the BOOT MENU and on bare `nixos-version` is `system.nixos.label`, which defaults to
+      # `<release>.<nixpkgs-date>.<nixpkgs-shortrev>` — so the hash a human sees is NIXPKGS, and
+      # reading it as a config rev is the 2026-08-08 round-trip documented above. The label was
+      # not merely unhelpful, it was actively misleading: it LOOKS like an answer to "what config
+      # is this box running?" and is an answer to a different question.
+      #
+      # Adding a TAG rather than setting `label` directly is deliberate. `label` defaults to
+      # `<version>` plus the sorted tags, so a tag ADDS the config rev while KEEPING the nixpkgs
+      # version that makes a channel bump visible; overriding `label` outright would trade one
+      # half-truth for the other. The `cfg-` prefix is the point of the whole change — with two
+      # hashes on one line, an unlabelled one is exactly what got misread before.
+      #
+      # Measured on all four variants, not predicted -- NixOS composes the label as
+      # `<sorted-tags>-<version>`, i.e. the tag is PREPENDED. I wrote this comment with it appended
+      # and the eval corrected me, which is the only reason the example below is right:
+      #
+      #   before:  26.11.20260726.624af66
+      #   after:   cfg-9540b35-26.11.20260726.624af66
+      #
+      # On an uncommitted tree `dirtyShortRev` is itself `<rev>-dirty`, so the label reads
+      # `cfg-9540b35-dirty-...`. That is wanted, not a defect: a box built from a dirty tree SAYS
+      # so on its boot menu, which is exactly the class of question this whole change exists for.
+      #
+      # Charset: the label lands in the system derivation's store-path NAME, so it is restricted
+      # to store-name characters. A git shortRev is hex and `dirty` is alphanumeric, so every value
+      # this can produce is safe — and an unsafe one would fail LOUDLY at eval/build, never at boot,
+      # so this cannot strand a running box.
+      revModule = {
+        system.configurationRevision = self.shortRev or self.dirtyShortRev or "dirty";
+        system.nixos.tags = [ "cfg-${self.shortRev or self.dirtyShortRev or "dirty"}" ];
+      };
       mkSystem = extraModules: nixpkgs.lib.nixosSystem {
         inherit system;
         modules = baseModules ++ [ revModule ] ++ extraModules;
