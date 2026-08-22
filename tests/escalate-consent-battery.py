@@ -221,8 +221,6 @@ check("J: ... served by the floor (degraded, never spilled)",
 # does not merely ADD a case — it SUBTRACTS every subclass it shadows from the handler that used
 # to serve them. Narrowing by exception type is invisible at the call site, and the arms for the
 # NEW behavior (B, D) all passed while the OLD behavior silently stopped.
-class _FakeHTTPError(Exception):
-    pass
 bk = load_brain(consent="", providers_yaml=cfg, turn_log=os.path.join(tmp, "k.jsonl"))
 import urllib.error as _ue
 
