@@ -842,12 +842,18 @@ def chat_stream_safe(msgs, retries=1, route=None):
             # that never happened. Internal key, popped by turn() like `_usage`.
             msg["_route"]=route
             return msg
-        except urllib.error.HTTPError as e:
-            # Rate-limited / overloaded on the ESCALATE provider → mark it unavailable for the
-            # rest of the session and re-resolve. _route_for_turn degrades to the LOCAL FLOOR,
-            # never to another metered provider (providers.resolve enforces it). A floor-role
-            # HTTPError is not ours to reinterpret — fall through to the generic handler.
-            if route and route["role"]=="escalate" and e.code in (401,403,429,500,502,503,529):
+        except (TimeoutError, urllib.error.URLError, ConnectionError) as e:
+            # ESCALATE DEGRADE, checked FIRST but inside the SAME handler as every other
+            # transport failure — deliberately not its own `except` clause. HTTPError subclasses
+            # URLError, so a separate clause placed above this one silently captures floor-role
+            # HTTP errors too, and `raise`-ing those turned an ollama 500 into a raw traceback on
+            # tty1 — the exact contract this function exists to hold (P1 fix #1). An isinstance
+            # check inside the existing handler cannot strand a case the handler used to serve.
+            if (isinstance(e, urllib.error.HTTPError) and route and route["role"]=="escalate"
+                    and e.code in (401,403,429,500,502,503,529)):
+                # Rate-limited / overloaded on the ESCALATE provider → mark it unavailable for the
+                # rest of the session and re-resolve. _route_for_turn degrades to the LOCAL FLOOR,
+                # never to another metered provider (providers.resolve enforces it).
                 sys.stdout.write("\r\033[K")
                 _ESCALATE_UNAVAILABLE.add(route["provider"])
                 route=_route_for_turn(route["consent_source"])
@@ -855,11 +861,9 @@ def chat_stream_safe(msgs, retries=1, route=None):
                 # a degrade is a re-route, not a failed attempt, so it must not consume one — a
                 # timeout-then-429 pair would otherwise exhaust the `for` and fall off the end
                 # returning None, which turn() then .pop()s → traceback on tty1. Bounded: the
-                # re-resolved route is the floor, and a floor-role HTTPError re-raises, so this
-                # recurses at most once.
+                # re-resolved route is the floor, and a floor-role HTTPError takes the generic
+                # arm below, so this recurses at most once.
                 return chat_stream_safe(msgs, retries=retries, route=route)
-            raise
-        except (TimeoutError, urllib.error.URLError, ConnectionError) as e:
             sys.stdout.write("\r\033[K")
             if attempt < retries:
                 print(f"  \033[2m(still warming the model — retrying…)\033[0m")

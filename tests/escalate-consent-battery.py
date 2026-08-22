@@ -32,7 +32,7 @@
 #
 # Zero network, zero model: _stream_events is exercised through a stub transport table.
 # Run: PYTHONPATH=modules python3 tests/escalate-consent-battery.py
-import importlib.util, json, os, subprocess, sys, tempfile, textwrap, urllib.error
+import importlib.util, io, json, os, subprocess, sys, tempfile, textwrap, urllib.error
 
 MOD = os.path.join(os.path.dirname(__file__), "..", "modules", "agent-brain.py")
 EX = 0
@@ -208,6 +208,62 @@ check("J: timeout-then-429 on escalate still returns a message (not None)",
 check("J: ... served by the floor (degraded, never spilled)",
       isinstance(mj, dict) and (mj.get("_route") or {}).get("role") == "floor"
       and (mj.get("_route") or {}).get("provider") == "local-ollama", repr(mj))
+
+# ── K. REGRESSION CONTROL: a FLOOR-role HTTPError still degrades gracefully, never a traceback ──
+# chat_stream_safe's founding contract is "never crash to a raw traceback on tty1" (P1 fix #1).
+# HTTPError subclasses URLError, so 5f00bd6's separate `except urllib.error.HTTPError` clause —
+# added above the generic handler purely to catch the escalate degrade — silently captured
+# FLOOR-role HTTP errors too and re-raised them. An ollama 500 (model missing, server wedged) went
+# from a polite "model isn't responding right now" to a traceback, on the path that has nothing to
+# do with escalation. Verified in both directions against the real pre-323 module before fixing.
+#
+# The general shape, worth more than the bug: a new `except` clause placed above an existing one
+# does not merely ADD a case — it SUBTRACTS every subclass it shadows from the handler that used
+# to serve them. Narrowing by exception type is invisible at the call site, and the arms for the
+# NEW behavior (B, D) all passed while the OLD behavior silently stopped.
+class _FakeHTTPError(Exception):
+    pass
+bk = load_brain(consent="", providers_yaml=cfg, turn_log=os.path.join(tmp, "k.jsonl"))
+import urllib.error as _ue
+
+def _raiser(code):
+    def boom(*a, **k):
+        raise _ue.HTTPError("http://x", code, "boom", {}, None)
+    return boom
+
+_stdout = sys.stdout
+for code in (404, 500, 503):
+    bk.chat_stream = _raiser(code)
+    sys.stdout = io.StringIO()
+    try:
+        msg = bk.chat_stream_safe([{"role": "user", "content": "hi"}], route=bk._floor_route())
+        raised = None
+    except BaseException as e:
+        msg, raised = None, e
+    finally:
+        sys.stdout = _stdout
+    check(f"K: floor-role HTTP {code} returns a message, never raises",
+          raised is None and isinstance(msg, dict) and msg.get("role") == "assistant",
+          f"raised={raised!r} msg={msg!r}")
+
+# and the escalate degrade this shares a handler with still works (no regression the other way)
+bk._ESCALATE_UNAVAILABLE.clear()
+_calls = []
+def _boom_then_ok(msgs, route=None):
+    _calls.append(route["role"])
+    if route["role"] == "escalate":
+        raise _ue.HTTPError("http://x", 429, "rate limited", {}, None)
+    return {"role": "assistant", "content": "floor answered", "tool_calls": [], "_usage": 5}
+bk.chat_stream = _boom_then_ok
+sys.stdout = io.StringIO()
+try:
+    m = bk.chat_stream_safe([{"role": "user", "content": "hi"}], route=bk._route_for_turn("turn"))
+finally:
+    sys.stdout = _stdout
+check("K: escalate 429 still degrades to the floor in the shared handler",
+      _calls == ["escalate", "floor"], repr(_calls))
+check("K: and the message is tagged with the SERVED route, not the asked one",
+      (m or {}).get("_route", {}).get("role") == "floor", repr((m or {}).get("_route")))
 
 print("  " + ("ALL PASS" if EX == 0 else "FAILURES"))
 sys.exit(EX)
