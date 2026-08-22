@@ -40,7 +40,41 @@
       #
       # Read it back on the box with:  nixos-version --configuration-revision
       # `dirtyShortRev` covers the build-on-the-Dell-live path, where the tree is uncommitted.
-      revModule = { system.configurationRevision = self.shortRev or self.dirtyShortRev or "dirty"; };
+      # WP-C3: put that same revision where a human actually LOOKS.
+      #
+      # `system.configurationRevision` below is only readable via
+      # `nixos-version --configuration-revision` — a flag nobody types under pressure. The string
+      # on the BOOT MENU and on bare `nixos-version` is `system.nixos.label`, which defaults to
+      # `<release>.<nixpkgs-date>.<nixpkgs-shortrev>` — so the hash a human sees is NIXPKGS, and
+      # reading it as a config rev is the 2026-08-08 round-trip documented above. The label was
+      # not merely unhelpful, it was actively misleading: it LOOKS like an answer to "what config
+      # is this box running?" and is an answer to a different question.
+      #
+      # Adding a TAG rather than setting `label` directly is deliberate. `label` defaults to
+      # `<version>` plus the sorted tags, so a tag ADDS the config rev while KEEPING the nixpkgs
+      # version that makes a channel bump visible; overriding `label` outright would trade one
+      # half-truth for the other. The `cfg-` prefix is the point of the whole change — with two
+      # hashes on one line, an unlabelled one is exactly what got misread before.
+      #
+      # Measured on all four variants, not predicted -- NixOS composes the label as
+      # `<sorted-tags>-<version>`, i.e. the tag is PREPENDED. I wrote this comment with it appended
+      # and the eval corrected me, which is the only reason the example below is right:
+      #
+      #   before:  26.11.20260726.624af66
+      #   after:   cfg-9540b35-26.11.20260726.624af66
+      #
+      # On an uncommitted tree `dirtyShortRev` is itself `<rev>-dirty`, so the label reads
+      # `cfg-9540b35-dirty-...`. That is wanted, not a defect: a box built from a dirty tree SAYS
+      # so on its boot menu, which is exactly the class of question this whole change exists for.
+      #
+      # Charset: the label lands in the system derivation's store-path NAME, so it is restricted
+      # to store-name characters. A git shortRev is hex and `dirty` is alphanumeric, so every value
+      # this can produce is safe — and an unsafe one would fail LOUDLY at eval/build, never at boot,
+      # so this cannot strand a running box.
+      revModule = {
+        system.configurationRevision = self.shortRev or self.dirtyShortRev or "dirty";
+        system.nixos.tags = [ "cfg-${self.shortRev or self.dirtyShortRev or "dirty"}" ];
+      };
       mkSystem = extraModules: nixpkgs.lib.nixosSystem {
         inherit system;
         modules = baseModules ++ [ revModule ] ++ extraModules;
@@ -285,6 +319,44 @@
             echo "capabilities: ${nixpkgs.lib.concatStringsSep " " reg.capabilityNames}"
             touch $out
           '';
+
+        # WP-C3 — the boot label actually carries the CONFIG rev, on EVERY variant.
+        #
+        # ADDED AFTER THE FACT, and the reason is the lesson task 324 step 1 just taught at cost:
+        # `revModule` was correct and nothing asserted that it REACHED anything. Worse, when I
+        # first control-armed this change I injected a throw into `revModule` and watched the
+        # `modules-parse` check stay GREEN — that check does not consume `revModule`, so the
+        # fixture never reached the code under test and a green sweep would have been reported as
+        # control-armed while the control was inert. A negative result from an instrument not
+        # wired to the thing under test proves nothing.
+        #
+        # So this asserts the SURFACE a human reads (`system.nixos.label`), not the input, and on
+        # all four variants rather than the one that happens to be checked. Eval-only: zero
+        # realization, no model FOD, DVo-cheap. Drop the tag from revModule and this throws.
+        #
+        # It asserts the `cfg-` PREFIX, not merely that the rev appears. Two hashes on one line
+        # with one of them unlabelled is precisely what got misread on 2026-08-08, so the prefix
+        # IS the change and an assertion that ignored it would pass a regression that undid it.
+        boot-label-carries-config-rev =
+          let
+            pkgs = nixpkgs.legacyPackages.${system};
+            lib  = nixpkgs.lib;
+            rev  = self.shortRev or self.dirtyShortRev or "dirty";
+            want = "cfg-" + rev;
+            labelOf = n: self.nixosConfigurations.${n}.config.system.nixos.label;
+            variants = [ "agentos" "agentos-sealed" "agentos-sealed-s5" "agentos-open" ];
+            bad = lib.filter (n: !(lib.hasInfix want (labelOf n))) variants;
+          in
+            assert lib.assertMsg (bad == [ ])
+              ("boot-label-carries-config-rev: these variants do NOT carry `${want}` in system.nixos.label: "
+               + lib.concatStringsSep " " bad
+               + ". The boot menu would show only the nixpkgs pin, which READS like an answer to "
+               + "\"what config is this box running?\" and is an answer to a different question.");
+            pkgs.runCommand "boot-label-check" { } ''
+              echo "all four variants carry ${want} in system.nixos.label:"
+              ${lib.concatStringsSep "\n" (map (n: "  echo '  ${n}: ${labelOf n}'") variants)}
+              touch $out
+            '';
 
         # Phase 1.5B · task 324 step 1 — the first-boot identity WIRING battery. The layer
         # itself is covered by tests/identity-battery.py; this one covers what was actually
