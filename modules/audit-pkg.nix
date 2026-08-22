@@ -13,6 +13,16 @@
 # the same `pkgs` yields the same derivation (Nix deduplicates), so there is no collision.
 { pkgs }:
 
+let
+  # The identity ROOT pin, from the SINGLE constant modules/identity-pkg.nix defines. bin/audit
+  # imports modules/identity.py to sign, and identity.py resolves its ROOT at import time from
+  # $AGENT_OS_IDENTITY_ROOT with a ~/identity fallback. Without this line the signer would look
+  # for keys under whatever $HOME the calling process happened to have, while the boot unit minted
+  # them under /var/lib/agent-os/identity — two halves agreeing only by coincidence of
+  # environment. Pinned here for exactly the reason the ledger is pinned below.
+  identityRoot = (import ./identity-pkg.nix { inherit pkgs; }).root;
+in
+
 # Pin the ledger unconditionally: a stray $AGENT_OS_AUDIT_DIR in the broker's env must NOT
 # redirect the PRODUCTION binary to a different log (append would exit 0 writing the WRONG
 # ledger). The env override survives only as a TEST affordance via a DIRECT `python3
@@ -38,5 +48,6 @@
 pkgs.writeShellScriptBin "audit" ''
   export AGENT_OS_AUDIT_DIR=/var/lib/agent-os/audit
   export AGENT_OS_MODULES=${../modules}
+  export AGENT_OS_IDENTITY_ROOT=${identityRoot}
   exec ${pkgs.python3}/bin/python3 ${../bin/audit} "$@"
 ''

@@ -16,6 +16,7 @@
         ./modules/agent-shell.nix
         ./modules/brain.nix
         ./modules/clean-room.nix
+        ./modules/identity.nix   # 324 step 1: first-boot participant minting + self-test (BEFORE audit, which signs as one)
         ./modules/audit.nix
         ./modules/taint.nix
         ./modules/mcp.nix
@@ -284,6 +285,19 @@
             echo "capabilities: ${nixpkgs.lib.concatStringsSep " " reg.capabilityNames}"
             touch $out
           '';
+
+        # Phase 1.5B · task 324 step 1 — the first-boot identity WIRING battery. The layer
+        # itself is covered by tests/identity-battery.py; this one covers what was actually
+        # broken, which is that nothing called it and nothing agreed where the keys live. Its
+        # section C reads the nix files, so an author who removes the import or unpins the root
+        # fails `nix flake check` rather than shipping a box that silently cannot sign.
+        identity-boot =
+          nixpkgs.legacyPackages.${system}.runCommand "identity-boot-check"
+            { nativeBuildInputs = [ nixpkgs.legacyPackages.${system}.python3 ]; } ''
+              cp -r ${./.}/. src && chmod -R u+w src
+              python3 src/tests/identity-boot-battery.py
+              touch $out
+            '';
 
         # Phase 2 · Step 2 — the audit-log primitive's property battery. Proves
         # append-only NDJSON, SHA-256 chain tamper/truncation evidence, no-log->no-execute
@@ -855,7 +869,7 @@
         # WHY THE VM TESTS DO NOT COVER IT: they `inherit baseModules`, so they DO see a drop — but
         # they are deliberately OUT of `checks` (they boot VMs) and run in the separate vm-tests.yml
         # matrix. The ship gate is `nix flake check`. A guarantee that lives only in the other lane is
-        # not a guarantee at the gate, and only some of the fourteen are observed by a VM test at all.
+        # not a guarantee at the gate, and only some of the fifteen are observed by a VM test at all.
         # Same seam lesson as the engine: green batteries per component say nothing about whether the
         # component is IN the machine.
         #
@@ -864,7 +878,7 @@
         # infix — `audit`/`taint`/`mcp`/`confirm` are short enough that `hasInfix` would happily match
         # an unrelated package and mask the very drop this is meant to catch.
         #
-        # Two of the fourteen are options-only in the sealed base by design (mesh-wireguard-sealed and
+        # Two of the fifteen are options-only in the sealed base by design (mesh-wireguard-sealed and
         # fetch-proxy ship INERT, enabled per-variant), so their fingerprint is the OPTION EXISTING,
         # not a service running. Asserting `.enable` there would assert the variant, not the import.
         agentos-sealed-imports =
@@ -880,6 +894,8 @@
               "agentos-sealed-imports: brain.nix is NOT imported — the agent-os-pull-model timer is absent, so the sealed image has no path to a model.";
             assert lib.assertMsg (builtins.hasAttr "cleanRoom" cfg.agentos)
               "agentos-sealed-imports: clean-room.nix is NOT imported — options.agentos.cleanRoom is absent. The egress wall would be missing from the SEALED image, which is the one property the sealed variant exists to have.";
+            assert lib.assertMsg (builtins.hasAttr "agent-os-identity-boot" cfg.systemd.services)
+              "agentos-sealed-imports: identity.nix is NOT imported — the agent-os-identity-boot oneshot is absent, so NO participant is ever minted and $AGENT_OS_AUDIT_SIGNER can only fail closed. That is the exact state this module was written to end (task 324 step 1): the layer worked, nothing called it.";
             assert lib.assertMsg (hasPkg "audit")
               "agentos-sealed-imports: audit.nix is NOT imported — `audit` missing from systemPackages.";
             assert lib.assertMsg (hasPkg "taint")
@@ -903,7 +919,7 @@
             assert lib.assertMsg cfg.boot.plymouth.enable
               "agentos-sealed-imports: boot-branding.nix is NOT imported — boot.plymouth.enable is false.";
             pkgs.runCommand "agentos-sealed-imports-check" { } ''
-              echo "agentos-sealed imports all fourteen baseModules: agent-shell brain clean-room(options) audit taint mcp broker confirm seal-check break-glass mesh-wireguard-sealed(options) fetch-proxy(options) system-set boot-branding"
+              echo "agentos-sealed imports all fifteen baseModules: agent-shell brain clean-room(options) identity audit taint mcp broker confirm seal-check break-glass mesh-wireguard-sealed(options) fetch-proxy(options) system-set boot-branding"
               touch $out
             '';
 
