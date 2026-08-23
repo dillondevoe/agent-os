@@ -19,6 +19,10 @@ import yaml
 
 REQUIRED_PROVIDER_FIELDS = {"kind", "cost_tier"}
 VALID_ROLES = {"floor", "escalate"}
+# Cost-cap breaker knobs (HARNESS-MAP guardrail 3). Both are per-TURN ceilings enforced
+# by agent-brain's turn() loop; absent keys mean "keep the built-in default" there, so an
+# existing providers.yaml with no limits block changes nothing.
+VALID_LIMIT_KEYS = {"max_hops_per_turn", "max_output_tokens_per_turn"}
 
 
 class ProviderConfigError(ValueError):
@@ -48,7 +52,18 @@ def load_providers(path):
             raise ProviderConfigError(f"role '{role}' points to undefined provider '{provider_name}'")
     if "floor" not in roles:
         raise ProviderConfigError("roles must define 'floor' — the OS must always have an offline floor")
-    return {"providers": providers, "roles": roles}
+    limits = raw.get("limits") or {}
+    if not isinstance(limits, dict):
+        raise ProviderConfigError(f"'limits' must be a mapping, got {type(limits).__name__}")
+    unknown = set(limits) - VALID_LIMIT_KEYS
+    if unknown:
+        raise ProviderConfigError(
+            f"unknown limits keys: {sorted(unknown)} (valid: {sorted(VALID_LIMIT_KEYS)})")
+    for k, v in limits.items():
+        # bool is an int subclass — `max_hops_per_turn: true` must not validate as 1.
+        if isinstance(v, bool) or not isinstance(v, int) or v <= 0:
+            raise ProviderConfigError(f"limits.{k} must be a positive integer, got {v!r}")
+    return {"providers": providers, "roles": roles, "limits": limits}
 
 
 def resolve(config, role, unavailable=frozenset()):
