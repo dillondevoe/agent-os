@@ -1408,6 +1408,31 @@
                 PYTHONPATH="$work/modules" python3 tests/agent-loop-dispatch-battery.py
               touch $out
             '';
+
+        # frontdoor-kick-contract — WIRES ONE OF THE 14 KNOWN_UNWIRED_DEBT BATTERIES.
+        # Chosen first because it is one of the SIX that hard-fail rather than self-disarm: it
+        # needs no CLI on PATH, no network and no model (the decision layer is pure), so wiring
+        # it is the whole of the job. The eight self-disarming entries would ALSO need a PATH
+        # guarantee or a strict mode, or the ledger line disappears while coverage stays zero —
+        # see the split comment above KNOWN_UNWIRED_DEBT in tests/vm-matrix-contract.py.
+        #
+        # This battery carries the 3B exfil regression (a mail tool_call attempting to ship
+        # /etc/secrets) and the summon wall. It has been referenced only by tests/run-local.sh,
+        # a manual runner, since it was written. A regression now fails `nix flake check`.
+        #
+        # It resolves ../modules/agent-brain.py relative to its own location, so the repo layout
+        # is reconstructed rather than the file copied flat.
+        frontdoor-kick-contract =
+          nixpkgs.legacyPackages.${system}.runCommand "frontdoor-kick-contract-check"
+            { nativeBuildInputs = [ nixpkgs.legacyPackages.${system}.python3 ]; } ''
+              work="$(mktemp -d)"
+              mkdir -p "$work/tests" "$work/modules"
+              cp ${./tests/frontdoor-kick-battery.py} "$work/tests/frontdoor-kick-battery.py"
+              cp ${./modules/agent-brain.py} "$work/modules/agent-brain.py"
+              cd "$work"
+              python3 tests/frontdoor-kick-battery.py
+              touch $out
+            '';
       };
     };
 }

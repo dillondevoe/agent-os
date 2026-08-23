@@ -106,7 +106,14 @@ KNOWN_UNWIRED_DEBT = frozenset({
     "audit-signing-battery.py",
     "bip340-battery.py",
     "escalate-consent-battery.py",
-    "frontdoor-kick-battery.py",
+    # frontdoor-kick-battery.py was here until 2026-08-23. WIRED, not merely delisted: flake.nix
+    # gained a `frontdoor-kick-contract` derivation that reconstructs tests/ + modules/ and runs
+    # it. Verified three ways before the line was removed — wiring_references() finds a real
+    # `python3 tests/...` invocation and not just a mention; self_disarms() is False; and the
+    # derivation's exact file set was simulated by hand (nix is not available on the surface this
+    # was written from), passing with the subject present and exiting 1 with modules/ absent.
+    # That last one is the #155 question: a wired battery that exits 0 when its subject is missing
+    # pays the debt on paper. This one does not.
     "transport-battery.py",
 })
 
@@ -181,7 +188,9 @@ def wiring_references(flake_src, tests_dir, base):
 # the one that matters"; this is that sentence applied to its own remediation.
 #
 # So the debt list is NOT homogeneous, and the count alone hides the split. Measured 2026-08-23:
-# 8 of the 14 self-disarm, 6 do not. Wiring one of the 6 needs a derivation. Wiring one of the 8
+# 8 of the 14 self-disarm, 6 do not (measured 2026-08-23; the list is now 13 after
+# frontdoor-kick-battery.py was wired, so it stands at 8 self-disarming of 13).
+# Wiring one of the non-self-disarming ones needs a derivation. Wiring one of the 8
 # needs a derivation AND a guarantee its CLI is on PATH inside that derivation.
 SELF_DISARM_WINDOW = 3
 _SH_EXIT = re.compile(r"^\s*exit 0\s*(#.*)?$")
