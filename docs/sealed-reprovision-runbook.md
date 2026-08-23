@@ -2,7 +2,8 @@
 
 **WP-S6.2.** Turns "seal = clean re-provision" from tribal knowledge into a procedure someone
 else can follow. Written 2026-08-23 by Mirror against `spec-agentos-phase-s-execution-2026-08-13`
-§0/§1/§5/§6 and `SEAL-CHECKLIST-agentos.md`.
+§0/§1/§5/§6 and `SEAL-CHECKLIST-agentos.md`. Revised 2026-08-23 (PR #148) to fold Geist's Fable-gate
+findings F1–F4 on PR #147 — two of which were procedures that named things the repo does not have.
 
 ---
 
@@ -33,9 +34,14 @@ been recorded below, this document is a plan, not a verified procedure.
 
 **Acceptance log** (append one line per literal cold-start run; empty is the honest state):
 
-| Date | Runner | Target | S1 | S2 | S3 | S4 | S5 | Notes |
-|---|---|---|---|---|---|---|---|---|
-| — | — | — | — | — | — | — | — | *no accepted run yet* |
+| Date | Runner | Target | S1 | S2 | S3 | S4 | S5 | **audit signed count** | RAM reserved / remainder | Notes |
+|---|---|---|---|---|---|---|---|---|---|---|
+| — | — | — | — | — | — | — | — | — | — | *no accepted run yet* |
+
+The **audit signed count** gets its own column rather than living in Notes (Geist's ask, PR #147
+review) because §5.6 is the one check whose failure mode is a *clean-looking success*: `chain
+intact` over an unsigned log. A number in a column is read; a number in a free-text field is
+skipped. Record the integer, not "ok".
 
 **This runbook does not authorize wiping any physical box.** WP-S7 is gated on spec §3
 (seal target (a) re-provision the Dell vs (b) image + runbook until second hardware), which has
@@ -69,9 +75,14 @@ table is a snapshot and this runbook outlives it.
 ```sh
 # S4 graduated: taint must be a GATE, not a shadow log
 grep -n 'taint' bin/broker | sed -n '1,40p'      # expect no shadow-only path at the gate
-nix build .#test-taint-gate-battery              # S4's Step-8 battery, every §10 deny case
+nix build .#<S4-BATTERY-ATTR>                    # FORWARD REFERENCE — see below
 # S5 verified on real hardware (see its own acceptance line — this cannot be met in a VM)
 ```
+
+`<S4-BATTERY-ATTR>` **does not exist on `main` yet.** It is S4's Step-8 acceptance battery, and
+**S4's PR must replace this placeholder with the real attribute name.** Left as a placeholder rather
+than a plausible guess on purpose: a guessed attribute fails for the wrong reason (no such thing)
+while looking like it failed for the right one.
 
 **If S4's battery does not exist or does not pass, stop.** Sealing a system whose capability gate
 is still advisory produces a box that looks hardened and is not — the exact false-success shape
@@ -95,26 +106,42 @@ shrinks the model lane has failed even if every other check is green.
 ### 1.3 Build the sealed closure
 
 ```sh
-nix flake check .#agentos-sealed          # S1's asserts ride here
-nix build .#agentos-sealed
+nix flake check .                         # S1's asserts + agentos-sealed-imports ride here
+nix build .#nixosConfigurations.agentos-sealed.config.system.build.toplevel
 ```
+
+(`nix flake check` takes a flake ref, not an installable — `.#agentos-sealed` is not valid there.)
 
 Composition must be `mkSystem`, **not** `mkOpenSystem`. Confirm by inspection of the flake output,
 not by the build succeeding — an open composition builds perfectly well.
 
 ### 1.4 Prove the release lane still refuses the open variants
 
-This is a **negative control** and it is load-bearing: an image lane that has never been shown to
-refuse is not known to refuse.
+**FORWARD REFERENCE — this control is not runnable on `main` today, and the first version of it
+written here was VACUOUS.** Stated plainly because it is the sharper half of the lesson: the
+original text told you to run `nix build .#image-agentos-open` and expect failure. **No `image-*`
+attribute exists in `flake.nix` at all** (the package set is `cap-*`, `test-*`, `vm`, `vm-open`,
+`vm-sealed`). So the check "passed" because the attribute was missing, not because a lane refused —
+and it was written inside the very paragraph asserting that *a lane never shown to refuse is not
+known to refuse*. An unarmed control, in the section naming the unarmed-control rule.
+
+The intent stands and is load-bearing. Two things must be true before it is a control:
+
+1. **The release/image lane must exist.** S6.1 introduces it; **S6.1's PR must fill in the attribute
+   names below.**
+2. **The assertion is on the failure REASON, not the exit code.** `nix build` on a nonexistent
+   attribute also exits non-zero, so exit status cannot distinguish *refused* from *no such thing*.
+   S6.1 must define a refusal string, and this check must grep for it:
 
 ```sh
-nix build .#image-agentos-open    # MUST FAIL
-nix build .#image-agentos         # MUST FAIL (unsealed)
-nix build .#image-agentos-sealed  # must succeed
+# <IMAGE-OPEN-ATTR> / <IMAGE-UNSEALED-ATTR> / <IMAGE-SEALED-ATTR>: filled in by S6.1's PR
+nix build .#<IMAGE-OPEN-ATTR>     2>&1 | grep -q '<LANE-REFUSAL-STRING>'   # refused, not absent
+nix build .#<IMAGE-UNSEALED-ATTR> 2>&1 | grep -q '<LANE-REFUSAL-STRING>'   # refused, not absent
+nix build .#<IMAGE-SEALED-ATTR>                                            # must SUCCEED
 ```
 
-If either of the first two succeeds, stop and fix the lane. Do not proceed and "remember not to
-use it."
+The third line is the positive arm and is not optional: without it, a lane that refuses everything
+reads identically to a lane that refuses correctly.
 
 ### 1.5 Answer the seal target before touching storage
 
@@ -135,37 +162,79 @@ Destructive. Nothing here is reversible; §6 is the abort path and it is "start 
    hostname is a claim made by the machine you are about to erase.
 2. Confirm nothing on the target is the only copy of anything. Sealed provisioning assumes the
    disk is worthless.
-3. Wipe partitions and any prior LUKS headers. Do not preserve `/var/lib`, `/home`, or an old
+3. Wipe partitions and any prior LUKS headers. §3.1 installs onto this storage from scratch —
+   nothing here is expected to survive. Do not preserve `/var/lib`, `/home`, or an old
    `/nix/store` "to save time" — a carried store is carried history, and it defeats the clean room.
 
 **Fresh means fresh.** Every reuse you allow here is a thing a future audit cannot rule out.
 
 ---
 
-## 3. Fresh weights, fresh state
+## 3. Provision UNSEALED, then seal — the two-stage sequence
 
-1. **Model weights: re-download, do not copy from the open box.** Weights carried off a
-   development machine have the development machine's provenance.
-2. **`/var/lib` is created empty.** No carried audit log, no carried registry, no carried identity
-   material.
-3. **Identity is minted on first boot, not transplanted.** The participant-minting oneshot
-   (`identity.nix`, task 324) runs before anything that signs. A copied key means the sealed box's
-   identity is the old box's identity, which makes the audit chain a lie about which machine acted.
+**This section replaces an earlier version of this runbook that was not executable.** That version
+wiped storage in §2 and then said `nixos-rebuild switch --flake .#agentos-sealed` — there is no
+system to *switch* on wiped storage — and told you to re-download weights *after* sealing, which the
+clean-room wall forbids. Both errors came from writing the procedure against the spec and the
+checklist without reading the code it operates on. The real flow was documented the whole time, in
+`flake.nix:8-13` and `modules/clean-room.nix:15-20`.
+
+**Sealing is not an install target. It is a second rebuild of a box that is already running.**
+
+### 3.1 Install the UNSEALED provisioning variant
+
+```sh
+nixos-install --flake <repo>#agentos
+```
+
+`#agentos`, **not** `#agentos-open`. They are different things and the distinction matters here:
+`#agentos` is the same machine as `#agentos-sealed` with `agentos.cleanRoom.sealed = false` — a
+provisioning variant. `#agentos-open` is the development lane and composes `openModules`; this
+procedure never installs it, so the sealed box never has its SSH keys or Tailscale.
+
+### 3.2 First boot — the provisioning window
+
+This boot is **the only moment the box has non-nixpkgs egress.** The unsealed wall permits DNS and
+80/443 so the weights can be fetched (`clean-room.nix:15-20`).
+
+1. `identity.nix` mints the participant identity (task 324) — before anything that signs.
+2. `agent-os-pull-model` / `bin/setup-brain.sh` runs `ollama pull`.
+
+**Pull the model and nothing else.** No SSH keys, no Tailscale, no hand-installed tools, no "while
+we have network" errands. Every one of those is a thing that outlives the window and that the sealed
+posture cannot subsequently account for.
+
+### 3.3 State and identity are fresh, and stay fresh across the seal
+
+- **`/var/lib` is created empty.** No carried audit log, registry, or identity material.
+- **Identity is minted here, never transplanted.** A copied key makes the audit chain a lie about
+  which machine acted.
+- **Minting before the seal is consistent with the seal, and CI proves the join:** leg 5 shows a
+  real reboot does not rotate keys. That is what makes "mint at unsealed first boot, seal
+  afterwards" sound — the identity that signs after §4 is the identity minted in §3.2.
+- **Weights are downloaded here, not copied from the open box.** Weights carried off a development
+  machine carry that machine's provenance.
 
 ---
 
-## 4. Apply the sealed config
+## 4. Seal — the second rebuild, same machine
 
 ```sh
-nixos-rebuild switch --flake .#agentos-sealed
+nixos-rebuild switch --flake <repo>#agentos-sealed
 ```
 
-Set the audit-signing pair **where the broker process actually inherits it** (§5.6 explains why
-this is not the same as declaring it in the config).
+This flips `agentos.cleanRoom.sealed = true` and removes the provisioning allowance — including the
+ollama daemon's own update ping. No local file editing, no git push: the seal is one rebuild.
+
+Set the audit-signing pair **where the broker process actually inherits it** (§5.6 explains why that
+is not the same as declaring it in the config).
 
 Reboot once before verifying. Verification against a system that has not completed a real boot
-proves less than it appears to — S1–S5's acceptance criteria are about a running sealed box, not
-about a successful switch.
+proves less than it appears to — S1–S5's criteria are about a running sealed box, not a successful
+switch.
+
+**If you find yourself needing the network after this point, the answer is not to unseal.** It is to
+start again from §2. A box unsealed to fix something is a box with an unaccounted-for window.
 
 ---
 
