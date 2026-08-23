@@ -972,6 +972,10 @@ def turn(msgs, consent_source=None):
         if clean and not msg.get("content"): print(clean)
         # Token check sits between "model asked for tools" and "tools run": once over
         # budget the pending calls are refused, not executed — halting spend is the point.
+        # NOT a hard cap: the ceiling is checked AFTER each streamed call, so real spend can
+        # overshoot by one hop's output before the trip (a streaming call cannot be
+        # preempted mid-flight without a per-call max_tokens). What it guarantees is that
+        # no FURTHER tool calls run once cumulative output >= max_output_tokens_per_turn.
         if MAX_TURN_TOKENS is not None and spent>=MAX_TURN_TOKENS:
             _trip_cost_breaker("token",spent,hops,msgs,len(calls),route=route); return
         for name,args in calls:

@@ -30,7 +30,7 @@
 #   file-cap-battery.sh           file.read/file.write capability round-trip + confinement
 #   providers-battery.py          11 checks — modules/providers.py provider-config contract
 #   wiring-battery.py             8 checks — agent-brain <-> providers.py wiring (needs pyyaml)
-#   cost-cap-battery.py           22 checks — cost-cap breaker: limits config + turn() trips (needs pyyaml)
+#   cost-cap-battery.py           28 checks — cost-cap breaker: limits config + turn() trips (needs pyyaml)
 #   transport-battery.py          23 checks — provider transport seam + ollama transport
 #   anthropic-transport-battery.py 34 checks — anthropic SSE transport + translation
 #   bip340-battery.py             47 checks — vendored BIP-340 signer vs the OFFICIAL vectors,
