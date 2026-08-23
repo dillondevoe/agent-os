@@ -115,6 +115,17 @@ KNOWN_UNWIRED_DEBT = frozenset({
     # That last one is the #155 question: a wired battery that exits 0 when its subject is missing
     # pays the debt on paper. This one does not.
     "transport-battery.py",
+    # ── ADDED 2026-08-23, AND THE LEDGER GOING UP HERE IS A CORRECTION, NOT A REGRESSION. ──
+    # Neither of these was newly un-wired. Both were MASKED: the only mentions of them in
+    # flake.nix are inside `#` comments, and until this same commit wiring_references() counted a
+    # comment as possible wiring. The true debt was 15 the whole time while the ledger said 14.
+    # The rule "this list may only shrink" is about never hiding a battery; it is not a reason to
+    # keep two hidden ones off it, so they go on loudly and the delta is named in the commit.
+    # Neither self-disarms, so each needs a derivation and nothing more — except that
+    # cap-sandbox-battery.sh wants sudo and real systemd, which is why it is likely the LAST of
+    # these to be payable and must not be quietly re-exempted for being inconvenient.
+    "identity-battery.py",
+    "cap-sandbox-battery.sh",
 })
 
 
@@ -155,10 +166,26 @@ def wiring_references(flake_src, tests_dir, base):
     silent degrade with the file left in place to reassure the reader.
 
     RESIDUAL SCOPE, STATED. This is a line-level heuristic over nix SOURCE, not an evaluation.
-    It excludes two shapes that provably cannot execute a file — a `builtins.pathExists` test and
-    a line that is purely a quoted message — and counts everything else as possible wiring. A
-    mention inside a `#` comment still counts, so this under-reports. It cannot over-report,
-    which is the direction that matters: it will never call a wired test unwired.
+    It excludes three shapes that provably cannot execute a file — a `builtins.pathExists` test,
+    a line that is purely a quoted message, and a `#` COMMENT — and counts everything else as
+    possible wiring.
+
+    THE COMMENT EXCLUSION IS NEW (2026-08-23) AND THE OLD DOCSTRING'S ARGUMENT FOR OMITTING IT
+    WAS SOUND FOR EXACTLY ONE OF THIS FUNCTION'S TWO CALLERS. It read: "a mention inside a `#`
+    comment still counts, so this under-reports. It cannot over-report, which is the direction
+    that matters: it will never call a wired test unwired." True — for the UNWIRED arm, where
+    over-counting is the safe direction.
+
+    But this function acquired a second caller, the STALE-EXEMPTION arm, where the direction is
+    INVERTED: there, counting a comment mention as wiring makes an honest exemption look stale
+    and turns CI red over a file nobody wired. It fired for real — PR #161 added a derivation
+    whose COMMENT named `tests/run-local.sh` and `tests/vm-matrix-contract.py` while explaining
+    the debt split, and flake-check went red claiming both exemptions were stale.
+
+    This is #155's finding one level up: ONE RETURN VALUE SERVING TWO CALLERS WITH OPPOSITE
+    CORRECT ANSWERS, and a failure-direction argument that was written about one of them. A
+    comment cannot execute a file, so excluding it is right for both arms; the old behaviour was
+    a safety margin in one direction that was a false positive in the other.
     """
     needle = f"{tests_dir}/{base}"
     hits = []
@@ -170,6 +197,8 @@ def wiring_references(flake_src, tests_dir, base):
             continue          # proves existence; executes nothing
         if stripped.startswith('"'):
             continue          # an assert's message string, not code
+        if stripped.startswith("#"):
+            continue          # a comment; it cannot run anything — see the docstring
         hits.append(stripped)
     return hits
 
@@ -188,8 +217,10 @@ def wiring_references(flake_src, tests_dir, base):
 # the one that matters"; this is that sentence applied to its own remediation.
 #
 # So the debt list is NOT homogeneous, and the count alone hides the split. Measured 2026-08-23:
-# 8 of the 14 self-disarm, 6 do not (measured 2026-08-23; the list is now 13 after
-# frontdoor-kick-battery.py was wired, so it stands at 8 self-disarming of 13).
+# Measured 2026-08-23: the list now stands at 15 — 8 self-disarming, 7 not. It moved twice that
+# day and the two moves have opposite meanings: frontdoor-kick-battery.py was WIRED and removed
+# (14 -> 13), then identity-battery.py and cap-sandbox-battery.sh were UNMASKED and added
+# (13 -> 15) when wiring_references() stopped counting `#` comments. One entry paid, two revealed.
 # Wiring one of the non-self-disarming ones needs a derivation. Wiring one of the 8
 # needs a derivation AND a guarantee its CLI is on PATH inside that derivation.
 SELF_DISARM_WINDOW = 3
