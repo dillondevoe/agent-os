@@ -5,6 +5,14 @@ else can follow. Written 2026-08-23 by Mirror against `spec-agentos-phase-s-exec
 §0/§1/§5/§6 and `SEAL-CHECKLIST-agentos.md`. Revised 2026-08-23 (PR #148) to fold Geist's Fable-gate
 findings F1–F4 on PR #147 — two of which were procedures that named things the repo does not have.
 
+> **Where the two source documents live.** `SEAL-CHECKLIST-agentos.md` and
+> `spec-agentos-phase-s-execution-2026-08-13.md` are **not in this repo** — both are in
+> `~/jarvis-sync/`. This matters here more than it would anywhere else: the scenario this runbook
+> exists for is a *clean re-provision*, and on a freshly-provisioned box SyncThing may not have run
+> yet, so an operator following the citations finds two filenames that resolve to nothing. Fetch
+> them from another machine in the mesh before starting §5. (Same class as F1–F4 — naming something
+> the repo does not have — one rung out: named, present somewhere, location unstated.)
+
 ---
 
 ## STATUS — READ THIS BEFORE FOLLOWING ANYTHING BELOW
