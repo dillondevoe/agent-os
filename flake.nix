@@ -278,6 +278,22 @@
           pkgs = nixpkgs.legacyPackages.${system};
           inherit openModules;
         };
+
+        # Task 324 step 2, BOOT LEG. Step 1 (#140) shipped the minting unit and every gate stayed
+        # green without any machine ever running it — the module parses, the package builds, the
+        # battery calls ensure_boot_identities() in-process. None of that is a booting machine.
+        # This was going to be verified on the Dell; it could not be, because the Dell runs
+        # `agentos-open` and Geist's 2026-08-23 ruling is that identity FOLLOWS AUDIT (sovereign
+        # only) — the open box has no agent-os unit at all, so it is the wrong instrument rather
+        # than a broken one. Hence baseModules, and hence a VM: leg 5 REBOOTS the guest to prove
+        # a real restart does not rotate the keys, which a single-process battery cannot show and
+        # which fails catastrophically and silently if it ever regresses.
+        # Out of `checks` for the same reason as its siblings: it boots a VM.
+        #   nix build .#test-identity-boot
+        test-identity-boot = import ./tests/identity-boot.nix {
+          pkgs = nixpkgs.legacyPackages.${system};
+          inherit baseModules;
+        };
       };
 
       checks.${system} = {
