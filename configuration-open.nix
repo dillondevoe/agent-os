@@ -94,7 +94,7 @@ in {
     ./modules/gaming-open.nix
     # Shared with the sovereign path deliberately (the ONE cross-lane import):
     # boot-branding is pure cosmetics (quiet+splash kernel params, Plymouth wordmark,
-    # 1s loader timeout) and the SAME identity is wanted on both variants. It sets
+    # 1s loader timeout) and the SAME wordmark/branding is wanted on both variants. It sets
     # nothing security-relevant; any future open-specific boot tweak goes in a new
     # boot-branding-open.nix, not edits here that would perturb the sealed surface.
     ./modules/boot-branding.nix

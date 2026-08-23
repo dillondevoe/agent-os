@@ -172,6 +172,13 @@ jobs:
           # RuntimeWatchdogUSec vs /sys/class/watchdog/watchdog0/state one entry up. Boots the
           # OPEN image, so it is the heaviest node in this matrix.
           - test-selfimprove-loop-runs
+          # IDENTITY AT BOOT. Added in the same commit as tests/identity-boot.nix, per this
+          # file's own rule. Task 324 step 2's boot leg: the minting oneshot shipped in #140 and
+          # nothing in the tree had ever watched a machine run it. Same "installed vs actually
+          # happened" distinction as the two entries above — but with a second reboot inside the
+          # test, because the property that matters (a restart does not rotate keys, orphaning
+          # every prior signature) only exists across boots. Boots the SOVEREIGN image twice.
+          - test-identity-boot
     steps:
       - name: Checkout
         # SHA-pinned, matching flake-check.yml: immutable commit of the newest v* release tag.
