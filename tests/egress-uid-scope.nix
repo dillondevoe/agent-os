@@ -122,6 +122,14 @@ pkgs.testers.runNixOSTest {
     assert peer_ip, "no off-box peer address found; the fixture, not the wall, is broken"
     # ...and prove it is genuinely off-box: if the sealed node owns this address too, every
     # denial below would be self-directed and unattributable to the egress chain.
+    # Arm this negative grep the same way peer_ip above is armed: it passes if the sealed node
+    # does not hold the address AND if `ip addr` printed nothing, and the empty case is the one
+    # that passes. peer_ip has an armed assert; its counterpart here did not.
+    sealed_addrs = sealed.succeed("ip -4 -o addr show scope global | wc -l").strip()
+    assert int(sealed_addrs) > 0, (
+        "the sealed node reported NO global addresses, so the off-box proof below would pass "
+        "vacuously; the fixture, not the wall, is what this leg measured"
+    )
     sealed.fail(f"ip -4 -o addr show scope global | grep -q ' {peer_ip}/'")
 
     # Both listeners are reachable from the peer's own side, so a later failure on the sealed

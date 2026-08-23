@@ -44,7 +44,17 @@ pkgs.testers.runNixOSTest {
         machine.succeed("nft list table inet agentos_egress >/dev/null")
         # the agent gate is polarised on the POSITIVE token (fail-closed on absence)
         machine.succeed("grep -q -- '! -e /run/agentos-sealed-ok' /etc/profile")
-        # dhcpcd genuinely off — NM is the only link manager
+        # dhcpcd genuinely off — NM is the only link manager.
+        # ARM THE INPUT FIRST. `! <cmd> | grep -q dhcpcd` passes when dhcpcd is absent AND when
+        # <cmd> printed nothing at all — a renamed flag, a systemd that answered on stderr, an
+        # empty list — and the empty case is the PASSING one. That makes the leg indistinguishable
+        # from a check that never ran. Count the units, prove the count is non-zero, then assert
+        # dhcpcd is not among them.
+        units = machine.succeed("systemctl list-unit-files --no-legend | wc -l").strip()
+        assert int(units) > 0, (
+            "systemctl list-unit-files returned an EMPTY list, so the dhcpcd assertion below "
+            "would pass without observing anything. The instrument, not the wall, is broken."
+        )
         machine.succeed("! systemctl list-unit-files --no-legend | grep -q '^dhcpcd'")
 
     with subtest("2. token re-asserts on a real reboot (written every boot, before getty)"):
