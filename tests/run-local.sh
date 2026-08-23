@@ -2,6 +2,13 @@
 # =============================================================================
 # tests/run-local.sh — run every battery that does NOT need nix, in one command.
 #
+# That first line was FALSE from some point until 2026-08-23: eleven nix-free batteries were
+# silently omitted. It is now true because the coverage assertion at the bottom makes it
+# true, not because the list above was re-read by hand. Two of the eleven were real losses
+# (escalate-consent, identity-boot: they run and pass with nothing installed); the other nine
+# self-disarm or need privilege, and are excluded BY NAME WITH A REASON rather than by
+# nobody having noticed.
+#
 # WHY THIS EXISTS
 #   The batteries are excellent and CI runs all of them via a sandboxed
 #   `nix flake check`. But there was no way to run ANY of them locally without
@@ -47,8 +54,14 @@
 #                                 control-armed
 #   mem-battery.py                11 checks — bin/mem (memory-as-filesystem) contract
 #   agent-loop-dispatch-battery.py  8 checks — agent-loop tool-dispatch mechanics vs bin/mcp + broker-stub
+#   escalate-consent-battery.py   consent/escalation contract (added 2026-08-23; was an orphan)
+#   identity-boot-battery.py      boot identity self-test (added 2026-08-23; was an orphan)
 #
-# NOT COVERED HERE — these need a materialized Nix registry and/or store paths:
+# NOT COVERED HERE. THIS LIST IS NO LONGER THE AUTHORITY — the EXCLUDED groups near the
+# bottom of this file are, and a coverage assertion fails the run if a battery file is
+# neither invoked nor in one of them. That inversion is the point: this paragraph said four
+# names while fifteen batteries were actually uncovered, and eleven of them were neither run
+# nor declared anywhere. Prose cannot go red, so it drifted for months in silence.
 #   broker-battery.sh · cap-battery.sh · confirm-battery.sh · seam-live-battery.sh
 #   nft-ruleset-* · agentos-open-imports · seal-faildown · vm / vm-sealed
 #   Run those with:  nix flake check --option sandbox true -L
@@ -185,6 +198,80 @@ if need "$BIN/agent-loop" agent-loop-dispatch && need "$T/broker-stub.py" agent-
     AGENT_OS_BROKER="$T/broker-stub.py" \
     PYTHONPATH="$ROOT/modules" \
     "$PY" "$T/agent-loop-dispatch-battery.py"
+fi
+
+# ── ADDED 2026-08-23 by the coverage assertion below, not by anyone remembering. ─────────
+# Both were present, nix-free, and passing on their own the whole time; both were simply
+# missing from the list above and from the header's exclusion prose, so neither had run in
+# this lane once. They are the two orphans of eleven that are NOT self-disarming — i.e. the
+# two where the silence was costing real coverage rather than a decorative green line.
+need "$T/escalate-consent-battery.py" escalate-consent && \
+  run escalate-consent "$PY" "$T/escalate-consent-battery.py"
+need "$T/identity-boot-battery.py" identity-boot && \
+  run identity-boot "$PY" "$T/identity-boot-battery.py"
+
+# ── COVERAGE ASSERTION — THIS FILE'S OWN LIST WAS SILENTLY STALE FOR MONTHS. ────────────
+# Added 2026-08-23 after Page found the identical defect on their surface: a hand-typed
+# runner list, published as "all batteries", while discovery found two more that had never
+# run once that day. Checked here and the answer was worse — the header claimed to run
+# "every battery that does NOT need nix" and named FOUR deliberate exclusions, while
+# fifteen were actually uncovered. Eleven batteries were neither run nor declared: they
+# fell out of a PROSE exclusion list that nothing compared against the directory.
+#
+# That is the same class as the `#`-comment defect in vm-matrix-contract.py's
+# wiring_references(), one level out: a suppression list stops matching reality, and
+# because nothing re-reads it when a file is ADDED, there is no moment of disagreement for
+# anyone to notice. A rule protects the sessions that remember it; this arm protects the
+# ones that do not, because it goes red in the run the contributor is already doing.
+#
+# It does NOT auto-run discovered batteries. Each entry above wires a bespoke argument
+# contract that discovery cannot invent, and a runner that guesses arguments produces
+# failures that are about the runner. It asserts COVERAGE: every battery file is either
+# invoked above or listed below WITH A REASON.
+#
+# The exclusions are not homogeneous and the count would hide the split, so they are
+# grouped by WHY. The agos-* seven matter most: they self-disarm to SKIP/rc=0 when their
+# CLI is off PATH, so adding them would buy a green line that proves nothing — the exact
+# trap named in vm-matrix-contract.py's KNOWN_UNWIRED_DEBT split comment.
+NIX_REQUIRED="broker-battery.sh cap-battery.sh confirm-battery.sh seam-live-battery.sh"
+PRIV_REQUIRED="cap-sandbox-battery.sh"                    # wants sudo + real systemd
+SELF_DISARMING="agos-calc-battery.py agos-doc-battery.py agos-files-battery.py
+                agos-media-battery.py agos-notes-battery.py agos-sys-battery.py
+                agos-web-battery.py calendar-battery.py"  # SKIP rc=0 with their CLI off PATH
+EXCLUDED="$NIX_REQUIRED $PRIV_REQUIRED $SELF_DISARMING"
+
+# Strip ONCE, into a variable, and grep the variable — do NOT pipe sed into grep inside the
+# loop. `set -o pipefail` is on at the top of this file, and `grep -q` exits at its FIRST
+# match, which SIGPIPEs sed (141) while grep itself succeeds. pipefail then reports the
+# pipeline as FAILED, so a battery that IS wired gets listed as uncovered — intermittently,
+# because whether sed has finished writing is a race. Observed here naming a different
+# correctly-wired battery on each of two runs (mcp-battery.sh, then audit-battery.sh) before
+# the cause was found. A FLAKY coverage arm is worse than none: it teaches you to disbelieve
+# the one output whose whole purpose is being believed.
+RL_CODE="$(sed 's/[[:space:]]*#.*//' "$SCRIPT_DIR/run-local.sh")"
+
+uncovered=""
+for f in "$T"/*battery.py "$T"/*battery.sh; do
+  [ -e "$f" ] || continue
+  b="$(basename "$f")"
+  case " $EXCLUDED " in *" $b "*) continue ;; esac
+  # Comments are stripped (see RL_CODE above), and that is not defensive padding — I wrote
+  # this assertion WITH a bare grep and caught it minutes later, hours after fixing the
+  # identical defect in wiring_references(). A `#` line cannot run anything, so a battery
+  # named only in the prose above would have been reported COVERED: a false green in the arm
+  # whose entire job is finding false greens, shipped inside the fix for it.
+  # No pipeline at all. Substituting `printf | grep -q` for `sed | grep -q` would have kept
+  # the identical exposure — printf takes the SIGPIPE instead of sed and pipefail reports it
+  # just the same. The bug is the PIPE under pipefail, not which command is upstream of it.
+  case "$RL_CODE" in *"$b"*) ;; *) uncovered="$uncovered $b" ;; esac
+done
+if [ -n "$uncovered" ]; then
+  echo
+  printf '  \033[31mFAIL\033[0m  %-28s %s\n' "coverage" "battery files neither run nor excluded:"
+  for b in $uncovered; do echo "          $b"; done
+  echo "        Add it above, or add it to an EXCLUDED group WITH ITS REASON."
+  echo "        A runner that silently omits a battery reports exactly like one that runs it."
+  fail=$((fail+1)); FAILED+=("coverage")
 fi
 
 echo
