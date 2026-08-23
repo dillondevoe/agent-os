@@ -71,6 +71,20 @@ jobs:
         # assumed present, an image change would turn this check into a no-op or a spurious red.
         run: nix shell nixpkgs#python3Packages.pyyaml --command python3 tests/vm-matrix-contract.py
 
+      # Same lane, same reason as the step above, and it is a SECOND contract about what CI runs:
+      # every battery file under tests/ is either invoked by tests/run-local.sh or excluded in
+      # runner-coverage-contract.py WITH A REASON. On 2026-08-23 the runner's header claimed it
+      # ran "every battery that does NOT need nix" while silently omitting eleven; two of those
+      # were real coverage losses that ran in no lane at all.
+      #
+      # It is HERE and not only inside run-local.sh because run-local.sh is a developer
+      # convenience that no workflow invokes — an arm living solely there protects the sessions
+      # that remember to run it, which is the tier of the prose it replaced. Stdlib only, so it
+      # needs no `nix shell` wrapper; run-local.sh calls this same file rather than restating
+      # the rule in bash.
+      - name: tests/run-local.sh covers every nix-free battery
+        run: python3 tests/runner-coverage-contract.py
+
       # `--option sandbox true` is the whole point: it reproduces the clean-room build
       # (no /usr/bin/env, patchShebangs load-bearing) that a laptop's non-sandbox check hides.
       # `-L` prints full build logs so a battery failure is legible in the run output.

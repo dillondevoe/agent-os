@@ -229,48 +229,41 @@ need "$T/identity-boot-battery.py" identity-boot && \
 # failures that are about the runner. It asserts COVERAGE: every battery file is either
 # invoked above or listed below WITH A REASON.
 #
-# The exclusions are not homogeneous and the count would hide the split, so they are
-# grouped by WHY. The agos-* seven matter most: they self-disarm to SKIP/rc=0 when their
-# CLI is off PATH, so adding them would buy a green line that proves nothing — the exact
-# trap named in vm-matrix-contract.py's KNOWN_UNWIRED_DEBT split comment.
-NIX_REQUIRED="broker-battery.sh cap-battery.sh confirm-battery.sh seam-live-battery.sh"
-PRIV_REQUIRED="cap-sandbox-battery.sh"                    # wants sudo + real systemd
-SELF_DISARMING="agos-calc-battery.py agos-doc-battery.py agos-files-battery.py
-                agos-media-battery.py agos-notes-battery.py agos-sys-battery.py
-                agos-web-battery.py calendar-battery.py"  # SKIP rc=0 with their CLI off PATH
-EXCLUDED="$NIX_REQUIRED $PRIV_REQUIRED $SELF_DISARMING"
-
-# Strip ONCE, into a variable, and grep the variable — do NOT pipe sed into grep inside the
-# loop. `set -o pipefail` is on at the top of this file, and `grep -q` exits at its FIRST
-# match, which SIGPIPEs sed (141) while grep itself succeeds. pipefail then reports the
-# pipeline as FAILED, so a battery that IS wired gets listed as uncovered — intermittently,
-# because whether sed has finished writing is a race. Observed here naming a different
-# correctly-wired battery on each of two runs (mcp-battery.sh, then audit-battery.sh) before
-# the cause was found. A FLAKY coverage arm is worse than none: it teaches you to disbelieve
-# the one output whose whole purpose is being believed.
-RL_CODE="$(sed 's/[[:space:]]*#.*//' "$SCRIPT_DIR/run-local.sh")"
-
-uncovered=""
-for f in "$T"/*battery.py "$T"/*battery.sh; do
-  [ -e "$f" ] || continue
-  b="$(basename "$f")"
-  case " $EXCLUDED " in *" $b "*) continue ;; esac
-  # Comments are stripped (see RL_CODE above), and that is not defensive padding — I wrote
-  # this assertion WITH a bare grep and caught it minutes later, hours after fixing the
-  # identical defect in wiring_references(). A `#` line cannot run anything, so a battery
-  # named only in the prose above would have been reported COVERED: a false green in the arm
-  # whose entire job is finding false greens, shipped inside the fix for it.
-  # No pipeline at all. Substituting `printf | grep -q` for `sed | grep -q` would have kept
-  # the identical exposure — printf takes the SIGPIPE instead of sed and pipefail reports it
-  # just the same. The bug is the PIPE under pipefail, not which command is upstream of it.
-  case "$RL_CODE" in *"$b"*) ;; *) uncovered="$uncovered $b" ;; esac
-done
-if [ -n "$uncovered" ]; then
-  echo
-  printf '  \033[31mFAIL\033[0m  %-28s %s\n' "coverage" "battery files neither run nor excluded:"
-  for b in $uncovered; do echo "          $b"; done
-  echo "        Add it above, or add it to an EXCLUDED group WITH ITS REASON."
-  echo "        A runner that silently omits a battery reports exactly like one that runs it."
+# The exclusions are grouped by WHY in the contract file, not flat: a count would hide the
+# split. The agos-* seven matter most — they self-disarm to SKIP/rc=0 when their CLI is off
+# PATH, so adding them would buy a green line that proves nothing: the exact trap named in
+# vm-matrix-contract.py's KNOWN_UNWIRED_DEBT split comment.
+# ── PROMOTED OUT OF THIS FILE 2026-08-23, and the promotion IS the finding. ─────────────
+# This arm was born here as ~40 lines of bash holding its own exclusion list. Two problems,
+# and I stated the first one too strongly at the time:
+#
+#   TIER. I called this a CI-enforced arm. It is not. run-local.sh has ZERO references in
+#   flake.nix and no workflow invokes it — I believed otherwise because the `#`-comment
+#   defect in wiring_references() reported a comment mention as wiring, and the belief
+#   outlived the bug by hours. An arm that lives only here protects the sessions that
+#   REMEMBER TO RUN IT, which is the tier of the prose it replaced.
+#
+#   DUPLICATION. Moving it to a CI lane while leaving a copy here would put one rule in two
+#   languages with nothing asserting they agree — the FOURTH SCAR exactly, the shape that
+#   produced the whitespace starvation bug.
+#
+# So the rule is ONE implementation in tests/runner-coverage-contract.py, run directly by
+# .github/workflows/flake-check.yml (tier three) AND called here (fast local feedback). Two
+# callers, one function. The exclusion list lives there and NOT here, on purpose: a second
+# copy is what this comment exists to prevent.
+if [ -f "$T/runner-coverage-contract.py" ]; then
+  if out="$("$PY" "$T/runner-coverage-contract.py" 2>&1)"; then
+    printf '  \033[32mPASS\033[0m  %-28s\n' "coverage"
+    pass=$((pass+1))
+  else
+    printf '  \033[31mFAIL\033[0m  %-28s\n' "coverage"
+    echo "$out" | sed 's/^/        /'
+    fail=$((fail+1)); FAILED+=("coverage")
+  fi
+else
+  # NOT a skip. The contract file being absent is the one state in which nothing is checking
+  # coverage at all, so it must be louder than any coverage gap it would have reported.
+  printf '  \033[31mFAIL\033[0m  %-28s %s\n' "coverage" "tests/runner-coverage-contract.py is MISSING"
   fail=$((fail+1)); FAILED+=("coverage")
 fi
 
