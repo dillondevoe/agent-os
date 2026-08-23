@@ -58,6 +58,7 @@ exercised is a comment with a CI badge.
 | 13 | A contract that compared two derived lists | `tests/vm-matrix-contract.py` (member 8's fix) asserted the flake's `test-*` packages and the vm-tests matrix were the same set, both directions — and could not see a `tests/*.nix` that was never wired into `flake.nix` at all. With no package, the file is absent from **both** lists, so comparing them passes. The file is committed and reviews as coverage; it runs nowhere. | `tests/vm-matrix-contract.py` (found by Mirror auditing his own gate; fixed same PR) |
 | 14 | A verification harness that manufactured the symptom it was looking for | Running a watcher piped to `\| head -3` closed the pipe; the process took **SIGPIPE** on a later `print()` and died before `_save_state`. The dedupe state was never written, and the result presented as a **dedupe bug in the feature under test**. Every other member here is a guard that failed to guard; this is a *harness* that produced a finding about code that was correct. | `agentos_merge_gate_watcher.py` (operational; found by Page while shipping the main-red alert) |
 | 15 | A coverage bound counted in FILES while the risk accrued in TIME | A comms-bus backstop scan read `ls -t *.md \| head -25` — a bound that reads like a considered budget ("the newest 25") and is one, in the wrong unit. The window it actually buys is `25 / arrival-rate`, so it narrows precisely when traffic is heaviest — i.e. exactly when a miss is likeliest. Measured at **under two hours** on a busy night; the same line reads as "recent traffic is covered" at every tree size. Fixed by making the window a TIME window (24h) unioned with the count. | `mirror-tick` §2 scan (operational; found by Mirror on his own surface, 2026-08-21). Geist ruled the same fix in `geist-inbound.sh`; Augur adopted it after finding his scan was a pure filename glob. |
+| 16 | Four consecutive fixes to the guard that ends this class, each cancelled by the next question it did not contain | `tests/vm-matrix-contract.py` globbed `*.nix` over a directory one third `.nix`; then counted its own `builtins.pathExists` assert as wiring; then never asked what a WIRED battery does when its subject is absent (two did exit 0); then shipped that new check gated on `.py` while naming a behaviour. No fix was found by the check before it. | `tests/vm-matrix-contract.py`, `tests/providers-battery.py`, `tests/agent-loop-dispatch-battery.py`, `flake.nix` (merged — PRs #153, #154, #155, #156, all 2026-08-23) |
 
 Members 6–7 are recorded here as in-flight rather than merged. If those PRs change shape in
 review, this table is wrong until someone fixes it — which is itself an instance of the class,
@@ -460,6 +461,49 @@ Two corollaries earned alongside it:
   same fix within a day. That is a good sign about the fix and says nothing about whether a
   fourth surface has the same bug — it was found on each surface by someone reading their
   own code, not by any of the others' fixes.
+
+### Member 16: four generations, each fix manufacturing the next defect
+
+Members 9 and 10 are the class biting its own cataloguers. Member 16 is the same thing sustained
+over four consecutive changes to one file, `tests/vm-matrix-contract.py` — the guard written to
+end this repo's worst historical bug, *"a regression test that does not execute does not prevent
+the regression; it documents that someone once could have caught it."* Recorded as one member
+rather than four because the individual defects are unremarkable and the SEQUENCE is not.
+
+| # | The guard as shipped | What cancelled it | Found by |
+|---|---|---|---|
+| G1 | globbed `tests/*.nix` | `tests/` is one third `.nix`; six batteries ran in no lane | reading the glob against `ls` |
+| G2 | "is `tests/<name>` mentioned in flake.nix?" | satisfied by `builtins.pathExists ./tests/x.py`, which executes nothing — the guard counted **its own existence-assert** as coverage, hiding all 8 ambient-hand batteries | auditing G1's own fix |
+| G3 | `self_disarms()`: is a wired battery `exit 0` when its subject is absent? | never asked; two already-wired batteries did exactly that, one of them contradicting a comment eight lines above its own invocation | asking a question G2 had no reason to ask |
+| G4 | `self_disarms()` gated on `base.endswith(".py")` | a name describing a BEHAVIOUR with a scope of one LANGUAGE — this file's scope/claim mismatch, inside the check written to catch it | sweeping the shell half by hand |
+
+Read the "found by" column. Not one of these was found by the check that preceded it. Each was
+found by someone looking at the previous fix and asking a question the fix did not contain — which
+is the operational content of member 9/10 and the reason the ledger is worth the space.
+
+Three things generalise past this file:
+
+> **A MENTION IS NOT WIRING.** Any guard that decides "is X covered?" with a substring, an import
+> list, a filename in a manifest, or a name in a config is answered by a reference that executes
+> nothing. Existence-asserts are the worst offenders precisely because they were added for a good
+> reason: G2's `pathExists` block exists to prove a battery has not been DELETED, and it does. It
+> cannot see UN-INVOCATION — the same silent degrade with the file left in place to reassure the
+> reader.
+
+> **WIRED IS NOT THE LAST QUESTION. ASK WHAT IT DOES WHEN ITS SUBJECT IS ABSENT.** A battery that
+> prints `SKIP: agos-calc not on PATH` and exits 0 is correct as a hand-run tool and vacuous the
+> instant it is wired into CI, where green then attests to the absence of the thing it tests. The
+> fix belongs per CALLER, not per file: the derivation sets `AGENT_OS_STRICT=1`, the hand-run does
+> not, and one exit code stops serving two callers with opposite correct answers.
+
+> **A DEBT LIST IS NOT HOMOGENEOUS, AND THE COUNT HIDES THE SPLIT.** `KNOWN_UNWIRED_DEBT` holds 14
+> batteries; 8 of them self-disarm. Wiring one of those eight is a two-line change that turns a
+> check green, removes a line from the ledger someone watches go down, and adds zero coverage —
+> **the debt paid on paper.** A ledger meant to shrink needs to publish what kind of item each
+> entry is, or the cheapest way to shrink it is the way that buys nothing.
+
+The dates are 2026-08-23, all four inside one working day, on a file whose docstring already
+argued the general case correctly at every step. **Prose in the guard is still prose.**
 
 ### Why this belongs in this file rather than a style guide
 
