@@ -44,6 +44,7 @@ Control arms (each MUST fail — if one does not, that check is not a check):
 """
 import argparse
 import glob
+import re
 import json
 import os
 import subprocess
@@ -183,6 +184,7 @@ def wiring_references(flake_src, tests_dir, base):
 # 8 of the 14 self-disarm, 6 do not. Wiring one of the 6 needs a derivation. Wiring one of the 8
 # needs a derivation AND a guarantee its CLI is on PATH inside that derivation.
 SELF_DISARM_WINDOW = 3
+_SH_EXIT = re.compile(r"^\s*exit 0\s*(#.*)?$")
 
 
 def self_disarms(path):
@@ -206,7 +208,12 @@ def self_disarms(path):
         # do is stop pointing at a file whose author has already answered the question.
         return False
     for i, line in enumerate(lines):
-        if "sys.exit(0)" not in line:
+        # Two spellings, because the check is named for a BEHAVIOUR and the behaviour is not
+        # Python's. Shipped .py-only in #155 — its own disguise-8, a name wider than its scope,
+        # in the check written to catch scope/claim mismatches. Swept the 12 shell batteries by
+        # hand at the same time and found none, so this arm is dormant on today's tree; it is
+        # here so the NEXT one is not found by hand.
+        if "sys.exit(0)" not in line and not _SH_EXIT.match(line):
             continue
         window = lines[max(0, i - SELF_DISARM_WINDOW):i]
         if any("SKIP" in w for w in window):
@@ -244,7 +251,7 @@ def unwired_test_files(tests_dir, flake_path):
                 continue
             if not wiring_references(flake_src, tests_dir, base):
                 unwired.append(path)
-            elif base.endswith(".py") and self_disarms(path):
+            elif self_disarms(path):
                 # Wired AND self-disarming: green proves the CLI was absent, nothing more.
                 vacuous.append(path)
 
