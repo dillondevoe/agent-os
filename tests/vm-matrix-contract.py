@@ -89,6 +89,18 @@ UNWIRED_BY_DESIGN = frozenset({
 # escalate-consent-battery.py deserves its own line: it is referenced by nothing at all, not even
 # tests/run-local.sh, so before this check it was invisible to every reader as well as to CI.
 KNOWN_UNWIRED_DEBT = frozenset({
+    # The eight ambient-hand acceptance batteries. Each is named in flake.nix by exactly one
+    # `builtins.pathExists` assert and its error string, and by nothing else in the repository.
+    # The guard that names them proves they have not been DELETED; nothing proves they RUN.
+    "calendar-battery.py",
+    "agos-calc-battery.py",
+    "agos-sys-battery.py",
+    "agos-files-battery.py",
+    "agos-notes-battery.py",
+    "agos-doc-battery.py",
+    "agos-media-battery.py",
+    "agos-web-battery.py",
+    # Found in the first sweep (#153): referenced only by tests/run-local.sh, a manual runner.
     "anthropic-transport-battery.py",
     "audit-signing-battery.py",
     "bip340-battery.py",
@@ -113,6 +125,45 @@ def matrix_entries(path):
         return set(wf["jobs"]["vm-test"]["strategy"]["matrix"]["test"])
     except (KeyError, TypeError) as exc:
         sys.exit(f"FAIL: could not read the matrix from {path}: {exc!r}")
+
+
+def wiring_references(flake_src, tests_dir, base):
+    """Lines of flake.nix that reference tests/<base> in a way that could RUN it.
+
+    A MENTION IS NOT WIRING, and the first version of this check could not tell the difference.
+    It asked whether the string "tests/<base>" appeared in flake.nix at all. That is satisfied by
+
+        assert lib.assertMsg (builtins.pathExists ./tests/calendar-battery.py)
+          "agentos-open-imports: calendar-open battery missing (tests/calendar-battery.py deleted?).";
+
+    which proves the file EXISTS and runs nothing. All eight ambient-hand acceptance batteries
+    (calendar, agos-calc, agos-sys, agos-files, agos-notes, agos-doc, agos-media, agos-web) are
+    referenced by nothing else anywhere in the repo. They were invisible to the very check written
+    to find tests that never run — the check counted its own guard's existence-assert as coverage.
+
+    Note what the pathExists guard says about itself: it was added because "a module's acceptance
+    BATTERY could be deleted and the build would stay green — same silent-degrade class as a
+    dropped import." It catches DELETION. It cannot catch UN-INVOCATION, which is the same
+    silent degrade with the file left in place to reassure the reader.
+
+    RESIDUAL SCOPE, STATED. This is a line-level heuristic over nix SOURCE, not an evaluation.
+    It excludes two shapes that provably cannot execute a file — a `builtins.pathExists` test and
+    a line that is purely a quoted message — and counts everything else as possible wiring. A
+    mention inside a `#` comment still counts, so this under-reports. It cannot over-report,
+    which is the direction that matters: it will never call a wired test unwired.
+    """
+    needle = f"{tests_dir}/{base}"
+    hits = []
+    for line in flake_src.splitlines():
+        if needle not in line:
+            continue
+        stripped = line.strip()
+        if "pathExists" in line:
+            continue          # proves existence; executes nothing
+        if stripped.startswith('"'):
+            continue          # an assert's message string, not code
+        hits.append(stripped)
+    return hits
 
 
 def unwired_test_files(tests_dir, flake_path):
@@ -142,8 +193,7 @@ def unwired_test_files(tests_dir, flake_path):
             present.add(base)
             if base in UNWIRED_BY_DESIGN or base in KNOWN_UNWIRED_DEBT:
                 continue
-            # Match the path as flake.nix would write it (./tests/foo.nix or tests/foo.nix).
-            if f"{tests_dir}/{base}" not in flake_src:
+            if not wiring_references(flake_src, tests_dir, base):
                 unwired.append(path)
 
     # A STALE EXEMPTION IS ITSELF THE BUG THIS FILE IS ABOUT. An entry naming a file that no
@@ -154,7 +204,7 @@ def unwired_test_files(tests_dir, flake_path):
     for base in sorted(UNWIRED_BY_DESIGN | KNOWN_UNWIRED_DEBT):
         if base not in present:
             stale.append((base, "no such file in %s/" % tests_dir))
-        elif f"{tests_dir}/{base}" in flake_src:
+        elif wiring_references(flake_src, tests_dir, base):
             stale.append((base, "is wired into %s now — remove the exemption" % flake_path))
     return unwired, stale
 
