@@ -184,11 +184,23 @@ check("I2. dispatcher routes claude kind to the anthropic transport",
       b.ACTIVE_PROVIDER_KIND == "claude" and b._TRANSPORTS["claude"] is b._anthropic_stream_events)
 check("I2. transport configures from the provider it was GIVEN, not a global",
       captured["body"]["model"] == "claude-opus-5")
+# THE LABEL BELOW MAKES TWO CLAIMS AND THIS ARM USED TO PROVE NEITHER OF THEM.
+# It was `except RuntimeError: check(..., True)` — satisfied by ANY RuntimeError from anywhere
+# in the call, including one raised for an unrelated reason, and silent about "rather than
+# mis-billing", which asserts that no request went out. Structurally a correct two-branch test;
+# its sentence was simply wider than its assertion. Found by reading the label against the
+# assert after Page did the same on their own arms (2026-08-23) — a structural sweep clears on
+# shape and never reads a word.
+_before = dict(captured)
 try:
     list(b._anthropic_stream_events([{"role": "user", "content": "x"}], provider="local-ollama"))
-    check("I2. wrong provider fails loud (no api_key_ref) rather than mis-billing", False)
-except RuntimeError:
-    check("I2. wrong provider fails loud (no api_key_ref) rather than mis-billing", True)
+    check("I2. wrong provider raises rather than proceeding", False)
+except RuntimeError as exc:
+    check("I2. wrong provider raises rather than proceeding", True)
+    check("I2. ...and it raises FOR the missing api_key_ref, not for some other reason",
+          "api_key_ref" in str(exc))
+    check("I2. ...and no request was issued — the 'rather than mis-billing' half",
+          dict(captured) == _before)
 
 # ── J. a stream error must raise, not truncate silently ──
 b.urllib.request.urlopen = lambda *a, **k: _FakeResp(
