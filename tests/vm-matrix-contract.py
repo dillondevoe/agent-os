@@ -54,14 +54,48 @@ FLAKE = "flake.nix"
 TESTS_DIR = "tests"
 SYSTEM = "x86_64-linux"
 
-# tests/*.nix files that are deliberately NOT wired into flake.nix as a test package —
-# shared helpers, libraries, fixtures. Empty today: every .nix in tests/ is a test.
+# Which extensions in tests/ are candidate test files. This was ".nix" ALONE until the sweep
+# below, and that single-extension glob is what let six committed batteries run nowhere for as
+# long as they have existed. The docstring above already argued the general case — "a test file
+# that was never added to flake.nix at all has no package, so it is absent from BOTH sides and
+# the comparison passes" — and that argument never had anything to do with the extension. The
+# guard simply looked at one third of the directory it claimed to cover.
+TEST_SUFFIXES = (".nix", ".py", ".sh")
+
+# Files in tests/ that are deliberately NOT wired into flake.nix as a test — shared helpers,
+# libraries, fixtures, and the local-only runner.
 #
 # This list is the opt-out, and it is explicit ON PURPOSE. The alternative — inferring
 # "probably a helper" from a filename — would make the check quietly stop covering things
 # as the tree grows, which is the exact failure this file exists to prevent. Adding an
 # entry here should be a visible decision in a diff, not a pattern that swallows files.
-UNWIRED_BY_DESIGN = frozenset()
+UNWIRED_BY_DESIGN = frozenset({
+    "run-local.sh",           # the manual at-a-box runner; it INVOKES batteries, it is not one
+    "vm-matrix-contract.py",  # this file; invoked directly by flake-check.yml, not via flake.nix
+})
+
+# DEBT, NOT DESIGN — and the two must never share a list.
+#
+# Every entry here is a real battery, committed and passing locally, that NO CI lane builds. It
+# is the repo's own worst historical bug ("a regression test that does not execute does not
+# prevent the regression; it documents that someone once could have caught it") sitting live in
+# the tree, and it was invisible because the guard written to end that bug globbed *.nix only.
+#
+# They are listed rather than silently exempted so that the count is a number someone can watch
+# go down. THIS LIST MAY ONLY SHRINK. Wiring each one needs its own derivation with its own
+# dependencies — separate work, per battery — but nothing new can join them: an unwired test that
+# is NOT named here fails this check on the commit that adds it, which is the whole point.
+#
+# escalate-consent-battery.py deserves its own line: it is referenced by nothing at all, not even
+# tests/run-local.sh, so before this check it was invisible to every reader as well as to CI.
+KNOWN_UNWIRED_DEBT = frozenset({
+    "anthropic-transport-battery.py",
+    "audit-signing-battery.py",
+    "bip340-battery.py",
+    "escalate-consent-battery.py",
+    "frontdoor-kick-battery.py",
+    "transport-battery.py",
+})
 
 
 def matrix_entries(path):
@@ -100,15 +134,29 @@ def unwired_test_files(tests_dir, flake_path):
     except OSError as exc:
         sys.exit(f"FAIL: could not read {flake_path}: {exc!r}")
 
+    present = set()
     unwired = []
-    for path in sorted(glob.glob(os.path.join(tests_dir, "*.nix"))):
-        name = os.path.basename(path)[: -len(".nix")]
-        if name in UNWIRED_BY_DESIGN:
-            continue
-        # Match the path as flake.nix would write it (./tests/foo.nix or tests/foo.nix).
-        if f"{tests_dir}/{name}.nix" not in flake_src:
-            unwired.append(path)
-    return unwired
+    for suffix in TEST_SUFFIXES:
+        for path in sorted(glob.glob(os.path.join(tests_dir, "*" + suffix))):
+            base = os.path.basename(path)
+            present.add(base)
+            if base in UNWIRED_BY_DESIGN or base in KNOWN_UNWIRED_DEBT:
+                continue
+            # Match the path as flake.nix would write it (./tests/foo.nix or tests/foo.nix).
+            if f"{tests_dir}/{base}" not in flake_src:
+                unwired.append(path)
+
+    # A STALE EXEMPTION IS ITSELF THE BUG THIS FILE IS ABOUT. An entry naming a file that no
+    # longer exists, or one that has since been wired up, keeps a name on a suppression list
+    # for no reason — and the next file to take that name inherits the exemption silently.
+    # Both lists are checked, because both suppress.
+    stale = []
+    for base in sorted(UNWIRED_BY_DESIGN | KNOWN_UNWIRED_DEBT):
+        if base not in present:
+            stale.append((base, "no such file in %s/" % tests_dir))
+        elif f"{tests_dir}/{base}" in flake_src:
+            stale.append((base, "is wired into %s now — remove the exemption" % flake_path))
+    return unwired, stale
 
 
 def flake_test_packages(system):
@@ -141,15 +189,26 @@ def main():
 
     unlisted = sorted(tests - matrix)
     dangling = sorted(matrix - tests)
-    unwired = unwired_test_files(args.tests_dir, args.flake)
+    unwired, stale = unwired_test_files(args.tests_dir, args.flake)
 
-    if not unlisted and not dangling and not unwired:
+    if not unlisted and not dangling and not unwired and not stale:
         print(f"OK: {len(tests)} test-* package(s), all present in the vm-tests matrix:")
         for name in sorted(tests):
             print(f"  {name}")
-        print(f"OK: every .nix in {args.tests_dir}/ is referenced by {args.flake}.")
+        print(f"OK: every {'/'.join(TEST_SUFFIXES)} in {args.tests_dir}/ is referenced by "
+              f"{args.flake}, exempt by design, or on the known-debt list.")
+        print(f"NOTE: {len(KNOWN_UNWIRED_DEBT)} known-unwired batter(ies) still run in NO CI lane "
+              f"(KNOWN_UNWIRED_DEBT). This number may only go down.")
+        for base in sorted(KNOWN_UNWIRED_DEBT):
+            print(f"  DEBT {base}")
         return 0
 
+    if stale:
+        print("FAIL: stale exemption(s) in this file — a suppression list that names things no",
+              file=sys.stderr)
+        print("      longer true silently exempts whatever takes the name next:", file=sys.stderr)
+        for base, why in stale:
+            print(f"  {base}: {why}", file=sys.stderr)
     if unwired:
         print(f"FAIL: test file(s) in {args.tests_dir}/ that {args.flake} never references —",
               file=sys.stderr)
