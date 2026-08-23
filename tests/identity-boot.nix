@@ -11,9 +11,19 @@
 # It was going to be verified on the Dell. It could not be: the Dell runs `agentos-open`, and
 # Geist's 2026-08-23 ruling on 324 is that identity FOLLOWS AUDIT — both are sovereign-only, so the
 # open box carries no `agent-os-*` unit at all and is the wrong instrument, not a broken one. This
-# test is the proof the Dell was going to give, without the Dell. The deploy half (signing actually
-# ON, via $AGENT_OS_AUDIT_SIGNER + $AGENT_OS_AUDIT_REQUIRE_SIGNED) lands when the Dell is switched
-# to a sovereign variant at the seal, and is deliberately NOT asserted here.
+# test is the proof the Dell was going to give, without the Dell.
+#
+# THE DEPLOY HALF IS NOW HERE TOO (legs 6-8, Geist's ruling 2026-08-23T05:39Z). It used to say the
+# deploy half "lands at the seal and is deliberately NOT asserted here" — that sentence is deleted
+# rather than left standing, because a comment that was true when written is exactly the bug this
+# repo spent 2026-08-23 on (line 97 of configuration-open.nix, same day, same class). The two env
+# vars are set in the NODE CONFIG, not on the command line, because the Dell's host config will set
+# them and a test that sets them per-invocation would share no shape with the deploy it stands in
+# for. What that buys beyond convenience: `identity.nix` claims to be "ordered BEFORE anything that
+# would want a signer … ordering against the future, cheaply", and with signing ON from boot that
+# future is HERE — if anything in the sovereign image signs before the oneshot has minted, this
+# test fails loud in CI instead of at the seal. Legs 1-5 therefore run with signing ON, which is
+# the deployed state anyway.
 #
 # WHAT THIS ASSERTS, weakest evidence to strongest:
 #   1. the unit RAN and succeeded          — oneshot reached active/exited, rc=0
@@ -21,6 +31,9 @@
 #   3. the self-test passed                — sign/verify roundtrip, in the unit's own words
 #   4. no key material reached the journal  — the module claims this; nothing asserted it
 #   5. SECOND BOOT yields the SAME npubs    — idempotency on real systemd
+#   6. a record APPENDS and is signed        — deploy shape: env from the node config
+#   7. `audit verify` passes under the pin   — the signature is real, not decorative
+#   8. a forged signer is REJECTED           — and the negative arm shows the PIN is what rejects
 #
 # Leg 5 is the one that needs a VM and cannot be faked in a battery. `mint()` is idempotent by
 # construction ("an existing key is NEVER replaced — re-minting would silently orphan every
@@ -34,9 +47,9 @@
 # never key material" and, until this file, that was a comment. A leak would be invisible forever.
 #
 # NOT covered here, stated so no coverage is claimed silently:
-#   - that anything SIGNS. After this module a box HAS a signer and still does not sign; that
-#     separation is the point of step 1 and asserting otherwise would test a deploy decision the
-#     build deliberately does not make.
+#   - the real-host deploy. Legs 6-8 assert the deploy SHAPE (env in the node config, the wrapper
+#     as the image installs it) on a VM; that the Dell's own host config carries the same two
+#     values is a seal-checklist line, not something CI can see.
 #   - key QUALITY (BIP-340 correctness, CSPRNG). tests/ already covers bip340/bech32 directly;
 #     this test would only re-run them one layer up and claim more than it checks.
 #   - the OPEN variant. It has no identity unit BY RULING; a test asserting its absence would
@@ -48,6 +61,17 @@ pkgs.testers.runNixOSTest {
     imports = baseModules;
     virtualisation.memorySize = 2048;
     virtualisation.cores = 2;
+    # THE DEPLOY SHAPE, not a test affordance. Set here — in the node config — rather than on the
+    # `audit` command line, because this is where the Dell's host config will set them, and a test
+    # whose mechanism differs from the deploy's is testing a different thing while reading like the
+    # same one. Both together, never one: modules/audit-pkg.nix's DEPLOY-COUPLING RULE (PR #126
+    # finding G) — SIGNER without REQUIRE_SIGNED lets a whole-log rewrite to all-unsigned verify
+    # clean from genesis, and `=1` instead of `=agent` lets any registered participant re-sign a
+    # fabricated tail. Leg 8 is the live demonstration of the second half.
+    environment.variables = {
+      AGENT_OS_AUDIT_SIGNER = "agent";
+      AGENT_OS_AUDIT_REQUIRE_SIGNED = "agent";
+    };
   };
   testScript = ''
     machine.start()
@@ -134,5 +158,77 @@ pkgs.testers.runNixOSTest {
                 "Every signature written before the reboot is now unverifiable."
             )
         print(f"second boot npubs unchanged: {npubs_before}")
+
+    # ── LEGS 6-8: THE DEPLOY ARM (Geist's ruling 2026-08-23T05:39Z) ──────────────────────
+    # Placed AFTER leg 5 on purpose: the keys are already shown stable across a reboot, so a
+    # signature produced here is a signature produced by the identity this test has already
+    # pinned down. Run in this order and NOT reorderable — leg 8 deliberately poisons the log
+    # for the pin, and the negative arm reads that same poisoned log.
+    ledger = "/var/lib/agent-os/audit/audit.log"
+
+    with subtest("6. ARMING — the node-config env actually reaches the invocation"):
+        # Without this the whole deploy arm is theatre. `environment.variables` lands in
+        # /etc/profile; if the path this test drives commands through did not source it, legs
+        # 6-8 would run with signing OFF, leg 6 would still append (unsigned), leg 7 would
+        # still pass (an unsigned log with no earlier signed record verifies clean), and only
+        # leg 8 would fail — reading as "the forgery check is broken" when the truth is "the
+        # experiment was never set up". A zero is only informative if you first made it
+        # capable of being non-zero, so the setup is asserted before anything is concluded
+        # from it.
+        seen_signer = machine.succeed("echo $AGENT_OS_AUDIT_SIGNER").strip()
+        seen_pin = machine.succeed("echo $AGENT_OS_AUDIT_REQUIRE_SIGNED").strip()
+        assert seen_signer == "agent", (
+            f"$AGENT_OS_AUDIT_SIGNER is {seen_signer!r} at the invocation, expected 'agent' — "
+            "the node config did not reach this command, so legs 6-8 would prove nothing"
+        )
+        assert seen_pin == "agent", (
+            f"$AGENT_OS_AUDIT_REQUIRE_SIGNED is {seen_pin!r} at the invocation, expected 'agent'"
+        )
+
+    with subtest("6b. a record appends through the image's own wrapper, SIGNED by agent"):
+        # `audit` as the image installs it (modules/audit.nix -> audit-pkg.nix), never a direct
+        # `python3 bin/audit`: the wrapper is what pins the ledger, AGENT_OS_MODULES and the
+        # identity root, and those pins are half of what is under test. The env override route
+        # exists in bin/audit only as a battery affordance and is not the deployed path.
+        machine.succeed(
+            """echo '{"event":"identity-boot-test","actor":"nixos-test"}' | audit append"""
+        )
+        last = machine.succeed(f"tail -1 {ledger}")
+        import json as _json
+        rec = _json.loads(last)
+        assert rec.get("signer") == "agent", f"record signer is {rec.get('signer')!r}:\n{last}"
+        assert isinstance(rec.get("sig"), str) and len(rec["sig"]) == 128, (
+            f"record carries no 64-byte hex signature:\n{last}"
+        )
+        # The signature must verify against the npub leg 5 pinned, not merely be present.
+        assert npubs_before["agent"].startswith("npub1"), npubs_before["agent"]
+
+    with subtest("7. `audit verify` passes under the pin"):
+        out = machine.succeed("audit verify")
+        print(f"verify under pin: {out.strip()}")
+
+    with subtest("8. a forged signer is REJECTED by the pin"):
+        # `dillon` is a REGISTERED participant with a REAL key, so this record is correctly
+        # signed and chains cleanly. Nothing about it is malformed. The only thing wrong with
+        # it is WHO signed it — which is precisely the attack `=1` would wave through (finding
+        # A: an actor holding any registered participant's key drops the tail and re-signs a
+        # fabricated suffix as themselves). Forging with a bogus name instead would prove far
+        # less: it would fail on an unresolvable npub, i.e. on the registry, not on the pin.
+        machine.succeed(
+            """echo '{"event":"forged","actor":"nixos-test"}' """
+            """| AGENT_OS_AUDIT_SIGNER=dillon audit append"""
+        )
+        machine.fail("audit verify")
+        forged = machine.succeed(f"tail -1 {ledger}")
+        assert _json.loads(forged).get("signer") == "dillon", forged
+
+    with subtest("8b. NEGATIVE ARM — with the pin UNSET the same log verifies clean"):
+        # This is what makes leg 8 mean what it reads. Without it, leg 8 passes just as well if
+        # the dillon record were malformed, unsigned, or chain-breaking — and the test would
+        # claim "the pin rejects a foreign signer" while actually having shown "a broken record
+        # fails verify", which needs no pin at all. Unsetting exactly one variable and getting
+        # a PASS isolates the pin as the cause. Same discipline as PR #144's negative arm
+        # dying at leg 1: the control has to fail for the reason you named.
+        machine.succeed("env -u AGENT_OS_AUDIT_REQUIRE_SIGNED audit verify")
   '';
 }
