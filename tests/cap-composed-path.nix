@@ -168,11 +168,37 @@ pkgs.testers.runNixOSTest {
     # The battery asserts this for the direct-dispatcher path; the wrapper path spawns the same
     # transient units, and a --collect regression here would accumulate units under the broker's
     # own invocations, which is where it would actually bite in production.
-    leaked = box.succeed(
-        "systemctl list-units --all --no-legend 'agent-os-cap-*' 2>/dev/null | wc -l"
-    ).strip()
-    assert leaked == "0", f"{leaked} transient agent-os-cap-* unit(s) leaked on the composed path"
-    print("composed 3 OK  (transient units collected on the wrapper-driven path too)")
+    # POSITIVE CONTROL FOR THE MATCHER, and it is not optional. `wc -l` always returns a number,
+    # so this leg cannot go vacuously EMPTY -- but it can go vacuously ZERO, which is worse because
+    # zero is the passing value. The glob `agent-os-cap-*` is a bare string literal spelled in THREE
+    # unconnected places: bin/cap-invoke:221 (`"agent-os-cap-%d-%d" % ...`, the only thing that ever
+    # creates these units), here, and tests/cap-sandbox-battery.sh:179. Nothing ties them together.
+    # Rename the prefix in cap-invoke and BOTH leak checks match nothing, report 0, and stay green
+    # forever while the leak they exist to catch runs unobserved. That is the whole inert-control
+    # class: ask what this check would print if it were inert, and the answer was "the same thing."
+    # So make it print something different. A decoy unit under the same glob must be VISIBLE here
+    # before the count of zero is allowed to mean anything.
+    def cap_units():
+        return box.succeed(
+            "systemctl list-units --all --no-legend 'agent-os-cap-*' 2>/dev/null | wc -l"
+        ).strip()
+
+    box.succeed(
+        "systemd-run --unit=agent-os-cap-matcherprobe --property=RemainAfterExit=yes "
+        "/bin/sh -c true"
+    )
+    seen = cap_units()
+    assert seen != "0", (
+        "the agent-os-cap-* matcher is INERT: a unit created under that exact prefix was invisible "
+        "to it, so the leak assertion below has been passing on an empty match set, not on a clean "
+        "one. Check the prefix in bin/cap-invoke against the glob here. Saw: " + seen
+    )
+    box.succeed("systemctl stop agent-os-cap-matcherprobe.service || true")
+    box.succeed("systemctl reset-failed agent-os-cap-matcherprobe.service || true")
+
+    leaked = cap_units()
+    assert leaked == "0", leaked + " transient agent-os-cap-* unit(s) leaked on the composed path"
+    print("composed 3 OK  (transient units collected; matcher armed -- saw " + seen + " decoy)")
 
     print("cap-composed-path: THE WIRING DELIVERS THE CONFINEMENT")
   '';
