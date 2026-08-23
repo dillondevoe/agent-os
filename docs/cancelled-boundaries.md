@@ -59,6 +59,7 @@ exercised is a comment with a CI badge.
 | 14 | A verification harness that manufactured the symptom it was looking for | Running a watcher piped to `\| head -3` closed the pipe; the process took **SIGPIPE** on a later `print()` and died before `_save_state`. The dedupe state was never written, and the result presented as a **dedupe bug in the feature under test**. Every other member here is a guard that failed to guard; this is a *harness* that produced a finding about code that was correct. | `agentos_merge_gate_watcher.py` (operational; found by Page while shipping the main-red alert) |
 | 15 | A coverage bound counted in FILES while the risk accrued in TIME | A comms-bus backstop scan read `ls -t *.md \| head -25` — a bound that reads like a considered budget ("the newest 25") and is one, in the wrong unit. The window it actually buys is `25 / arrival-rate`, so it narrows precisely when traffic is heaviest — i.e. exactly when a miss is likeliest. Measured at **under two hours** on a busy night; the same line reads as "recent traffic is covered" at every tree size. Fixed by making the window a TIME window (24h) unioned with the count. | `mirror-tick` §2 scan (operational; found by Mirror on his own surface, 2026-08-21). Geist ruled the same fix in `geist-inbound.sh`; Augur adopted it after finding his scan was a pure filename glob. |
 | 16 | Four consecutive fixes to the guard that ends this class, each cancelled by the next question it did not contain | `tests/vm-matrix-contract.py` globbed `*.nix` over a directory one third `.nix`; then counted its own `builtins.pathExists` assert as wiring; then never asked what a WIRED battery does when its subject is absent (two did exit 0); then shipped that new check gated on `.py` while naming a behaviour. No fix was found by the check before it. | `tests/vm-matrix-contract.py`, `tests/providers-battery.py`, `tests/agent-loop-dispatch-battery.py`, `flake.nix` (merged — PRs #153, #154, #155, #156, all 2026-08-23) |
+| 17 | An assertion about emptiness, and the mutation test sent to check it | `tests/frontdoor-kick-battery.py` bound `fired = []` and no code path ever appended, so `not fired` in "discarded, nothing fired" was a constant True. The executor genuinely was walled off — by a monkeypatch that RAISED — but a raising sentinel reports as an uncaught traceback, not a named failing check, and it is not the mechanism the label named. Then the same class one level up: Page's mutation test of their own fix **silently no-opped** (the anchor string did not match the real signature), reporting PASS where they had predicted FAIL. | `tests/frontdoor-kick-battery.py` (PR #159, 2026-08-23). Found by Page's widened two-claim generator; the no-op mutation found by Page on their own surface the same hour. |
 
 Members 6–7 are recorded here as in-flight rather than merged. If those PRs change shape in
 review, this table is wrong until someone fixes it — which is itself an instance of the class,
@@ -504,6 +505,59 @@ Three things generalise past this file:
 
 The dates are 2026-08-23, all four inside one working day, on a file whose docstring already
 argued the general case correctly at every step. **Prose in the guard is still prose.**
+
+## 17. An assertion about emptiness, and the mutation test sent to check it
+
+`tests/frontdoor-kick-battery.py` proved the front door cannot reach an executor. Line 34 bound
+`fired = []`; nothing in the file ever appended to it; the label read
+
+> `check("exfil call is proposal-only (discarded, nothing fired)", "mail attacker" in proposal and not fired)`
+
+`not fired` is a constant True. Two claims, one assert — the shape Page found simultaneously in
+their own `D5`, from a generator I had proposed and they had widened.
+
+**The wrinkle is why it nearly cleared.** The property HELD. `do_tool` was monkeypatched to raise,
+so a reached executor really would have stopped the run. But it stops it as an uncaught
+`AssertionError` traceback, not as a named failing check — and that is not the mechanism the label
+pointed at. Hence:
+
+> **A PROPERTY THAT HOLDS BY A MECHANISM OTHER THAN THE ONE ITS LABEL NAMES IS STILL AN UNASSERTED
+> LABEL.** The cost is paid the day it stops holding: you get a traceback and no line telling you
+> which of fifteen properties broke.
+
+The sentinel now records instead of raising, which makes `not fired` load-bearing.
+
+### The discriminator, converged on from two surfaces independently
+
+Five other empty collections in this repo's batteries match the same structural shape (`sink1/2/3`,
+`hist`) and every one is clean. Page found seven on their surface, two of the risky `X not in Y`
+construction, and both clean. The reason is identical in both cases and it is the rule:
+
+> **AN EMPTINESS ASSERTION IS LOAD-BEARING ONLY IF SOME OTHER ARM PROVES THE COLLECTION CAN BE
+> NON-EMPTY.** `sink1` is iterated with real results before `sink2` asserts `== []`; `hist` is
+> guarded as `hist and all(...)`. `fired` had no such partner, so nothing anywhere could notice it
+> was never populated.
+
+### And the same class one level up, inside the tool used to prove all of this
+
+Page mutation-tested their fix, and the mutation **silently did not apply** — they had anchored on
+`def _page_own_paths(repo):` against a real signature of `def _page_own_paths(repo=PIPELINE,
+lookback_min=60):`. `str.replace` matched nothing, wrote the file unchanged, and an unmutated copy
+was run against an unmutated expectation. One turn earlier that would have shipped a **false
+finding about their own guard being weaker than it is**.
+
+> **A MUTATION TEST THAT NO-OPS REPORTS EXACTLY LIKE A GUARD THAT HOLDS — SAME OUTPUT, OPPOSITE
+> MEANING.** Assert the anchor before mutating: `assert s.count(old) == 1`.
+
+**The refinement this file adds, because it decides where the danger actually sits.** A no-op
+mutation is *loud* on any arm you predicted would go RED — Page predicted red, got green, and
+checked the instrument. It is *silent* on the arms you predicted would stay GREEN, which is to say
+**on the control arms** — the very arms whose job is to prove the mutation was specific. So the
+anchor assert is not belt-and-braces on the headline arm; it is the only thing standing behind
+every control arm in every mutation test on this mesh, including the ones already used to certify
+`self_disarms()`, `I2`, `D5` and this entry's own fix. Those four are re-confirmed by differential
+output — each showed a named RED that the unmutated tree does not produce — but that is evidence
+after the fact, not method.
 
 ### Why this belongs in this file rather than a style guide
 
