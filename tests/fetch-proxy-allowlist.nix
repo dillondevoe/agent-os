@@ -133,7 +133,25 @@ pkgs.testers.runNixOSTest {
   };
 
   testScript = ''
-    start_all()
+    # STAGGERED BOOT, not start_all() — see the measurement below (2026-08-23, tick 367).
+    # `RuntimeError: Shell did not start in time` has failed this lane four times. It was being
+    # called "runner contention", and that name presupposed contention BETWEEN matrix jobs, which
+    # would make `max-parallel` the fix. The distribution says otherwise: all FOUR landed in the
+    # three two-VM tests (mesh x3, egress-uid-scope x1) and ZERO in the six single-VM tests. Under
+    # a uniform-across-the-matrix model that is (3/9)^4 ~ 1%. Matrix entries get their OWN runner,
+    # so `max-parallel` cannot touch an intra-job problem — the contention is two QEMU guests
+    # booting simultaneously on one 4-vCPU runner, and the driver's shell timeout is what gives.
+    # Starting them in sequence halves peak boot load. Nothing here needs simultaneity: every
+    # cross-machine interaction below is already gated on an explicit wait.
+    # HONEST LIMIT: this is a measured mitigation, not a proof. The failure is probabilistic
+    # (4 in ~88 runs), so the only evidence it worked is a long absence of recurrence — and the
+    # absence of a flake is exactly the kind of zero that means nothing on its own. If it returns
+    # in a two-VM test, the next move is the targeted one-shot retry on this exact RuntimeError
+    # (never a blanket retry), which Geist pre-authorised.
+    sealed.start()
+    sealed.wait_for_unit("multi-user.target")
+    peer.start()
+    peer.wait_for_unit("multi-user.target")
     # Wait on the PORT, at the address the probes actually use — not on the unit. An active unit is
     # not a live instrument: see the comment on listen-443 above. wait_for_open_port polls
     # `nc -z ${peerIp} <port>` on the peer, so it cannot be satisfied by a process that is starting,
