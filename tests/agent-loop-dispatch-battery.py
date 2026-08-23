@@ -444,11 +444,20 @@ def test_chat_once_model_free_harness():
 
 
 def main():
-    if not os.path.exists(MCP):
-        print("SKIP: bin/mcp not found at %r — run from the repo root" % MCP)
-        sys.exit(0)
-    if not os.path.exists(BROKER):
-        print("SKIP: broker-stub not found at %r" % BROKER)
+    # STRICT MODE EXISTS BECAUSE ONE EXIT CODE HAS TO SERVE TWO CALLERS. Run by hand from the
+    # wrong directory, "bin/mcp is not here" is a usage mistake and a skip is the kind answer.
+    # Run inside agent-loop-dispatch-contract, the same condition means the derivation stopped
+    # copying a file it is supposed to copy — and skipping there turns a green check into an
+    # attestation that nothing ran. The derivation sets AGENT_OS_STRICT=1; nothing else does.
+    strict = os.environ.get("AGENT_OS_STRICT") == "1"
+    for label, path in (("bin/mcp", MCP), ("broker-stub", BROKER)):
+        if os.path.exists(path):
+            continue
+        msg = "%s not found at %r" % (label, path)
+        if strict:
+            sys.exit("FAIL (AGENT_OS_STRICT=1): " + msg + " — refusing to exit 0; in CI this "
+                     "means the derivation did not stage what it promised.")
+        print("SKIP: " + msg + " — run from the repo root, or set AGENT_OS_STRICT=1")
         sys.exit(0)
     test_discover_tools_via_real_mcp()
     test_dispatch_data_result_envelope()
