@@ -176,9 +176,23 @@ OUT="$(printf '%s' "$(req file.read "path=$SAFE/dir/canary.txt")" | env -i \
 echo "cap-sandbox 5 OK  (no-entry / no-launcher / unreadable-policy all DENY, never fall back)"
 
 # ── 6. no transient units leak ────────────────────────────────────────────────────────────
-LEAKED="$(systemctl list-units --all --no-legend 'agent-os-cap-*' 2>/dev/null | wc -l)"
+# Arm the matcher BEFORE trusting its zero. `wc -l` can never come back empty, so this leg looks
+# un-vacuous -- but it can come back vacuously ZERO, and zero is the PASSING value. The glob is a
+# bare literal spelled in three unconnected places: bin/cap-invoke:221 (the only creator of these
+# units), here, and tests/cap-composed-path.nix. Rename the prefix there and both leak checks go
+# permanently green against an empty match set. A decoy under the same glob must be visible first.
+cap_units() { systemctl list-units --all --no-legend 'agent-os-cap-*' 2>/dev/null | wc -l; }
+"$SYSTEMD_RUN" --unit=agent-os-cap-matcherprobe --property=RemainAfterExit=yes /bin/sh -c true \
+  >/dev/null 2>&1 || fail "6: could not create the matcher probe unit; leg 6 cannot be armed"
+SEEN="$(cap_units)"
+[ "$SEEN" != 0 ] || fail "6: matcher INERT -- a unit created under agent-os-cap-* was invisible to \
+the glob, so every previous pass of this leg measured an empty match set, not a clean box"
+systemctl stop agent-os-cap-matcherprobe.service >/dev/null 2>&1 || true
+systemctl reset-failed agent-os-cap-matcherprobe.service >/dev/null 2>&1 || true
+
+LEAKED="$(cap_units)"
 [ "$LEAKED" = 0 ] || fail "6: $LEAKED transient agent-os-cap-* unit(s) leaked (--collect not working)"
-echo "cap-sandbox 6 OK  (transient units collected, none left behind)"
+echo "cap-sandbox 6 OK  (transient units collected, none left behind; matcher armed, saw $SEEN)"
 
 # ── 7. the NETWORK half of the confinement is real, not just a string ─────────────────────
 # Legs 0-6 are all filesystem. The network boundary has had exactly ONE gate: flake.nix asserts
