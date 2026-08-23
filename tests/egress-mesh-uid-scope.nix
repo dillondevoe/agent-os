@@ -166,8 +166,24 @@ pkgs.testers.runNixOSTest {
   };
 
   testScript = ''
-    start_all()
+    # STAGGERED BOOT, not start_all() — see the measurement below (2026-08-23, tick 367).
+    # `RuntimeError: Shell did not start in time` has failed this lane four times. It was being
+    # called "runner contention", and that name presupposed contention BETWEEN matrix jobs, which
+    # would make `max-parallel` the fix. The distribution says otherwise: all FOUR landed in the
+    # three two-VM tests (mesh x3, egress-uid-scope x1) and ZERO in the six single-VM tests. Under
+    # a uniform-across-the-matrix model that is (3/9)^4 ~ 1%. Matrix entries get their OWN runner,
+    # so `max-parallel` cannot touch an intra-job problem — the contention is two QEMU guests
+    # booting simultaneously on one 4-vCPU runner, and the driver's shell timeout is what gives.
+    # Starting them in sequence halves peak boot load. Nothing here needs simultaneity: every
+    # cross-machine interaction below is already gated on an explicit wait.
+    # HONEST LIMIT: this is a measured mitigation, not a proof. The failure is probabilistic
+    # (4 in ~88 runs), so the only evidence it worked is a long absence of recurrence — and the
+    # absence of a flake is exactly the kind of zero that means nothing on its own. If it returns
+    # in a two-VM test, the next move is the targeted one-shot retry on this exact RuntimeError
+    # (never a blanket retry), which Geist pre-authorised.
+    sealed.start()
     sealed.wait_for_unit("multi-user.target")
+    meshpeer.start()
     meshpeer.wait_for_unit("multi-user.target")
 
     # The build-time pin must equal the runtime address, or accept (b) points at nothing and the
@@ -191,7 +207,17 @@ pkgs.testers.runNixOSTest {
     # what a broken fixture gives you, and it denies everything.
     sealed.wait_for_unit("wireguard-wg-mesh.service")
     meshpeer.wait_for_unit("wireguard-wg-mesh.service")
-    sealed.succeed("ping -c1 -W2 ${meshTunIp} >/dev/null")
+    # THE FIRST PACKET IS THE TRIGGER, NOT THE ASSERTION (2026-08-23, tick 370).
+    # This was `succeed("ping -c1 -W2 ...")` and it went red the moment the boot above was
+    # staggered. WireGuard is lazy: the first packet to a peer with no session INITIATES the
+    # handshake and is itself dropped, and the initiator retries on a backoff. So a single ping
+    # with a 2s deadline asserts "a session already existed", which is precisely the
+    # interface-exists-vs-peers-talking conflation the comment above says it is guarding against.
+    # Under start_all() both VMs booted concurrently and something had already completed a
+    # handshake by the time this line ran, so it passed on incidental timing, not on the property.
+    # NOT A WEAKENING: `wait_until_succeeds` still fails a genuinely dead tunnel — it bounds the
+    # wait, and the handshake assertion on the next line is unchanged and is the real check.
+    sealed.wait_until_succeeds("ping -c1 -W2 ${meshTunIp} >/dev/null", timeout=60)
     sealed.wait_until_succeeds(
         "test $(wg show wg-mesh latest-handshakes | awk '{print $2}') -ne 0", timeout=30
     )
