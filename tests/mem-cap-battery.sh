@@ -189,15 +189,29 @@ rec "$EMPTY" "$(req mem.recall "namespace=notes" "query=memory")"
 # ── 10. key-grammar fence: illegal namespaces fail closed, NOTHING written ────
 # The impl re-checks the namespace (dumb twin of the broker's _NS_RE) so a contract slip can't smuggle
 # a path segment. Each of these must exit 3, ok:false, and create NO file.
-before="$(find "$MEM/session" -type f | wc -l)"
+# COUNT THE WHOLE TREE, NOT THE LEAF. This leg fences path traversal -- "../x" is in the list
+# below -- and a traversal that SUCCEEDS lands OUTSIDE the leaf by definition: the impl builds
+# path=join(MEM/session, "<ns>.<hash>.md"), so ns="../x" resolves to MEM/x.<hash>.md, a sibling of
+# session/. Counting only under session/ therefore watches the one directory a successful escape
+# cannot appear in, and the leg would report before==after and PASS while the fence was breached.
+# Not a live hole today (the key-grammar check rejects "/" as a second fence), but the assertion
+# that exists to prove "NOTHING written" must be able to observe the write it is denying.
+# Scope, stated: this sees escapes that land anywhere under $MEM. A deeper "../../" escape above
+# $MEM would still be invisible here; the exit-3 and ok:false asserts in the loop are what cover
+# the general case, and this is the corroborating on-disk check.
+before="$(find "$MEM" -type f | wc -l)"
+# ...and arm it: if the tree is empty, before==after==0 passes without observing anything. Legs
+# 1-9 have written by now, so a zero here means the fixture broke, not that the fence held.
+[ "$before" -gt 0 ] || fail "10: \$MEM is EMPTY before the fence legs, so the before/after count \
+below would pass vacuously -- the fixture, not the fence, is what this leg would be measuring"
 for ns in "a/b" "../x" "-lead" ".lead" "" "$(printf 'x%.0s' $(seq 1 65))"; do
   OUT="$(printf '%s' "{\"capability\":\"mem.remember\",\"arguments\":{\"namespace\":\"$ns\",\"content\":\"x\"}}" \
          | env AGENT_OS_MEM_ROOT="$MEM" "$PY" "$REMEMBER" 2>/dev/null)"; RC=$?
   [ "$RC" = 3 ] || fail "10: illegal namespace '$ns' must exit 3, got $RC"
   [ "$(jf "$OUT" 'o["ok"]')" = "false" ] || fail "10: illegal namespace '$ns' ok must be false"
 done
-after="$(find "$MEM/session" -type f | wc -l)"
-[ "$before" = "$after" ] || fail "10: an illegal-namespace remember wrote a file ($before -> $after)"
+after="$(find "$MEM" -type f | wc -l)"
+[ "$before" = "$after" ] || fail "10: an illegal-namespace remember wrote a file under \$MEM ($before -> $after)"
 
 # ── 11. content-type fence: non-string / non-object args fail closed ──────────
 for bad in \
