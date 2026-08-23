@@ -312,8 +312,19 @@ def test_empty_providers_rejected():
 
 def main():
     if yaml is None:
-        print("SKIP: pyyaml not importable — install pyyaml or run under the nix closure")
-        sys.exit(0)
+        # NOT A SKIP, and flake.nix already said so before this file agreed with it. The
+        # providers-contract check's own comment calls pyyaml "a HARD REQUIREMENT, not a skip",
+        # because "a missing pyyaml previously let agent-brain silently degrade every boot to
+        # legacy OLLAMA_MODEL with an unseen stderr warning (K6 post-merge bug, PR #77); a
+        # battery that SKIPs on missing pyyaml would hide that exact regression."
+        #
+        # This battery then skipped on missing pyyaml. The derivation supplies pyyaml today, so
+        # nothing was actually hidden — but the protection lived entirely in the derivation, and
+        # a green check would have survived losing it. The comment stated the contract; only the
+        # exit code enforces it.
+        sys.exit("FAIL: pyyaml is not importable. Refusing to exit 0 — a battery that skips "
+                 "itself when its dependency is missing is indistinguishable from one that "
+                 "passed, and pyyaml's absence is the regression this file exists to catch.")
     test_valid_load_and_floor()
     test_missing_floor_is_hard_error()
     test_escalate_optional()

@@ -166,6 +166,54 @@ def wiring_references(flake_src, tests_dir, base):
     return hits
 
 
+# A battery that exits 0 when the thing it tests is absent. All eight ambient-hand batteries do
+# this — `shutil.which("agos-calc")` returns None, the file prints "SKIP ... (image not built)"
+# and exits 0 — and that is CORRECT for a manual at-a-box runner, where the alternative is a red
+# that means nothing. It stops being correct the moment the file is wired into CI, because then a
+# green check attests to nothing but the absence of the CLI it was written to exercise.
+#
+# THIS IS THE TRAP LAID FOR WHOEVER PAYS THE DEBT ABOVE, AND IT IS BAITED. Wiring one of these
+# eight into `checks` is a two-line change that turns the check green, DELETES the entry from
+# KNOWN_UNWIRED_DEBT (the ledger someone watches go down), and adds zero coverage. The debt would
+# be paid on paper and the test would still run nowhere — the same defect, now with a passing
+# badge and no line item. The docstring of this file calls that "present in every sense except
+# the one that matters"; this is that sentence applied to its own remediation.
+#
+# So the debt list is NOT homogeneous, and the count alone hides the split. Measured 2026-08-23:
+# 8 of the 14 self-disarm, 6 do not. Wiring one of the 6 needs a derivation. Wiring one of the 8
+# needs a derivation AND a guarantee its CLI is on PATH inside that derivation.
+SELF_DISARM_WINDOW = 3
+
+
+def self_disarms(path):
+    """True if the file has a `sys.exit(0)` reachable on a "the tool is not here" path.
+
+    HEURISTIC, AND DELIBERATELY NARROW. It requires a SKIP-announcing print within the three
+    lines before the exit — the shape every one of the eight actually has. A plain `sys.exit(0)`
+    at the end of a successful run does not match, which is the false-positive that would matter:
+    this check's failure arm turns CI red, so it is tuned to under-report. A battery that
+    self-disarms in some other spelling is missed here and stays missed, exactly as before.
+    """
+    try:
+        with open(path) as fh:
+            lines = fh.read().splitlines()
+    except OSError:
+        return False
+    if any("AGENT_OS_STRICT" in l for l in lines):
+        # The file has a strict mode: the skip is opt-out, and the derivation that wires it opts
+        # out. Named by convention rather than proven here — this check reads source, it does not
+        # evaluate the derivation, so it cannot confirm the env var is actually set. What it can
+        # do is stop pointing at a file whose author has already answered the question.
+        return False
+    for i, line in enumerate(lines):
+        if "sys.exit(0)" not in line:
+            continue
+        window = lines[max(0, i - SELF_DISARM_WINDOW):i]
+        if any("SKIP" in w for w in window):
+            return True
+    return False
+
+
 def unwired_test_files(tests_dir, flake_path):
     """tests/*.nix files that flake.nix never references.
 
@@ -187,6 +235,7 @@ def unwired_test_files(tests_dir, flake_path):
 
     present = set()
     unwired = []
+    vacuous = []
     for suffix in TEST_SUFFIXES:
         for path in sorted(glob.glob(os.path.join(tests_dir, "*" + suffix))):
             base = os.path.basename(path)
@@ -195,6 +244,9 @@ def unwired_test_files(tests_dir, flake_path):
                 continue
             if not wiring_references(flake_src, tests_dir, base):
                 unwired.append(path)
+            elif base.endswith(".py") and self_disarms(path):
+                # Wired AND self-disarming: green proves the CLI was absent, nothing more.
+                vacuous.append(path)
 
     # A STALE EXEMPTION IS ITSELF THE BUG THIS FILE IS ABOUT. An entry naming a file that no
     # longer exists, or one that has since been wired up, keeps a name on a suppression list
@@ -206,7 +258,7 @@ def unwired_test_files(tests_dir, flake_path):
             stale.append((base, "no such file in %s/" % tests_dir))
         elif wiring_references(flake_src, tests_dir, base):
             stale.append((base, "is wired into %s now — remove the exemption" % flake_path))
-    return unwired, stale
+    return unwired, vacuous, stale
 
 
 def flake_test_packages(system):
@@ -239,9 +291,9 @@ def main():
 
     unlisted = sorted(tests - matrix)
     dangling = sorted(matrix - tests)
-    unwired, stale = unwired_test_files(args.tests_dir, args.flake)
+    unwired, vacuous, stale = unwired_test_files(args.tests_dir, args.flake)
 
-    if not unlisted and not dangling and not unwired and not stale:
+    if not unlisted and not dangling and not unwired and not vacuous and not stale:
         print(f"OK: {len(tests)} test-* package(s), all present in the vm-tests matrix:")
         for name in sorted(tests):
             print(f"  {name}")
@@ -249,8 +301,12 @@ def main():
               f"{args.flake}, exempt by design, or on the known-debt list.")
         print(f"NOTE: {len(KNOWN_UNWIRED_DEBT)} known-unwired batter(ies) still run in NO CI lane "
               f"(KNOWN_UNWIRED_DEBT). This number may only go down.")
+        disarming = sorted(b for b in KNOWN_UNWIRED_DEBT
+                           if self_disarms(os.path.join(args.tests_dir, b)))
+        print(f"      {len(disarming)} of them ALSO self-disarm (exit 0 when their CLI is absent),"
+              f" so wiring one is not enough on its own — see self_disarms().")
         for base in sorted(KNOWN_UNWIRED_DEBT):
-            print(f"  DEBT {base}")
+            print(f"  DEBT {base}" + ("  [self-disarming]" if base in disarming else ""))
         return 0
 
     if stale:
@@ -271,6 +327,17 @@ def main():
         print("     or, if it is a shared helper rather than a test, add it to",
               file=sys.stderr)
         print("     UNWIRED_BY_DESIGN in this file so the exemption is visible in a diff.",
+              file=sys.stderr)
+    if vacuous:
+        print(f"FAIL: test file(s) wired into {args.flake} that EXIT 0 when the thing they test",
+              file=sys.stderr)
+        print("      is absent — a green here proves the CLI was missing, not that it works:",
+              file=sys.stderr)
+        for path in vacuous:
+            print(f"  {path}", file=sys.stderr)
+        print("  -> guarantee the CLI is on PATH inside the derivation, and make the battery",
+              file=sys.stderr)
+        print("     FAIL rather than skip when it is not. Wiring alone pays the debt on paper.",
               file=sys.stderr)
     if unlisted:
         print("FAIL: test-* package(s) with NO vm-tests matrix entry — these NEVER RUN in CI:",

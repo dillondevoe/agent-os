@@ -1399,7 +1399,12 @@
               cp ${./tests/agent-loop-dispatch-battery.py} "$work/tests/agent-loop-dispatch-battery.py"
               cp ${./tests/broker-stub.py} "$work/tests/broker-stub.py"
               cd "$work"
+              # AGENT_OS_STRICT=1 turns the battery's "bin/mcp not found -> SKIP, exit 0" into
+              # a hard failure. That skip is right for a hand-run from the wrong directory; here
+              # it would mean a `cp` above silently stopped happening and this check went green
+              # having executed nothing.
               AGENT_OS_MCP="$work/bin/mcp" AGENT_OS_BROKER="$work/tests/broker-stub.py" \
+                AGENT_OS_STRICT=1 \
                 PYTHONPATH="$work/modules" python3 tests/agent-loop-dispatch-battery.py
               touch $out
             '';
