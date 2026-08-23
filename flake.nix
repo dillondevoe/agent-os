@@ -1433,6 +1433,34 @@
               python3 tests/frontdoor-kick-battery.py
               touch $out
             '';
+
+        # identity-contract — WIRES THE SECOND DEBT ENTRY, AND THE FIRST ONE THAT THE LEDGER ONLY
+        # KNEW ABOUT BECAUSE THE DETECTOR WAS FIXED. identity-battery.py was never newly unwired:
+        # it was MASKED, because flake.nix's only mention of it sat inside a `#` comment and
+        # wiring_references() counted comments as wiring until the same commit that added the
+        # frontdoor derivation above. Paying it now is the point — an entry that appeared on the
+        # ledger by unmasking is exactly the kind that gets quietly tolerated as "not really new".
+        #
+        # Pure stdlib, no CLI on PATH, no network, no model — so like frontdoor-kick it is
+        # hard-failing rather than self-disarming and wiring it is the whole of the job.
+        #
+        # THE PERMISSION ARMS (C, F) ARE THE REASON THIS NEEDED CHECKING BEFORE CLAIMING IT WIRED:
+        # they assert 0600 on the key and 0700 on its dir, so they depend on the build's umask, not
+        # only on the code. Reproduced 2026-08-23 in a read-only copy under `umask 022` — the shape
+        # a nix build actually runs in — before this derivation was written. Green, all arms.
+        identity-contract =
+          nixpkgs.legacyPackages.${system}.runCommand "identity-contract-check"
+            { nativeBuildInputs = [ nixpkgs.legacyPackages.${system}.python3 ]; } ''
+              work="$(mktemp -d)"
+              mkdir -p "$work/tests" "$work/modules"
+              cp ${./tests/identity-battery.py} "$work/tests/identity-battery.py"
+              cp ${./modules/identity.py} "$work/modules/identity.py"
+              cp ${./modules/bech32.py} "$work/modules/bech32.py"
+              cp ${./modules/bip340.py} "$work/modules/bip340.py"
+              cd "$work"
+              python3 tests/identity-battery.py
+              touch $out
+            '';
       };
     };
 }

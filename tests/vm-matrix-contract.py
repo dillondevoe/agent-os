@@ -124,7 +124,13 @@ KNOWN_UNWIRED_DEBT = frozenset({
     # Neither self-disarms, so each needs a derivation and nothing more — except that
     # cap-sandbox-battery.sh wants sudo and real systemd, which is why it is likely the LAST of
     # these to be payable and must not be quietly re-exempted for being inconvenient.
-    "identity-battery.py",
+    #
+    # identity-battery.py was PAID the same day it was revealed (identity-contract in flake.nix),
+    # deliberately: an entry that reached this list by UNMASKING rather than by regression is the
+    # one most easily tolerated as "not really new debt", and the way to not tolerate it is to pay
+    # it first. Note who forced this line to be deleted — not memory. The STALE-EXEMPTION arm went
+    # red the instant the derivation landed, so wiring a battery and forgetting its ledger row is
+    # not a reachable state. That is the arm the `#`-comment defect had inverted.
     "cap-sandbox-battery.sh",
 })
 
@@ -220,7 +226,10 @@ def wiring_references(flake_src, tests_dir, base):
 # Measured 2026-08-23: the list now stands at 15 — 8 self-disarming, 7 not. It moved twice that
 # day and the two moves have opposite meanings: frontdoor-kick-battery.py was WIRED and removed
 # (14 -> 13), then identity-battery.py and cap-sandbox-battery.sh were UNMASKED and added
-# (13 -> 15) when wiring_references() stopped counting `#` comments. One entry paid, two revealed.
+# (13 -> 15) when wiring_references() stopped counting `#` comments, and then identity-battery.py
+# was WIRED and removed (15 -> 14). Three moves, two directions: two paid, two revealed. Do not
+# net them into one number — the netted figure (14, same as the morning) is the one reading that
+# describes none of what happened.
 # Wiring one of the non-self-disarming ones needs a derivation. Wiring one of the 8
 # needs a derivation AND a guarantee its CLI is on PATH inside that derivation.
 SELF_DISARM_WINDOW = 3
