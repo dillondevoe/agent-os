@@ -258,3 +258,48 @@ into this file AT THE TIME rather than planning to go back for it.
 |---|---|
 | **Occurrences** | 3 (logs read: 2 of 3; occurrence 1 aged out of the run list) |
 | **Status** | open — image-level, not test-level; wedge stage identified, cause still hypothesis |
+
+### The confirming observation was taken immediately, and it WEAKENS the hypothesis it tested
+
+Taken in the same tick rather than deferred, from `32773211071` (green `93558da`,
+`test-identity-boot`):
+
+```
+[    3.384650] systemd[1]: Starting Virtual Console Setup...
+[    3.519639] systemd[1]: Finished Virtual Console Setup.
+[    3.837610] systemd[1]: systemd-vconsole-setup.service: Deactivated successfully.
+[    3.853525] systemd[1]: Stopping Virtual Console Setup...
+[    3.856360] systemd[1]: Starting Virtual Console Setup...
+         OK   Finished Virtual Console Setup.
+```
+
+**The repeated start/stop cycling is NORMAL.** It happens on green boots too, in the same shape.
+The previous section flagged the cycling as "an observation, not a diagnosis" and was right to; it
+is not distinctive and carries no signal. The vconsole-contention hypothesis is not confirmed, and
+the null result is the informative one this entry asked for.
+
+**But the timing is a real signal, and it corrects something I asserted two sections ago.** The
+green boot reaches vconsole-setup at **3.4-3.9s**. The two failures reach the same stage at
+**9.05s** and **13.0-13.8s** — three to four times later, at an identical point in the boot
+sequence. Those guests were already far behind before they went quiet.
+
+**Correction, and it changes the recommended action, which is why it is stated rather than
+quietly folded in.** The third-occurrence section says *"That is a WEDGE, not a slowness"* and
+*"Do not raise a timeout in the meantime."* The first half is over-strong on this evidence: the
+failing boots were demonstrably slow *as well as* eventually silent, and "wedge" was inferred from
+the silence alone without ever comparing against a green boot's clock. What the evidence now
+supports is **a guest running 3-4x slow that then stops emitting** — which is compatible with a
+wedge, and equally compatible with a guest so starved of CPU that it makes no visible progress
+inside the driver's window.
+
+The **operational** advice does not change, for a different reason than the one first given. Do not
+raise the timeout — not because a timeout cannot help a wedge, but because a 3-4x slowdown against
+a shared CI runner points at resource contention, and raising the limit would convert a fast red
+into a slow one while removing the only signal that the runner is oversubscribed.
+
+**Next step, revised again.** Stop looking at the boot log's content and start looking at its
+clock. On every future occurrence record the guest timestamp of a fixed early landmark (e.g.
+`Starting Virtual Console Setup`) alongside the same landmark from a green run of the same test.
+If the ratio is consistently >2x, this is runner contention and belongs to the workflow's
+concurrency/resource settings, not to the image and not to any test. Two data points say 3-4x;
+that is a hypothesis with a cheap test and a clear owner.
