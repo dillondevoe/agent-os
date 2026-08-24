@@ -81,6 +81,33 @@ try:
         check("`append appended line` exits 0", rc == 0, "rc=%s err=%s" % (rc, err[:60]))
         ad = json.loads(out)
         check("append -> ok:true", ad.get("ok") is True, out[:60])
+
+        # THE FOURTH CHANNEL. Every arm above reads stdout or the exit code — both of which
+        # are the hand's own REPORT of what it did. A write hand that returned {"ok":true}
+        # and wrote nothing would pass all six. The store is the only witness that is not
+        # the defendant, so read it directly. This is only assertable because the lane sets
+        # AGOS_NOTES_DIR; before that override existed the write paths never ran at all.
+        store = os.environ.get("AGOS_NOTES_DIR")
+        if store:
+            path = os.path.join(store, slug + ".md")
+            check("on disk: the note file exists", os.path.isfile(path), path)
+            try:
+                disk = open(path, encoding="utf-8").read()
+            except OSError as e:
+                disk = ""
+                check("on disk: readable", False, str(e))
+            check("on disk: `new` wrote the title", "Battery Test Note" in disk, disk[:60])
+            # Not merely "contains the text" — APPENDED. An implementation that truncated on
+            # append would satisfy a containment check and lose the title.
+            check("on disk: `append` added a line AFTER the title, and kept it",
+                  disk.rstrip().endswith("appended line") and "Battery Test Note" in disk,
+                  repr(disk[:80]))
+        elif os.environ.get("AGENT_OS_STRICT") == "1":
+            # The wired lane sets it. If it ever stops, these four arms would vanish in
+            # silence and the battery would still print ALL PASS — a skip that looks like
+            # coverage is the shape this repo keeps finding.
+            check("strict: AGOS_NOTES_DIR must be set so the store can be inspected", False,
+                  "unset — on-disk arms would have been skipped silently")
     elif os.environ.get("AGENT_OS_STRICT") == "1":
         # A SECOND DISARM BEHIND THE FIRST ONE. The strict block at the top of this file only
         # guarantees the CLI is on PATH; this branch could still swallow a broken write path
