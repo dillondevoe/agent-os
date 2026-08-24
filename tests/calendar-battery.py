@@ -33,6 +33,17 @@ def run(cmd):
 agos = shutil.which("agos-cal")
 khal = shutil.which("khal")
 
+if not agos and os.environ.get("AGENT_OS_STRICT") == "1":
+    # Wired into flake.nix as `agos-cal-contract`, where `agos-cal` IS on PATH. This battery
+    # has TWO exit-0 paths that are not assertions — the khal fallback and the final SKIP —
+    # and strict mode has to close BOTH, not the first one. The khal fallback is a genuine
+    # convenience on a dev box, but in the wired lane it would silently swap the SUBJECT:
+    # it exercises khal, the backend, and would report a green for `agos-cal` while the hand
+    # itself was never invoked. That is the vacuous-green shape this file exists to catch.
+    print("  FAIL calendar-battery: AGENT_OS_STRICT=1 and `agos-cal` is not on PATH "
+          "(the khal fallback exercises the backend, not the hand).")
+    sys.exit(1)
+
 if agos:
     print("  using REAL agos-cal CLI: " + agos)
     def cal(*args): return run([agos, *args])
@@ -75,6 +86,12 @@ else:
 
 # 1) now → JSON-ish instant, epoch is int, tz present
 rc, out, err = cal("now")
+# Exit code, not just stdout. The hands have ONE uniform contract — `exit 2` is reserved for
+# usage errors, and EVERY degraded path is `return 0` with an {ok:false} body — so any arm that
+# is not probing usage must see rc 0. This surface is more exposed than most: `agenda` and
+# `cals` pipe khal into jq under `set -euo pipefail`, which is the exact shape that made
+# `agos-notes list` print a valid `[]` and exit 1 for the whole life of the repo.
+check("`now` exits 0", rc == 0, "rc=%s err=%s" % (rc, err[:60]))
 try:
     # agos-cal emits JSON; `date -Iseconds` (fallback) is plain text — accept both
     if out.startswith("{"):
@@ -88,6 +105,7 @@ except Exception as e:
 
 # 2) cals → lists the agent collection
 rc, out, err = cal("cals")
+check("`cals` exits 0", rc == 0, "rc=%s err=%s" % (rc, err[:60]))
 ok = ("agent" in out) or ("agent" in err)
 check("cals → lists agent collection", ok, (out or err)[:60])
 
@@ -95,9 +113,13 @@ check("cals → lists agent collection", ok, (out or err)[:60])
 import datetime
 start = (datetime.datetime.now() + datetime.timedelta(hours=2)).strftime("%Y-%m-%d %H:%M")
 rc, out, err = cal("add", start, "battery-test-event")
+check("`add` exits 0", rc == 0, "rc=%s err=%s" % (rc, err[:60]))
 added_ok = ("ok" in out.lower()) or rc == 0
 check("add → accepted", added_ok, (out or err)[:60])
 rc, out, err = cal("agenda", "1")
+# The pipefail arm proper: khal | jq | jq -s. If the first stage exits non-zero the script dies
+# AFTER stdout is already correct, so only the exit code can see it.
+check("`agenda 1` exits 0", rc == 0, "rc=%s err=%s" % (rc, err[:60]))
 shows = "battery-test-event" in out
 check("agenda → shows the added event", shows, (out or err)[:80])
 

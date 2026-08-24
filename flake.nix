@@ -1590,6 +1590,52 @@
               touch $out
             '';
 
+        agos-cal-contract =
+          let
+            pkgs = nixpkgs.legacyPackages.${system};
+            agos-cal = import ./modules/pkgs/agos-cal.nix {
+              inherit pkgs;
+              calName = "agent";
+              calPath = "/var/lib/agent-calendar/agent";
+            };
+          in
+          pkgs.runCommand "agos-cal-contract-check"
+            { nativeBuildInputs = [ pkgs.python3 pkgs.khal agos-cal ]; } ''
+              work="$(mktemp -d)"
+              mkdir -p "$work/tests"
+              cp ${./tests/calendar-battery.py} "$work/tests/calendar-battery.py"
+              cd "$work"
+              # AGOS_CAL_CONF points the hand at a WRITABLE vdir. The baked config names
+              # /var/lib/agent-calendar, which no build sandbox can create, so without this
+              # override `add`, `agenda` and `cals` could not execute at all — they would be
+              # wired and never run, which this repo has twice found indistinguishable from
+              # passing.
+              export XDG_CACHE_HOME="$work/cache"
+              mkdir -p "$work/vdir/agent" "$work/cache"
+              cat > "$work/khal.conf" <<CONF
+              [calendars]
+              [[agent]]
+              path = $work/vdir/agent
+              type = calendar
+
+              [locale]
+              timeformat = %H:%M
+              dateformat = %Y-%m-%d
+              longdateformat = %Y-%m-%d
+              datetimeformat = %Y-%m-%d %H:%M
+              longdatetimeformat = %Y-%m-%d %H:%M
+              default_timezone = America/Chicago
+              local_timezone = America/Chicago
+
+              [default]
+              default_calendar = agent
+              CONF
+              sed -i "s/^ *//" "$work/khal.conf"
+              export AGOS_CAL_CONF="$work/khal.conf"
+              AGENT_OS_STRICT=1 python3 tests/calendar-battery.py
+              touch $out
+            '';
+
         agos-doc-contract =
           let
             pkgs = nixpkgs.legacyPackages.${system};

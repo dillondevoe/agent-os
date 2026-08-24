@@ -56,95 +56,12 @@ let
   # on discovery. Copied in only if absent (tmpfiles `C`) — never clobbers radicale's props.
   radicaleProps = pkgs.writeText "agos-radicale-props.json" ''{"tag": "VCALENDAR"}'';
 
-  # khal config — READ-only (lives in the immutable /etc store symlink); khal WRITES
-  # only into calPath (mutable, tmpfiles-created below). Timezone pinned so "now" and
-  # every stored event are unambiguous. Formats fixed so agos-cal's parse is stable.
-  khalConf = pkgs.writeText "agos-khal.conf" ''
-    [calendars]
-    [[${calName}]]
-    path = ${calPath}
-    type = calendar
+  # khalConf and the agos-cal hand now live in ./pkgs/agos-cal.nix. A `let` binding inside a
+  # NixOS module cannot be named from anywhere else, so while the hand lived here no derivation
+  # could put `agos-cal` on a PATH and calendar-battery.py was structurally unwireable.
+  # calName and calPath are passed IN rather than duplicated — the module body needs both.
+  agosCal = import ./pkgs/agos-cal.nix { inherit pkgs calName calPath; };
 
-    [locale]
-    timeformat = %H:%M
-    dateformat = %Y-%m-%d
-    longdateformat = %Y-%m-%d
-    datetimeformat = %Y-%m-%d %H:%M
-    longdatetimeformat = %Y-%m-%d %H:%M
-    default_timezone = America/Chicago
-    local_timezone = America/Chicago
-
-    [default]
-    default_calendar = ${calName}
-  '';
-
-  # The agent's calendar hand-surface. Emits JSON on stdout for every read; writes go
-  # through khal. Invocations below are the ones proven against khal 0.14.0 (nixpkgs
-  # unstable) before this module was written. The field separator is generated at
-  # runtime (0x1f) and handed to jq via --arg, so no control char lives in the source.
-  agosCal = pkgs.writeShellApplication {
-    name = "agos-cal";
-    runtimeInputs = [ pkgs.khal pkgs.jq pkgs.coreutils ];
-    text = ''
-      CONF="${khalConf}"
-      CAL="${calName}"
-
-      usage() {
-        cat >&2 <<'USAGE'
-      agos-cal — the agent's calendar hand (JSON out).
-
-        agos-cal now                     current instant: {iso,epoch,tz,weekday,date}
-        agos-cal agenda [DAYS]           events today..+DAYS (default 7) as a JSON array
-        agos-cal add "<YYYY-MM-DD HH:MM>" "<summary>" ["<YYYY-MM-DD HH:MM>"]
-                                         create an event (end optional; khal defaults 1h)
-        agos-cal cals                    list calendar collections
-
-      Store: a real iCalendar vdir (per-event *.ics). Config is read-only.
-      USAGE
-      }
-
-      cmd="''${1:-}"
-      if [ "$#" -gt 0 ]; then shift; fi
-      case "$cmd" in
-        now)
-          # Nuclear-accurate: the system clock is NTP-synced (systemd-timesyncd).
-          printf '{"iso":"%s","epoch":%s,"tz":"%s","weekday":"%s","date":"%s"}\n' \
-            "$(date -Iseconds)" "$(date +%s)" "$(date +%Z)" "$(date +%A)" "$(date +%Y-%m-%d)"
-          ;;
-        agenda)
-          days="''${1:-7}"
-          sep="$(printf '\037')"   # 0x1f unit separator — never appears in a title
-          khal -c "$CONF" list --day-format "" \
-               --format "{start}''${sep}{end}''${sep}{title}" today "''${days}d" \
-            | jq -R -c --arg sep "''${sep}" 'select(length>0) | split($sep) | {start:.[0],end:.[1],title:.[2]}' \
-            | jq -s -c '.'
-          ;;
-        add)
-          start="''${1:?agos-cal add: need a start \"YYYY-MM-DD HH:MM\"}"
-          summary="''${2:?agos-cal add: need a summary}"
-          end="''${3:-}"
-          # khal `new` takes START (and END) as whitespace-split positional tokens.
-          read -r -a sarr <<< "$start"
-          if [ -n "$end" ]; then read -r -a earr <<< "$end"; else earr=(); fi
-          khal -c "$CONF" new -a "$CAL" "''${sarr[@]}" "''${earr[@]}" "$summary" >/dev/null
-          printf '{"ok":true,"start":"%s","end":"%s","title":"%s"}\n' "$start" "$end" "$summary"
-          ;;
-        cals)
-          khal -c "$CONF" printcalendars | jq -R -s -c 'split("\n") | map(select(length>0))'
-          ;;
-        ""|-h|--help|help)
-          usage
-          if [ "$cmd" = "" ]; then exit 2; fi
-          exit 0
-          ;;
-        *)
-          echo "agos-cal: unknown command: $cmd" >&2
-          usage
-          exit 2
-          ;;
-      esac
-    '';
-  };
 in {
   # The store dir must exist + be agent-writable before first use. setgid (2) so new
   # *.ics inherit group `users` even when root (Rabbot over SSH) creates them.

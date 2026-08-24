@@ -117,9 +117,12 @@ KNOWN_UNWIRED_DEBT = frozenset({
     # BEHIND THE FIRST ONE IS STILL A DISARM, and the false claim in the comment is what made it
     # invisible. When you wire a battery, count its exit-0 paths, do not fix the first one.
     #
-    # calendar-battery.py is NOT the same shape and is deliberately not in that six: it probes
-    # two tools (agos-cal AND khal) and disarms at a different point.
-    "calendar-battery.py",
+    # calendar-battery.py left on 2026-08-24, and it was NOT the same shape as that six: it
+    # probes two tools (agos-cal AND khal) and so had TWO exit-0 paths that are not assertions,
+    # not one. Closing only the final SKIP would have left the khal fallback to silently swap
+    # the SUBJECT — exercising the backend and reporting a green for the hand, which was never
+    # invoked. Strict mode now demands `agos-cal` specifically. Same third half as agos-media:
+    # when you wire a battery, COUNT its exit-0 paths; do not fix the first one.
     # agos-calc-battery.py left on 2026-08-24 — the FIRST of these eight to run anywhere, and
     # the entry that shows why the group resisted for so long. Its reason ("self-disarms: SKIP
     # rc=0 with its CLI off PATH") named a property of the BATTERY, and the battery was only
@@ -649,7 +652,7 @@ def bare_top_level_bindings(pkgs_dir="modules/pkgs"):
     return bad
 
 
-RC_ASSERTION_FLOOR = 18
+RC_ASSERTION_FLOOR = 34
 
 
 def rc_assertion_census(tests_dir=TESTS_DIR):
@@ -675,7 +678,13 @@ def rc_assertion_census(tests_dir=TESTS_DIR):
     """
     total = 0
     for base in sorted(os.listdir(tests_dir)):
-        if not (base.startswith("agos-") and base.endswith("-battery.py")):
+        # `*-battery.py`, NOT `agos-*-battery.py`. The prefix was this instrument's THIRD
+        # mistake and the same class as the first two: an enumeration standing in for a
+        # discovery. calendar-battery.py is an ambient-hand battery by every property that
+        # matters — it drives agos-cal, it runs in a contract lane — and the census could not
+        # see it, purely because the hand's battery is not named after the hand. Four exit-code
+        # arms added there on 2026-08-24 moved this number not at all.
+        if not base.endswith("-battery.py"):
             continue
         try:
             tree = ast.parse(open(os.path.join(tests_dir, base), encoding="utf-8").read())
