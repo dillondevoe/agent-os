@@ -122,5 +122,18 @@ try:
 except Exception as e:
     check("new parses", False, str(e))
 
+# A degrade path, probed on all three channels. The battery had no arm at all for "the note
+# does not exist" — the single most likely thing a caller hits — and the hands' contract makes
+# that an {ok:false} on STDOUT with rc 0 and nothing on stderr, not an error.
+rc, out, err = run([ncli, "read", "no-such-note-xyz"])
+check("`read <missing>` exits 0", rc == 0, "rc=%s err=%s" % (rc, err[:60]))
+check("read <missing> -> says nothing on stderr", err == "", repr(err[:80]))
+try:
+    md = json.loads(out)
+    check("read <missing> -> ok:false + a reason on STDOUT",
+          md.get("ok") is False and md.get("error"), out[:60])
+except Exception as e:
+    check("read-missing parses", False, str(e))
+
 print("agos-notes-battery: " + ("ALL PASS" if EX == 0 else "FAILURES"))
 sys.exit(EX)

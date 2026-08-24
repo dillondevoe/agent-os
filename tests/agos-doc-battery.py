@@ -77,6 +77,20 @@ try:
 except Exception as e:
     check("text parses", False, str(e))
 
+# The degrade path, on all three channels. `info` on a file that is not there is the most
+# likely thing a caller hits, and the battery had no arm for it: contract says {ok:false} on
+# STDOUT, rc 0, stderr silent — pdfinfo's own complaint is swallowed by design, and an arm
+# that reads only stdout cannot tell "swallowed" from "leaked".
+rc, out, err = run([dcli, "info", "/nonexistent-agos-doc-fixture.pdf"])
+check("`info <missing>` exits 0", rc == 0, "rc=%s err=%s" % (rc, err[:60]))
+check("info <missing> -> says nothing on stderr", err == "", repr(err[:80]))
+try:
+    md = json.loads(out)
+    check("info <missing> -> ok:false + a reason on STDOUT",
+          md.get("ok") is False and md.get("error"), out[:60])
+except Exception as e:
+    check("info-missing parses", False, str(e))
+
 check("read-only: the fixture PDF is byte-identical afterwards",
       hashlib.sha256(open(p.name, "rb").read()).hexdigest() == before_sha, before_sha[:16])
 

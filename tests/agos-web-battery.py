@@ -48,6 +48,8 @@ rc, out, err = run([wcli, "fetch", "file:///etc/hostname"])
 check("`fetch file:///etc/hostname` exits 0", rc == 0, "rc=%s err=%s" % (rc, err[:60]))
 try:
     d = json.loads(out)
+    # Third channel, on the one degrade path this battery can reach without a network.
+    check("fetch file:// -> says nothing on stderr", err == "", repr(err[:80]))
     check("fetch file:// -> ok:false + http(s) refusal", d.get("ok") is False and "http(s)" in str(d.get("error","")), out[:60])
 except Exception as e:
     check("guard parses", False, str(e))

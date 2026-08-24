@@ -652,7 +652,7 @@ def bare_top_level_bindings(pkgs_dir="modules/pkgs"):
     return bad
 
 
-RC_ASSERTION_FLOOR = 34
+RC_ASSERTION_FLOOR = 36
 
 
 def rc_assertion_census(tests_dir=TESTS_DIR):

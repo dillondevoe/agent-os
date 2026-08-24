@@ -90,6 +90,12 @@ check("`stat nope` exits 0", rc == 0, "rc=%s err=%s" % (rc, err[:60]))
 try:
     j = json.loads(out)
     check("stat missing -> exists:false (graceful)", j.get("exists") is False, out[:60])
+    # THE THIRD CHANNEL. stdout and the exit code are asserted above; stderr was read by
+    # nothing. It matters most on a DEGRADE path: the hands' contract is that a failure
+    # becomes {ok:false} ON STDOUT, which is only worth relying on if the diagnosis is not
+    # also being written somewhere the caller is not looking. Measured, not assumed — every
+    # degrade path reachable off the Dell was probed on 2026-08-24 and all were silent.
+    check("stat missing -> says nothing on stderr", err == "", repr(err[:80]))
 except Exception as e:
     check("stat-missing parses", False, str(e))
 
