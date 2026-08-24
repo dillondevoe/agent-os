@@ -147,9 +147,28 @@ contains — which refutes any strict dependency on agos-sys. Noted rather than 
 occurrences are on commits touching `agos-sys.nix`**, occurrence 1 is the disconfirming case, and
 a fourth occurrence on a commit that touches neither would settle it.
 
-**Same-SHA control: `gh run rerun 32770548874 --failed` was triggered at 20:2xZ and had not
-reached a verdict when this entry was written.** Stated as pending rather than assumed green —
-that is the exact failure mode the first entry in this file had to retract.
+**Same-SHA control, attempt 1: TRIGGERED, THEN CANCELLED BY MY OWN NEXT PUSH — the identical
+mistake this file's first entry had to retract, repeated one tick later, in the file that
+documents it.** `gh run rerun 32770548874 --failed` was started, and then the commit carrying
+this very section was pushed to the same branch, superseding it: `03b210a cancelled`. The first
+entry above says, verbatim, *"it was re-triggered, and it never reached a verdict ... superseded
+by the next push to the branch."* I read that sentence while writing this section and still did it.
+
+**Why the prose did not prevent the repeat, which is the part worth generalising.** The lesson was
+recorded as a thing to remember, and the actual cause is structural: on this repo a branch rerun
+and a push to that branch are *in conflict by construction*, and nothing in the sequence
+"trigger control -> finish work -> push" knows that. A rule phrased as vigilance loses to an
+ordering defect every time. **The control must be started and RESOLVED before the tick pushes
+anything, or started from a commit the tick will not move past.**
+
+**What is NOT evidence here.** `93558da` — the markdown-only commit that cancelled the control —
+ran vm-tests green. That is a green on a LATER tree, which this file already ruled the weak form:
+it cannot separate "flaky" from "the intervening commit changed it," and the fact that a
+docs-only commit could not plausibly have changed it is exactly the plausibility argument this
+ledger exists to replace. Recorded as not-a-control.
+
+**Same-SHA control, attempt 2: re-triggered on `03b210a` with the push deliberately withheld
+until it reaches a verdict.** Result recorded in the next tick, whichever way it goes.
 
 | | |
 |---|---|
