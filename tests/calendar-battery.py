@@ -232,5 +232,33 @@ if agos:
             # But it is the exact silhouette of the defect, so say so rather than pass quietly.
             print("  NOTE %s returned [] under a bogus store — verify khal actually failed" % verb)
 
+# ---------------------------------------------------------------------------
+# ABSENT BACKEND -- and this hand is the reason the arm exists at all. agos-cal was the
+# HONEST one of the four fixed in 619d3a9: it named khal and never blamed the calendar. It
+# still got the guard, because "nearly right" is the state in which a rule quietly stops
+# applying to you -- a caller could not tell "khal is not installed" from "khal rejected the
+# request" without parsing prose. And carrying that guard across hands is exactly where the
+# bad fix landed: `|| return 0` inside a top-level `case` arm is not a function return, so it
+# printed correct JSON and exited 2, the code reserved for USAGE errors, telling every caller
+# it had held the tool wrong. tests/backend-absence-contract.py saw a guard and was satisfied.
+# Static cannot see an exit code. This arm can, and unlike the block above it needs no khal.
+if agos:
+    denv = dict(os.environ, AGOS_CAL_KHAL="no-such-khal-binary-xyz")
+    for _verb, _argv in (("agenda", ["1"]), ("cals", []),
+                         ("add", ["2099-01-01 09:00", "absent-backend-probe"])):
+        o = subprocess.run([agos, _verb] + _argv, capture_output=True, text=True, timeout=30, env=denv)
+        drc, dout = o.returncode, o.stdout.strip()
+        check("absent backend: `%s` exits 0, not 2 (it is not a usage error)" % _verb, drc == 0,
+              "rc=%s out=%s" % (drc, dout[:60]))
+        try:
+            db = json.loads(dout)
+        except Exception as e:
+            db = None
+            check("absent backend: `%s` -> parseable JSON on STDOUT" % _verb, False,
+                  str(e) + " | " + dout[:60])
+        if isinstance(db, dict):
+            check("absent backend: `%s` -> ok:false + a reason naming the BACKEND" % _verb,
+                  db.get("ok") is False and "absent" in str(db.get("error", "")).lower(), dout[:80])
+
 print("calendar-battery: " + ("ALL PASS" if EX == 0 else "FAILURES"))
 sys.exit(EX)

@@ -103,6 +103,46 @@ except Exception as e:
 check("read-only: the fixture PDF is byte-identical afterwards",
       hashlib.sha256(open(p.name, "rb").read()).hexdigest() == before_sha, before_sha[:16])
 
+# NOTE ON PLACEMENT: this block sat BELOW `os.unlink(p.name)` for its first run. Three of
+# its four arms still PASSED -- because a deleted fixture yields {ok:false,"no such file"},
+# which is also rc 0 with a reason. Only the arm that reads WHICH failure it is caught the
+# teardown. An arm placed after teardown asserts about a subject that no longer exists.
+
+# ---------------------------------------------------------------------------
+# ABSENT BACKEND. Shipped 619d3a9 fixed this hand's worst degrade: with its backend
+# merely NOT INSTALLED it emitted a confident, specific, FALSE diagnosis of the
+# SUBJECT -- a valid PDF became "not a readable PDF" -- about a subject it never reached.
+# tests/backend-absence-contract.py fences the SHAPE (a guard exists before the
+# call). It is static, and static cannot see an exit code: the same morning, the
+# guard carried into agos-cal was written `|| return 0` inside a top-level `case`
+# arm, which returns rc=2 -- the code reserved for USAGE errors -- with the static
+# contract fully satisfied. Only a run caught it, and the run was ad-hoc and will
+# never happen again. This arm is that run, made permanent.
+#
+# It is also the one arm here that needs NO backend of its own: the override names a
+# binary that cannot exist, so it asserts the same thing on every host.
+
+denv = dict(os.environ, AGOS_DOC_PDFINFO="no-such-pdfinfo-binary-xyz", AGOS_DOC_PDFTOTEXT="no-such-pdftotext-binary-xyz")
+for _verb, _argv in [("info", [p.name]), ("text", [p.name])]:
+    o = subprocess.run([dcli, _verb] + _argv, capture_output=True, text=True, timeout=30, env=denv)
+    drc, dout = o.returncode, o.stdout.strip()
+    # exit 2 is USAGE. An uninstalled backend is not the caller holding the tool wrong.
+    check("absent backend: `%s` exits 0, not 2 (it is not a usage error)" % _verb,
+          drc == 0, "rc=%s out=%s" % (drc, dout[:60]))
+    try:
+        db = json.loads(dout)
+    except Exception as e:
+        db = None
+        check("absent backend: `%s` -> parseable JSON on STDOUT" % _verb, False, str(e) + " | " + dout[:60])
+    if isinstance(db, dict):
+        check("absent backend: `%s` -> ok:false + a reason" % _verb,
+              db.get("ok") is False and db.get("error"), dout[:80])
+        # THE LOAD-BEARING ONE. The pre-fix code also answered ok:false with a reason --
+        # the reason was just a lie about the subject. What changed is WHO is blamed.
+        _err = str(db.get("error", "")).lower()
+        check("absent backend: the reason blames the BACKEND, not the subject",
+              "absent" in _err and "readable pdf" not in _err, dout[:80])
+
 os.unlink(p.name)
 print("agos-doc-battery: " + ("ALL PASS" if EX == 0 else "FAILURES"))
 sys.exit(EX)

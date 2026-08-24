@@ -33,6 +33,45 @@ if not mcli:
     print("  SKIP agos-media-battery: agos-media not on PATH (image not built).")
     sys.exit(0)
 
+# ---------------------------------------------------------------------------
+# ABSENT BACKEND. Shipped 619d3a9 fixed this hand's worst degrade: with ffprobe merely
+# NOT INSTALLED it answered {"ok":false,"error":"not a readable media file"} about a
+# perfectly valid file it never opened -- a confident, specific, FALSE diagnosis of the
+# subject. tests/backend-absence-contract.py fences the SHAPE (a guard exists before the
+# call), but static cannot see an exit code: the same morning the guard carried into
+# agos-cal was `|| return 0` inside a top-level `case` arm, which returns rc=2 -- the code
+# reserved for USAGE errors -- with the static contract fully satisfied. Only a run caught
+# that, and the run was ad-hoc.
+#
+# DELIBERATELY PLACED ABOVE THE FIXTURE SKIP. Every other arm in this file needs a real
+# media file, so a lane without AGOS_MEDIA_FIXTURE exits 0 here having asserted NOTHING --
+# a skip that reads as coverage, which is the shape this repo keeps finding. This arm needs
+# no media and no ffprobe: the subject is never reached and the override names a binary that
+# cannot exist, so it asserts the same thing on every host.
+import tempfile as _tf
+_probe = _tf.NamedTemporaryFile("wb", suffix=".mp4", delete=False)
+_probe.write(b"\x00\x00\x00\x18ftypmp42"); _probe.close()
+denv = dict(os.environ, AGOS_MEDIA_FFPROBE="no-such-ffprobe-binary-xyz")
+o = subprocess.run([mcli, "info", _probe.name], capture_output=True, text=True, timeout=30, env=denv)
+drc, dout = o.returncode, o.stdout.strip()
+# exit 2 is USAGE. An uninstalled backend is not the caller holding the tool wrong.
+check("absent backend: `info` exits 0, not 2 (it is not a usage error)", drc == 0,
+      "rc=%s out=%s" % (drc, dout[:60]))
+try:
+    db = json.loads(dout)
+except Exception as e:
+    db = None
+    check("absent backend: `info` -> parseable JSON on STDOUT", False, str(e) + " | " + dout[:60])
+if isinstance(db, dict):
+    check("absent backend: `info` -> ok:false + a reason",
+          db.get("ok") is False and db.get("error"), dout[:80])
+    # THE LOAD-BEARING ONE. The pre-fix code ALSO answered ok:false with a reason -- the
+    # reason was just a lie about the subject. What changed is WHO gets blamed.
+    _err = str(db.get("error", "")).lower()
+    check("absent backend: the reason blames the BACKEND, not the subject",
+          "absent" in _err and "readable media" not in _err, dout[:80])
+os.unlink(_probe.name)
+
 fixture = os.environ.get("AGOS_MEDIA_FIXTURE")
 if not fixture or not os.path.isfile(fixture):
     print("  SKIP agos-media-battery: no fixture. Set AGOS_MEDIA_FIXTURE=/path/to/sample.png|mp4")
