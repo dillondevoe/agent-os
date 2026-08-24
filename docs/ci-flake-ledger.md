@@ -167,8 +167,17 @@ it cannot separate "flaky" from "the intervening commit changed it," and the fac
 docs-only commit could not plausibly have changed it is exactly the plausibility argument this
 ledger exists to replace. Recorded as not-a-control.
 
-**Same-SHA control, attempt 2: re-triggered on `03b210a` with the push deliberately withheld
-until it reaches a verdict.** Result recorded in the next tick, whichever way it goes.
+**Same-SHA control, attempt 2: TAKEN, and it is GREEN.** Re-triggered on `03b210a` with the tick's
+push deliberately withheld until it reached a verdict — the ordering fix above, applied to itself.
+`attempt=2 completed success 03b210a`, and verified by the job list rather than the run's
+conclusion: all nine legs succeeded, **`vm-test (test-fetch-proxy-allowlist)` included**. Same
+tree, same test, green. Occurrence 3 is therefore non-determinism DEMONSTRATED, not inferred —
+the strong form, on the third occurrence and for the second time in this file.
+
+Note in passing: this rerun also put `vm-test (test-identity-boot)` green on the same tree.
+
+**What the control does NOT settle.** It shows the wedge is not deterministic. It says nothing
+about what wedged. The next step below is unchanged by it.
 
 | | |
 |---|---|
