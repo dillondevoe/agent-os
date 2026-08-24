@@ -413,3 +413,28 @@ this entry should state one before it asserts anything again.**
 |---|---|
 | **Per-attempt failure rate** | 4/21 ≈ **19%** (branch `mirror/dead-sentinel-covers-flags-and-counters`) |
 | **Measured via** | `gh run view <id> --json attempt` — NOT `gh run list --json conclusion` |
+
+### Occurrence 5, and a same-commit failure that is NOT this flake
+
+`6ae7c32` — **both lanes failed**, and they are two unrelated causes. Recorded together
+because "both lanes red" invites the inference that one thing broke, and that inference
+would have been wrong.
+
+- **vm-tests: occurrence 5.** `test-identity-boot`, subtest 5 (the real-reboot leg), the
+  same `Shell did not start in time`. Updated rate: **5 failed attempts of 22 ≈ 23%.**
+- **flake-check: NOT this flake, and not flaky at all.** `calendar-battery` failed a real
+  assertion: `add` reported `ok:true` for `2026-08-25 00:25` and `agenda 1` returned `[]`.
+  The arm hardcoded a one-calendar-day window while adding an event at `now + 2h`, so for
+  the two hours after 22:00 the event lands on tomorrow and the window correctly excludes
+  it. Reproduced across all 1440 minutes of a day: **wrong for 120 of them, 8.3%**, right
+  for the rest. Fixed by deriving the span from the event. See the commit.
+
+**The distinction is the point.** One of these is a non-deterministic infrastructure flake;
+the other is a test that was *deterministically wrong for 8.3% of the day* and had simply
+never been run in that window. They present identically — a red lane on a docs-only commit —
+and only reading each failure's own output separates them. **A base rate for one failure mode
+does not license attributing the next red to it.**
+
+| | |
+|---|---|
+| **Per-attempt failure rate** | 5/22 ≈ **23%** |
