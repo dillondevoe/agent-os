@@ -46,6 +46,7 @@ import argparse
 import glob
 import re
 import json
+import ast
 import os
 import subprocess
 import sys
@@ -648,6 +649,45 @@ def bare_top_level_bindings(pkgs_dir="modules/pkgs"):
     return bad
 
 
+RC_ASSERTION_FLOOR = 18
+
+
+def rc_assertion_census(tests_dir=TESTS_DIR):
+    r"""Count exit-code assertions across the ambient batteries, by PARSING, not grepping.
+
+    This exists because I hand-counted the same number wrong twice in two hours, in OPPOSITE
+    directions, and both times the wrong number went into a commit message and onto the bus.
+
+      1. `grep 'rc == 0\|rc != 0'` reported ZERO assertions. There were three — all spelled
+         `rc == 2`, which the pattern could not match. An instrument too NARROW to see the
+         thing being counted.
+      2. `grep -c 'rc *[=!]= *[0-9]'` then reported 24. The real figure was 18: the pattern
+         matched the explanatory COMMENT I had just written about `rc == 2` assertions. An
+         instrument too BROAD, counting prose about assertions as assertions.
+
+    Both are the same defect — a census taken with a tool that cannot distinguish code from
+    text about code — and the fix is not a better regex. It is to ask Python what is actually
+    there. `ast` knows the difference between an expression and a comment; grep never will.
+
+    The floor is enforced rather than printed. A NOTE nobody asserts is the shape this whole
+    file exists to catch: it reads as a measurement while being unable to fail. Exit codes are
+    now checked on every non-usage arm, and this number going DOWN means a check was deleted.
+    """
+    total = 0
+    for base in sorted(os.listdir(tests_dir)):
+        if not (base.startswith("agos-") and base.endswith("-battery.py")):
+            continue
+        try:
+            tree = ast.parse(open(os.path.join(tests_dir, base), encoding="utf-8").read())
+        except (OSError, SyntaxError):
+            continue
+        for node in ast.walk(tree):
+            if (isinstance(node, ast.Compare) and isinstance(node.left, ast.Name)
+                    and node.left.id == "rc"):
+                total += 1
+    return total
+
+
 def flake_test_packages(system):
     """Attribute NAMES only — this evaluates the package set's keys, it builds nothing."""
     proc = subprocess.run(
@@ -689,9 +729,11 @@ def main():
         sys.exit(f"FAIL: could not read {args.flake}: {exc!r}")
     false_claims = false_ci_claims(args.tests_dir, _flake_src)
     bare_bindings = bare_top_level_bindings(args.pkgs_dir)
+    rc_count = rc_assertion_census(args.tests_dir)
+    rc_regressed = rc_count < RC_ASSERTION_FLOOR
 
     if (not unlisted and not dangling and not unwired and not vacuous and not stale
-            and not false_claims and not bare_bindings):
+            and not false_claims and not bare_bindings and not rc_regressed):
         print(f"OK: {len(tests)} test-* package(s), all present in the vm-tests matrix:")
         for name in sorted(tests):
             print(f"  {name}")
@@ -705,7 +747,20 @@ def main():
               f" so wiring one is not enough on its own — see self_disarms().")
         for base in sorted(KNOWN_UNWIRED_DEBT):
             print(f"  DEBT {base}" + ("  [self-disarming]" if base in disarming else ""))
+        print(f"NOTE: {rc_count} exit-code assertion(s) across the ambient batteries "
+              f"(floor {RC_ASSERTION_FLOOR}). This number may only go UP. Counted by parsing, "
+              f"not grepping — see rc_assertion_census().")
         return 0
+
+    if rc_regressed:
+        print(f"FAIL: exit-code assertions dropped to {rc_count}, below the floor of "
+              f"{RC_ASSERTION_FLOOR}.", file=sys.stderr)
+        print("      A deleted rc check is invisible in a diff review and silent in CI: the arm",
+              file=sys.stderr)
+        print("      that remains still reads stdout and still prints PASS. `agos-notes list`",
+              file=sys.stderr)
+        print("      printed a valid [] and exited 1 for as long as nobody asserted the code.",
+              file=sys.stderr)
 
     if false_claims:
         print("FAIL: test file(s) that CLAIM CI runs them while being wired into no lane:",
