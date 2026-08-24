@@ -56,6 +56,12 @@ else:
 # 1) known arithmetic -> ok true, result contains 20
 rc, out, err = ev("(2+3)*4")
 check("`eval (2+3)*4` exits 0", rc == 0, "rc=%s err=%s" % (rc, err[:60]))
+# THE CHANNEL NOBODY WAS READING. `err` has been captured by run() since this file was
+# written and, on every success path, thrown away — it appeared only inside failure DETAIL
+# strings, which are printed only when some OTHER arm has already gone red. A hand that
+# answered correctly on stdout while spraying a backend's warnings on stderr would pass
+# every arm in this file. The contract is that a healthy call is SILENT there.
+check("eval '(2+3)*4' -> says nothing on stderr", err == "", repr(err[:80]))
 try:
     d = json.loads(out)
     check("eval '(2+3)*4' -> ok:true", d.get("ok") is True, out[:60])
@@ -88,6 +94,30 @@ else:
 
 rc, out, err = ev("")
 check("eval with an EMPTY expression -> exit 2 (usage)", rc == 2, "rc=%s" % rc)
+# The MIRROR-IMAGE of the arm above, and the reason both are needed: "silent on success" and
+# "loud on usage error" are one rule about where output goes, and a hand that was silent
+# EVERYWHERE would satisfy the success arm perfectly. rc=2 tells the caller something went
+# wrong; only stderr tells them what. Asserted against the real CLI only — the qalc fallback
+# fabricates an empty stderr in its shim, so this arm would be measuring the shim, not a hand.
+if calc:
+    check("eval with an EMPTY expression -> SAYS WHY, on stderr", err != "", repr(err[:80]))
+
+# The degrade path a caller actually hits, and it had no arm of any kind: an expression that
+# does not evaluate. Deliberately NOT asserting ok:false — whether qalc rejects "2+" or coerces
+# it is qalc's business and unmeasurable from the host this arm was written on, and an arm
+# written blind is how a flaky red ships. What IS the hand's business, and is asserted, is that
+# a bad expression stays inside the uniform contract instead of crashing out of it: rc 0, a
+# silent stderr, parseable JSON, a boolean ok, and the input echoed back.
+if calc:
+    rc, out, err = ev("2+")
+    check("`eval 2+` (bad expression) exits 0, not a crash", rc == 0, "rc=%s err=%s" % (rc, err[:60]))
+    check("eval '2+' -> says nothing on stderr", err == "", repr(err[:80]))
+    try:
+        bad = json.loads(out)
+        check("eval '2+' -> JSON with a boolean ok", bad.get("ok") in (True, False), out[:80])
+        check("eval '2+' -> echoes the input back", bad.get("input") == "2+", out[:80])
+    except Exception as e:
+        check("eval '2+' parses", False, str(e) + " | out=" + out[:80])
 
 print("agos-calc-battery: " + ("ALL PASS" if EX == 0 else "FAILURES"))
 sys.exit(EX)

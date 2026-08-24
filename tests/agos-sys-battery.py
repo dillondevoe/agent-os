@@ -40,6 +40,13 @@ rc, out, err = run([syscli, "status"])
 # This site was skipped by the mechanical pass because the NEXT arm asserts rc == 2, and a
 # lookahead window cannot tell "this call is checked" from "a nearby call is checked".
 check("`status` exits 0", rc == 0, "rc=%s err=%s" % (rc, err[:60]))
+# THE CHANNEL NOBODY WAS READING, and this hand is the one most exposed to it. `status` shells
+# out to nmcli, wpctl, brightnessctl and upower, EVERY one of which is absent in the contract
+# sandbox — so every one of those calls fails, and the documented behaviour is to swallow that
+# and report null. Nothing asserted the swallowing. A hand that emitted four "command not
+# found" lines on stderr and the identical all-null JSON on stdout passed this battery
+# unchanged. The degraded case is not the exotic one here; it is the ONLY case CI ever runs.
+check("`status` says nothing on stderr, even with every backend absent", err == "", repr(err[:120]))
 try:
     d = json.loads(out)
     for k in ("network", "audio", "display", "power"):
@@ -52,6 +59,12 @@ except Exception as e:
 # bad subcmd -> usage, exit 2 (graceful)
 rc, out, err = run([syscli, "bogus"])
 check("bad subcmd -> exit 2 (usage)", rc == 2, "rc=%s" % rc)
+# The MIRROR-IMAGE of the arm above, and why one without the other proves little: "silent on
+# success" and "loud on usage error" are a single rule about WHERE output goes, and a hand that
+# had been made silent everywhere would satisfy the success arm perfectly while telling a
+# confused caller nothing. rc=2 says something is wrong; only stderr says what.
+check("bad subcmd -> SAYS WHY, on stderr", err != "", repr(err[:80]))
+check("bad subcmd -> stdout stays clean (the usage text is not JSON)", out == "", repr(out[:80]))
 
 print("agos-sys-battery: " + ("ALL PASS" if EX == 0 else "FAILURES"))
 sys.exit(EX)
