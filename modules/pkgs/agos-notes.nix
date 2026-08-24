@@ -64,7 +64,15 @@ pkgs.writeShellApplication {
         jq -n --arg slug "$slug" --arg path "$path" '{ok:false,error:"note exists",slug:$slug,path:$path}'
         return 0
       fi
-      printf '# %s\n' "$title" > "$path"
+      # The store may not exist or may not be writable (any host that is not the Dell gate).
+      # writeShellApplication runs with `set -euo pipefail`, so a bare redirect into an
+      # unwritable path KILLS THE SCRIPT before jq runs and the command emits NOTHING —
+      # breaking the JSON contract precisely when the caller most needs to be told why.
+      if ! printf '# %s\n' "$title" > "$path" 2>/dev/null; then
+        jq -n --arg slug "$slug" --arg path "$path" \
+          '{ok:false,error:"store not writable",slug:$slug,path:$path}'
+        return 0
+      fi
       jq -n --arg slug "$slug" --arg title "$title" --arg path "$path" '{ok:true,slug:$slug,title:$title,path:$path}'
     }
 
@@ -84,7 +92,12 @@ pkgs.writeShellApplication {
       if [ -z "$slug" ]; then echo "agos-notes append: need a slug and text" >&2; exit 2; fi
       path="$NOTES/$slug.md"
       if [ ! -e "$path" ]; then jq -n --arg slug "$slug" '{ok:false,error:"no such note",slug:$slug}'; return 0; fi
-      printf '%s\n' "$text" >> "$path"
+      # Same failure mode as cmd_new: a read-only store must answer, not die silently.
+      if ! printf '%s\n' "$text" >> "$path" 2>/dev/null; then
+        jq -n --arg slug "$slug" --arg path "$path" \
+          '{ok:false,error:"store not writable",slug:$slug,path:$path}'
+        return 0
+      fi
       jq -n --arg slug "$slug" '{ok:true,slug:$slug}'
     }
 

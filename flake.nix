@@ -1580,6 +1580,12 @@
               mkdir -p "$work/tests"
               cp ${./tests/agos-notes-battery.py} "$work/tests/agos-notes-battery.py"
               cd "$work"
+              # agos-notes bakes its store path in at build time, so it cannot be redirected
+              # here. Try to create it: if the sandbox allows it the lane exercises the REAL
+              # write path, and if it does not the lane exercises the documented ok:false
+              # degrade. Both are contract-honoring; before b55c017's follow-up the second
+              # one emitted nothing at all and the battery could not tell you which it got.
+              mkdir -p /var/lib/agos-notes 2>/dev/null || true
               AGENT_OS_STRICT=1 python3 tests/agos-notes-battery.py
               touch $out
             '';

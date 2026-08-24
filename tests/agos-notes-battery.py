@@ -4,6 +4,14 @@
 # /var/lib/agos-notes; on a host without a writable store the write path degrades
 # gracefully (ok:false) — we assert the JSON contract either way, and SKIP the
 # write-path detail if the store isn't writable (Dell gate owns the real store).
+#
+# THAT SENTENCE WAS PROSE UNTIL 2026-08-24. The hand did NOT degrade gracefully: under
+# writeShellApplication's `set -euo pipefail`, `printf ... > "$path"` into an unwritable
+# store killed the script before jq ran, so `new` emitted NOTHING and the JSON contract
+# was broken exactly when a caller most needs to be told why. It was never caught because
+# this battery ran in no CI lane — it was on KNOWN_UNWIRED_DEBT — and the only host that
+# ran it was the one host where the store IS writable. Wiring it turned the claim red on
+# the first execution.
 # Run: PYTHONPATH=modules python3 tests/agos-notes-battery.py
 import subprocess, json, shutil, sys
 import os
