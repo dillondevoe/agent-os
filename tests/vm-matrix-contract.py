@@ -661,6 +661,85 @@ def bare_top_level_bindings(pkgs_dir="modules/pkgs"):
 RC_ASSERTION_FLOOR = 27
 
 
+# Sentinels this detector has SEEN and that are known-explained. It may only go DOWN.
+# The one entry is fixed in PR #159 (`brain.do_tool = lambda *a, **k: fired.append((a, k))`,
+# a sentinel that RECORDS instead of raising) and is listed here rather than tuned out of the
+# detector, because an exemption you can read is a different object from a detector that
+# quietly cannot see something.
+KNOWN_UNMUTATED_SENTINELS = frozenset({
+    ("frontdoor-kick-battery.py", "fired"),
+})
+
+_MUTATING_METHODS = frozenset({
+    "append", "extend", "add", "update", "insert", "setdefault", "pop", "remove", "clear",
+})
+
+
+def unmutated_sentinels(tests_dir=TESTS_DIR):
+    """Names bound to an EMPTY collection, asserted on, and mutated by nothing.
+
+    The shape PR #159 found in frontdoor-kick-battery: `fired = []`, an executor stub that
+    RAISED instead of recording, and `check("...nothing fired", ... and not fired)`. `not fired`
+    was true at the moment of binding and true forever — the arm read as proof that no executor
+    ran while being unable to observe an executor running at all. A sentinel that cannot be
+    tripped is an assertion about nothing, which is this file's whole subject.
+
+    DELIBERATELY UNDER-REPORTS, in three named ways, because its failure arm turns CI red:
+
+      - A name passed as an ARGUMENT to any call is skipped. `deliver_once(root, sink=sink2)`
+        mutates `sink2` from inside the callee, and `sink2 == []` there is a real assertion
+        about a real double-fire. Two of these live in agos-comms-shadow-contract.py and they
+        are correct; a detector that reds them would be trained away within a day.
+      - Any REBINDING of the name counts as mutation, without checking what it was rebound to.
+      - Only module- and function-level `check()` conditions are scanned for the assertion,
+        the same discovery rule the rc census uses.
+    """
+    hits = []
+    for base in sorted(os.listdir(tests_dir)):
+        if not base.endswith(".py") or base == "vm-matrix-contract.py":
+            continue
+        try:
+            tree = ast.parse(open(os.path.join(tests_dir, base), encoding="utf-8").read())
+        except (OSError, SyntaxError):
+            continue
+        empties, mutated, asserted, passed_as_arg = {}, set(), set(), set()
+        for node in ast.walk(tree):
+            if (isinstance(node, ast.Assign) and len(node.targets) == 1
+                    and isinstance(node.targets[0], ast.Name)):
+                name = node.targets[0].id
+                val = node.value
+                is_empty = (isinstance(val, (ast.List, ast.Set)) and not val.elts) or (
+                    isinstance(val, ast.Dict) and not val.keys)
+                if is_empty and name not in empties:
+                    empties[name] = node.lineno
+                elif name in empties or not is_empty:
+                    mutated.add(name)          # a rebinding is a mutation, unexamined
+            if isinstance(node, ast.AugAssign) and isinstance(node.target, ast.Name):
+                mutated.add(node.target.id)
+            if isinstance(node, ast.Assign):
+                for tgt in node.targets:
+                    if isinstance(tgt, ast.Subscript) and isinstance(tgt.value, ast.Name):
+                        mutated.add(tgt.value.id)
+            if isinstance(node, ast.Call):
+                if (isinstance(node.func, ast.Attribute) and node.func.attr in _MUTATING_METHODS
+                        and isinstance(node.func.value, ast.Name)):
+                    mutated.add(node.func.value.id)
+                # An out-parameter is mutated where this file cannot see it.
+                for arg in list(node.args) + [k.value for k in node.keywords]:
+                    if isinstance(arg, ast.Name):
+                        passed_as_arg.add(arg.id)
+                if (isinstance(node.func, ast.Name) and node.func.id == "check"
+                        and len(node.args) > 1):
+                    for sub in ast.walk(node.args[1]):
+                        if isinstance(sub, ast.Name):
+                            asserted.add(sub.id)
+        for name, lineno in sorted(empties.items()):
+            if name in asserted and name not in mutated and name not in passed_as_arg:
+                if (base, name) not in KNOWN_UNMUTATED_SENTINELS:
+                    hits.append((base, lineno, name))
+    return hits
+
+
 def rc_assertion_census(tests_dir=TESTS_DIR):
     r"""Count exit-code assertions across the ambient batteries, by PARSING, not grepping.
 
@@ -785,9 +864,11 @@ def main():
     bare_bindings = bare_top_level_bindings(args.pkgs_dir)
     rc_count = rc_assertion_census(args.tests_dir)
     rc_regressed = rc_count < RC_ASSERTION_FLOOR
+    dead_sentinels = unmutated_sentinels(args.tests_dir)
 
     if (not unlisted and not dangling and not unwired and not vacuous and not stale
-            and not false_claims and not bare_bindings and not rc_regressed):
+            and not false_claims and not bare_bindings and not rc_regressed
+            and not dead_sentinels):
         print(f"OK: {len(tests)} test-* package(s), all present in the vm-tests matrix:")
         for name in sorted(tests):
             print(f"  {name}")
@@ -801,10 +882,23 @@ def main():
               f" so wiring one is not enough on its own — see self_disarms().")
         for base in sorted(KNOWN_UNWIRED_DEBT):
             print(f"  DEBT {base}" + ("  [self-disarming]" if base in disarming else ""))
+        print(f"OK: no sentinel collection is asserted on while nothing can trip it "
+              f"({len(KNOWN_UNMUTATED_SENTINELS)} known-explained, may only go down).")
         print(f"NOTE: {rc_count} exit-code assertion(s) across the ambient batteries "
               f"(floor {RC_ASSERTION_FLOOR}). This number may only go UP. Counted by parsing, "
               f"not grepping — see rc_assertion_census().")
         return 0
+
+    if dead_sentinels:
+        print("FAIL: sentinel collection(s) asserted on that NOTHING can ever mutate:",
+              file=sys.stderr)
+        for base, lineno, name in dead_sentinels:
+            print(f"  {base}:{lineno}  `{name}`", file=sys.stderr)
+        print("      The arm reads as proof that the thing never happened. It is true at the",
+              file=sys.stderr)
+        print("      moment of binding and true forever, and cannot observe the thing happening",
+              file=sys.stderr)
+        print("      at all. Make the stub RECORD instead of raise — see PR #159.", file=sys.stderr)
 
     if rc_regressed:
         print(f"FAIL: exit-code assertions dropped to {rc_count}, below the floor of "
