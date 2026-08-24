@@ -59,6 +59,13 @@ check("list exits 0 (empty store is not an error)", rc == 0, "rc=%d err=%s" % (r
 
 # new -> attempts create; assert it returns valid JSON with ok bool
 rc, out, err = run([ncli, "new", "Battery Test Note"])
+# Exit code, not just stdout. The hands have ONE uniform contract — `exit 2` is reserved
+# for usage errors, and EVERY degraded path is `return 0` with an {ok:false} body — so any
+# arm that is not probing usage must see rc 0. Until 2026-08-24 the only rc assertions on
+# this surface were `rc == 2` ones: the batteries checked that bad input fails loudly and
+# never once that good input succeeds quietly. That is exactly the gap `agos-notes list`
+# lived in — valid JSON on stdout, rc 1 underneath, green lane.
+check("`new Battery Test Note` exits 0", rc == 0, "rc=%s err=%s" % (rc, err[:60]))
 try:
     d = json.loads(out)
     check("new -> valid JSON {ok:bool}", d.get("ok") in (True, False), out[:60])
@@ -66,10 +73,12 @@ try:
     if d.get("ok") is True and slug:
         # read -> body contains the title
         rc, out, err = run([ncli, "read", slug])
+        check("`read` exits 0", rc == 0, "rc=%s err=%s" % (rc, err[:60]))
         rd = json.loads(out)
         check("read -> ok:true + body", rd.get("ok") is True and "Battery" in str(rd.get("body","")), out[:60])
         # append -> ok true
         rc, out, err = run([ncli, "append", slug, "appended line"])
+        check("`append appended line` exits 0", rc == 0, "rc=%s err=%s" % (rc, err[:60]))
         ad = json.loads(out)
         check("append -> ok:true", ad.get("ok") is True, out[:60])
     else:

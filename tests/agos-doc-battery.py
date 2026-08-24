@@ -45,6 +45,13 @@ p.write(pdf); p.close()
 
 # info -> valid JSON, ok bool, pages int
 rc, out, err = run([dcli, "info", p.name])
+# Exit code, not just stdout. The hands have ONE uniform contract — `exit 2` is reserved
+# for usage errors, and EVERY degraded path is `return 0` with an {ok:false} body — so any
+# arm that is not probing usage must see rc 0. Until 2026-08-24 the only rc assertions on
+# this surface were `rc == 2` ones: the batteries checked that bad input fails loudly and
+# never once that good input succeeds quietly. That is exactly the gap `agos-notes list`
+# lived in — valid JSON on stdout, rc 1 underneath, green lane.
+check("`info` exits 0", rc == 0, "rc=%s err=%s" % (rc, err[:60]))
 try:
     d = json.loads(out)
     check("info -> valid JSON {ok:bool}", d.get("ok") in (True, False), out[:60])
@@ -55,6 +62,7 @@ except Exception as e:
 
 # text -> valid JSON (whole-doc extract)
 rc, out, err = run([dcli, "text", p.name])
+check("`text` exits 0", rc == 0, "rc=%s err=%s" % (rc, err[:60]))
 try:
     d = json.loads(out)
     check("text -> valid JSON {ok:bool}", d.get("ok") in (True, False), out[:60])

@@ -36,6 +36,10 @@ print("  using REAL agos-sys CLI: " + syscli)
 
 # status -> valid JSON with the four top-level sections
 rc, out, err = run([syscli, "status"])
+# `exit 2` is reserved for usage errors in every hand; a healthy `status` must exit 0.
+# This site was skipped by the mechanical pass because the NEXT arm asserts rc == 2, and a
+# lookahead window cannot tell "this call is checked" from "a nearby call is checked".
+check("`status` exits 0", rc == 0, "rc=%s err=%s" % (rc, err[:60]))
 try:
     d = json.loads(out)
     for k in ("network", "audio", "display", "power"):

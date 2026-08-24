@@ -39,6 +39,13 @@ print("  using REAL agos-web CLI: " + wcli)
 
 # 1) http(s)-only guard — OFFLINE, always assertable
 rc, out, err = run([wcli, "fetch", "file:///etc/hostname"])
+# Exit code, not just stdout. The hands have ONE uniform contract — `exit 2` is reserved
+# for usage errors, and EVERY degraded path is `return 0` with an {ok:false} body — so any
+# arm that is not probing usage must see rc 0. Until 2026-08-24 the only rc assertions on
+# this surface were `rc == 2` ones: the batteries checked that bad input fails loudly and
+# never once that good input succeeds quietly. That is exactly the gap `agos-notes list`
+# lived in — valid JSON on stdout, rc 1 underneath, green lane.
+check("`fetch file:///etc/hostname` exits 0", rc == 0, "rc=%s err=%s" % (rc, err[:60]))
 try:
     d = json.loads(out)
     check("fetch file:// -> ok:false + http(s) refusal", d.get("ok") is False and "http(s)" in str(d.get("error","")), out[:60])
@@ -47,6 +54,7 @@ except Exception as e:
 
 # 2) live fetch — valid JSON with ok bool (network may or may not succeed; both are the contract)
 rc, out, err = run([wcli, "fetch", "https://example.com"])
+check("`fetch https://example.com` exits 0", rc == 0, "rc=%s err=%s" % (rc, err[:60]))
 try:
     d = json.loads(out)
     check("fetch https -> valid JSON {ok:bool}", d.get("ok") in (True, False), out[:60])

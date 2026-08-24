@@ -38,6 +38,13 @@ open(os.path.join(d, "b.log"), "w").close()
 
 # list -> ok true, count int, entries array
 rc, out, err = run([fcli, "list", d])
+# Exit code, not just stdout. The hands have ONE uniform contract — `exit 2` is reserved
+# for usage errors, and EVERY degraded path is `return 0` with an {ok:false} body — so any
+# arm that is not probing usage must see rc 0. Until 2026-08-24 the only rc assertions on
+# this surface were `rc == 2` ones: the batteries checked that bad input fails loudly and
+# never once that good input succeeds quietly. That is exactly the gap `agos-notes list`
+# lived in — valid JSON on stdout, rc 1 underneath, green lane.
+check("`list` exits 0", rc == 0, "rc=%s err=%s" % (rc, err[:60]))
 try:
     j = json.loads(out)
     check("list -> ok:true", j.get("ok") is True, out[:60])
@@ -48,6 +55,7 @@ except Exception as e:
 
 # stat existing -> exists true
 rc, out, err = run([fcli, "stat", d])
+check("`stat` exits 0", rc == 0, "rc=%s err=%s" % (rc, err[:60]))
 try:
     j = json.loads(out)
     check("stat dir -> exists:true", j.get("exists") is True, out[:60])
@@ -56,6 +64,7 @@ except Exception as e:
 
 # stat missing -> exists false (graceful, not a crash)
 rc, out, err = run([fcli, "stat", os.path.join(d, "nope")])
+check("`stat nope` exits 0", rc == 0, "rc=%s err=%s" % (rc, err[:60]))
 try:
     j = json.loads(out)
     check("stat missing -> exists:false (graceful)", j.get("exists") is False, out[:60])

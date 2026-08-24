@@ -55,6 +55,7 @@ else:
 
 # 1) known arithmetic -> ok true, result contains 20
 rc, out, err = ev("(2+3)*4")
+check("`eval (2+3)*4` exits 0", rc == 0, "rc=%s err=%s" % (rc, err[:60]))
 try:
     d = json.loads(out)
     check("eval '(2+3)*4' -> ok:true", d.get("ok") is True, out[:60])
@@ -64,6 +65,7 @@ except Exception as e:
 
 # 2) irrational -> ok true, result non-empty
 rc, out, err = ev("sqrt(2)")
+check("`eval sqrt(2)` exits 0", rc == 0, "rc=%s err=%s" % (rc, err[:60]))
 try:
     d = json.loads(out)
     check("eval 'sqrt(2)' -> ok:true + non-empty result", d.get("ok") is True and str(d.get("result","")).strip(), out[:60])
