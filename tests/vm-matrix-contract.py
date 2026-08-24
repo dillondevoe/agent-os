@@ -72,7 +72,12 @@ TEST_SUFFIXES = (".nix", ".py", ".sh")
 # entry here should be a visible decision in a diff, not a pattern that swallows files.
 UNWIRED_BY_DESIGN = frozenset({
     "run-local.sh",           # the manual at-a-box runner; it INVOKES batteries, it is not one
-    "vm-matrix-contract.py",  # this file; invoked directly by flake-check.yml, not via flake.nix
+    # vm-matrix-contract.py USED TO BE EXEMPTED HERE, with the true-but-unverified comment
+    # "invoked directly by flake-check.yml, not via flake.nix". workflow_run_references() now
+    # computes that, so the exemption went stale the moment it could be checked and the arm
+    # deleted its own row. Note who forced this line out — not memory. Same move as the
+    # identity-battery ledger row: the state "exempted while actually running" is unreachable,
+    # and so is "exempted while the step that ran it was deleted".
 })
 
 # DEBT, NOT DESIGN — and the two must never share a list.
@@ -150,6 +155,78 @@ def matrix_entries(path):
         return set(wf["jobs"]["vm-test"]["strategy"]["matrix"]["test"])
     except (KeyError, TypeError) as exc:
         sys.exit(f"FAIL: could not read the matrix from {path}: {exc!r}")
+
+
+WORKFLOWS_DIR = ".github/workflows"
+
+
+def workflow_run_references(base, workflows_dir=WORKFLOWS_DIR):
+    """Workflow `run:` steps that execute tests/<base>. Returns [(file, step-name), ...].
+
+    WHY THIS EXISTS, and it is a correction to this file rather than a feature.
+
+    `wiring_references()` answers "does flake.nix run it," and this file treated that as the
+    whole of "does it run anywhere." It is not. A file can be executed by an explicit workflow
+    STEP with no flake reference at all — and the proof is THIS FILE, which was exempted in
+    UNWIRED_BY_DESIGN with the comment "invoked directly by flake-check.yml, not via flake.nix."
+
+    That comment was TRUE and it was also PROSE. Nothing checked it. Delete the step from
+    flake-check.yml and the exemption still stands, this contract runs in no lane, and the arm
+    that exists to catch exactly that failure is the one silently exempting it. An exemption
+    whose stated reason is unverified is a suppression list entry with a story attached.
+
+    So the reason is now COMPUTED, the exemption is deleted, and if the step ever disappears
+    this file starts failing its own check — which is the behaviour the comment claimed.
+
+    PARSE THE YAML; DO NOT STRIP `#` COMMENTS BY HAND. That was my first draft and it is wrong
+    here in a way that is worth recording, because the same reflex is correct one file over: in
+    run-local.sh, cutting at the first `#` is the entire check. In YAML it DESTROYS the answer —
+    the real invocation reads
+
+        run: nix shell nixpkgs#python3Packages.pyyaml --command python3 tests/vm-matrix-contract.py
+
+    and cutting at the first `#` truncates it at `nixpkgs`, dropping the reference and reporting
+    the file unwired. A rule transplanted from the file where it was learned, into a file with
+    different syntax, inverts. The parser drops comments correctly because it knows what a
+    comment IS.
+    """
+    try:
+        import yaml
+    except ImportError:
+        # Same refusal as matrix_entries(), and for a sharper reason here: without the parser
+        # this function returns "no workflow runs it" for EVERY file, which reads exactly like
+        # a repo where nothing is workflow-wired. That is a check silently skipping itself.
+        sys.exit(
+            "FAIL: PyYAML is unavailable, so workflow `run:` steps cannot be parsed.\n"
+            "      Refusing to exit 0: without it this check cannot tell a file that runs in\n"
+            "      a workflow from one that runs nowhere, and would report the latter."
+        )
+    hits = []
+    if not os.path.isdir(workflows_dir):
+        return hits
+    needle = "tests/" + base
+    for name in sorted(os.listdir(workflows_dir)):
+        if not name.endswith((".yml", ".yaml")):
+            continue
+        path = os.path.join(workflows_dir, name)
+        try:
+            with open(path) as fh:
+                doc = yaml.safe_load(fh)
+        except (OSError, yaml.YAMLError):
+            # A workflow this cannot parse must NOT read as "no reference" — that direction
+            # silently turns a wired file into an unwired one and then into a new exemption.
+            # Surface it and keep going; the caller's other evidence still applies.
+            print("WARN: could not parse %s — not counted as wiring" % path, file=sys.stderr)
+            continue
+        if not isinstance(doc, dict):
+            continue
+        for job in (doc.get("jobs") or {}).values():
+            if not isinstance(job, dict):
+                continue
+            for step in (job.get("steps") or []):
+                if isinstance(step, dict) and needle in str(step.get("run", "")):
+                    hits.append((name, step.get("name", "<unnamed step>")))
+    return hits
 
 
 def wiring_references(flake_src, tests_dir, base):
@@ -298,7 +375,12 @@ def unwired_test_files(tests_dir, flake_path):
             present.add(base)
             if base in UNWIRED_BY_DESIGN or base in KNOWN_UNWIRED_DEBT:
                 continue
-            if not wiring_references(flake_src, tests_dir, base):
+            # EITHER lane counts as running it: a flake derivation, or an explicit workflow
+            # step. Before 2026-08-23 only the first did, so a workflow-run contract had to be
+            # hand-exempted — which put a genuinely-running file on the same list as files that
+            # run nowhere, and made the list stop meaning one thing.
+            if not (wiring_references(flake_src, tests_dir, base)
+                    or workflow_run_references(base)):
                 unwired.append(path)
             elif self_disarms(path):
                 # Wired AND self-disarming: green proves the CLI was absent, nothing more.
@@ -314,6 +396,9 @@ def unwired_test_files(tests_dir, flake_path):
             stale.append((base, "no such file in %s/" % tests_dir))
         elif wiring_references(flake_src, tests_dir, base):
             stale.append((base, "is wired into %s now — remove the exemption" % flake_path))
+        elif workflow_run_references(base):
+            where = ", ".join("%s: %s" % h for h in workflow_run_references(base))
+            stale.append((base, "is RUN by a workflow now (%s) — remove the exemption" % where))
     return unwired, vacuous, stale
 
 
