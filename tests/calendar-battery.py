@@ -153,7 +153,21 @@ if agos:
 
 # 3) add → agenda shows it
 import datetime
-start = (datetime.datetime.now() + datetime.timedelta(hours=2)).strftime("%Y-%m-%d %H:%M")
+_now = datetime.datetime.now()
+_start_dt = _now + datetime.timedelta(hours=2)
+start = _start_dt.strftime("%Y-%m-%d %H:%M")
+# `agenda N` is a CALENDAR-DAY window, so the span this arm needs depends on whether now+2h
+# crossed midnight. It was hardcoded `1` until 2026-08-24, which is correct for 22 hours a
+# day and WRONG for the two hours after 22:00: the event lands on tomorrow, `agenda 1` is
+# asked only about today, and it correctly returns [] while the arm reads that as a broken
+# `add`. It had never fired because nothing had been pushed in that window -- CI caught it
+# on the first commit that was, run 32784416155 at 22:25Z, `add` reporting ok:true for
+# 2026-08-25 00:25 and `agenda 1` returning [].
+#
+# A LITERAL THAT ENCODES AN ASSUMPTION NOTHING STATES: "now+2h is still today". Deriving
+# the span from the event that was actually added is the version that cannot go stale, and
+# it removes the wall-clock from the arm's correctness entirely.
+_span = (_start_dt.date() - _now.date()).days + 1
 rc, out, err = cal("add", start, "battery-test-event")
 check("`add` exits 0", rc == 0, "rc=%s err=%s" % (rc, err[:60]))
 # A TAUTOLOGY, until 2026-08-24: `("ok" in out.lower()) or rc == 0`, one line below an arm
@@ -171,12 +185,13 @@ if agos:
         check("add parses as JSON", False, str(e) + " | out=" + out[:80])
 else:
     check("add (khal fallback) -> khal accepted the event", "battery-test-event" in (out or err), (out or err)[:60])
-rc, out, err = cal("agenda", "1")
+rc, out, err = cal("agenda", str(_span))
 # The pipefail arm proper: khal | jq | jq -s. If the first stage exits non-zero the script dies
 # AFTER stdout is already correct, so only the exit code can see it.
-check("`agenda 1` exits 0", rc == 0, "rc=%s err=%s" % (rc, err[:60]))
+check("`agenda %d` exits 0" % _span, rc == 0, "rc=%s err=%s" % (rc, err[:60]))
 shows = "battery-test-event" in out
-check("agenda → shows the added event", shows, (out or err)[:80])
+check("agenda → shows the added event (span=%d, event %s)" % (_span, start), shows,
+      (out or err)[:80])
 
 # 4) THE DEGRADE PATH — added 2026-08-24, and it is two known shapes at once, both of them
 # already fixed once in `agos-notes` and both re-found here on a second hand.
