@@ -57,10 +57,41 @@ except Exception as e:
 # 2) live fetch — valid JSON with ok bool (network may or may not succeed; both are the contract)
 rc, out, err = run([wcli, "fetch", "https://example.com"])
 check("`fetch https://example.com` exits 0", rc == 0, "rc=%s err=%s" % (rc, err[:60]))
+check("fetch https -> says nothing on stderr", err == "", repr(err[:80]))
 try:
     d = json.loads(out)
     check("fetch https -> valid JSON {ok:bool}", d.get("ok") in (True, False), out[:60])
     check("fetch https -> has url field", d.get("url") == "https://example.com", str(d.get("url")))
+
+    # WHICH BRANCH DID WE JUST TAKE? Until 2026-08-24 nothing here answered that, and the two
+    # arms above pass identically either way — `ok` was allowed to be ANY boolean and nothing
+    # downstream of it was ever asserted. The nix sandbox has NO NETWORK, so in the only lane
+    # this file runs in, the live path is never the path taken; a reader scanning the log saw
+    # "fetch https -> valid JSON  PASS" and had every reason to believe the fetch worked.
+    # That is the same green-by-never-running shape this repo has now found five times, and
+    # the fix is the same one: say out loud which leg ran, and assert THAT leg's contract.
+    #
+    # Deliberately not forcing either branch. Demanding a live fetch would make the sandbox
+    # lane permanently red for a reason that is not a defect; demanding a degrade would go red
+    # on the one host where the hand actually works. What is NOT optional is that whichever
+    # branch runs must satisfy its own half of the contract.
+    if d.get("ok") is True:
+        print("  live: the network was reachable — asserting the SUCCESS contract")
+        check("fetch https (live) -> non-empty text", str(d.get("text", "")).strip() != "", repr(str(d.get("text"))[:60]))
+        # The label says "matching the text", so the arm HAS to check that — a label claiming
+        # more than its condition is one of the disguises this repo enumerates. It is safe to
+        # assert exactly rather than approximately: the hand computes both fields from one
+        # string in one jq expression (`chars:($t | length)`), so equality is true by
+        # construction and any drift between them is a real defect, not a counting convention.
+        check("fetch https (live) -> chars is a positive int matching the text",
+              isinstance(d.get("chars"), int) and d.get("chars") > 0
+              and d.get("chars") == len(str(d.get("text", ""))),
+              "chars=%s len(text)=%s" % (d.get("chars"), len(str(d.get("text", "")))))
+    else:
+        print("  offline: no network in this lane — asserting the DEGRADE contract instead")
+        # An ok:false with no reason is the worst of both worlds: the caller knows it failed
+        # and cannot know why. The uniform contract puts the reason on STDOUT, next to ok.
+        check("fetch https (offline) -> ok:false carries a reason", str(d.get("error", "")).strip() != "", out[:80])
 except Exception as e:
     check("live fetch parses", False, str(e) + " | out=" + out[:60])
 
