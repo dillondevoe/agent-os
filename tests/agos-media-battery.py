@@ -23,6 +23,12 @@ def run(cmd):
         return 1, "", str(e)
 
 mcli = shutil.which("agos-media")
+if not mcli and os.environ.get("AGENT_OS_STRICT") == "1":
+    # Wired into flake.nix as `agos-media-contract`, where the CLI IS on PATH. In that
+    # lane an absent tool is a BUILD FAILURE, not a reason to pass: a battery that
+    # exits 0 when its subject is missing reports a green about nothing.
+    print("  FAIL agos-media-battery: AGENT_OS_STRICT=1 and `agos-media` is not on PATH.")
+    sys.exit(1)
 if not mcli:
     print("  SKIP agos-media-battery: agos-media not on PATH (image not built).")
     sys.exit(0)
@@ -30,7 +36,7 @@ if not mcli:
 fixture = os.environ.get("AGOS_MEDIA_FIXTURE")
 if not fixture or not os.path.isfile(fixture):
     print("  SKIP agos-media-battery: no fixture. Set AGOS_MEDIA_FIXTURE=/path/to/sample.png|mp4")
-    print("  (cannot synthesize a valid media file headlessly; the reshape logic is exercised on the Dell gate).")
+    print("  (set it, or run the wired `agos-media-contract` lane, which synthesizes one with ffmpeg).")
     sys.exit(0)
 
 print("  using REAL agos-media CLI: " + mcli + "  fixture=" + fixture)

@@ -1538,6 +1538,98 @@
               AGENT_OS_STRICT=1 python3 tests/agos-calc-battery.py
               touch $out
             '';
+
+        agos-sys-contract =
+          let
+            pkgs = nixpkgs.legacyPackages.${system};
+            agos-sys = import ./modules/pkgs/agos-sys.nix { inherit pkgs; };
+          in
+          pkgs.runCommand "agos-sys-contract-check"
+            { nativeBuildInputs = [ pkgs.python3 agos-sys ]; } ''
+              work="$(mktemp -d)"
+              mkdir -p "$work/tests"
+              cp ${./tests/agos-sys-battery.py} "$work/tests/agos-sys-battery.py"
+              cd "$work"
+              AGENT_OS_STRICT=1 python3 tests/agos-sys-battery.py
+              touch $out
+            '';
+
+        agos-files-contract =
+          let
+            pkgs = nixpkgs.legacyPackages.${system};
+            agos-files = import ./modules/pkgs/agos-files.nix { inherit pkgs; };
+          in
+          pkgs.runCommand "agos-files-contract-check"
+            { nativeBuildInputs = [ pkgs.python3 agos-files ]; } ''
+              work="$(mktemp -d)"
+              mkdir -p "$work/tests"
+              cp ${./tests/agos-files-battery.py} "$work/tests/agos-files-battery.py"
+              cd "$work"
+              AGENT_OS_STRICT=1 python3 tests/agos-files-battery.py
+              touch $out
+            '';
+
+        agos-notes-contract =
+          let
+            pkgs = nixpkgs.legacyPackages.${system};
+            agos-notes = import ./modules/pkgs/agos-notes.nix { inherit pkgs; notesDir = "/var/lib/agos-notes"; };
+          in
+          pkgs.runCommand "agos-notes-contract-check"
+            { nativeBuildInputs = [ pkgs.python3 agos-notes ]; } ''
+              work="$(mktemp -d)"
+              mkdir -p "$work/tests"
+              cp ${./tests/agos-notes-battery.py} "$work/tests/agos-notes-battery.py"
+              cd "$work"
+              AGENT_OS_STRICT=1 python3 tests/agos-notes-battery.py
+              touch $out
+            '';
+
+        agos-doc-contract =
+          let
+            pkgs = nixpkgs.legacyPackages.${system};
+            agos-doc = import ./modules/pkgs/agos-doc.nix { inherit pkgs; };
+          in
+          pkgs.runCommand "agos-doc-contract-check"
+            { nativeBuildInputs = [ pkgs.python3 agos-doc ]; } ''
+              work="$(mktemp -d)"
+              mkdir -p "$work/tests"
+              cp ${./tests/agos-doc-battery.py} "$work/tests/agos-doc-battery.py"
+              cd "$work"
+              AGENT_OS_STRICT=1 python3 tests/agos-doc-battery.py
+              touch $out
+            '';
+
+        agos-web-contract =
+          let
+            pkgs = nixpkgs.legacyPackages.${system};
+            agos-web = import ./modules/pkgs/agos-web.nix { inherit pkgs; };
+          in
+          pkgs.runCommand "agos-web-contract-check"
+            { nativeBuildInputs = [ pkgs.python3 agos-web ]; } ''
+              work="$(mktemp -d)"
+              mkdir -p "$work/tests"
+              cp ${./tests/agos-web-battery.py} "$work/tests/agos-web-battery.py"
+              cd "$work"
+              AGENT_OS_STRICT=1 python3 tests/agos-web-battery.py
+              touch $out
+            '';
+
+        agos-media-contract =
+          let
+            pkgs = nixpkgs.legacyPackages.${system};
+            agos-media = import ./modules/pkgs/agos-media.nix { inherit pkgs; };
+          in
+          pkgs.runCommand "agos-media-contract-check"
+            { nativeBuildInputs = [ pkgs.python3 agos-media pkgs.ffmpeg-headless ]; } ''
+              work="$(mktemp -d)"
+              mkdir -p "$work/tests"
+              cp ${./tests/agos-media-battery.py} "$work/tests/agos-media-battery.py"
+              cd "$work"
+              ffmpeg -loglevel error -f lavfi -i testsrc=size=64x64:rate=1 -frames:v 1 "$work/fixture.png"
+              export AGOS_MEDIA_FIXTURE="$work/fixture.png"
+              AGENT_OS_STRICT=1 python3 tests/agos-media-battery.py
+              touch $out
+            '';
       };
     };
 }

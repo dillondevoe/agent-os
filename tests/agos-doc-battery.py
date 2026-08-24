@@ -22,6 +22,12 @@ def run(cmd):
         return 1, "", str(e)
 
 dcli = shutil.which("agos-doc")
+if not dcli and os.environ.get("AGENT_OS_STRICT") == "1":
+    # Wired into flake.nix as `agos-doc-contract`, where the CLI IS on PATH. In that
+    # lane an absent tool is a BUILD FAILURE, not a reason to pass: a battery that
+    # exits 0 when its subject is missing reports a green about nothing.
+    print("  FAIL agos-doc-battery: AGENT_OS_STRICT=1 and `agos-doc` is not on PATH.")
+    sys.exit(1)
 if not dcli:
     print("  SKIP agos-doc-battery: agos-doc not on PATH (image not built / poppler absent).")
     sys.exit(0)

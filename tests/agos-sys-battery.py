@@ -5,6 +5,7 @@
 # The mutating subcmds (volume/brightness) are NOT exercised — they change the box.
 # Run: PYTHONPATH=modules python3 tests/agos-sys-battery.py
 import subprocess, json, shutil, sys
+import os
 
 EX = 0
 def check(name, cond, detail=""):
@@ -22,6 +23,12 @@ def run(cmd):
         return 1, "", str(e)
 
 syscli = shutil.which("agos-sys")
+if not syscli and os.environ.get("AGENT_OS_STRICT") == "1":
+    # Wired into flake.nix as `agos-sys-contract`, where the CLI IS on PATH. In that
+    # lane an absent tool is a BUILD FAILURE, not a reason to pass: a battery that
+    # exits 0 when its subject is missing reports a green about nothing.
+    print("  FAIL agos-sys-battery: AGENT_OS_STRICT=1 and `agos-sys` is not on PATH.")
+    sys.exit(1)
 if not syscli:
     print("  SKIP agos-sys-battery: agos-sys not on PATH (image not built).")
     sys.exit(0)

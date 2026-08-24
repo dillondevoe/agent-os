@@ -25,61 +25,7 @@
 # nothing with the sealed path — fold into a shared substrate module at seal-time.
 { pkgs, ... }:
 let
-  # `ffmpeg-headless` (hyphen) must be quoted string-access — a bareword inside
-  # `with pkgs; [ … ]` would parse as the subtraction `ffmpeg - headless`. writeShellApplication
-  # resolves its `bin` output for PATH via lib.getBin, so ffprobe lands correctly.
-  ffmpegHeadless = pkgs."ffmpeg-headless";
-
-  agos-media = pkgs.writeShellApplication {
-    name = "agos-media";
-    runtimeInputs = [ ffmpegHeadless pkgs.coreutils pkgs.jq ];
-    text = ''
-      usage() {
-        cat >&2 <<'USAGE'
-      agos-media — the agent's read-only media hand (JSON out). Images/video/audio via ffprobe.
-
-        agos-media info <path>   probe a media file:
-          {ok,path,bytes,media_type,format_name,duration_s,width,height,streams}
-          media_type ∈ image|video|audio|other; streams:[{type,codec,width,height}]
-      USAGE
-        exit 2
-      }
-
-      cmd_info() {
-        path="''${1:-}"
-        if [ -z "$path" ]; then echo "agos-media info: need a path" >&2; exit 2; fi
-        if [ ! -f "$path" ]; then jq -n --arg p "$path" '{ok:false,error:"no such file",path:$p}'; return 0; fi
-        if ! probe=$(ffprobe -v quiet -print_format json -show_format -show_streams "$path" 2>/dev/null) \
-             || [ -z "$probe" ]; then
-          jq -n --arg p "$path" '{ok:false,error:"not a readable media file",path:$p}'; return 0
-        fi
-        bytes=$(stat -c '%s' "$path")
-        # Reshape ffprobe's schema into the stable contract. An image is a single-frame "video"
-        # stream, so a *_pipe / image2 container name classifies as image before the video test.
-        printf '%s' "$probe" | jq --arg p "$path" --argjson bytes "$bytes" '
-          (.streams // []) as $st
-          | ($st | map(select(.codec_type=="video")) | .[0]) as $v
-          | ($st | any(.codec_type=="video")) as $hasv
-          | ($st | any(.codec_type=="audio")) as $hasa
-          | (.format.format_name // "") as $fmt
-          | (if ($fmt|test("_pipe$")) or ($fmt=="image2") then "image"
-             elif $hasv then "video"
-             elif $hasa then "audio"
-             else "other" end) as $mt
-          | { ok:true, path:$p, bytes:$bytes, media_type:$mt,
-              format_name:(.format.format_name // null),
-              duration_s:((.format.duration // null) | if .==null then null else (tonumber? // null) end),
-              width:($v.width // null), height:($v.height // null),
-              streams:($st | map({ type:.codec_type, codec:.codec_name,
-                                   width:(.width // null), height:(.height // null) })) }'
-      }
-
-      case "''${1:-}" in
-        info) shift; cmd_info "$@" ;;
-        *)    usage ;;
-      esac
-    '';
-  };
+  agos-media = import ./pkgs/agos-media.nix { inherit pkgs; };
 in {
   environment.systemPackages = [
     agos-media      # the agent's read-only media hand (JSON: info)

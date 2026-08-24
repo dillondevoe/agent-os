@@ -8,6 +8,7 @@
 # Runs SKIP if agos-web isn't on PATH (image not built in this env).
 # Run: PYTHONPATH=modules python3 tests/agos-web-battery.py
 import subprocess, json, shutil, sys
+import os
 
 EX = 0
 def check(name, cond, detail=""):
@@ -25,6 +26,12 @@ def run(cmd):
         return 1, "", str(e)
 
 wcli = shutil.which("agos-web")
+if not wcli and os.environ.get("AGENT_OS_STRICT") == "1":
+    # Wired into flake.nix as `agos-web-contract`, where the CLI IS on PATH. In that
+    # lane an absent tool is a BUILD FAILURE, not a reason to pass: a battery that
+    # exits 0 when its subject is missing reports a green about nothing.
+    print("  FAIL agos-web-battery: AGENT_OS_STRICT=1 and `agos-web` is not on PATH.")
+    sys.exit(1)
 if not wcli:
     print("  SKIP agos-web-battery: agos-web not on PATH (image not built).")
     sys.exit(0)

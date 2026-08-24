@@ -99,9 +99,25 @@ UNWIRED_BY_DESIGN = frozenset({
 # escalate-consent-battery.py deserves its own line: it is referenced by nothing at all, not even
 # tests/run-local.sh, so before this check it was invisible to every reader as well as to CI.
 KNOWN_UNWIRED_DEBT = frozenset({
-    # The eight ambient-hand acceptance batteries. Each is named in flake.nix by exactly one
-    # `builtins.pathExists` assert and its error string, and by nothing else in the repository.
-    # The guard that names them proves they have not been DELETED; nothing proves they RUN.
+    # What remains of the eight ambient-hand acceptance batteries. Each was named in flake.nix
+    # by exactly one `builtins.pathExists` assert and its error string, and by nothing else in
+    # the repository. The guard that names them proves they have not been DELETED; nothing
+    # proved they RUN.
+    #
+    # 2026-08-24: SIX more left in one pass by the agos-calc route -- extract the `let`-bound
+    # writeShellApplication into modules/pkgs/<name>.nix so something outside the module can
+    # name it, add AGENT_OS_STRICT so the battery refuses to pass with its subject absent, then
+    # depend on it from a cheap runCommand. Both halves are required, every time.
+    #
+    # agos-media took a third half. It has a SECOND self-disarm -- no fixture, exit 0 -- and its
+    # own comment asserted a fixture "cannot [be] synthesize[d] headlessly". ffmpeg does exactly
+    # that, in three lines, and the hand already carries ffmpeg-headless. Wired without it, the
+    # battery would have sailed past strict mode and reported a vacuous green: A SECOND DISARM
+    # BEHIND THE FIRST ONE IS STILL A DISARM, and the false claim in the comment is what made it
+    # invisible. When you wire a battery, count its exit-0 paths, do not fix the first one.
+    #
+    # calendar-battery.py is NOT the same shape and is deliberately not in that six: it probes
+    # two tools (agos-cal AND khal) and disarms at a different point.
     "calendar-battery.py",
     # agos-calc-battery.py left on 2026-08-24 — the FIRST of these eight to run anywhere, and
     # the entry that shows why the group resisted for so long. Its reason ("self-disarms: SKIP
@@ -111,12 +127,6 @@ KNOWN_UNWIRED_DEBT = frozenset({
     # nothing could turn green; fixing only the packaging would have produced a vacuous green.
     # Now: modules/pkgs/agos-calc.nix + AGENT_OS_STRICT=1 + an agos-calc-contract derivation.
     # The other seven are the same shape and should follow mechanically.
-    "agos-sys-battery.py",
-    "agos-files-battery.py",
-    "agos-notes-battery.py",
-    "agos-doc-battery.py",
-    "agos-media-battery.py",
-    "agos-web-battery.py",
     # anthropic-transport-battery.py and audit-signing-battery.py were here from the first
     # sweep (#153) with the reason "referenced only by tests/run-local.sh, a manual runner."
     # That reason was accurate and it named the fixable half out loud for a day and a half:

@@ -6,6 +6,7 @@
 # write-path detail if the store isn't writable (Dell gate owns the real store).
 # Run: PYTHONPATH=modules python3 tests/agos-notes-battery.py
 import subprocess, json, shutil, sys
+import os
 
 EX = 0
 def check(name, cond, detail=""):
@@ -23,6 +24,12 @@ def run(cmd):
         return 1, "", str(e)
 
 ncli = shutil.which("agos-notes")
+if not ncli and os.environ.get("AGENT_OS_STRICT") == "1":
+    # Wired into flake.nix as `agos-notes-contract`, where the CLI IS on PATH. In that
+    # lane an absent tool is a BUILD FAILURE, not a reason to pass: a battery that
+    # exits 0 when its subject is missing reports a green about nothing.
+    print("  FAIL agos-notes-battery: AGENT_OS_STRICT=1 and `agos-notes` is not on PATH.")
+    sys.exit(1)
 if not ncli:
     print("  SKIP agos-notes-battery: agos-notes not on PATH (image not built).")
     sys.exit(0)
