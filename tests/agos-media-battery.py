@@ -40,6 +40,14 @@ if not fixture or not os.path.isfile(fixture):
     sys.exit(0)
 
 print("  using REAL agos-media CLI: " + mcli + "  fixture=" + fixture)
+
+# The fixture's own facts, read from the filesystem rather than from the hand. Every arm
+# below reads stdout or the exit code — the hand's account of itself — so an implementation
+# that reported plausible numbers for a file it never opened passed all of them.
+import hashlib
+fixture_bytes = os.path.getsize(fixture)
+fixture_sha = hashlib.sha256(open(fixture, "rb").read()).hexdigest()
+
 rc, out, err = run([mcli, "info", fixture])
 # Exit code, not just stdout. The hands have ONE uniform contract — `exit 2` is reserved
 # for usage errors, and EVERY degraded path is `return 0` with an {ok:false} body — so any
@@ -53,8 +61,28 @@ try:
     check("info -> valid JSON {ok:bool}", d.get("ok") in (True, False), out[:60])
     check("info -> media_type in {image,video,audio,other}", d.get("media_type") in ("image","video","audio","other"), str(d.get("media_type")))
     check("info -> streams is array", isinstance(d.get("streams"), list), str(d.get("streams"))[:40])
+    # Not "bytes is an int" — the RIGHT int, checked against the file itself.
+    check("info -> bytes matches the file on disk", d.get("bytes") == fixture_bytes,
+          "hand=%s disk=%s" % (d.get("bytes"), fixture_bytes))
 except Exception as e:
     check("info parses", False, str(e) + " | out=" + out[:80])
+
+# agos-media info is a READ-only inspection; that was prose until 2026-08-24.
+check("read-only: the fixture is byte-identical afterwards",
+      hashlib.sha256(open(fixture, "rb").read()).hexdigest() == fixture_sha, fixture_sha[:16])
+
+# The degrade path, on all three channels — it had no arm of any kind. Contract: {ok:false}
+# with a reason on STDOUT, rc 0, and stderr silent (ffprobe's own complaint is swallowed by
+# design, and an arm reading only stdout cannot tell "swallowed" from "leaked").
+rc, out, err = run([mcli, "info", "/nonexistent-agos-media-fixture.png"])
+check("`info <missing>` exits 0", rc == 0, "rc=%s err=%s" % (rc, err[:60]))
+check("info <missing> -> says nothing on stderr", err == "", repr(err[:80]))
+try:
+    md = json.loads(out)
+    check("info <missing> -> ok:false + a reason on STDOUT",
+          md.get("ok") is False and md.get("error"), out[:60])
+except Exception as e:
+    check("info-missing parses", False, str(e))
 
 print("agos-media-battery: " + ("ALL PASS" if EX == 0 else "FAILURES"))
 sys.exit(EX)
