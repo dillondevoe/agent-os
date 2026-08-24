@@ -661,7 +661,17 @@ def bare_top_level_bindings(pkgs_dir="modules/pkgs"):
 RC_ASSERTION_FLOOR = 27
 
 
-# Sentinels this detector has SEEN and that are known-explained. It may only go DOWN.
+# Sentinels this detector has SEEN and that are known-explained. It may only go DOWN,
+# and that is now ENFORCED by stale_sentinel_exemptions() rather than asserted here.
+#
+# IT TOOK A DAY AND A COMM FROM PAGE TO NOTICE, AND THE PRECEDENT WAS 460 LINES UP.
+# `unwired_and_stale()` has carried "A STALE EXEMPTION IS ITSELF THE BUG THIS FILE IS ABOUT"
+# in a comment for weeks, and checks BOTH of the older lists for entries that name a missing
+# file or an already-wired one. I added a third suppression list to the same file and gave it
+# a comment where the other two have a check. Proximity of precedent is not transfer of it:
+# the rule was in scope, in the same module, and it still had to arrive from another surface.
+#
+# So: ANY new exemption list added below needs a stale-check before it needs entries.
 # The one entry is fixed in PR #159 (`brain.do_tool = lambda *a, **k: fired.append((a, k))`,
 # a sentinel that RECORDS instead of raising) and is listed here rather than tuned out of the
 # detector, because an exemption you can read is a different object from a detector that
