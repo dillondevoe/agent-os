@@ -675,7 +675,7 @@ _MUTATING_METHODS = frozenset({
 })
 
 
-def unmutated_sentinels(tests_dir=TESTS_DIR):
+def _scan_sentinels(tests_dir=TESTS_DIR):
     """Names bound to an EMPTY collection (or to 0/False), asserted on, and mutated by nothing.
 
     The shape PR #159 found in frontdoor-kick-battery: `fired = []`, an executor stub that
@@ -748,9 +748,34 @@ def unmutated_sentinels(tests_dir=TESTS_DIR):
                             asserted.add(sub.id)
         for name, lineno in sorted(empties.items()):
             if name in asserted and name not in mutated and name not in passed_as_arg:
-                if (base, name) not in KNOWN_UNMUTATED_SENTINELS:
-                    hits.append((base, lineno, name))
+                hits.append((base, lineno, name))
     return hits
+
+
+def unmutated_sentinels(tests_dir=TESTS_DIR):
+    """The live findings — every dead sentinel MINUS the ones on the exemption list."""
+    return [h for h in _scan_sentinels(tests_dir)
+            if (h[0], h[2]) not in KNOWN_UNMUTATED_SENTINELS]
+
+
+def stale_sentinel_exemptions(tests_dir=TESTS_DIR):
+    """Exemptions that no longer describe anything — and this is the half that was PROSE.
+
+    `KNOWN_UNMUTATED_SENTINELS` carried the comment "It may only go DOWN" and a NOTE line
+    saying so in the CI log, and NOTHING enforced either. An exemption is subtracted from the
+    findings before they are printed, so a stale one is invisible BY CONSTRUCTION: the day
+    PR #159 lands and `fired` starts recording, the entry stops describing a real defect and
+    becomes a permanent hole in the detector that reads, in the log, as an accounted-for one.
+
+    That is this file's own subject aimed at this file's newest ledger. `KNOWN_UNWIRED_DEBT`
+    has a human who watches it shrink; a suppression list nobody watches only ever grows,
+    because the cost of adding an entry is one line and the cost of removing one is noticing.
+
+    So the ratchet is a CHECK, not a comment: an entry that no longer names a live dead
+    sentinel fails the lane and must be deleted. Deleting it is the whole point.
+    """
+    live = {(base, name) for base, _, name in _scan_sentinels(tests_dir)}
+    return sorted(e for e in KNOWN_UNMUTATED_SENTINELS if e not in live)
 
 
 def rc_assertion_census(tests_dir=TESTS_DIR):
@@ -878,10 +903,11 @@ def main():
     rc_count = rc_assertion_census(args.tests_dir)
     rc_regressed = rc_count < RC_ASSERTION_FLOOR
     dead_sentinels = unmutated_sentinels(args.tests_dir)
+    stale_exemptions = stale_sentinel_exemptions(args.tests_dir)
 
     if (not unlisted and not dangling and not unwired and not vacuous and not stale
             and not false_claims and not bare_bindings and not rc_regressed
-            and not dead_sentinels):
+            and not dead_sentinels and not stale_exemptions):
         print(f"OK: {len(tests)} test-* package(s), all present in the vm-tests matrix:")
         for name in sorted(tests):
             print(f"  {name}")
@@ -896,11 +922,24 @@ def main():
         for base in sorted(KNOWN_UNWIRED_DEBT):
             print(f"  DEBT {base}" + ("  [self-disarming]" if base in disarming else ""))
         print(f"OK: no sentinel (collection, 0, or False) is asserted on while nothing can trip it "
-              f"({len(KNOWN_UNMUTATED_SENTINELS)} known-explained, may only go down).")
+              f"({len(KNOWN_UNMUTATED_SENTINELS)} known-explained, and every one of those still "
+              f"names a LIVE finding — the 'may only go down' is enforced, not printed).")
         print(f"NOTE: {rc_count} exit-code assertion(s) across the ambient batteries "
               f"(floor {RC_ASSERTION_FLOOR}). This number may only go UP. Counted by parsing, "
               f"not grepping — see rc_assertion_census().")
         return 0
+
+    if stale_exemptions:
+        print("FAIL: KNOWN_UNMUTATED_SENTINELS entries that no longer name a live finding:",
+              file=sys.stderr)
+        for base, name in stale_exemptions:
+            print(f"  {base}  `{name}`", file=sys.stderr)
+        print("      Either the sentinel was fixed (good — DELETE the entry) or the file was",
+              file=sys.stderr)
+        print("      renamed or deleted. A suppression that describes nothing is a permanent",
+              file=sys.stderr)
+        print("      hole in the detector that reads, in this log, as an accounted-for one.",
+              file=sys.stderr)
 
     if dead_sentinels:
         print("FAIL: sentinel collection(s) asserted on that NOTHING can ever mutate:",
