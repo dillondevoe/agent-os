@@ -86,6 +86,19 @@ jobs:
       - name: tests/run-local.sh covers every nix-free battery
         run: python3 tests/runner-coverage-contract.py
 
+      # A THIRD contract in the same lane, and this one is about the HANDS rather than about
+      # what CI runs. One defect shape was found and fixed in three separate agos-* hands on
+      # 2026-08-24 — an external producer as a non-final pipeline stage under `set -euo
+      # pipefail`, whose failure is swallowed while the final stage prints a complete, plausible
+      # answer. Three correct fixes, none of which stopped the next recurrence. That is a class,
+      # and a class needs a check rather than a fourth commit.
+      #
+      # Stdlib only, so no `nix shell` wrapper. It is deliberately the CHEAP STATIC HALF: it
+      # finds the structural precondition, not whether a hand degrades well. The live degrade
+      # arms in the batteries are the other half and neither substitutes for the other.
+      - name: no agos-* hand swallows a failing producer mid-pipeline
+        run: python3 tests/hand-degrade-contract.py
+
       # The nix-free battery suite itself. Until 2026-08-24 these 23 batteries ran ONLY on a
       # developer's machine: four of them — anthropic-transport, audit-signing, escalate-consent,
       # transport — sat on vm-matrix-contract.py's KNOWN_UNWIRED_DEBT list precisely because no

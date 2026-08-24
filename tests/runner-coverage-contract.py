@@ -28,7 +28,7 @@
 # It asserts COVERAGE; it does not auto-run. Every entry in run-local.sh wires a bespoke
 # argument contract that discovery cannot invent, and a runner that guesses arguments produces
 # failures that are about the runner.
-import os, sys
+import os, re, sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TESTS = os.path.join(ROOT, "tests")
@@ -71,19 +71,58 @@ def runner_code(path):
     by hand in the first draft of this very check, hours after being fixed there. It is what
     the class does.
     """
+    return strip_comments(open(path, encoding="utf-8").read())
+
+
+def strip_comments(text):
+    """Drop `#` comment text. Shared by the runner and the flake for the reason above: a name
+    that appears only in prose is not a caller, in either language."""
     out = []
-    for line in open(path, encoding="utf-8"):
-        i = line.find("#")
-        out.append(line if i < 0 else line[:i])
+    for line in text.split("\n"):
+        # `#` ONLY STARTS A COMMENT AT A WORD BOUNDARY, and getting this wrong ate the repo's
+        # most load-bearing contract. flake-check.yml invokes vm-matrix-contract.py as
+        # `nix shell nixpkgs#python3Packages.pyyaml --command python3 tests/vm-matrix-contract.py`
+        # — a bare find("#") truncates that line at the FLAKE REFERENCE and deletes the filename,
+        # so the check reported its own most important subject as unrun. Same class as everything
+        # else here: a predicate that under-reports, failing toward a confident wrong answer.
+        # Also correct for `${var#prefix}` in shell and nix.
+        m = re.search(r"(?:^|\s)#", line)
+        out.append(line if not m else line[:m.start()])
     return "\n".join(out)
 
 
 def uncovered(tests_dir, runner_path):
-    """Battery files neither invoked by the runner nor excluded above."""
+    """Battery AND contract files neither invoked by a runner nor excluded above.
+
+    `*-contract.py` JOINED THE SUBJECT 2026-08-24, and the omission was a real hole rather than
+    a tidy-up. This check's subject was battery files only, so a contract file could land with
+    no caller anywhere and nothing would say so — which is precisely the failure the file was
+    written to end, one filename-suffix away from where it was looking. Found by adding
+    hand-degrade-contract.py and noticing that NOTHING objected to it being unrun.
+
+    Measured before the predicate was widened: all 12 contract files that existed at the time
+    already had a caller, so switching this on cost zero exemptions. A widening that had needed
+    a pile of new exemptions would have been the widening arguing against itself.
+
+    Contracts are covered by run-local.sh OR by flake.nix, because that is how they are actually
+    invoked — most run as nix checks and were never meant to be in the bash runner. Batteries
+    stay run-local.sh-only: that is the lane the exclusion reasons below are written about.
+    """
     code = runner_code(runner_path)
+    root = os.path.dirname(tests_dir)
+    # flake-check.yml is the third caller and NOT an afterthought: vm-matrix-contract.py is
+    # invoked from there and nowhere else in code — its flake.nix and run-local.sh mentions are
+    # both PROSE. Widening the subject without widening the sources would have flagged the
+    # repo's most load-bearing contract as unrun, which is the false-positive mirror of the hole
+    # being closed. Comments are stripped from all three for the same reason.
+    for extra in (os.path.join(root, "flake.nix"),
+                  os.path.join(root, ".github", "workflows", "flake-check.yml")):
+        if os.path.exists(extra):
+            code += "\n" + strip_comments(open(extra, encoding="utf-8").read())
     missing = []
     for b in sorted(os.listdir(tests_dir)):
-        if not (b.endswith("battery.py") or b.endswith("battery.sh")):
+        if not (b.endswith("battery.py") or b.endswith("battery.sh")
+                or b.endswith("contract.py")):
             continue
         if b in EXCLUDED:
             continue
@@ -111,21 +150,21 @@ def main():
     stale = stale_exclusions(TESTS)
     rc = 0
     if miss:
-        print("FAIL: battery files neither run by tests/run-local.sh nor excluded:")
+        print("FAIL: battery or contract files neither run by run-local.sh, flake.nix, nor flake-check.yml, and not excluded:")
         for b in miss:
             print("        " + b)
         print("      Add it to run-local.sh, or add it to EXCLUDED here WITH ITS REASON.")
         print("      A runner that silently omits a battery reports exactly like one that runs it.")
         rc = 1
     if stale:
-        print("FAIL: EXCLUDED names a battery that no longer exists:")
+        print("FAIL: EXCLUDED names a file that no longer exists:")
         for b in stale:
             print("        " + b + "  (" + EXCLUDED[b] + ")")
         rc = 1
     if rc == 0:
         n = sum(1 for b in os.listdir(TESTS)
                 if b.endswith("battery.py") or b.endswith("battery.sh"))
-        print("runner-coverage-contract: PASS — %d battery files, %d run, %d excluded with a reason"
+        print("runner-coverage-contract: PASS — %d battery + contract files, %d run, %d excluded with a reason"
               % (n, n - len(EXCLUDED), len(EXCLUDED)))
     return rc
 
