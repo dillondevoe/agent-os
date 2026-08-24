@@ -652,7 +652,13 @@ def bare_top_level_bindings(pkgs_dir="modules/pkgs"):
     return bad
 
 
-RC_ASSERTION_FLOOR = 39
+# 39 -> 27 on 2026-08-24. THIS IS A UNIT CHANGE, NOT A COVERAGE CHANGE — read
+# rc_assertion_census() before touching it. The old counter counted every `rc <op> N` anywhere
+# in a battery, including `if` guards and `or` disjuncts that assert nothing; the new one counts
+# only comparisons a check() can fail on. Not one assertion was deleted to get here. A ratchet
+# whose units change must be restated in the new units, loudly, in the commit that changes them
+# — quietly lowering it to get green is the move this whole file exists to make impossible.
+RC_ASSERTION_FLOOR = 27
 
 
 def rc_assertion_census(tests_dir=TESTS_DIR):
@@ -690,11 +696,42 @@ def rc_assertion_census(tests_dir=TESTS_DIR):
             tree = ast.parse(open(os.path.join(tests_dir, base), encoding="utf-8").read())
         except (OSError, SyntaxError):
             continue
+        # MISTAKE 4, 2026-08-24, and it is mistake 2 again one level in: `ast.walk` counts
+        # EVERY `rc <op> N` in the file, wherever it sits. An `if rc == 0:` guard is control
+        # flow. `added_ok = (...) or rc == 0` is an assignment — and worse, a DISJUNCT, which
+        # cannot fail the arm it feeds no matter what rc is. Neither asserts anything, and both
+        # were in the count. The floor was 39 and the true number of exit-code ASSERTIONS was
+        # 27; the gap was eleven uses of `rc` that this instrument was reading as claims about
+        # rc. It surfaced the honest way: deleting one tautological disjunct (5833bf9, a
+        # `("ok" in out) or rc == 0` sitting under an arm that already asserted `rc == 0`)
+        # dropped the count below the floor and turned CI red for improving the test.
+        #
+        # An assertion is a condition a `check()` will FAIL on. So: walk only `check()`'s
+        # condition argument, and refuse anything beneath an `or` — a disjunct is satisfiable
+        # without the rc comparison ever being true, which is exactly the arm just deleted.
         for node in ast.walk(tree):
-            if (isinstance(node, ast.Compare) and isinstance(node.left, ast.Name)
-                    and node.left.id == "rc"):
-                total += 1
+            if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                    and node.func.id == "check" and len(node.args) > 1):
+                total += _rc_assertions_in(node.args[1])
     return total
+
+
+def _rc_assertions_in(cond, under_or=False):
+    """Exit-code comparisons in `cond` that can actually fail the check.
+
+    `and` is transparent (every conjunct must hold, so an rc comparison inside one is load-
+    bearing); `or` is opaque (the arm passes on the other side, so the comparison is not a
+    claim). Anything else — a call, a subscript, a comprehension — is walked through, because
+    the shape a future battery uses is not knowable from here and the alternative is mistake 1:
+    an instrument too narrow to see the thing it counts.
+    """
+    if (isinstance(cond, ast.Compare) and isinstance(cond.left, ast.Name)
+            and cond.left.id == "rc"):
+        return 0 if under_or else 1
+    if isinstance(cond, ast.BoolOp):
+        nested = under_or or isinstance(cond.op, ast.Or)
+        return sum(_rc_assertions_in(v, nested) for v in cond.values)
+    return sum(_rc_assertions_in(c, under_or) for c in ast.iter_child_nodes(cond))
 
 
 def flake_test_packages(system):
