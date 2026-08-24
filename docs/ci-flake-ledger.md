@@ -438,3 +438,33 @@ does not license attributing the next red to it.**
 | | |
 |---|---|
 | **Per-attempt failure rate** | 5/22 ≈ **23%** |
+
+### The calendar fix got a LIVE confirmation, and it was luck
+
+Run `32787907053` on `0188505` executed at **23:09Z — inside the 22:00-23:59 window**, the
+two hours where the old code was wrong. Its own output lines:
+
+```
+PASS span: the derived agenda window covers now+2h at every minute of the day  — 0 uncovered
+PASS span: and the OLD hardcoded `1` demonstrably did NOT (the arm can fail)  — ... got 120
+PASS `agenda 2` exits 0
+PASS agenda → shows the added event (span=2, event 2026-08-25 01:09)
+```
+
+`span=2`, not 1. The old code would have asked `agenda 1` about an event on 2026-08-25 and
+got `[]`. The fix was exercised in the exact window it exists for, and held.
+
+**This does not retire the wall-clock-independent arms, and the reason matters.** I built
+those because a live confirmation was not available on demand — a run inside a 2-hour window
+is not something you can schedule, and waiting for one is not a control. The live
+confirmation then arrived anyway, on the second consecutive commit to land in the window.
+That is luck, and luck is not a method: the next run will be outside the window, and the span
+arms will still be checking the arithmetic while the live arm quietly passes for free.
+
+**Verified by the log's own output lines rather than the lane's conclusion**, per the standing
+rule in this file — which is the only reason the `span=2` is visible at all. A green
+`conclusion` would have said nothing about which window was queried.
+
+| | |
+|---|---|
+| **Per-attempt failure rate** | 5/24 ≈ **21%** |
