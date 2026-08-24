@@ -115,6 +115,69 @@ try:
 except Exception as e:
     check("stat-missing parses", False, str(e))
 
+# THE PATH THAT SWEEP MISSED, added 2026-08-24. The comment above says every reachable
+# degrade path was probed and all were silent — and an UNREADABLE DIRECTORY was not among
+# them, because the only degrade arms anyone had written were "absent" ones. A dir that does
+# not exist is caught by the `-d` guard; a dir that EXISTS and cannot be read walks straight
+# past it into `find | jq`, and under set -euo pipefail jq wraps find's partial output and
+# stamps ok:true on it BEFORE pipefail can set the code. Measured on a chmod-000 dir holding
+# three entries:
+#
+#     {"ok":true,"dir":...,"count":0,"entries":[]}   rc=1
+#
+# Third hand with this shape (agos-notes, then agos-cal) and the worst instance of it: the
+# other two returned a bare value under a failing rc, this one ASSERTS SUCCESS over the
+# failure. A partially-readable tree is worse still — a real subset of entries under a
+# `count` that is a confident undercount. A lie with a number attached.
+degrade_root = tempfile.mkdtemp(prefix="agos-files-degrade-")
+# Deliberately NOT inside `d`: the read-only fingerprint arm at the bottom asserts the
+# fixture tree is untouched, and creating probe dirs there would make MY arms break IT.
+perm = os.path.join(degrade_root, "unreadable-dir")
+os.makedirs(perm, exist_ok=True)
+for leaf in ("one.txt", "two.txt"):
+    open(os.path.join(perm, leaf), "w").close()
+os.chmod(perm, 0o000)
+try:
+    rc, out, err = run([fcli, "list", perm])
+    # rc is the load-bearing assertion: it is what the pre-fix code fails. Contract says exit 2
+    # is for usage errors only and every degraded path is rc 0 with an {ok:false} body.
+    check("`list` on an unreadable dir exits 0", rc == 0, "rc=%s out=%s" % (rc, out[:60]))
+    try:
+        ub = json.loads(out)
+        check("list unreadable -> ok:FALSE, not ok:true over a failure",
+              ub.get("ok") is False, out[:90])
+        check("list unreadable -> names a reason", bool(ub.get("error")), out[:90])
+        # An empty entries list with ok:true is the exact silhouette of the defect; assert the
+        # count cannot be presented as a real answer.
+        check("list unreadable -> does not report a count as if it were true",
+              ub.get("ok") is False or ub.get("count") != 0, out[:90])
+    except Exception as e:
+        check("list-unreadable parses", False, str(e) + " | " + out[:60])
+finally:
+    os.chmod(perm, 0o755)
+
+# AND THE SUCCESS PATH, because the first attempt at this fix BROKE IT. `raw=$(find ... -printf
+# ...\0)` is the same capture-then-pipe remedy that fixed agos-notes and agos-cal, and command
+# substitution STRIPS NUL — which is this pipeline's record separator, chosen precisely because a
+# filename may legally contain a newline. A three-entry dir came back count=1. The remedy for a
+# confident undercount manufactured a confident undercount on the path that had been correct.
+# These two arms are what caught it, so they stay: a degrade fix that is not fenced by a
+# success-path assertion is a coin flip.
+nul = os.path.join(degrade_root, "sep-fidelity")
+os.makedirs(nul, exist_ok=True)
+for leaf in ("plain.txt", "we\nird.txt", "sp ace.txt"):
+    open(os.path.join(nul, leaf), "w").close()
+rc, out, err = run([fcli, "list", nul])
+check("`list` on a readable dir exits 0", rc == 0, "rc=%s err=%s" % (rc, err[:60]))
+try:
+    nb = json.loads(out)
+    check("list -> counts EVERY entry (NUL record separator survives)",
+          nb.get("count") == 3, "count=%r out=%s" % (nb.get("count"), out[:90]))
+    check("list -> a filename containing a NEWLINE comes back intact",
+          any("\n" in str(e_.get("name", "")) for e_ in nb.get("entries", [])), out[:120])
+except Exception as e:
+    check("list sep-fidelity parses", False, str(e) + " | " + out[:60])
+
 check("read-only: the fixture tree is untouched", fingerprint(d) == before,
       "before=%s after=%s" % (before, fingerprint(d)))
 

@@ -48,15 +48,40 @@ pkgs.writeShellApplication {
         return 0
       fi
       sep="$(printf '\037')"   # 0x1f unit separator between fields; NUL between records
-      find "$dir" -mindepth 1 -maxdepth 1 -printf "%y''${sep}%s''${sep}%T@''${sep}%f\0" \
-        | jq -R -s -c --arg sep "$sep" --arg dir "$dir" '
+      # CAPTURE, then pipe. `find | jq` under `set -euo pipefail` is a FALSE-ANSWER generator,
+      # and this instance is the worst of the three this repo has found: jq wraps whatever find
+      # managed to print and STAMPS `ok:true` on it, so an unreadable directory answered
+      # {"ok":true,"count":0,"entries":[]} with rc 1 underneath. Measured 2026-08-24 on a
+      # chmod-000 dir holding three entries. The `-d` guard above catches "not a directory" and
+      # cannot see this: the directory EXISTS. Worse, a PARTIALLY readable tree returns some
+      # entries and a `count` that is a confident undercount — a lie with a number attached.
+      # agos-notes had this shape, then agos-cal; this is the third hand, and the only one that
+      # asserts ok:true over the failure rather than merely returning a bare value.
+      # A TEMP FILE, NOT `raw=$(...)`. The obvious capture-then-pipe remedy — the one that
+      # fixed agos-notes and agos-cal — SILENTLY BROKE THIS HAND, and the control arm on the
+      # SUCCESS path is the only reason I know: a dir with 3 entries came back count=1. Command
+      # substitution strips NUL bytes, and NUL is this pipeline's record separator (chosen
+      # because a filename may legally contain a newline). So the remedy for a confident
+      # undercount manufactured a confident undercount, on the path that was previously correct.
+      # The fix cannot borrow the shape; it has to preserve the bytes. THE REMEDY IS NOT THE
+      # LESSON — "capture, then pipe" is shorthand for "do not let a failing producer's exit
+      # code be swallowed", and $( ) is only one way to hold the output.
+      out=$(mktemp) || { jq -n --arg dir "$dir" '{ok:false,error:"no temp space",dir:$dir,count:0,entries:[]}'; return 0; }
+      trap 'rm -f "$out"' RETURN
+      if ! err=$(find "$dir" -mindepth 1 -maxdepth 1 \
+                   -printf "%y''${sep}%s''${sep}%T@''${sep}%f\0" 2>&1 >"$out"); then
+        jq -n --arg dir "$dir" --arg e "$err" \
+          '{ok:false, error:"cannot list directory", detail:$e, dir:$dir, count:0, entries:[]}'
+        return 0
+      fi
+      jq -R -s -c --arg sep "$sep" --arg dir "$dir" '
             split("\u0000")
             | map(select(length>0) | split($sep)
                   | { name:.[3],
                       type:('"$TYPEMAP"'[.[0]] // .[0]),
                       size:(.[1]|tonumber),
                       mtime_epoch:(.[2]|tonumber|floor) })
-            | { ok:true, dir:$dir, count:length, entries:. }'
+            | { ok:true, dir:$dir, count:length, entries:. }' <"$out"
     }
 
     cmd_stat() {
@@ -67,7 +92,11 @@ pkgs.writeShellApplication {
         return 0
       fi
       sep="$(printf '\037')"
-      find "$path" -maxdepth 0 -printf "%y''${sep}%s''${sep}%T@\n" \
+      if ! raw=$(find "$path" -maxdepth 0 -printf "%y''${sep}%s''${sep}%T@\n" 2>&1); then
+        jq -n --arg p "$path" --arg e "$raw" '{ok:false, error:"cannot stat path", detail:$e, path:$p}'
+        return 0
+      fi
+      printf '%s\n' "$raw" \
         | jq -R -c --arg sep "$sep" --arg p "$path" '
             split($sep)
             | { ok:true, exists:true, path:$p,
