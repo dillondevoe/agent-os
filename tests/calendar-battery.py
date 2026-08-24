@@ -178,5 +178,59 @@ check("`agenda 1` exits 0", rc == 0, "rc=%s err=%s" % (rc, err[:60]))
 shows = "battery-test-event" in out
 check("agenda → shows the added event", shows, (out or err)[:80])
 
+# 4) THE DEGRADE PATH — added 2026-08-24, and it is two known shapes at once, both of them
+# already fixed once in `agos-notes` and both re-found here on a second hand.
+#
+# Probed on this host with a khal stub that exits 1 (the hand's shell body extracted from the
+# .nix and run directly, since writeShellApplication prepends its own runtimeInputs and a
+# stub cannot be shadowed onto PATH from outside). Before the fix, all three khal-backed
+# verbs failed the contract:
+#
+#     agenda  rc=1  stdout=[]      <- the `agos-notes list` shape, and WORSE
+#     cals    rc=1  stdout=[]
+#     add     rc=1  stdout=''      <- the `agos-notes new` shape
+#
+# `agenda` is worse than the notes case it rhymes with. There, a caller got a CORRECT value
+# under a failing rc. Here `jq` succeeds on empty input and prints `[]` BEFORE pipefail can
+# set the code, so a broken calendar store answers "no events today" — a PLAUSIBLE, BELIEVABLE
+# answer that is a lie. A caller reading stdout is not merely uninformed, it is misinformed.
+#
+# The arm below is a PROBE in the same sense as 2b: no khal here, so CI returns the verdict.
+# `rc == 0` is the load-bearing assertion — it is what the pre-fix code fails — and the
+# ok:false check is deliberately conditional, because if khal turns out to TOLERATE a bogus
+# collection this arm must not go red for the wrong reason. What it must never do is pass
+# while the hand exits non-zero.
+if agos:
+    bogus = tempfile.mkdtemp(prefix="agos-cal-degrade-")
+    conf = os.path.join(bogus, "khal.conf")
+    with open(conf, "w", encoding="utf-8") as fh:
+        fh.write("[calendars]\n[[agent]]\npath = /proc/no-such-vdir-agos\ntype = calendar\n")
+    denv = dict(os.environ, AGOS_CAL_CONF=conf)
+    for verb, argv in (("agenda", ["1"]), ("cals", []), ("add", ["2099-01-01 09:00", "degrade-probe"])):
+        try:
+            o = subprocess.run([agos, verb] + argv, capture_output=True, text=True, timeout=30, env=denv)
+            drc, dout = o.returncode, o.stdout.strip()
+        except Exception as e:
+            drc, dout = 1, ""
+            check("degrade: `%s` ran" % verb, False, str(e))
+        # THE CONTRACT: exit 2 is reserved for usage errors; every degraded path is rc 0 with
+        # an {ok:false} body. A broken store is not a usage error.
+        check("degrade: `%s` on a broken store exits 0, not 1" % verb, drc == 0,
+              "rc=%s out=%s" % (drc, dout[:60]))
+        check("degrade: `%s` still says SOMETHING on stdout" % verb, dout != "",
+              "empty stdout is the `agos-notes new` shape")
+        try:
+            db = json.loads(dout) if dout else None
+        except Exception as e:
+            db = None
+            check("degrade: `%s` -> parseable JSON" % verb, False, str(e) + " | " + dout[:60])
+        if isinstance(db, dict):
+            check("degrade: `%s` -> ok:false + a reason" % verb,
+                  db.get("ok") is False and db.get("error"), dout[:80])
+        elif db == []:
+            # Not a failure by itself — khal may have tolerated the config and found nothing.
+            # But it is the exact silhouette of the defect, so say so rather than pass quietly.
+            print("  NOTE %s returned [] under a bogus store — verify khal actually failed" % verb)
+
 print("calendar-battery: " + ("ALL PASS" if EX == 0 else "FAILURES"))
 sys.exit(EX)

@@ -76,8 +76,19 @@ pkgs.writeShellApplication {
       agenda)
         days="''${1:-7}"
         sep="$(printf '\037')"   # 0x1f unit separator — never appears in a title
-        khal -c "$CONF" list --day-format "" \
-             --format "{start}''${sep}{end}''${sep}{title}" today "''${days}d" \
+        # CAPTURE, then pipe. `khal | jq` looks natural and is a FALSE-ANSWER generator: jq
+        # succeeds on empty input and prints `[]` BEFORE pipefail can set the exit code, so a
+        # broken calendar store emitted a perfectly plausible "no events today" on stdout with
+        # rc 1 underneath. Proved 2026-08-24 against a khal stub that exits 1 — stdout `[]`,
+        # rc 1, on all three khal-backed verbs. An empty agenda is a BELIEVABLE answer, which
+        # makes this strictly worse than the `agos-notes list` case it rhymes with: there the
+        # caller got a correct value with a failing rc; here the value itself is a lie.
+        if ! raw=$(khal -c "$CONF" list --day-format "" \
+             --format "{start}''${sep}{end}''${sep}{title}" today "''${days}d" 2>&1); then
+          jq -n --arg e "$raw" '{ok:false,error:"khal list failed",detail:$e}'
+          exit 0
+        fi
+        printf '%s\n' "$raw" \
           | jq -R -c --arg sep "''${sep}" 'select(length>0) | split($sep) | {start:.[0],end:.[1],title:.[2]}' \
           | jq -s -c '.'
         ;;
@@ -88,11 +99,21 @@ pkgs.writeShellApplication {
         # khal `new` takes START (and END) as whitespace-split positional tokens.
         read -r -a sarr <<< "$start"
         if [ -n "$end" ]; then read -r -a earr <<< "$end"; else earr=(); fi
-        khal -c "$CONF" new -a "$CAL" "''${sarr[@]}" "''${earr[@]}" "$summary" >/dev/null
+        # Same capture rule, different failure: `add` emitted NO JSON AT ALL under set -e, so
+        # the one uniform thing every hand promises — a parseable body on stdout — was absent
+        # exactly when the caller most needs to be told why.
+        if ! raw=$(khal -c "$CONF" new -a "$CAL" "''${sarr[@]}" "''${earr[@]}" "$summary" 2>&1); then
+          jq -n --arg e "$raw" '{ok:false,error:"khal new failed",detail:$e}'
+          exit 0
+        fi
         printf '{"ok":true,"start":"%s","end":"%s","title":"%s"}\n' "$start" "$end" "$summary"
         ;;
       cals)
-        khal -c "$CONF" printcalendars | jq -R -s -c 'split("\n") | map(select(length>0))'
+        if ! raw=$(khal -c "$CONF" printcalendars 2>&1); then
+          jq -n --arg e "$raw" '{ok:false,error:"khal printcalendars failed",detail:$e}'
+          exit 0
+        fi
+        printf '%s\n' "$raw" | jq -R -s -c 'split("\n") | map(select(length>0))'
         ;;
       ""|-h|--help|help)
         usage
