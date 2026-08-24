@@ -43,6 +43,14 @@ pdf = b"%PDF-1.4\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n" \
 p = tempfile.NamedTemporaryFile("wb", suffix=".pdf", delete=False)
 p.write(pdf); p.close()
 
+# The fixture's exact bytes. agos-doc is a READ-ONLY hand — `info` and `text` inspect a
+# document and must not alter it — and until 2026-08-24 that was prose. Every arm below
+# reads stdout or the exit code, both of which are the hand's own account of itself; a
+# converter that rewrote the PDF in place would pass all of them. The inverse of the
+# agos-notes case fixed the same day: there the side effect MUST happen, here it must NOT.
+import hashlib
+before_sha = hashlib.sha256(open(p.name, "rb").read()).hexdigest()
+
 # info -> valid JSON, ok bool, pages int
 rc, out, err = run([dcli, "info", p.name])
 # Exit code, not just stdout. The hands have ONE uniform contract — `exit 2` is reserved
@@ -68,6 +76,9 @@ try:
     check("text -> valid JSON {ok:bool}", d.get("ok") in (True, False), out[:60])
 except Exception as e:
     check("text parses", False, str(e))
+
+check("read-only: the fixture PDF is byte-identical afterwards",
+      hashlib.sha256(open(p.name, "rb").read()).hexdigest() == before_sha, before_sha[:16])
 
 os.unlink(p.name)
 print("agos-doc-battery: " + ("ALL PASS" if EX == 0 else "FAILURES"))

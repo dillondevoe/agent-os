@@ -36,6 +36,23 @@ d = tempfile.mkdtemp(prefix="agos-files-battery-")
 open(os.path.join(d, "a.txt"), "w").close()
 open(os.path.join(d, "b.log"), "w").close()
 
+def fingerprint(root):
+    """Names + sizes + mtimes of the fixture tree — the channel no arm here reads.
+
+    agos-files is a READ-ONLY hand, and until 2026-08-24 that was prose: every arm
+    below reads stdout or the exit code, both of which are the hand's own account of
+    itself. An implementation that listed a directory and also truncated a file in it
+    would pass all of them. The inverse of the agos-notes case fixed the same day —
+    there the side effect MUST happen, here it must NOT — and the same missing channel.
+    """
+    out = []
+    for base in sorted(os.listdir(root)):
+        st = os.stat(os.path.join(root, base))
+        out.append((base, st.st_size, st.st_mtime_ns))
+    return out
+
+before = fingerprint(d)
+
 # list -> ok true, count int, entries array
 rc, out, err = run([fcli, "list", d])
 # Exit code, not just stdout. The hands have ONE uniform contract — `exit 2` is reserved
@@ -50,6 +67,11 @@ try:
     check("list -> ok:true", j.get("ok") is True, out[:60])
     check("list -> count is int", isinstance(j.get("count"), int) and j["count"] >= 2, str(j.get("count")))
     check("list -> entries is array", isinstance(j.get("entries"), list) and len(j["entries"]) >= 2)
+    # Not merely "two of something". A hand that reported the right COUNT of names it
+    # invented would satisfy every arm above; the fixture names are the only thing that
+    # ties the output to the directory actually on disk.
+    names = {e.get("name") if isinstance(e, dict) else e for e in (j.get("entries") or [])}
+    check("list -> entries name the fixture files", {"a.txt", "b.log"} <= names, str(sorted(names))[:80])
 except Exception as e:
     check("list parses", False, str(e) + " | out=" + out[:80])
 
@@ -70,6 +92,9 @@ try:
     check("stat missing -> exists:false (graceful)", j.get("exists") is False, out[:60])
 except Exception as e:
     check("stat-missing parses", False, str(e))
+
+check("read-only: the fixture tree is untouched", fingerprint(d) == before,
+      "before=%s after=%s" % (before, fingerprint(d)))
 
 print("agos-files-battery: " + ("ALL PASS" if EX == 0 else "FAILURES"))
 sys.exit(EX)
