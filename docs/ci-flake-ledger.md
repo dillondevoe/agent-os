@@ -303,3 +303,64 @@ clock. On every future occurrence record the guest timestamp of a fixed early la
 If the ratio is consistently >2x, this is runner contention and belongs to the workflow's
 concurrency/resource settings, not to the image and not to any test. Two data points say 3-4x;
 that is a hypothesis with a cheap test and a clear owner.
+
+### Fourth occurrence KILLS both hypotheses, one tick after each was proposed
+
+`1f97e23`, run `32779702396`, job **`vm-test (test-seal-faildown)`** — a **third** distinct test.
+Four occurrences now span three different VM tests, which retires "test-specific" for good.
+
+**It kills the timing hypothesis, which was proposed in the section immediately above.** That
+section predicted the failing boots would show a consistent >2x slowdown at a fixed early landmark.
+Measured:
+
+| run | test | `Starting Virtual Console Setup` |
+|---|---|---|
+| green `93558da` | identity-boot | 3.38s |
+| occurrence 2 | identity-boot | 13.01s |
+| occurrence 3 | fetch-proxy-allowlist | 9.05s |
+| **occurrence 4** | **seal-faildown** | **2.47s** |
+
+Occurrence 4 reaches the landmark **faster than the green run.** There is no consistent ratio, so
+there is no runner-contention signal at this landmark. The hypothesis was specified with a null
+result that would be informative, and this is it.
+
+**It also kills the same-stage reading from the section before that.** Occurrence 4 goes silent
+after `Finished register-nix-paths.service` at 9.88s, not at vconsole-setup. Two occurrences
+sharing a stage was a coincidence of two points, and it was reported here as "the first evidence
+about the IMAGE rather than any test." That claim does not survive a third sample. **Two points
+define a line no matter where they fall**, and this entry has now spent two sections learning that
+at one section apiece.
+
+**And it settles the agos-sys correlation as coincidence.** `1f97e23` touches exactly one file,
+`docs/ci-flake-ledger.md` — this file. It contains no code, changes no image, and could not have
+influenced any boot. The "2 of 3 occurrences touch agos-sys.nix" note is now 2 of 4 with two
+disconfirming cases. Dropped.
+
+**What actually survives four occurrences**, stated as the whole of it:
+
+- Three different tests, four commits, one symptom: `RuntimeError: Shell did not start in time`.
+- The guest is alive and making normal progress right up to the silence, every time.
+- The stage at which it goes silent is **not** consistent.
+- The speed at which it reaches a fixed landmark is **not** consistent, and is sometimes faster
+  than a green run.
+- The failure is always in the driver's backdoor connect, before any assertion in the test body.
+- Same-SHA reruns pass (demonstrated twice).
+
+**That last-but-one point is where this file STARTED.** The first entry wrote: *"The failure is in
+the nixos test harness's initial shell connect, before any assertion in the test body runs."* Three
+sections of narrowing — to identity-boot, to the second boot, to a boot stage, to a timing ratio —
+have each been refuted by the next occurrence, and the reading with the most evidence behind it is
+the one taken before any narrowing happened. Recorded because the narrowings were not careless;
+each was the best reading of the data then available, and each was wrong. **A localisation drawn
+from every sample you have is still a localisation drawn from a small sample.**
+
+**Next step, and this time it is not another guess about the guest.** Instrument the DRIVER side:
+capture what the test driver is doing during the silent window (it is the only participant whose
+behaviour has never been looked at) and check whether the backdoor socket is ever opened at all.
+Until that exists, add nothing to this entry but occurrences and their landmark timings.
+
+| | |
+|---|---|
+| **Occurrences** | 4 |
+| **Tests** | identity-boot ×2, fetch-proxy-allowlist ×1, seal-faildown ×1 |
+| **Status** | open — not test-specific, not stage-consistent, not speed-consistent; driver side never examined |
