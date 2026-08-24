@@ -125,5 +125,51 @@ if calc:
     except Exception as e:
         check("eval '2+' parses", False, str(e) + " | out=" + out[:80])
 
+# THE ok:false BRANCH HAD NO ARM ANYWHERE, and the comment above explains correctly why "2+"
+# is not the way to get one: whether qalc rejects it or coerces it is qalc's business. So the
+# branch stayed unexecuted, and what was hiding in it was a refusal with NO REASON IN IT —
+# `{ok:false, result:"", messages:null}`, no `error` key at all, while every other hand in the
+# family names a cause. Measured on a host where qalc is genuinely absent; that is the literal
+# output. A caller branching on `.error` to tell the user what broke got `null` either way, and
+# could not distinguish "the calculator isn't installed" from "your expression was rejected".
+#
+# The deterministic route in is AGOS_CALC_QALC, not a PATH strip. A PATH strip would have
+# PASSED FOR THE WRONG REASON: writeShellApplication prepends `runtimeInputs` inside the
+# wrapper, so qalc is on PATH regardless of the caller's environment, and the probe would have
+# taken the ordinary success path while this file printed green about a branch it never entered.
+if calc:
+    denv = dict(os.environ, AGOS_CALC_QALC="no-such-calc-binary-xyz")
+    o = subprocess.run([calc, "eval", "1+1"], capture_output=True, text=True,
+                       timeout=30, env=denv)
+    drc, dout, derr = o.returncode, o.stdout.strip(), o.stderr.strip()
+    check("degrade: an absent backend exits 0, not 1 (it is not a usage error)",
+          drc == 0, "rc=%s err=%s" % (drc, derr[:60]))
+    check("degrade: an absent backend still says SOMETHING on stdout", dout != "", repr(dout[:60]))
+    try:
+        db = json.loads(dout)
+        check("degrade: an absent backend -> ok:false", db.get("ok") is False, dout[:80])
+        # The whole point of the arm. `messages` being null is LEGITIMATE here — qalc's terse
+        # mode suppresses diagnostics — so `messages` was never a substitute for a reason.
+        check("degrade: the refusal NAMES A REASON in `error`", bool(db.get("error")), dout[:80])
+        check("degrade: the reason distinguishes absent-backend from rejected-expression",
+              "absent" in str(db.get("error", "")).lower(), dout[:80])
+        check("degrade: the input is echoed back even on refusal",
+              db.get("input") == "1+1", dout[:80])
+    except ValueError as e:
+        check("degrade: an absent backend emits parseable JSON", False, str(e) + " | " + dout[:80])
+
+    # CONTROL ARM, and it is the one that earns the others. The obvious form of this fix —
+    # adding `error` unconditionally — would satisfy every assertion above and quietly put an
+    # `error` key on SUCCESSFUL results, where the rest of the family has none. That is the
+    # agos-files lesson from earlier today: a degrade fix not fenced by a success-path
+    # assertion is a coin flip, and there the coin came up wrong.
+    rc, out, err = ev("(2+3)*4")
+    try:
+        good = json.loads(out)
+        check("success: a SUCCESSFUL result carries NO `error` key",
+              good.get("ok") is True and "error" not in good, out[:80])
+    except ValueError as e:
+        check("success: control arm parses", False, str(e) + " | " + out[:80])
+
 print("agos-calc-battery: " + ("ALL PASS" if EX == 0 else "FAILURES"))
 sys.exit(EX)
