@@ -65,8 +65,24 @@ check("`list` exits 0", rc == 0, "rc=%s err=%s" % (rc, err[:60]))
 try:
     j = json.loads(out)
     check("list -> ok:true", j.get("ok") is True, out[:60])
-    check("list -> count is int", isinstance(j.get("count"), int) and j["count"] >= 2, str(j.get("count")))
-    check("list -> entries is array", isinstance(j.get("entries"), list) and len(j["entries"]) >= 2)
+    # `>= 2` was the wrong comparison and had been since this file was written. The fixture
+    # tree is BUILT BY THIS TEST and holds exactly two files, so the exact number is known,
+    # not guessed — and `>=` passes a hand that listed the parent directory, followed a
+    # symlink out, or leaked an extra entry, which is the failure most worth catching in a
+    # directory-listing hand. An inequality is the right shape only when the true value is
+    # unknown; here it was a habit standing in for a fact the test already had.
+    check("list -> count is exactly the 2 files the fixture has",
+          isinstance(j.get("count"), int) and j["count"] == 2, str(j.get("count")))
+    check("list -> entries is an array of exactly 2",
+          isinstance(j.get("entries"), list) and len(j["entries"]) == 2, str(len(j.get("entries") or [])))
+    # The hand reports the same fact twice and nothing made the two agree. `count` and
+    # `len(entries)` are independent fields in the JSON, so a hand that counted one way and
+    # listed another would satisfy both arms above separately while contradicting itself in
+    # a single response — and a caller that trusted `count` for pagination would silently
+    # read past the end of `entries`.
+    check("list -> count agrees with the entries actually returned",
+          j.get("count") == len(j.get("entries") or []),
+          "count=%s len(entries)=%s" % (j.get("count"), len(j.get("entries") or [])))
     # Not merely "two of something". A hand that reported the right COUNT of names it
     # invented would satisfy every arm above; the fixture names are the only thing that
     # ties the output to the directory actually on disk.

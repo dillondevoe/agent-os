@@ -65,7 +65,13 @@ check("eval '(2+3)*4' -> says nothing on stderr", err == "", repr(err[:80]))
 try:
     d = json.loads(out)
     check("eval '(2+3)*4' -> ok:true", d.get("ok") is True, out[:60])
-    check("eval '(2+3)*4' -> result=20", "20" in str(d.get("result", "")), str(d.get("result")))
+    # The LABEL says `result=20`; the condition said `"20" in result`, which is a different
+    # and weaker claim — "120", "20.5" and "3.1420" all satisfy it. Same disguise as the
+    # agos-web chars arm: a label promising more than its condition checks. Equality is safe
+    # to assert rather than approximate because the hand builds this field with `qalc -t`,
+    # whose whole purpose is to print the value and nothing else; CI confirms it emits
+    # exactly "20". Verified against the log before tightening, not assumed from the flag.
+    check("eval '(2+3)*4' -> result=20", str(d.get("result", "")).strip() == "20", repr(d.get("result")))
 except Exception as e:
     check("eval parses", False, str(e))
 

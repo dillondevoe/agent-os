@@ -63,8 +63,17 @@ check("`info` exits 0", rc == 0, "rc=%s err=%s" % (rc, err[:60]))
 try:
     d = json.loads(out)
     check("info -> valid JSON {ok:bool}", d.get("ok") in (True, False), out[:60])
-    check("info -> pages is int", isinstance(d.get("pages"), int), str(d.get("pages")))
-    check("info -> bytes is int", isinstance(d.get("bytes"), int) and d["bytes"] > 0, str(d.get("bytes")))
+    # SHAPE, NOT VALUE — and the value is knowable here, which is what makes the shape
+    # check insufficient rather than merely weak. The fixture PDF is hand-built a few lines
+    # up by this very file: it declares `/Count 1`, so its page count is 1 by construction,
+    # and its size on disk is one os.path.getsize away. Asserting "is an int" and "> 0"
+    # accepts a hand that reported 7 pages and someone else's byte count. Same correction as
+    # agos-media's `bytes` arm: not "is an int", the RIGHT int, checked against the file.
+    check("info -> pages is exactly the 1 page the fixture declares",
+          d.get("pages") == 1, str(d.get("pages")))
+    check("info -> bytes matches the file on disk",
+          d.get("bytes") == os.path.getsize(p.name),
+          "hand=%s disk=%s" % (d.get("bytes"), os.path.getsize(p.name)))
 except Exception as e:
     check("info parses", False, str(e) + " | out=" + out[:80])
 
