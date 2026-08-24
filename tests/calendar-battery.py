@@ -92,6 +92,12 @@ rc, out, err = cal("now")
 # `cals` pipe khal into jq under `set -euo pipefail`, which is the exact shape that made
 # `agos-notes list` print a valid `[]` and exit 1 for the whole life of the repo.
 check("`now` exits 0", rc == 0, "rc=%s err=%s" % (rc, err[:60]))
+# The fourth channel on the one verb where it is answerable from any host: `now` is pure
+# printf+date in the hand and pure `date` in the fallback — no khal, no jq, nothing that has
+# a legitimate reason to write to stderr. Every other verb here shells into khal, which may
+# warn for real reasons, so this arm is deliberately NOT generalised: an arm written blind is
+# how a flaky red ships.
+check("`now` says nothing on stderr", err == "", repr(err[:80]))
 try:
     # agos-cal emits JSON; `date -Iseconds` (fallback) is plain text — accept both
     if out.startswith("{"):
@@ -106,8 +112,24 @@ except Exception as e:
 # 2) cals → lists the agent collection
 rc, out, err = cal("cals")
 check("`cals` exits 0", rc == 0, "rc=%s err=%s" % (rc, err[:60]))
-ok = ("agent" in out) or ("agent" in err)
-check("cals → lists agent collection", ok, (out or err)[:60])
+# THE CHANNEL DISJUNCTION. This arm read `("agent" in out) or ("agent" in err)` until
+# 2026-08-24, and that `or` is the whole defect: the contract (agos-cal.nix, `cals`) is
+# `khal printcalendars | jq -R -s -c 'split("\n") | map(select(length>0))'` — a JSON ARRAY on
+# STDOUT. A hand that emitted NOTHING on stdout and merely named the calendar in a khal warning
+# on stderr satisfied it. That is `agos-notes list` again with the channels swapped: the output
+# looks right to a human reading the log and is unusable to the caller that parses it.
+# The disjunction was there to serve the khal FALLBACK, whose output is raw text, not JSON —
+# so split the paths instead of loosening the arm for both.
+if agos:
+    try:
+        cl = json.loads(out)
+        check("cals -> a JSON array on STDOUT", isinstance(cl, list), out[:80])
+        check("cals -> the agent collection is IN that array",
+              isinstance(cl, list) and any("agent" in str(x) for x in cl), out[:80])
+    except Exception as e:
+        check("cals parses as JSON", False, str(e) + " | out=" + out[:80])
+else:
+    check("cals (khal fallback) -> names the agent collection", "agent" in (out or err), (out or err)[:60])
 
 # 2b) agenda on an EMPTY calendar. This arm is a PROBE, written 2026-08-24 and shipped
 # without a local verdict: khal is not installed on the host this was authored on, so CI is
@@ -134,8 +156,21 @@ import datetime
 start = (datetime.datetime.now() + datetime.timedelta(hours=2)).strftime("%Y-%m-%d %H:%M")
 rc, out, err = cal("add", start, "battery-test-event")
 check("`add` exits 0", rc == 0, "rc=%s err=%s" % (rc, err[:60]))
-added_ok = ("ok" in out.lower()) or rc == 0
-check("add → accepted", added_ok, (out or err)[:60])
+# A TAUTOLOGY, until 2026-08-24: `("ok" in out.lower()) or rc == 0`, one line below an arm
+# that already asserts `rc == 0`. The second disjunct is therefore TRUE whenever the previous
+# arm passed, so this check could not fail independently of it — it read as a second
+# assertion and was a restatement of the first. Same family as an unexecuted arm: it is not
+# unreachable, it is unfalsifiable. The hand printfs `{"ok":true,"start":..,"title":..}`, so
+# under the real CLI there is an exact contract to assert; the khal fallback prints prose.
+if agos:
+    try:
+        ad = json.loads(out)
+        check("add -> ok:true on STDOUT", ad.get("ok") is True, out[:80])
+        check("add -> echoes the title back", ad.get("title") == "battery-test-event", out[:80])
+    except Exception as e:
+        check("add parses as JSON", False, str(e) + " | out=" + out[:80])
+else:
+    check("add (khal fallback) -> khal accepted the event", "battery-test-event" in (out or err), (out or err)[:60])
 rc, out, err = cal("agenda", "1")
 # The pipefail arm proper: khal | jq | jq -s. If the first stage exits non-zero the script dies
 # AFTER stdout is already correct, so only the exit code can see it.
