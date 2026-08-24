@@ -360,6 +360,98 @@ def self_disarms(path):
     return False
 
 
+# Phrases by which a file asserts that CI enforces it. Deliberately narrow: each one is a claim
+# about EXECUTION, not a description of intent. "should run in CI" and "belongs in CI" are not
+# here, because they describe a wish and a wish is not a false receipt.
+CI_CLAIM_PATTERNS = (
+    "runs in ci",
+    "run in ci",
+    "enforced in ci",
+    "ci-enforced",
+    "checked in ci",
+    "goes red in ci",
+)
+
+
+def ci_claim_lines(path):
+    """Lines in which this file claims CI executes it. Case-insensitive, substring."""
+    try:
+        with open(path) as fh:
+            text = fh.read()
+    except OSError:
+        return []
+    hits = []
+    for i, line in enumerate(text.splitlines(), 1):
+        low = line.lower()
+        for pat in CI_CLAIM_PATTERNS:
+            if pat in low:
+                hits.append((i, line.strip()))
+                break
+    return hits
+
+
+def false_ci_claims(tests_dir, flake_src):
+    """Test files that CLAIM CI runs them while being wired into no lane.
+
+    THE BUG THIS IS MADE OF, 2026-08-23. tests/bip340-battery.py opened with:
+
+        Binding condition 2 of Geist's 2026-08-19 Path-A ruling: the FULL official test-vector
+        set runs in CI, INCLUDING the must-fail verification vectors, control-armed.
+
+    It ran in no lane, and had been on KNOWN_UNWIRED_DEBT the whole time. The repository held
+    BOTH statements — "runs in CI" in the file's header, "runs nowhere" in the ledger — and
+    nothing ever required them to be true at the same moment. Neither was hidden.
+
+    A RULING CONDITION DISCHARGED BY WRITING A FILE IS DISCHARGED BY PROSE. The condition asks
+    for an EXECUTION; the only evidence of one is a lane that goes red when it stops. For four
+    days the header was read as the receipt — by me, while working down the very list that
+    contradicted it.
+
+    Note this is NOT subsumed by the unwired check above. That check exempts everything on
+    KNOWN_UNWIRED_DEBT, which is exactly where a file like this hides: acknowledged as debt in
+    one place while advertising itself as enforced in another. This arm has NO exemption list on
+    purpose — a file may be unwired, and a file may claim CI runs it, but not both. Delete the
+    claim or wire the file.
+
+    SCOPE, stated rather than quietly chosen: tests/ only. modules/identity.py and
+    modules/bip340.py carry the same kind of marker, but their claim is that some OTHER file
+    asserts it, and mapping a module to its asserting battery means guessing. Both were checked
+    by hand and by mutation on 2026-08-23 (strip the marker -> the battery goes red), and both
+    batteries are now wired. A guessed mapping would make this arm fuzzy, and a fuzzy arm is one
+    a human has to adjudicate, which puts it back in the tier it was written to escape.
+
+    KNOWN LIMITATION, stated because hiding it is the failure this file is about: this is a
+    SUBSTRING match and it cannot read negation. Written honestly, "I called this a CI-enforced
+    arm. It is not." matches. That exact line exists in run-local.sh, and it is the reason the
+    UNWIRED_BY_DESIGN skip above is a real fix rather than a convenient one — run-local.sh is a
+    runner, so it is out of scope on the merits, not because the match was inconvenient.
+
+    For an actual battery, a negated claim would still be a false hit. The remedy is to fix the
+    prose, not to teach this function to parse English: a matcher that tries to decide which
+    "not" applies to which clause is a matcher whose verdict a human must check, and that is the
+    tier this arm exists to escape. Erring toward a loud false positive is the correct direction
+    here — the opposite error is silence about a file advertising enforcement it does not have.
+    """
+    bad = []
+    for suffix in TEST_SUFFIXES:
+        for path in sorted(glob.glob(os.path.join(tests_dir, "*" + suffix))):
+            base = os.path.basename(path)
+            # UNWIRED_BY_DESIGN is skipped; KNOWN_UNWIRED_DEBT is NOT, and the asymmetry is the
+            # whole design. "By design" means the file is not a test at all — run-local.sh is a
+            # RUNNER — so prose in it is not a false receipt about its own execution. "Debt"
+            # means it IS a test that runs nowhere, which is exactly the state that must never
+            # coexist with a claim of CI enforcement.
+            if base in UNWIRED_BY_DESIGN:
+                continue
+            claims = ci_claim_lines(path)
+            if not claims:
+                continue
+            if wiring_references(flake_src, tests_dir, base) or workflow_run_references(base):
+                continue
+            bad.append((path, claims))
+    return bad
+
+
 def unwired_test_files(tests_dir, flake_path):
     """tests/*.nix files that flake.nix never references.
 
@@ -446,8 +538,15 @@ def main():
     unlisted = sorted(tests - matrix)
     dangling = sorted(matrix - tests)
     unwired, vacuous, stale = unwired_test_files(args.tests_dir, args.flake)
+    try:
+        with open(args.flake) as _fh:
+            _flake_src = _fh.read()
+    except OSError as exc:
+        sys.exit(f"FAIL: could not read {args.flake}: {exc!r}")
+    false_claims = false_ci_claims(args.tests_dir, _flake_src)
 
-    if not unlisted and not dangling and not unwired and not vacuous and not stale:
+    if (not unlisted and not dangling and not unwired and not vacuous and not stale
+            and not false_claims):
         print(f"OK: {len(tests)} test-* package(s), all present in the vm-tests matrix:")
         for name in sorted(tests):
             print(f"  {name}")
@@ -463,6 +562,23 @@ def main():
             print(f"  DEBT {base}" + ("  [self-disarming]" if base in disarming else ""))
         return 0
 
+    if false_claims:
+        print("FAIL: test file(s) that CLAIM CI runs them while being wired into no lane:",
+              file=sys.stderr)
+        for path, claims in false_claims:
+            print(f"  {path}", file=sys.stderr)
+            for lineno, text in claims:
+                print(f"    line {lineno}: {text}", file=sys.stderr)
+        print("  -> wire it, or delete the claim. Not both states at once.", file=sys.stderr)
+        print("     A ruling condition discharged by writing a file is discharged by prose:",
+              file=sys.stderr)
+        print("     the condition asks for an EXECUTION, and the only evidence of one is a lane",
+              file=sys.stderr)
+        print("     that goes red when it stops. Being on KNOWN_UNWIRED_DEBT does NOT exempt a",
+              file=sys.stderr)
+        print("     file here — acknowledged-as-debt while advertising itself as CI-enforced is",
+              file=sys.stderr)
+        print("     precisely the state this arm exists to make unreachable.", file=sys.stderr)
     if stale:
         print("FAIL: stale exemption(s) in this file — a suppression list that names things no",
               file=sys.stderr)
