@@ -676,7 +676,7 @@ _MUTATING_METHODS = frozenset({
 
 
 def unmutated_sentinels(tests_dir=TESTS_DIR):
-    """Names bound to an EMPTY collection, asserted on, and mutated by nothing.
+    """Names bound to an EMPTY collection (or to 0/False), asserted on, and mutated by nothing.
 
     The shape PR #159 found in frontdoor-kick-battery: `fired = []`, an executor stub that
     RAISED instead of recording, and `check("...nothing fired", ... and not fired)`. `not fired`
@@ -693,6 +693,7 @@ def unmutated_sentinels(tests_dir=TESTS_DIR):
       - Any REBINDING of the name counts as mutation, without checking what it was rebound to.
       - Only module- and function-level `check()` conditions are scanned for the assertion,
         the same discovery rule the rc census uses.
+      - A `global`/`nonlocal` declaration counts as mutation without following where it goes.
     """
     hits = []
     for base in sorted(os.listdir(tests_dir)):
@@ -708,14 +709,26 @@ def unmutated_sentinels(tests_dir=TESTS_DIR):
                     and isinstance(node.targets[0], ast.Name)):
                 name = node.targets[0].id
                 val = node.value
+                # 0 and False are the same sentinel wearing a different type: `seen = False`
+                # under a stub that raises, `n = 0` under one that never increments. Added
+                # 2026-08-24 after the collection version shipped, and today's tree has ZERO of
+                # them — a MEASURED zero, not an assumed one: the probe was run against injected
+                # instances first (a dead flag is reported; a flag that flips and a counter that
+                # increments are both silent) before the number was believed.
                 is_empty = (isinstance(val, (ast.List, ast.Set)) and not val.elts) or (
-                    isinstance(val, ast.Dict) and not val.keys)
+                    isinstance(val, ast.Dict) and not val.keys) or (
+                    isinstance(val, ast.Constant) and val.value in (0, False)
+                    and not isinstance(val.value, str))
                 if is_empty and name not in empties:
                     empties[name] = node.lineno
                 elif name in empties or not is_empty:
                     mutated.add(name)          # a rebinding is a mutation, unexamined
             if isinstance(node, ast.AugAssign) and isinstance(node.target, ast.Name):
                 mutated.add(node.target.id)
+            # `global EX` / `nonlocal` hands the name to a function this walk cannot follow.
+            # Every battery in this repo binds `EX = 0` and mutates it from inside check().
+            if isinstance(node, (ast.Global, ast.Nonlocal)):
+                mutated.update(node.names)
             if isinstance(node, ast.Assign):
                 for tgt in node.targets:
                     if isinstance(tgt, ast.Subscript) and isinstance(tgt.value, ast.Name):
