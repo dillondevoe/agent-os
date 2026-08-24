@@ -70,9 +70,22 @@ try:
 except Exception as e:
     check("sqrt parses", False, str(e))
 
-# 3) no expression -> usage, exit 2 (graceful, never a crash)
+# 3) no expression -> usage, exit 2 (graceful, never a crash).
+#
+# SPLIT INTO TWO 2026-08-24, because the single check's LABEL described an invocation it did
+# not make. It said "no arg" and passed ev("") — which sends `agos-calc eval ""`, i.e. ONE
+# empty argument. The hand's `[ "$#" -eq 0 ]` guard therefore never fired on this path, and
+# the two cases were never distinguished by anything. The empty-expression case was a real
+# rc=0 and had been since the hand was written; the zero-argument case, the one the label
+# named, was never tested at all.
+rc, out, err = run([calc, "eval"]) if calc else (2, "", "")
+if calc:
+    check("eval with ZERO arguments -> exit 2 (usage)", rc == 2, "rc=%s" % rc)
+else:
+    print("  n/a  eval with ZERO arguments: needs the real agos-calc CLI, not the qalc fallback")
+
 rc, out, err = ev("")
-check("eval with no arg -> exit 2 (usage)", rc == 2, "rc=%s" % rc)
+check("eval with an EMPTY expression -> exit 2 (usage)", rc == 2, "rc=%s" % rc)
 
 print("agos-calc-battery: " + ("ALL PASS" if EX == 0 else "FAILURES"))
 sys.exit(EX)

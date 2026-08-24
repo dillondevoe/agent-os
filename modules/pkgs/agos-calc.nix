@@ -38,6 +38,15 @@ pkgs.writeShellApplication {
           exit 2
         fi
         expr="$*"
+        # An EMPTY expression is "no expression given" in substance, and until 2026-08-24 it
+        # took a different path: `agos-calc eval ""` is one argument, so the $# guard above
+        # never fired, the empty string went to qalc, and the hand answered rc=0. Found the
+        # first time tests/agos-calc-battery.py ever executed anywhere — the battery had been
+        # asserting exit 2 here since it was written, and nothing had ever run the assertion.
+        if [ -z "''${expr//[[:space:]]/}" ]; then
+          echo "agos-calc eval: empty expression" >&2
+          exit 2
+        fi
         # qalc is permissive and its exit code alone can't separate a clean eval from a
         # unit/variable coercion (e.g. "zzz" -> z³). It reports validity via diagnostics
         # that behave differently by mode: TERSE (-t) prints ONLY the value — clean, and it
