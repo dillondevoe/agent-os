@@ -77,13 +77,34 @@ jobs:
       # ran "every battery that does NOT need nix" while silently omitting eleven; two of those
       # were real coverage losses that ran in no lane at all.
       #
-      # It is HERE and not only inside run-local.sh because run-local.sh is a developer
-      # convenience that no workflow invokes — an arm living solely there protects the sessions
-      # that remember to run it, which is the tier of the prose it replaced. Stdlib only, so it
-      # needs no `nix shell` wrapper; run-local.sh calls this same file rather than restating
-      # the rule in bash.
+      # It is HERE as well as inside run-local.sh because the two answer different questions:
+      # this step goes red on a PR, while run-local.sh's copy tells a developer before they push.
+      # (Until the step below existed, the stronger reason applied: run-local.sh was a developer
+      # convenience NO workflow invoked, so an arm living solely there protected only the
+      # sessions that remembered to run it.) Stdlib only, so it needs no `nix shell` wrapper;
+      # run-local.sh calls this same file rather than restating the rule in bash.
       - name: tests/run-local.sh covers every nix-free battery
         run: python3 tests/runner-coverage-contract.py
+
+      # The nix-free battery suite itself. Until 2026-08-24 these 23 batteries ran ONLY on a
+      # developer's machine: four of them — anthropic-transport, audit-signing, escalate-consent,
+      # transport — sat on vm-matrix-contract.py's KNOWN_UNWIRED_DEBT list precisely because no
+      # flake derivation and no workflow step named them, and they are stdlib-only and finish in
+      # 34s. There was never a technical reason they could not run here; the reason was that the
+      # runner script had no caller.
+      #
+      # This step is what makes the coverage contract above MEAN anything. That contract asserts
+      # every nix-free battery is invoked by run-local.sh — a statement about a script, which is
+      # worth exactly as much as the script's own execution. One lane running run-local.sh turns
+      # it into a statement about CI.
+      #
+      # run-local.sh exits 1 iff any battery exits nonzero, verified by mutation rather than by
+      # reading: `sys.exit(EX)` -> `sys.exit(3)` in transport-battery.py gave `fail=1`, `rc=1`,
+      # and the line `FAIL transport rc=3  transport-battery: PASS`. Note what that line shows —
+      # the battery PRINTED "PASS" while exiting 3, and the runner believed the exit code. A
+      # runner that grepped its children's output for "PASS" would have gone green there.
+      - name: nix-free battery suite (tests/run-local.sh)
+        run: bash tests/run-local.sh
 
       # `--option sandbox true` is the whole point: it reproduces the clean-room build
       # (no /usr/bin/env, patchShebangs load-bearing) that a laptop's non-sandbox check hides.

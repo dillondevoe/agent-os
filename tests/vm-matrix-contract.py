@@ -71,7 +71,11 @@ TEST_SUFFIXES = (".nix", ".py", ".sh")
 # as the tree grows, which is the exact failure this file exists to prevent. Adding an
 # entry here should be a visible decision in a diff, not a pattern that swallows files.
 UNWIRED_BY_DESIGN = frozenset({
-    "run-local.sh",           # the manual at-a-box runner; it INVOKES batteries, it is not one
+    # "run-local.sh" was exempted here as "the manual at-a-box runner; it INVOKES batteries,
+    # it is not one" — true, and stale as of 2026-08-24: flake-check.yml now runs it, so the
+    # wiring check finds it on the merits and an exemption would only hide a future removal
+    # of that step. THE ARM DELETED THIS ROW ITSELF, as it did its own row on 2026-08-23:
+    # the stale-exemption check reported it the first time it ran with the third lane in.
     # vm-matrix-contract.py USED TO BE EXEMPTED HERE, with the true-but-unverified comment
     # "invoked directly by flake-check.yml, not via flake.nix". workflow_run_references() now
     # computes that, so the exemption went stale the moment it could be checked and the arm
@@ -106,9 +110,12 @@ KNOWN_UNWIRED_DEBT = frozenset({
     "agos-doc-battery.py",
     "agos-media-battery.py",
     "agos-web-battery.py",
-    # Found in the first sweep (#153): referenced only by tests/run-local.sh, a manual runner.
-    "anthropic-transport-battery.py",
-    "audit-signing-battery.py",
+    # anthropic-transport-battery.py and audit-signing-battery.py were here from the first
+    # sweep (#153) with the reason "referenced only by tests/run-local.sh, a manual runner."
+    # That reason was accurate and it named the fixable half out loud for a day and a half:
+    # the batteries were fine, the RUNNER had no caller. On 2026-08-24 flake-check.yml gained
+    # a `bash tests/run-local.sh` step, and all four run-local-only entries left this list
+    # together — see escalate-consent and transport below.
     # bip340-battery.py was here until 2026-08-23, and it is the entry that should NOT have
     # been a routine line on this list. Its own header states, as fact, that it satisfies
     # "binding condition 2 of Geist's 2026-08-19 Path-A ruling: the FULL official test-vector
@@ -123,7 +130,18 @@ KNOWN_UNWIRED_DEBT = frozenset({
     # the must-fail vectors (5-15) and check I's control arm, i.e. the forgery-acceptance
     # coverage the ruling singled out — a verifier returning True unconditionally passes every
     # TRUE vector, so the unrun half was the half that matters.
-    "escalate-consent-battery.py",
+    # escalate-consent-battery.py and transport-battery.py left on 2026-08-24 with the two
+    # above. WIRED, not delisted: the workflow step runs run-local.sh, run-local.sh runs all
+    # four, and run-local.sh exits 1 iff a battery exits nonzero — mutation-verified, not read.
+    # A third detector, runner_lane_reference(), computes this transitively and REQUIRES the
+    # workflow step to still exist; delete the step and these four correctly return to debt.
+    # Verified before delisting: all four are self_disarms() == False, all four pass under
+    # `env -i` with PATH=/usr/bin:/bin, and the whole suite is 34s.
+    #
+    # The general shape, and it is why this took four separate ticks to see: THE DEBT WAS NEVER
+    # IN THESE FILES. Each entry described its own file as the problem, and the problem was one
+    # missing caller shared by all four. A per-item ledger reads as four independent debts and
+    # invites four independent fixes; the fix was one line in a workflow.
     # frontdoor-kick-battery.py was here until 2026-08-23. WIRED, not merely delisted: flake.nix
     # gained a `frontdoor-kick-contract` derivation that reconstructs tests/ + modules/ and runs
     # it. Verified three ways before the line was removed — wiring_references() finds a real
@@ -132,7 +150,6 @@ KNOWN_UNWIRED_DEBT = frozenset({
     # was written from), passing with the subject present and exiting 1 with modules/ absent.
     # That last one is the #155 question: a wired battery that exits 0 when its subject is missing
     # pays the debt on paper. This one does not.
-    "transport-battery.py",
     # ── ADDED 2026-08-23, AND THE LEDGER GOING UP HERE IS A CORRECTION, NOT A REGRESSION. ──
     # Neither of these was newly un-wired. Both were MASKED: the only mentions of them in
     # flake.nix are inside `#` comments, and until this same commit wiring_references() counted a
@@ -240,6 +257,52 @@ def workflow_run_references(base, workflows_dir=WORKFLOWS_DIR):
                 if isinstance(step, dict) and needle in str(step.get("run", "")):
                     hits.append((name, step.get("name", "<unnamed step>")))
     return hits
+
+
+RUNNER = "run-local.sh"
+
+
+def runner_lane_reference(base, tests_dir, workflows_dir=WORKFLOWS_DIR):
+    """Is <base> run by tests/run-local.sh, in a lane where CI actually runs run-local.sh?
+
+    A THIRD way to be wired, and it is transitive — which is why neither of the other two
+    detectors can see it. `wiring_references()` reads flake.nix; `workflow_run_references()`
+    matches "tests/<base>" inside a `run:` step. A battery invoked by run-local.sh is named
+    NOWHERE in either place, so both answer "runs nowhere" while CI runs it every push.
+
+    BOTH HALVES ARE REQUIRED AND THE SECOND IS THE LOAD-BEARING ONE. Until 2026-08-24 no
+    workflow invoked run-local.sh at all, and in that world "run-local.sh runs it" was a
+    statement about a developer's habits — the exact tier this file exists to push things out
+    of. Being named in the runner is only wiring while the runner itself is in a lane, so this
+    asks that question every run instead of trusting that it stays true. Delete the workflow
+    step and these files correctly go back to being unwired debt.
+
+    Comment-stripping here is DELEGATED, not rewritten. run-local.sh is bash, so cutting at the
+    first `#` is correct — and it is the entire check, because a battery named only in the
+    runner's header prose is not run by it. That rule already has exactly one implementation,
+    in runner-coverage-contract.py, and a second copy here would be two spellings of one rule
+    with nothing asserting they agree. That is the shape of this surface's fourth scar.
+    """
+    if not workflow_run_references(RUNNER, workflows_dir):
+        return []
+    runner_path = os.path.join(tests_dir, RUNNER)
+    contract = os.path.join(tests_dir, "runner-coverage-contract.py")
+    if not (os.path.exists(runner_path) and os.path.exists(contract)):
+        return []
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("_rcc", contract)
+    mod = importlib.util.module_from_spec(spec)
+    try:
+        spec.loader.exec_module(mod)
+        code = mod.runner_code(runner_path)
+    except Exception as exc:  # noqa: BLE001 - see below
+        # Deliberately NOT silent, and deliberately NOT fatal. Returning [] on a broken import
+        # would quietly reclassify every runner-wired battery as unwired debt, which is a loud
+        # wrong answer; crashing would take down a check that has two other working detectors.
+        print("WARN: could not consult %s (%s) — runner lane not counted" % (contract, exc),
+              file=sys.stderr)
+        return []
+    return [(RUNNER, "invoked by the runner")] if base in code else []
 
 
 def wiring_references(flake_src, tests_dir, base):
@@ -446,7 +509,9 @@ def false_ci_claims(tests_dir, flake_src):
             claims = ci_claim_lines(path)
             if not claims:
                 continue
-            if wiring_references(flake_src, tests_dir, base) or workflow_run_references(base):
+            if (wiring_references(flake_src, tests_dir, base)
+                    or workflow_run_references(base)
+                    or runner_lane_reference(base, tests_dir)):
                 continue
             bad.append((path, claims))
     return bad
@@ -480,12 +545,15 @@ def unwired_test_files(tests_dir, flake_path):
             present.add(base)
             if base in UNWIRED_BY_DESIGN or base in KNOWN_UNWIRED_DEBT:
                 continue
-            # EITHER lane counts as running it: a flake derivation, or an explicit workflow
-            # step. Before 2026-08-23 only the first did, so a workflow-run contract had to be
-            # hand-exempted — which put a genuinely-running file on the same list as files that
-            # run nowhere, and made the list stop meaning one thing.
+            # ANY of three lanes counts as running it: a flake derivation, an explicit
+            # workflow step, or the runner — when a workflow runs the runner. Before 2026-08-23
+            # only the first did, so a workflow-run contract had to be hand-exempted, which put
+            # a genuinely-running file on the same list as files that run nowhere and made the
+            # list stop meaning one thing. The third lane was added 2026-08-24 with the workflow
+            # step that made it real; four batteries moved off the debt list on its strength.
             if not (wiring_references(flake_src, tests_dir, base)
-                    or workflow_run_references(base)):
+                    or workflow_run_references(base)
+                    or runner_lane_reference(base, tests_dir)):
                 unwired.append(path)
             elif self_disarms(path):
                 # Wired AND self-disarming: green proves the CLI was absent, nothing more.
@@ -504,6 +572,9 @@ def unwired_test_files(tests_dir, flake_path):
         elif workflow_run_references(base):
             where = ", ".join("%s: %s" % h for h in workflow_run_references(base))
             stale.append((base, "is RUN by a workflow now (%s) — remove the exemption" % where))
+        elif runner_lane_reference(base, tests_dir):
+            stale.append((base, "is run by tests/%s, which CI now runs — remove the exemption"
+                          % RUNNER))
     return unwired, vacuous, stale
 
 
