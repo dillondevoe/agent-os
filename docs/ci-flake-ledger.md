@@ -193,3 +193,68 @@ read for this. If the wedge point is the same across tests, it is a boot-path de
 and belongs to the image, not to any test. **Do not raise a timeout in the meantime** — on this
 evidence it would convert a 5-minute red into a longer red, or worse, into a green that means
 nothing.
+
+### The wedge point is the SAME in both tests — first application of the new next step
+
+The previous section's next step was: *"capture the guest's last serial line on every occurrence
+and compare it against the two identity-boot occurrences' logs, which were never read for this."*
+Done, and it produced the first cross-test evidence this entry has ever had.
+
+**Occurrence 3** — `test-fetch-proxy-allowlist`, `03b210a`, machine `sealed`. Last guest line,
+guest-time **9.05s**:
+
+```
+[    9.053528] systemd[1]: Starting Virtual Console Setup...
+        <4m50s of total silence>
+RuntimeError: Shell did not start in time
+```
+
+**Occurrence 2** — `test-identity-boot`, `6fbd328`, run `32751833582` **attempt 1** (note: `gh run
+view --log` returns the LATEST attempt, which for this run is the green rerun; `--attempt 1` is
+required to see the failing one, and reading the wrong attempt would have shown a clean 278s pass).
+Last guest lines, guest-time **13.0-13.8s**:
+
+```
+[   13.011831] systemd[1]: Starting Virtual Console Setup...
+[   13.127372] systemd[1]: systemd-vconsole-setup.service: Deactivated successfully.
+[   13.130212] systemd[1]: Stopped Virtual Console Setup.
+[   13.169598] systemd[1]: Starting Virtual Console Setup...
+[   13.227441] systemd[1]: systemd-vconsole-setup.service: Deactivated successfully.
+[   13.231150] systemd[1]: Stopped Virtual Console Setup.
+[   13.236991] systemd[1]: Starting Virtual Console Setup...
+[   13.832705] systemd[1]: Finished Virtual Console Setup.
+        <silence>
+RuntimeError: Shell did not start in time
+```
+
+**Two different tests, two different machines, two different commits — and the guest goes silent at
+the same boot stage, with `systemd-vconsole-setup` cycling repeatedly immediately before it, in
+both.** That is the first evidence in this entry that is about the IMAGE rather than about any
+test, and it is what finally justifies the retitle: this was never an identity-boot bug.
+
+**Hypothesis, stated as a hypothesis.** `systemd-vconsole-setup` and the nixos test driver's serial
+backdoor both want the console device. A race between them would produce exactly this silhouette:
+the guest is alive and healthy (occurrence 2 shows vconsole-setup *Finished* cleanly), but the
+backdoor shell never becomes reachable, so the driver waits out its full timeout and reports the
+only thing it can see — "Shell did not start in time." **Not confirmed.** Two data points at the
+same stage is suggestive and is also what you would get from any stage that happens to be where the
+boot log naturally thins out.
+
+**What would confirm or kill it, chosen so that a null result is informative either way.** On a
+GREEN run of the same tests, find where the backdoor shell comes up relative to
+`systemd-vconsole-setup`. If the backdoor consistently connects BEFORE vconsole-setup runs on green
+boots and the two failures are the cases where the ordering inverted, the race is real and the fix
+is an ordering constraint, not a timeout. If the backdoor comes up after vconsole-setup on green
+boots too, then vconsole-setup is merely the last chatty unit before a quiet stretch, this
+correlation is an artifact of where the log thins, and the next place to look is what the driver
+does between spawning qemu and its first successful connect.
+
+**Occurrence 1 (`3c99650`) could not be read**: it has aged out of `gh run list --limit 60` on this
+repo. Recorded as unavailable rather than omitted — the third data point that would have made this
+a pattern instead of a pair is simply gone, which is an argument for capturing the last serial line
+into this file AT THE TIME rather than planning to go back for it.
+
+| | |
+|---|---|
+| **Occurrences** | 3 (logs read: 2 of 3; occurrence 1 aged out of the run list) |
+| **Status** | open — image-level, not test-level; wedge stage identified, cause still hypothesis |
