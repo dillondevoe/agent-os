@@ -595,6 +595,59 @@ def unwired_test_files(tests_dir, flake_path):
     return unwired, vacuous, stale
 
 
+def bare_top_level_bindings(pkgs_dir="modules/pkgs"):
+    """modules/pkgs/*.nix whose body has a `name = value;` binding at top level.
+
+    THE DEFECT THIS EXISTS FOR (e5d5c5c, 2026-08-24). Six hands were extracted out of NixOS
+    modules into standalone package files. Three of them carried a helper binding along --
+    `trafilatura = pkgs.python3Packages.trafilatura;` and friends -- which had been legal
+    inside the module's `let` block and became a SYNTAX ERROR once emitted at the top level
+    of a file that no longer had one. `error: syntax error, unexpected '=', expecting end of
+    file`, four times, both lanes red.
+
+    Why the extraction's own verification missed it: that commit diffed each extracted hand
+    BYTE-IDENTICAL against `git show HEAD:`, and the diff was sliced from the
+    `pkgs.writeShellApplication` token onward. The proof covered the hand exactly and excluded
+    the prefix, which is the only region that broke. THE HALF YOU ARE NOT STARING AT -- the
+    same class as the five scars in the mirror-tick guard, arriving in a different file.
+
+    There is no `nix` binary on the surface this repo is built from, so nix syntax is
+    unverifiable locally and CI is the only parser. That makes a cheap structural arm like
+    this one worth more here than it would be somewhere `nix-instantiate --parse` is a
+    keystroke away.
+    """
+    bad = []
+    for path in sorted(glob.glob(os.path.join(pkgs_dir, "*.nix"))):
+        try:
+            with open(path) as fh:
+                lines = fh.read().split("\n")
+        except OSError as exc:
+            bad.append((path, "unreadable: %r" % (exc,)))
+            continue
+        # everything after the argument line is the body
+        argi = None
+        for i, line in enumerate(lines):
+            if re.match(r"^\{[^}]*\}:\s*$", line):
+                argi = i
+                break
+        if argi is None:
+            bad.append((path, "no `{ ... }:` argument line"))
+            continue
+        depth = 0
+        for line in lines[argi + 1:]:
+            stripped = line.strip()
+            if stripped.startswith("#") or not stripped:
+                continue
+            if depth == 0 and re.match(r"^[A-Za-z_][\w-]* = ", line):
+                bad.append((path, "top-level binding outside any `let`: %s" % stripped[:60]))
+                break
+            if re.match(r"^\s*let\s*$", line) or stripped == "let":
+                depth += 1
+            elif stripped == "in" or stripped.startswith("in "):
+                depth = max(0, depth - 1)
+    return bad
+
+
 def flake_test_packages(system):
     """Attribute NAMES only — this evaluates the package set's keys, it builds nothing."""
     proc = subprocess.run(
@@ -615,6 +668,9 @@ def main():
     ap.add_argument("--workflow", default=WORKFLOW)
     ap.add_argument("--flake", default=FLAKE)
     ap.add_argument("--tests-dir", default=TESTS_DIR)
+    ap.add_argument("--pkgs-dir", default="modules/pkgs",
+                    help="package dir to scan for top-level bindings; the failing "
+                         "arm is exercised by pointing this at a fixture")
     ap.add_argument("--packages-json", default=None,
                     help="JSON array of package names, for testing the failing arm")
     args = ap.parse_args()
@@ -632,9 +688,10 @@ def main():
     except OSError as exc:
         sys.exit(f"FAIL: could not read {args.flake}: {exc!r}")
     false_claims = false_ci_claims(args.tests_dir, _flake_src)
+    bare_bindings = bare_top_level_bindings(args.pkgs_dir)
 
     if (not unlisted and not dangling and not unwired and not vacuous and not stale
-            and not false_claims):
+            and not false_claims and not bare_bindings):
         print(f"OK: {len(tests)} test-* package(s), all present in the vm-tests matrix:")
         for name in sorted(tests):
             print(f"  {name}")
@@ -685,6 +742,17 @@ def main():
         print("     or, if it is a shared helper rather than a test, add it to",
               file=sys.stderr)
         print("     UNWIRED_BY_DESIGN in this file so the exemption is visible in a diff.",
+              file=sys.stderr)
+    if bare_bindings:
+        print("FAIL: package file(s) with a binding at top level, outside any `let` — this is",
+              file=sys.stderr)
+        print("      a nix SYNTAX ERROR (unexpected '=', expecting end of file), and there is",
+              file=sys.stderr)
+        print("      no nix binary here to catch it, so CI is the only other parser:",
+              file=sys.stderr)
+        for path, why in bare_bindings:
+            print(f"  {path}: {why}", file=sys.stderr)
+        print("  -> wrap the helper binding(s) in `let ... in`, or inline them.",
               file=sys.stderr)
     if vacuous:
         print(f"FAIL: test file(s) wired into {args.flake} that EXIT 0 when the thing they test",

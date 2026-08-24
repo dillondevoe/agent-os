@@ -12,10 +12,13 @@
 
 { pkgs }:
 
-# `ffmpeg-headless` (hyphen) must be quoted string-access — a bareword inside
-# `with pkgs; [ … ]` would parse as the subtraction `ffmpeg - headless`. writeShellApplication
-# resolves its `bin` output for PATH via lib.getBin, so ffprobe lands correctly.
-ffmpegHeadless = pkgs."ffmpeg-headless";
+let
+
+  # `ffmpeg-headless` (hyphen) must be quoted string-access — a bareword inside
+  # `with pkgs; [ … ]` would parse as the subtraction `ffmpeg - headless`. writeShellApplication
+  # resolves its `bin` output for PATH via lib.getBin, so ffprobe lands correctly.
+  ffmpegHeadless = pkgs."ffmpeg-headless";
+in
 pkgs.writeShellApplication {
   name = "agos-media";
   runtimeInputs = [ ffmpegHeadless pkgs.coreutils pkgs.jq ];

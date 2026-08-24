@@ -12,10 +12,13 @@
 
 { pkgs }:
 
-# `poppler-utils` is the live attribute (the underscore `poppler_utils` is a removed alias
-# that throws on eval). Hyphen ⇒ must be quoted string-access and bound here — a bareword
-# `poppler-utils` inside `with pkgs; [ … ]` would parse as the subtraction `poppler - utils`.
-popplerUtils = pkgs."poppler-utils";
+let
+
+  # `poppler-utils` is the live attribute (the underscore `poppler_utils` is a removed alias
+  # that throws on eval). Hyphen ⇒ must be quoted string-access and bound here — a bareword
+  # `poppler-utils` inside `with pkgs; [ … ]` would parse as the subtraction `poppler - utils`.
+  popplerUtils = pkgs."poppler-utils";
+in
 pkgs.writeShellApplication {
   name = "agos-doc";
   runtimeInputs = [ popplerUtils pkgs.coreutils pkgs.gnused pkgs.jq ];

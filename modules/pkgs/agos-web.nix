@@ -12,10 +12,13 @@
 
 { pkgs }:
 
-# trafilatura's CLI lives in the python package's bin output; writeShellApplication puts it on
-# PATH via lib.makeBinPath. It is the readability/extract pass — it strips nav/boilerplate and
-# emits JSON with title/text (and, with --with-metadata, author/date).
-trafilatura = pkgs.python3Packages.trafilatura;
+let
+
+  # trafilatura's CLI lives in the python package's bin output; writeShellApplication puts it on
+  # PATH via lib.makeBinPath. It is the readability/extract pass — it strips nav/boilerplate and
+  # emits JSON with title/text (and, with --with-metadata, author/date).
+  trafilatura = pkgs.python3Packages.trafilatura;
+in
 pkgs.writeShellApplication {
   name = "agos-web";
   runtimeInputs = [ pkgs.curl trafilatura pkgs.coreutils pkgs.jq ];
