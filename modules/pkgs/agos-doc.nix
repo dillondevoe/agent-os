@@ -34,11 +34,36 @@ pkgs.writeShellApplication {
       exit 2
     }
 
+    # A MISSING BACKEND IS NOT A DEFECTIVE SUBJECT, and until 2026-08-24 this hand said it was.
+    # Every backend call below is guarded with `if ! out=$(...)`, which is right for capturing a real
+    # failure — but "the tool is not installed" and "the file is broken" arrive through that same
+    # branch, and the branch names the FILE. Probed with poppler stripped from PATH against a PDF that
+    # is demonstrably fine: `{ok:false,error:"not a readable PDF"}`. That is not a MISSING reason, it
+    # is a WRONG one. The caller is misinformed rather than uninformed, and one that believes it may
+    # tell someone their document is corrupt, or fall back, or delete it, on the strength of a claim
+    # this hand had no evidence for. Same severity ordering as the swallowed-producer sweep earlier
+    # today: agos-notes/agos-cal left the caller uninformed, agos-files stamped ok:true on a lie, and
+    # this stamps a specific, confident, false diagnosis of the subject.
+    #
+    # The backends are named through variables so the branch is REACHABLE FROM A TEST. Stripping PATH
+    # cannot reach it — writeShellApplication prepends `runtimeInputs` INSIDE the wrapper, so a probe
+    # would take the ordinary success path while the battery printed green about a branch it never
+    # entered. Same override pattern as AGOS_CAL_CONF and AGOS_CALC_QALC, and the same reason.
+    PDFINFO="''${AGOS_DOC_PDFINFO:-pdfinfo}"
+    PDFTOTEXT="''${AGOS_DOC_PDFTOTEXT:-pdftotext}"
+    require_backend() {  # $1 binary, $2 subject path
+      command -v "$1" >/dev/null 2>&1 && return 0
+      jq -n --arg p "$2" --arg b "$1" \
+        '{ok:false, error:"document backend absent", detail:("not on PATH: " + $b), path:$p}'
+      return 1
+    }
+
     cmd_info() {
       path="''${1:-}"
       if [ -z "$path" ]; then echo "agos-doc info: need a path" >&2; exit 2; fi
       if [ ! -f "$path" ]; then jq -n --arg p "$path" '{ok:false,error:"no such file",path:$p}'; return 0; fi
-      if ! info=$(pdfinfo "$path" 2>/dev/null); then
+      require_backend "$PDFINFO" "$path" || return 0
+      if ! info=$("$PDFINFO" "$path" 2>/dev/null); then
         jq -n --arg p "$path" '{ok:false,error:"not a readable PDF",path:$p}'; return 0
       fi
       # Each pdfinfo field is a single line "Name:   value" — strip the label + leading space.
@@ -62,12 +87,14 @@ pkgs.writeShellApplication {
       if [ ! -f "$path" ]; then jq -n --arg p "$path" '{ok:false,error:"no such file",path:$p}'; return 0; fi
       if [ -n "$page" ]; then
         case "$page" in *[!0-9]*) echo "agos-doc text: page must be a number" >&2; exit 2 ;; esac
-        if ! body=$(pdftotext -f "$page" -l "$page" "$path" - 2>/dev/null); then
+        require_backend "$PDFTOTEXT" "$path" || return 0
+        if ! body=$("$PDFTOTEXT" -f "$page" -l "$page" "$path" - 2>/dev/null); then
           jq -n --arg p "$path" '{ok:false,error:"not a readable PDF",path:$p}'; return 0
         fi
         jq -n --arg p "$path" --argjson page "$page" --arg body "$body" '{ok:true,path:$p,page:$page,text:$body}'
       else
-        if ! body=$(pdftotext "$path" - 2>/dev/null); then
+        require_backend "$PDFTOTEXT" "$path" || return 0
+        if ! body=$("$PDFTOTEXT" "$path" - 2>/dev/null); then
           jq -n --arg p "$path" '{ok:false,error:"not a readable PDF",path:$p}'; return 0
         fi
         jq -n --arg p "$path" --arg body "$body" '{ok:true,path:$p,page:null,text:$body}'

@@ -51,6 +51,30 @@ pkgs.writeShellApplication {
     CONF="''${AGOS_CAL_CONF:-${khalConf}}"
     CAL="${calName}"
 
+    # This hand was ALREADY the honest one in the family — with khal absent it reports
+    # `error:"khal list failed"` with the shell's "command not found" in `detail`, so it names the
+    # BACKEND and never asserts a false diagnosis of the calendar, unlike agos-doc/agos-media/agos-web
+    # before 2026-08-24. What it could not do is let a caller tell "khal is not installed" from "khal
+    # ran and rejected the request" WITHOUT PARSING PROSE, because both produce the same machine-
+    # readable error string. That distinction is the whole value of the class fix, so it gets the same
+    # guard rather than an exemption: being nearly right is the state in which a rule quietly stops
+    # applying to you.
+    KHAL="''${AGOS_CAL_KHAL:-khal}"
+    # `|| exit 0`, NOT `|| return 0`. This hand's verbs are top-level `case` ARMS, not shell
+    # functions — every existing degrade path here already ends in `exit 0` — so a `return` is a
+    # runtime error ("can only `return' from a function"), and under the uniform contract it
+    # surfaces as rc 2, the code reserved for USAGE errors. The JSON on stdout was correct; the
+    # exit code told the caller it had held the tool wrong. Caught by probing the extracted hand,
+    # NOT by the static contract, which sees a guard present and is satisfied. Same shape as the
+    # agos-files bad fix earlier today: THE REMEDY IS NOT THE LESSON, and a fix carried across
+    # hands without checking the context it lands in is a fix applied blind.
+    require_backend() {  # $1 binary
+      command -v "$1" >/dev/null 2>&1 && return 0
+      jq -n --arg b "$1" \
+        '{ok:false, error:"calendar backend absent", detail:("not on PATH: " + $b)}'
+      return 1
+    }
+
     usage() {
       cat >&2 <<'USAGE'
     agos-cal — the agent's calendar hand (JSON out).
@@ -83,7 +107,8 @@ pkgs.writeShellApplication {
         # rc 1, on all three khal-backed verbs. An empty agenda is a BELIEVABLE answer, which
         # makes this strictly worse than the `agos-notes list` case it rhymes with: there the
         # caller got a correct value with a failing rc; here the value itself is a lie.
-        if ! raw=$(khal -c "$CONF" list --day-format "" \
+        require_backend "$KHAL" || exit 0
+        if ! raw=$("$KHAL" -c "$CONF" list --day-format "" \
              --format "{start}''${sep}{end}''${sep}{title}" today "''${days}d" 2>&1); then
           jq -n --arg e "$raw" '{ok:false,error:"khal list failed",detail:$e}'
           exit 0
@@ -102,14 +127,16 @@ pkgs.writeShellApplication {
         # Same capture rule, different failure: `add` emitted NO JSON AT ALL under set -e, so
         # the one uniform thing every hand promises — a parseable body on stdout — was absent
         # exactly when the caller most needs to be told why.
-        if ! raw=$(khal -c "$CONF" new -a "$CAL" "''${sarr[@]}" "''${earr[@]}" "$summary" 2>&1); then
+        require_backend "$KHAL" || exit 0
+        if ! raw=$("$KHAL" -c "$CONF" new -a "$CAL" "''${sarr[@]}" "''${earr[@]}" "$summary" 2>&1); then
           jq -n --arg e "$raw" '{ok:false,error:"khal new failed",detail:$e}'
           exit 0
         fi
         printf '{"ok":true,"start":"%s","end":"%s","title":"%s"}\n' "$start" "$end" "$summary"
         ;;
       cals)
-        if ! raw=$(khal -c "$CONF" printcalendars 2>&1); then
+        require_backend "$KHAL" || exit 0
+        if ! raw=$("$KHAL" -c "$CONF" printcalendars 2>&1); then
           jq -n --arg e "$raw" '{ok:false,error:"khal printcalendars failed",detail:$e}'
           exit 0
         fi

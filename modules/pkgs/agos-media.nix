@@ -34,11 +34,24 @@ pkgs.writeShellApplication {
       exit 2
     }
 
+    # Same class as agos-doc, same day: "not a readable media file" is what this hand says when
+    # FFPROBE IS MISSING, about a file it never managed to look at. A confident false diagnosis of
+    # the subject, not a missing reason. FFPROBE is named through a variable because a PATH strip
+    # cannot reach the branch under writeShellApplication's runtimeInputs.
+    FFPROBE="''${AGOS_MEDIA_FFPROBE:-ffprobe}"
+    require_backend() {  # $1 binary, $2 subject path
+      command -v "$1" >/dev/null 2>&1 && return 0
+      jq -n --arg p "$2" --arg b "$1" \
+        '{ok:false, error:"media backend absent", detail:("not on PATH: " + $b), path:$p}'
+      return 1
+    }
+
     cmd_info() {
       path="''${1:-}"
       if [ -z "$path" ]; then echo "agos-media info: need a path" >&2; exit 2; fi
       if [ ! -f "$path" ]; then jq -n --arg p "$path" '{ok:false,error:"no such file",path:$p}'; return 0; fi
-      if ! probe=$(ffprobe -v quiet -print_format json -show_format -show_streams "$path" 2>/dev/null) \
+      require_backend "$FFPROBE" "$path" || return 0
+      if ! probe=$("$FFPROBE" -v quiet -print_format json -show_format -show_streams "$path" 2>/dev/null) \
            || [ -z "$probe" ]; then
         jq -n --arg p "$path" '{ok:false,error:"not a readable media file",path:$p}'; return 0
       fi

@@ -121,14 +121,31 @@ def uncovered(tests_dir, runner_path):
             code += "\n" + strip_comments(open(extra, encoding="utf-8").read())
     missing = []
     for b in sorted(os.listdir(tests_dir)):
-        if not (b.endswith("battery.py") or b.endswith("battery.sh")
-                or b.endswith("contract.py")):
+        if not is_subject(b):
             continue
         if b in EXCLUDED:
             continue
         if b not in code:
             missing.append(b)
     return missing
+
+
+def is_subject(b):
+    """The one definition of "a file this contract governs".
+
+    IT WAS TWO, AND THEY DISAGREED. When the subject was widened to include contract files
+    (2026-08-24, after a contract file landed unrun), the ENFORCEMENT below was widened and the
+    SUMMARY COUNT was not — so the printed line read "%d battery + contract files" while counting
+    batteries only. The label named a scope the number did not have, the total was wrong from the
+    moment of the widening, and `n - len(EXCLUDED)` inherited the error silently. It surfaced only
+    because adding tests/backend-absence-contract.py left the count unchanged at 32 when it should
+    have moved.
+
+    This is the repo's fourth scar exactly: reader and writer spelling ONE rule in TWO languages,
+    with nothing asserting they agree. The remedy is the same one — make both halves CALL THE SAME
+    FUNCTION rather than merely be written to match.
+    """
+    return b.endswith("battery.py") or b.endswith("battery.sh") or b.endswith("contract.py")
 
 
 def stale_exclusions(tests_dir):
@@ -162,8 +179,7 @@ def main():
             print("        " + b + "  (" + EXCLUDED[b] + ")")
         rc = 1
     if rc == 0:
-        n = sum(1 for b in os.listdir(TESTS)
-                if b.endswith("battery.py") or b.endswith("battery.sh"))
+        n = sum(1 for b in os.listdir(TESTS) if is_subject(b))
         print("runner-coverage-contract: PASS — %d battery + contract files, %d run, %d excluded with a reason"
               % (n, n - len(EXCLUDED), len(EXCLUDED)))
     return rc
