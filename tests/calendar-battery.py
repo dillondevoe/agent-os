@@ -109,6 +109,26 @@ check("`cals` exits 0", rc == 0, "rc=%s err=%s" % (rc, err[:60]))
 ok = ("agent" in out) or ("agent" in err)
 check("cals → lists agent collection", ok, (out or err)[:60])
 
+# 2b) agenda on an EMPTY calendar. This arm is a PROBE, written 2026-08-24 and shipped
+# without a local verdict: khal is not installed on the host this was authored on, so CI is
+# the only instrument that can answer it. The contract says `agenda` returns a JSON ARRAY;
+# the hand builds it with `khal list ... | jq -R -c 'select(length>0) | split($sep) | ...'
+# | jq -s -c '.'`, and what khal prints when a range holds no events decides whether the
+# empty case is `[]` or a one-element array wrapping a human sentence like "No events".
+# The second is the same class as `agos-notes list` — a caller iterating the result gets a
+# fabricated event — and no arm anywhere would have seen it, because every existing arm
+# runs AFTER something has been added.
+if agos:
+    rc, out, err = cal("agenda", "1")
+    check("`agenda` on an empty calendar exits 0", rc == 0, "rc=%s err=%s" % (rc, err[:60]))
+    try:
+        empty = json.loads(out)
+        check("agenda (empty) -> JSON array", isinstance(empty, list), out[:80])
+        check("agenda (empty) -> EMPTY, not a human sentence wrapped in an object",
+              empty == [], out[:120])
+    except Exception as e:
+        check("agenda (empty) parses", False, str(e) + " | out=" + out[:80])
+
 # 3) add → agenda shows it
 import datetime
 start = (datetime.datetime.now() + datetime.timedelta(hours=2)).strftime("%Y-%m-%d %H:%M")
