@@ -66,5 +66,52 @@ check("bad subcmd -> exit 2 (usage)", rc == 2, "rc=%s" % rc)
 check("bad subcmd -> SAYS WHY, on stderr", err != "", repr(err[:80]))
 check("bad subcmd -> stdout stays clean (the usage text is not JSON)", out == "", repr(out[:80]))
 
+# THE WRITE VERBS, added 2026-08-24. This battery had ZERO arms asserting the {ok:false}
+# contract and exactly ONE asserting rc == 0 — the least-guarded hand in the repo by that
+# measure, which is how it was picked to read next. What the reading found: `volume` and
+# `brightness` printed NOTHING AT ALL, in either direction. Measured on this host, where there
+# is no PipeWire and no backlight:
+#
+#     pre-fix, backend absent:  rc=127  stdout=''      <- the `agos-notes new` shape, third time
+#     pre-fix, backend present: rc=0    stdout=''      <- and the SUCCESS path said nothing either
+#
+# The second line is the one worth staring at. Every other defect in this family was about a
+# failure being disguised as success; here SUCCESS ITSELF was indistinguishable from a no-op, in
+# a hand whose every other verb returns a body. Off the Dell there is no PipeWire and no
+# backlight at all, so the degrade path is the NORMAL path everywhere except one machine.
+#
+# The arms assert the invariant that holds in BOTH directions — rc 0 and a parseable {ok:bool}
+# body — because CI has no audio sink either and an arm demanding ok:true there would be red for
+# the wrong reason. That invariant is precisely what empty stdout fails, in either direction.
+if syscli:
+    for verb, val in (("volume", "40"), ("volume", "mute"), ("brightness", "60")):
+        rc, out, err = run([syscli, verb, val])
+        label = "%s %s" % (verb, val)
+        check("`%s` exits 0 (a missing backend is not a usage error)" % label, rc == 0,
+              "rc=%s err=%s" % (rc, err[:60]))
+        check("`%s` says something on stdout" % label, out != "",
+              "empty stdout cannot distinguish 'done' from 'did nothing'")
+        try:
+            wb = json.loads(out) if out else None
+            check("`%s` -> JSON with an ok bool" % label,
+                  isinstance(wb, dict) and wb.get("ok") in (True, False), out[:80])
+            check("`%s` -> echoes back what was asked for" % label,
+                  isinstance(wb, dict) and wb.get("verb") == verb and wb.get("requested") == val,
+                  out[:80])
+            # A refusal must SAY why. An {ok:false} with no reason is a silent no-op wearing a
+            # field name — the caller cannot see stderr and has nothing else to go on.
+            if isinstance(wb, dict) and wb.get("ok") is False:
+                check("`%s` -> a refusal names a reason" % label, bool(wb.get("error")), out[:80])
+        except Exception as e:
+            check("`%s` parses as JSON" % label, False, str(e) + " | " + out[:60])
+
+    # The usage arms must NOT have moved: exit 2 is still reserved for bad input, and widening
+    # the JSON contract to the write verbs is exactly the change that could have swallowed them
+    # into {ok:false} bodies. Asserted here so the fix cannot quietly eat its own guard rails.
+    for bad in (["volume", "abc"], ["brightness", ""], ["volume"], ["brightness"]):
+        rc, out, err = run([syscli] + bad)
+        check("`%s` is still a USAGE error (exit 2), not an {ok:false}" % " ".join(bad or ["<none>"]),
+              rc == 2, "rc=%s out=%s" % (rc, out[:60]))
+
 print("agos-sys-battery: " + ("ALL PASS" if EX == 0 else "FAILURES"))
 sys.exit(EX)

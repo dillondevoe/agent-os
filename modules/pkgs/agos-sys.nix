@@ -88,21 +88,52 @@ pkgs.writeShellApplication {
          }'
     }
 
+    # THE WRITE VERBS SAID NOTHING AT ALL, in either direction, until 2026-08-24. This is a
+    # JSON hand: `status` returns a body, every other agos-* verb returns a body, and these two
+    # printed EMPTY STDOUT on success — so a caller could not tell "the volume was set" from
+    # "the call did nothing". On failure it was worse and it is a shape this repo has now fixed
+    # three times: under `set -euo pipefail` a missing PipeWire or backlight aborted the script
+    # with rc 1, no JSON, and wpctl's raw text on stderr — the `agos-notes new` defect exactly,
+    # in the hand whose battery had ZERO ok:false arms and so could never have noticed.
+    #
+    # Off the Dell there IS no PipeWire and no backlight, which makes the degrade path the
+    # NORMAL path everywhere except one machine. Contract: exit 2 stays for usage errors; a
+    # backend that is absent or refuses is rc 0 with {ok:false} and the tool's own words in
+    # `detail`, because a caller that cannot see stderr otherwise gets a silent no-op.
+    #
+    # NOTE FOR THE NEXT SWEEP: tests/hand-degrade-contract.py could not have found this, and
+    # says so in its own header — no pipeline, no producer, nothing structural to match. It was
+    # found by asking which battery asserted the contract LEAST (agos-sys: zero ok:false arms,
+    # one rc==0 arm) and then reading that hand. The static check and that question are
+    # different instruments; this hand is the evidence that neither one covers the other.
+    emit_write() {
+      # $1 verb, $2 requested value, $3 rc, $4 captured output
+      if [ "$3" -eq 0 ]; then
+        jq -n --arg v "$1" --arg r "$2" '{ok:true, verb:$v, requested:$r}'
+      else
+        jq -n --arg v "$1" --arg r "$2" --arg e "$4" \
+          '{ok:false, verb:$v, requested:$r, error:"backend refused or is absent", detail:$e}'
+      fi
+    }
+
     cmd_volume() {
       case "''${1:-}" in
-        mute)    wpctl set-mute   @DEFAULT_AUDIO_SINK@ 1 ;;
-        unmute)  wpctl set-mute   @DEFAULT_AUDIO_SINK@ 0 ;;
-        toggle)  wpctl set-mute   @DEFAULT_AUDIO_SINK@ toggle ;;
+        mute)    if out=$(wpctl set-mute @DEFAULT_AUDIO_SINK@ 1 2>&1); then rc=0; else rc=$?; fi ;;
+        unmute)  if out=$(wpctl set-mute @DEFAULT_AUDIO_SINK@ 0 2>&1); then rc=0; else rc=$?; fi ;;
+        toggle)  if out=$(wpctl set-mute @DEFAULT_AUDIO_SINK@ toggle 2>&1); then rc=0; else rc=$?; fi ;;
         ""|*[!0-9]*) echo "usage: agos-sys volume <0-100|mute|unmute|toggle>" >&2; exit 2 ;;
-        *)       wpctl set-volume -l 1.0 @DEFAULT_AUDIO_SINK@ "''${1}%" ;;  # -l caps at 100%
+        # -l caps at 100% so a caller cannot drive the sink above unity.
+        *)       if out=$(wpctl set-volume -l 1.0 @DEFAULT_AUDIO_SINK@ "''${1}%" 2>&1); then rc=0; else rc=$?; fi ;;
       esac
+      emit_write volume "''${1}" "$rc" "$out"
     }
 
     cmd_brightness() {
       case "''${1:-}" in
         ""|*[!0-9]*) echo "usage: agos-sys brightness <0-100>" >&2; exit 2 ;;
-        *)       brightnessctl set "''${1}%" >/dev/null ;;
+        *)       if out=$(brightnessctl set "''${1}%" 2>&1); then rc=0; else rc=$?; fi ;;
       esac
+      emit_write brightness "''${1}" "$rc" "$out"
     }
 
     case "''${1:-}" in
