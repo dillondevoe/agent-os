@@ -25,13 +25,13 @@ The entry criterion is: *the failing job cannot be explained by the change under
 
 ---
 
-## test-identity-boot — "Shell did not start in time"
+## "Shell did not start in time" — first seen in test-identity-boot, NOT specific to it
 
 | | |
 |---|---|
 | **First observed** | 2026-08-24T01:11Z |
 | **Last observed** | 2026-08-24T16:36:45Z |
-| **Occurrences** | 2 |
+| **Occurrences** | 3 — see the third-occurrence section below; NOT identity-boot-only |
 | **Commits** | `3c99650` (PR #161); `6fbd328` (PR #162) |
 | **Job** | `vm-test (test-identity-boot)` |
 | **Status** | open — non-determinism now DEMONSTRATED (same-SHA green re-run); cause still unidentified |
@@ -104,3 +104,64 @@ there would make this ledger entry stop accruing occurrences while changing noth
 underlying slowness, and — worse — it would silently absorb a REAL failure of identity-boot to come
 back from a reboot, which is the exact thing subtest 5 exists to detect. Masking the only detector
 of a defect in order to quiet its false positives costs more than the false positives do.
+
+### Third occurrence, 2026-08-24T19:58Z — and it FALSIFIES this entry's title and its next step
+
+`03b210a`, run `32770548874`, job **`vm-test (test-fetch-proxy-allowlist)`**. Same terminal
+error, `RuntimeError: Shell did not start in time`.
+
+**It is not test-identity-boot.** It is a different VM test, on a different machine (`sealed`),
+reaching the error through a different call — `wait_for_unit` -> `systemctl` -> `execute` ->
+`connect`, on the machine's **FIRST** boot, not through `machine.start()` on a second one. The
+second occurrence's localisation ("slow to reach a usable shell *the second time*") does not
+survive this, and neither does the prescribed next step. **The previous entry said a third
+occurrence "should not be re-triaged from scratch — it should go straight to that wait." Going
+straight to that wait would have been going straight to code this occurrence never executed.**
+Recording that plainly: the narrowing was real evidence at the time and it was still wrong, because
+two occurrences of a symptom in one test is also what a fleet-wide symptom looks like early.
+
+**The new information, and it is about the failure's SHAPE rather than its location.** The guest's
+serial log stops dead at guest-time **9.05s**, mid-boot, on `Starting Virtual Console Setup...`
+(wall clock 19:53:37Z). The next line in the log is the driver's traceback at **19:58:27Z** —
+**4 minutes 50 seconds of total silence from a guest that was emitting several lines per second.**
+
+That distinguishes two hypotheses this ledger has so far treated as one. "Slow to reach a usable
+shell" predicts boot messages continuing, just late. What actually happened is that the guest
+**stopped emitting entirely** — a wedge, not a slowness. **No timeout increase fixes a wedge**, and
+every remedy considered across the first two occurrences (raise the limit, add a wait, retry the
+start) assumed slowness. The retry loop deliberately NOT written at occurrence 2 is, on this
+evidence, even less likely to have helped than the entry gave it credit for.
+
+`Starting Virtual Console Setup...` appears three times in the final seconds (19:53:37.127,
+.218, .302). Recorded as an observation, not a diagnosis — systemd restarting a unit is one
+reading among several and this entry does not have enough to pick.
+
+**The change under test still cannot explain it, checked rather than assumed — but the check is
+weaker this time and that is worth saying.** `03b210a` touches `modules/pkgs/agos-sys.nix`, and
+`agos-sys` IS in `systemPackages` via `settings-open.nix`, so it is in the image every one of
+these VMs boots. That is a real path, unlike the previous two occurrences' subjects. Against it:
+`agos-sys` is a `writeShellApplication` that nothing runs at boot, the wedge is in
+`systemd-vconsole-setup` which has no relation to it, the other VM legs on the same commit passed,
+and **occurrence 1 (`3c99650`) touched only `tests/vm-matrix-contract.py`** — a file no VM image
+contains — which refutes any strict dependency on agos-sys. Noted rather than dismissed: **2 of 3
+occurrences are on commits touching `agos-sys.nix`**, occurrence 1 is the disconfirming case, and
+a fourth occurrence on a commit that touches neither would settle it.
+
+**Same-SHA control: `gh run rerun 32770548874 --failed` was triggered at 20:2xZ and had not
+reached a verdict when this entry was written.** Stated as pending rather than assumed green —
+that is the exact failure mode the first entry in this file had to retract.
+
+| | |
+|---|---|
+| **Occurrences** | 3 |
+| **Jobs** | `vm-test (test-identity-boot)` ×2; `vm-test (test-fetch-proxy-allowlist)` ×1 |
+| **Status** | open — NOT identity-boot-specific; symptom is a mid-boot wedge, not slowness |
+
+**Next step, replacing the one this occurrence falsified.** Stop looking at which test waits and
+start looking at what the guest was doing when it went quiet. Concretely: capture the guest's
+last serial line on every future occurrence (this entry now has one data point: `9.05s, Virtual
+Console Setup`), and compare it against the two identity-boot occurrences' logs, which were never
+read for this. If the wedge point is the same across tests, it is a boot-path defect in our image
+and belongs to the image, not to any test. **Do not raise a timeout in the meantime** — on this
+evidence it would convert a 5-minute red into a longer red, or worse, into a green that means
+nothing.
