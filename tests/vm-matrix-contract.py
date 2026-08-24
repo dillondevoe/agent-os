@@ -895,7 +895,7 @@ def main():
               f" so wiring one is not enough on its own — see self_disarms().")
         for base in sorted(KNOWN_UNWIRED_DEBT):
             print(f"  DEBT {base}" + ("  [self-disarming]" if base in disarming else ""))
-        print(f"OK: no sentinel collection is asserted on while nothing can trip it "
+        print(f"OK: no sentinel (collection, 0, or False) is asserted on while nothing can trip it "
               f"({len(KNOWN_UNMUTATED_SENTINELS)} known-explained, may only go down).")
         print(f"NOTE: {rc_count} exit-code assertion(s) across the ambient batteries "
               f"(floor {RC_ASSERTION_FLOOR}). This number may only go UP. Counted by parsing, "
