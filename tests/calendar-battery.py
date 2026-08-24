@@ -30,6 +30,36 @@ def run(cmd):
         return 1, "", str(e)
 
 # ── locate the calendar backend ──
+# ---------------------------------------------------------------------------
+# THE SPAN ARM. Runs BEFORE the CLI probe, deliberately, so it executes on every host at
+# every hour — including the SKIP path below, where nothing else in this file runs at all.
+#
+# It exists because the fix it guards CANNOT be confirmed by a green CI run. The defect was
+# a hardcoded `agenda 1` window against an event at now+2h, which is wrong only between
+# 22:00 and 23:59. A run at any other hour passes with the OLD code and the NEW code alike,
+# so 22 of every 24 hours of green say nothing. Confirming the fix by waiting for a run in
+# a 2-hour window is not a control; checking the arithmetic at all 1440 minutes is.
+#
+# This is the pre-fix reproduction promoted into the battery rather than left in a scratch
+# file: it FAILS against the old expression and passes against the new one, at any hour.
+import datetime as _dt
+_base = _dt.datetime(2026, 1, 1)
+_uncovered_new, _uncovered_old = [], []
+for _m in range(24 * 60):
+    _n = _base + _dt.timedelta(minutes=_m)
+    _e = _n + _dt.timedelta(hours=2)
+    # `agenda N` maps to `khal list today Nd`: a CALENDAR-DAY window covering [today, today+N-1].
+    _delta = (_e.date() - _n.date()).days
+    if _delta > (_delta + 1) - 1: _uncovered_new.append(_m)   # derived span
+    if _delta > 1 - 1:            _uncovered_old.append(_m)   # the hardcoded `1`
+check("span: the derived agenda window covers now+2h at every minute of the day",
+      not _uncovered_new, "%d uncovered" % len(_uncovered_new))
+# The control arm. Without it the arm above passes for a `_span` that is merely large, and
+# would also pass if someone reverted the fix and this file's model went stale with it.
+check("span: and the OLD hardcoded `1` demonstrably did NOT (the arm can fail)",
+      len(_uncovered_old) == 120,
+      "expected 120 minutes uncovered (22:00-23:59), got %d" % len(_uncovered_old))
+
 agos = shutil.which("agos-cal")
 khal = shutil.which("khal")
 
@@ -80,9 +110,19 @@ elif khal:
             return run([khal, "-c", khalconf, "list", "today", days + "d"])
         return 127, "", "unknown verb"
 else:
-    print("  SKIP calendar-battery: neither agos-cal nor khal on PATH (image not built in this env).")
+    print("  SKIP calendar-battery LIVE HALF: neither agos-cal nor khal on PATH (image not built here).")
     print("  (Dell gate validates the live half — see tasks/active/294-...)")
-    sys.exit(0)
+    # `sys.exit(EX)`, not `sys.exit(0)` — and the difference was live for the length of one
+    # edit. The span arms above run BEFORE this branch precisely so they execute on hosts
+    # with no CLI, and this line was `sys.exit(0)`, so on exactly those hosts a FAILING span
+    # arm exited 0. Verified by reverting the fix in a copy: the arm printed FAIL and the
+    # process still reported success.
+    #
+    # A PRE-EXISTING SKIP SWALLOWS EVERY ARM YOU LATER PUT ABOVE IT. The exit was written
+    # when nothing ran before it, so `0` was then correct and silently stopped being correct
+    # the moment an arm moved earlier in the file. Adding an arm is not only a question of
+    # whether it can fail — it is a question of whether anything downstream can still hear it.
+    sys.exit(EX)
 
 # 1) now → JSON-ish instant, epoch is int, tz present
 rc, out, err = cal("now")

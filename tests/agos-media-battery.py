@@ -74,9 +74,15 @@ os.unlink(_probe.name)
 
 fixture = os.environ.get("AGOS_MEDIA_FIXTURE")
 if not fixture or not os.path.isfile(fixture):
-    print("  SKIP agos-media-battery: no fixture. Set AGOS_MEDIA_FIXTURE=/path/to/sample.png|mp4")
+    print("  SKIP agos-media-battery FIXTURE HALF: no fixture. Set AGOS_MEDIA_FIXTURE=/path/to/sample.png|mp4")
     print("  (set it, or run the wired `agos-media-contract` lane, which synthesizes one with ffmpeg).")
-    sys.exit(0)
+    # `sys.exit(EX)`, not `sys.exit(0)`. The absent-backend arms above are top-level and have
+    # already RUN by the time this branch is reached, so `0` discarded their verdict on every
+    # host without a fixture — which is every host that takes this branch, by definition. Found
+    # 2026-08-24 by sweeping for the identical defect after introducing it in calendar-battery.
+    # A PRE-EXISTING SKIP SWALLOWS EVERY ARM LATER PUT ABOVE IT: the exit was correct when it
+    # was written and stopped being correct when arms moved earlier, with no edit to this line.
+    sys.exit(EX)
 
 print("  using REAL agos-media CLI: " + mcli + "  fixture=" + fixture)
 
