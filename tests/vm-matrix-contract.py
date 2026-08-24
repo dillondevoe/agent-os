@@ -675,7 +675,7 @@ _MUTATING_METHODS = frozenset({
 })
 
 
-def _scan_sentinels(tests_dir=TESTS_DIR):
+def _scan_sentinels(tests_dir=TESTS_DIR, with_invisible=False):
     """Names bound to an EMPTY collection (or to 0/False), asserted on, and mutated by nothing.
 
     The shape PR #159 found in frontdoor-kick-battery: `fired = []`, an executor stub that
@@ -696,6 +696,7 @@ def _scan_sentinels(tests_dir=TESTS_DIR):
       - A `global`/`nonlocal` declaration counts as mutation without following where it goes.
     """
     hits = []
+    invisible = set()
     for base in sorted(os.listdir(tests_dir)):
         if not base.endswith(".py") or base == "vm-matrix-contract.py":
             continue
@@ -749,7 +750,10 @@ def _scan_sentinels(tests_dir=TESTS_DIR):
         for name, lineno in sorted(empties.items()):
             if name in asserted and name not in mutated and name not in passed_as_arg:
                 hits.append((base, lineno, name))
-    return hits
+            elif name in asserted and name in passed_as_arg:
+                # NOT a finding, and NOT evidence of a fix either — see stale_sentinel_exemptions().
+                invisible.add((base, name))
+    return (hits, invisible) if with_invisible else hits
 
 
 def unmutated_sentinels(tests_dir=TESTS_DIR):
@@ -773,8 +777,24 @@ def stale_sentinel_exemptions(tests_dir=TESTS_DIR):
 
     So the ratchet is a CHECK, not a comment: an entry that no longer names a live dead
     sentinel fails the lane and must be deleted. Deleting it is the whole point.
+    THE TWO DIRECTIONS WANT OPPOSITE BIASES, and that is the trap this function walked into.
+    `_scan_sentinels()` deliberately UNDER-reports so its failure arm never reddens a correct
+    assertion. On the findings side that bias is safe. On THIS side it inverts: a sentinel that
+    becomes invisible to the scanner for an unrelated reason — someone passes `fired` to a
+    helper, so the out-parameter rule drops it — is not a fixed sentinel, but a naive diff reads
+    it as one and tells the author to DELETE an exemption still guarding a live defect. The
+    under-report that protects one arm silently arms the other.
+
+    Page found the same shape on their surface within the hour (2026-08-24, `pytest.mark.skip`):
+    three exemptions reading "<module> archived" would have failed a naive existence check
+    because orphaned `__pycache__` shells still sit on disk. Their rule, adopted: **a stale
+    check needs a predicate for why the claim no longer holds, not merely the claim's absence.**
+
+    So an arg-passed name counts as PRESENT here. Mutation and outright disappearance (file
+    renamed or deleted) still count as stale, because those ARE evidence about the claim.
     """
-    live = {(base, name) for base, _, name in _scan_sentinels(tests_dir)}
+    hits, invisible = _scan_sentinels(tests_dir, with_invisible=True)
+    live = {(base, name) for base, _, name in hits} | invisible
     return sorted(e for e in KNOWN_UNMUTATED_SENTINELS if e not in live)
 
 
