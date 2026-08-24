@@ -684,13 +684,21 @@ def rc_assertion_census(tests_dir=TESTS_DIR):
     """
     total = 0
     for base in sorted(os.listdir(tests_dir)):
-        # `*-battery.py`, NOT `agos-*-battery.py`. The prefix was this instrument's THIRD
-        # mistake and the same class as the first two: an enumeration standing in for a
-        # discovery. calendar-battery.py is an ambient-hand battery by every property that
-        # matters — it drives agos-cal, it runs in a contract lane — and the census could not
-        # see it, purely because the hand's battery is not named after the hand. Four exit-code
-        # arms added there on 2026-08-24 moved this number not at all.
-        if not base.endswith("-battery.py"):
+        # MISTAKE 3, and it took two goes to actually retire. It began as `agos-*-battery.py`,
+        # which could not see calendar-battery.py — an ambient-hand battery by every property
+        # that matters (it drives agos-cal, it runs in a contract lane), invisible purely
+        # because the hand's battery is not named after the hand. Widening to `*-battery.py`
+        # fixed that INSTANCE and left the class alone: tests/ also holds ten `agos-*-contract.py`
+        # files with 328 check() arms between them, and the census could not see any of them
+        # either. On today's tree that costs nothing — they are source-inspection contracts that
+        # assert the ABSENCE of subprocess, so they have no exit codes to assert and the total is
+        # 27 under either rule (measured, not assumed). But the blind spot is the same one, and
+        # the next contract file that drives a CLI would land in it silently.
+        #
+        # So discover by BEHAVIOUR, not by filename: a file that calls `check()` is a battery.
+        # A naming convention is an enumeration wearing a discovery's clothes, and this
+        # instrument has now been caught by that three times.
+        if not base.endswith(".py") or base == "vm-matrix-contract.py":
             continue
         try:
             tree = ast.parse(open(os.path.join(tests_dir, base), encoding="utf-8").read())
