@@ -30,10 +30,11 @@ The entry criterion is: *the failing job cannot be explained by the change under
 | | |
 |---|---|
 | **First observed** | 2026-08-24T01:11Z |
-| **Occurrences** | 1 |
-| **Commit** | `3c99650` (branch `mirror/wire-frontdoor-kick-battery`, PR #161) |
+| **Last observed** | 2026-08-24T16:36:45Z |
+| **Occurrences** | 2 |
+| **Commits** | `3c99650` (PR #161); `6fbd328` (PR #162) |
 | **Job** | `vm-test (test-identity-boot)` |
-| **Status** | open — infrastructure-suspected, not reproduced locally |
+| **Status** | open — non-determinism now DEMONSTRATED (same-SHA green re-run); cause still unidentified |
 
 ```
 RuntimeError: Shell did not start in time
@@ -68,3 +69,38 @@ plausible reconstruction from memory is what it replaces.
 A green run is not evidence the first red was spurious in either case — it is at most evidence
 the failure is not deterministic, which is what "flake" means. This entry stays open at one
 occurrence, now with the added note that the confirming observation was never actually taken.
+
+### Second occurrence, 2026-08-24 — and it supplies the observation the first one lacked
+
+`6fbd328`, run `32751833582`, job `vm-test (test-identity-boot)`. Same terminal error,
+`RuntimeError: Shell did not start in time`. This time the failure is located precisely: it is
+**subtest 5, "a REAL reboot does not rotate the keys — the leg a battery cannot show"** — subtests
+1-4 passed and finished cleanly first. So the shell that did not start is the one after
+`machine.shutdown(); machine.start()`, i.e. the VM's SECOND cold boot, not its first. That is new
+information the first entry did not have, and it narrows the suspect from "our VM is slow to reach
+a usable shell" to "our VM is slow to reach a usable shell *the second time*."
+
+**The same-SHA control was taken this time.** `gh run rerun 32751833582 --failed` completed:
+`attempt=2 completed success 6fbd328`. Same tree, same test, green. That is the observation the
+first entry explicitly records as never taken, and it is the strong form: it isolates
+non-determinism without resting on any argument about what an intervening commit could plausibly
+have changed. **`flake` is now demonstrated rather than inferred.** The cause is still not
+identified, and this entry stays open.
+
+**The change under test still cannot explain it**, by the same criterion as before, checked rather
+than assumed: `6fbd328` touches `modules/pkgs/agos-sys.nix` and `tests/agos-sys-battery.py`, and
+`grep -c 'agos-sys' tests/identity-boot-battery.py` -> 0. The eleven vm-tests runs immediately
+preceding this one were all green.
+
+**What the second occurrence changes about the next step.** The first entry said two occurrences
+would make "runner load" weaker than "our VM is slow to reach a usable shell." It has happened, and
+the subtest-5 localisation points somewhere more specific than either: the reboot leg calls
+`machine.start()` and then waits, with no timeout of its own, on the test driver's default backdoor
+connect. A third occurrence should not be re-triaged from scratch — it should go straight to that
+wait.
+
+**What was deliberately NOT done.** No retry loop was wrapped around `machine.start()`. A retry
+there would make this ledger entry stop accruing occurrences while changing nothing about the
+underlying slowness, and — worse — it would silently absorb a REAL failure of identity-boot to come
+back from a reboot, which is the exact thing subtest 5 exists to detect. Masking the only detector
+of a defect in order to quiet its false positives costs more than the false positives do.
