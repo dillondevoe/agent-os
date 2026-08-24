@@ -50,6 +50,12 @@ try:
     check("list -> JSON array", isinstance(arr, list), out[:60])
 except Exception as e:
     check("list parses", False, str(e))
+# ...AND it must SUCCEED. This arm read stdout only until 2026-08-24, and that is exactly
+# how it stayed green over a real failure: `find` on an absent store exits 1, its message is
+# swallowed by 2>/dev/null, and under `set -euo pipefail` the pipeline's rc becomes 1 — but
+# only AFTER jq has already printed a perfectly valid `[]`. Correct output, failing command.
+# A caller that branches on the exit status treats "the store is empty" as "the hand broke".
+check("list exits 0 (empty store is not an error)", rc == 0, "rc=%d err=%s" % (rc, err[:60]))
 
 # new -> attempts create; assert it returns valid JSON with ok bool
 rc, out, err = run([ncli, "new", "Battery Test Note"])

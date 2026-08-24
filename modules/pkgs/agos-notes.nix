@@ -43,7 +43,13 @@ pkgs.writeShellApplication {
     }
 
     cmd_list() {
-      find "$NOTES" -maxdepth 1 -name '*.md' -printf '%f\t%s\t%T@\n' 2>/dev/null \
+      # `|| true` inside the braces, not after the pipeline. An absent or unreadable store
+      # makes find exit 1; its message is already swallowed, so under `set -euo pipefail` the
+      # pipeline inherited that rc and killed the script — AFTER jq had printed a valid `[]`.
+      # Right answer, failing command: a caller branching on the exit status reads "empty
+      # store" as "the hand broke". Same class as the new/append write paths fixed 2026-08-24,
+      # on the one path that fix did not touch.
+      { find "$NOTES" -maxdepth 1 -name '*.md' -printf '%f\t%s\t%T@\n' 2>/dev/null || true; } \
         | while IFS="$(printf '\t')" read -r fname bytes mtime; do
             slug="''${fname%.md}"
             title=$(title_of "$NOTES/$fname" "$slug")
