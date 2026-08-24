@@ -120,6 +120,23 @@ def swallowed_producers():
             # `||` is not a pipeline, and `|&` is bash's stderr-merging pipe (still one).
             if re.match(r"^[^|]*\|\|", s):
                 continue
+            # A CASE PATTERN IS NOT A PIPELINE. `mute|unmute|toggle) : ;;` uses `|` for
+            # alternation, and this scan read the alternatives as pipeline stages and reported
+            # `mute` as an unguarded external producer -- a confident finding about a command
+            # that does not exist. Found the day agos-sys grew a validation arm: the FIX to one
+            # hand made an unrelated check emit a false positive, which is the cost of a
+            # line-oriented scan and the reason it states its blind spots out loud below.
+            # STRIP the pattern, do not SKIP the line: `foo) curl "$u" | jq .` is a case arm whose
+            # BODY is a real pipeline, and an early `continue` here would have silenced it. The
+            # first version of this fix did exactly that -- a correction that widened into a
+            # blind spot, which is how an exemption becomes the defect it was added to describe.
+            _cp = re.match(r"^[A-Za-z0-9_*?\[\]!\"'.|/-]+\)\s+", s)
+            if _cp:
+                s = s[_cp.end():].strip()
+                if "|" not in s:
+                    continue
+                if re.match(r"^[^|]*\|\|", s):
+                    continue
             first = s.split("|")[0].strip()
             # Already guarded: inside a command substitution, an `if`/`while` condition, or
             # negated. Any of these means the exit status is REACHABLE by the author.

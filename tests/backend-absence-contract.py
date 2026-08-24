@@ -39,7 +39,59 @@ def check(name, cond, detail=""):
 # The external backends these hands shell out to. Shell builtins and the coreutils/jq/sed/grep
 # family are deliberately NOT here: they come from the same nixpkgs closure as the wrapper itself,
 # so "jq is missing" is not a state a built hand can reach, and guarding it would be noise.
-BACKENDS = ("pdfinfo", "pdftotext", "ffprobe", "ffmpeg", "curl", "trafilatura", "qalc", "khal")
+BACKENDS = ("pdfinfo", "pdftotext", "ffprobe", "ffmpeg", "curl", "trafilatura", "qalc", "khal",
+            "wpctl", "brightnessctl", "nmcli")
+
+# THIS TUPLE WAS SILENTLY INCOMPLETE FOR ITS FIRST DAY, and finding that is what produced the
+# check below. It shipped without wpctl/brightnessctl/nmcli, so agos-sys — a hand with THREE
+# external backends — was swept and reported clean, because the sweep was looking for names it
+# had never been told about. A hand-maintained denylist fails in the direction that produces a
+# green, which is the one direction an instrument must never fail in.
+#
+# So the list is now RATCHETED against something the repo already declares and cannot forget to
+# update: `runtimeInputs`. Nix must be told every package a hand can reach, or the hand does not
+# run at all — it is the one enumeration in this repo that cannot go stale, because the build
+# breaks first. Every package there is either AMBIENT (the coreutils/jq/sed/grep family, from the
+# same closure as the wrapper — "jq is missing" is not a state a built hand can reach) or it
+# provides a backend this file must know by name. A package in neither set is a FAILURE, and the
+# fix is to add it to one of them.
+#
+# Package names are not binary names (popplerUtils -> pdfinfo+pdftotext, wireplumber -> wpctl,
+# networkmanager -> nmcli, libqalculate -> qalc), so the mapping is explicit. Writing it down is
+# the point: it is the step that cannot be skipped when a hand grows a new backend.
+AMBIENT_PKGS = {"coreutils", "gnugrep", "gnused", "gawk", "findutils", "jq", "pkgs.coreutils",
+                "pkgs.gnused", "pkgs.gnugrep", "pkgs.jq", "pkgs.findutils", "pkgs.gawk"}
+PKG_BINARIES = {
+    "popplerUtils": ("pdfinfo", "pdftotext"),
+    "ffmpegHeadless": ("ffprobe", "ffmpeg"),
+    "wireplumber": ("wpctl",),
+    "networkmanager": ("nmcli",),
+    "brightnessctl": ("brightnessctl",),
+    "libqalculate": ("qalc",),
+    "trafilatura": ("trafilatura",),
+    "pkgs.khal": ("khal",),
+    "pkgs.curl": ("curl",),
+}
+
+def runtime_inputs(src):
+    """The packages a hand declares to Nix. Returns [] if the hand has no runtimeInputs."""
+    m = re.search(r"runtimeInputs\s*=\s*(?:with\s+pkgs;\s*)?\[(.*?)\]", src, re.S)
+    if not m:
+        return []
+    body = re.sub(r"#[^\n]*", "", m.group(1))          # drop the trailing "# nmcli — ..." notes
+    return [t for t in body.split() if t and t != ";"]
+
+def declared_backends(src):
+    """Backends a hand's runtimeInputs promise it can reach, plus the packages we cannot classify."""
+    known, unknown = set(), []
+    for pkg in runtime_inputs(src):
+        if pkg in AMBIENT_PKGS:
+            continue
+        if pkg in PKG_BINARIES:
+            known.update(PKG_BINARIES[pkg])
+        else:
+            unknown.append(pkg)
+    return known, unknown
 
 def hand_bodies():
     """Each hand's shell body, keyed by filename. Same extraction as hand-degrade-contract.py."""
@@ -114,13 +166,36 @@ def invoked_and_guarded(code):
         guarded.add(b)
     return invoked, guarded
 
+def tolerated(code, backend, varfor):
+    """Backends whose ABSENCE is already handled without a guard, by falling back to a default.
+
+    `net_state=$(nmcli ... 2>/dev/null) || net_state="unknown"` needs no guard: an absent nmcli
+    produces a NULL FIELD, which is this hand's documented contract for `status`, not an error
+    about the subject. Adding a guard there would convert a working degrade into a refusal — the
+    contract would have forced a WRONG fix, which is the failure mode of a rule that knows only
+    one shape of correctness.
+
+    The distinction is narrow on purpose and it is the one that separates this from the four
+    hands 619d3a9 fixed: those wrote `if ! out=$(pdfinfo ...)` and then EMITTED a diagnosis. A
+    `|| var=` tolerance emits nothing and blames no one. Only the second form is excused."""
+    names = [backend] + [v for v, d in varfor.items() if d == backend]
+    for line in code.split("\n"):
+        if not any(re.search(r"[\"$]?\b%s\b" % re.escape(n), line) for n in names):
+            continue
+        if re.search(r"\|\|\s*[A-Za-z_][A-Za-z0-9_]*=", line):
+            return True
+    return False
+
 def findings():
     """(file, backend) for every backend a hand invokes with no absence guard."""
     bad = []
     for fn, body in hand_bodies().items():
         code = strip_comments_and_heredocs(body)
         invoked, guarded = invoked_and_guarded(code)
+        varfor = dict(re.findall(r'([A-Z_][A-Z0-9_]*)="\W*\$\{[A-Z_][A-Z0-9_]*:-([a-z0-9_.-]+)\}"', code))
         for b in sorted(invoked - guarded):
+            if tolerated(code, b, varfor):
+                continue
             bad.append((fn, b))
     return bad
 
@@ -135,6 +210,32 @@ def main():
                                 for b in bodies.values())))
     check("the sweep actually saw backend invocations", len(seen) >= 4,
           "invoked: " + ", ".join(seen))
+    all_pkgs, all_declared = [], set()
+    for fn in sorted(bodies):
+        src = open(os.path.join(PKGS, fn), encoding="utf-8").read()
+        all_pkgs += runtime_inputs(src)
+        all_declared |= declared_backends(src)[0]
+    # The ratchet has its own vacuity arms: a runtimeInputs regex that stops matching would make
+    # every "is classified" arm pass on an EMPTY list, which is the exact green-by-seeing-nothing
+    # this file was written about — one level up, inside the check that was supposed to prevent it.
+    check("the ratchet actually parsed runtimeInputs", len(all_pkgs) >= 20,
+          "%d packages across %d hands" % (len(all_pkgs), len(bodies)))
+    check("the ratchet actually resolved packages to backends", len(all_declared) >= 5,
+          "declared: " + ", ".join(sorted(all_declared)))
+
+    # THE RATCHET. Every package a hand declares to Nix must be classified — ambient, or a
+    # named backend. An unclassifiable package means this file has been outgrown, and it says so
+    # instead of sweeping for names it was never told about.
+    for fn in sorted(bodies):
+        src = open(os.path.join(PKGS, fn), encoding="utf-8").read()
+        known, unknown = declared_backends(src)
+        check("%s: every runtimeInputs package is classified" % fn, not unknown,
+              "unclassified: %s — add to AMBIENT_PKGS or PKG_BINARIES" % ", ".join(unknown))
+        # And the classification must reach BACKENDS, or a hand could declare a backend this
+        # sweep still cannot look for.
+        missing = sorted(b for b in known if b not in BACKENDS)
+        check("%s: every declared backend is one this sweep looks for" % fn, not missing,
+              "declared but not in BACKENDS: " + ", ".join(missing))
 
     bad = findings()
     for fn, b in bad:

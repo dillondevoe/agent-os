@@ -44,12 +44,12 @@ pkgs.writeShellApplication {
         | awk -F: '$1=="yes"{print $2; exit}') || wifi_signal=""
 
       # --- audio (PipeWire via wireplumber) ---
-      vol_raw=$(wpctl get-volume @DEFAULT_AUDIO_SINK@ 2>/dev/null) || vol_raw=""
+      vol_raw=$("$WPCTL" get-volume @DEFAULT_AUDIO_SINK@ 2>/dev/null) || vol_raw=""
       vol_pct=$(printf '%s' "$vol_raw" | awk '/Volume/{printf "%d", $2*100}') || vol_pct=""
       if printf '%s' "$vol_raw" | grep -q "MUTED"; then vol_muted="true"; else vol_muted="false"; fi
 
       # --- display backlight ---
-      bri_pct=$(brightnessctl -m 2>/dev/null \
+      bri_pct=$("$BRIGHTNESSCTL" -m 2>/dev/null \
         | awk -F, 'NR==1{gsub("%","",$4); print $4}') || bri_pct=""
 
       # --- battery (sysfs — no upower dep) ---
@@ -106,24 +106,64 @@ pkgs.writeShellApplication {
     # found by asking which battery asserted the contract LEAST (agos-sys: zero ok:false arms,
     # one rc==0 arm) and then reading that hand. The static check and that question are
     # different instruments; this hand is the evidence that neither one covers the other.
+    # ABSENT vs REFUSED, and this hand was the LAST rung of a ladder the repo climbed on
+    # 2026-08-24. `emit_write` below SAID `error:"backend refused or is absent"` — one string for
+    # two states a caller must treat differently. "wpctl said no" is a fact about the machine's
+    # audio; "wpctl is not installed" is a fact about the BUILD, and no amount of retrying fixes
+    # it. agos-cal got this same treatment while being the honest one of its family, on the
+    # reasoning that nearly-right is the state in which a rule quietly stops applying to you.
+    # This hand is nearly-right in exactly the same way.
+    #
+    # The overrides exist because a PATH strip cannot reach these: writeShellApplication prepends
+    # runtimeInputs INSIDE the wrapper, so a probe would take the ordinary path while a battery
+    # printed green about a branch it never entered.
+    #
+    # `cmd_status` is deliberately NOT guarded. Its contract is to degrade every probe to null —
+    # an absent backend there is a MISSING FIELD, not an error — and a guard would convert a
+    # working degrade into a refusal. The guard belongs where absence is reported AS a failure.
+    WPCTL="''${AGOS_SYS_WPCTL:-wpctl}"
+    BRIGHTNESSCTL="''${AGOS_SYS_BRIGHTNESSCTL:-brightnessctl}"
+
+    require_backend() {  # $1 binary, $2 verb, $3 requested
+      command -v "$1" >/dev/null 2>&1 && return 0
+      jq -n --arg v "$2" --arg r "$3" --arg b "$1" \
+        '{ok:false, verb:$v, requested:$r, error:"system backend absent",
+           detail:("not on PATH: " + $b)}'
+      return 1
+    }
+
+    # `error` was "backend refused or is absent" until the guard above existed, and that string
+    # was accurate then and is a LIE now: absence is caught before this emitter is reached, so
+    # every message this branch prints is a genuine refusal. A disjunction left standing after
+    # one of its arms is made unreachable reads as caution and is actually staleness.
     emit_write() {
       # $1 verb, $2 requested value, $3 rc, $4 captured output
       if [ "$3" -eq 0 ]; then
         jq -n --arg v "$1" --arg r "$2" '{ok:true, verb:$v, requested:$r}'
       else
         jq -n --arg v "$1" --arg r "$2" --arg e "$4" \
-          '{ok:false, verb:$v, requested:$r, error:"backend refused or is absent", detail:$e}'
+          '{ok:false, verb:$v, requested:$r, error:"backend refused", detail:$e}'
       fi
     }
 
     cmd_volume() {
+      # ORDER MATTERS, and it is not the order the guard was first written in. A usage error is
+      # a fact about the CALL and is true whether or not the backend exists; an absent backend
+      # is a fact about the machine. Guarding first made `agos-sys volume bogus` answer rc 0
+      # {ok:false,"system backend absent"} on every host without PipeWire -- which is every host
+      # but the Dell -- silently retiring the exit-2 usage contract for this verb.
       case "''${1:-}" in
-        mute)    if out=$(wpctl set-mute @DEFAULT_AUDIO_SINK@ 1 2>&1); then rc=0; else rc=$?; fi ;;
-        unmute)  if out=$(wpctl set-mute @DEFAULT_AUDIO_SINK@ 0 2>&1); then rc=0; else rc=$?; fi ;;
-        toggle)  if out=$(wpctl set-mute @DEFAULT_AUDIO_SINK@ toggle 2>&1); then rc=0; else rc=$?; fi ;;
+        mute|unmute|toggle) : ;;
+        ""|*[!0-9]*) echo "usage: agos-sys volume <0-100|mute|unmute|toggle>" >&2; exit 2 ;;
+      esac
+      require_backend "$WPCTL" volume "''${1:-}" || return 0
+      case "''${1:-}" in
+        mute)    if out=$("$WPCTL" set-mute @DEFAULT_AUDIO_SINK@ 1 2>&1); then rc=0; else rc=$?; fi ;;
+        unmute)  if out=$("$WPCTL" set-mute @DEFAULT_AUDIO_SINK@ 0 2>&1); then rc=0; else rc=$?; fi ;;
+        toggle)  if out=$("$WPCTL" set-mute @DEFAULT_AUDIO_SINK@ toggle 2>&1); then rc=0; else rc=$?; fi ;;
         ""|*[!0-9]*) echo "usage: agos-sys volume <0-100|mute|unmute|toggle>" >&2; exit 2 ;;
         # -l caps at 100% so a caller cannot drive the sink above unity.
-        *)       if out=$(wpctl set-volume -l 1.0 @DEFAULT_AUDIO_SINK@ "''${1}%" 2>&1); then rc=0; else rc=$?; fi ;;
+        *)       if out=$("$WPCTL" set-volume -l 1.0 @DEFAULT_AUDIO_SINK@ "''${1}%" 2>&1); then rc=0; else rc=$?; fi ;;
       esac
       emit_write volume "''${1}" "$rc" "$out"
     }
@@ -131,7 +171,11 @@ pkgs.writeShellApplication {
     cmd_brightness() {
       case "''${1:-}" in
         ""|*[!0-9]*) echo "usage: agos-sys brightness <0-100>" >&2; exit 2 ;;
-        *)       if out=$(brightnessctl set "''${1}%" 2>&1); then rc=0; else rc=$?; fi ;;
+      esac
+      require_backend "$BRIGHTNESSCTL" brightness "''${1:-}" || return 0
+      case "''${1:-}" in
+        ""|*[!0-9]*) echo "usage: agos-sys brightness <0-100>" >&2; exit 2 ;;
+        *)       if out=$("$BRIGHTNESSCTL" set "''${1}%" 2>&1); then rc=0; else rc=$?; fi ;;
       esac
       emit_write brightness "''${1}" "$rc" "$out"
     }

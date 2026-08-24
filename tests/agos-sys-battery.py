@@ -105,6 +105,42 @@ if syscli:
         except Exception as e:
             check("`%s` parses as JSON" % label, False, str(e) + " | " + out[:60])
 
+    # ABSENT vs REFUSED. Until 2026-08-24 this hand answered `error:"backend refused or is
+    # absent"` to both, and the battery asserted only that SOME reason was present -- so one
+    # string covering two states a caller must treat differently passed cleanly. "wpctl said no"
+    # is a fact about the machine's audio and may be worth retrying; "wpctl is not installed" is
+    # a fact about the BUILD and never is.
+    #
+    # This pair is the only arm here that asserts the same thing on EVERY host: both branches are
+    # driven by an override, so neither needs PipeWire, a backlight, or the Dell.
+    import tempfile as _tf
+    _fake = os.path.join(_tf.mkdtemp(prefix="agos-sys-refuse-"), "wpctl")
+    with open(_fake, "w", encoding="utf-8") as fh:
+        fh.write("#!/bin/sh\necho 'wpctl: refused by the battery' >&2\nexit 1\n")
+    os.chmod(_fake, 0o755)
+    for label, override, want_absent in (("absent", "no-such-wpctl-binary-xyz", True),
+                                         ("refused", _fake, False)):
+        o = subprocess.run([syscli, "volume", "50"], capture_output=True, text=True, timeout=30,
+                           env=dict(os.environ, AGOS_SYS_WPCTL=override))
+        rc2, out2 = o.returncode, o.stdout.strip()
+        check("%s backend: `volume 50` exits 0, not 2 (it is not a usage error)" % label,
+              rc2 == 0, "rc=%s out=%s" % (rc2, out2[:60]))
+        try:
+            wb2 = json.loads(out2)
+        except Exception as e:
+            wb2 = None
+            check("%s backend: parseable JSON on STDOUT" % label, False, str(e) + " | " + out2[:60])
+        if isinstance(wb2, dict):
+            _e = str(wb2.get("error", "")).lower()
+            check("%s backend: ok:false with a reason" % label,
+                  wb2.get("ok") is False and bool(_e), out2[:80])
+            # THE LOAD-BEARING ONE. Both branches were already ok:false with a reason before the
+            # fix; what changed is that the two reasons are now DIFFERENT.
+            check("%s backend: the reason is machine-readably `%s`" % (label, label),
+                  ("absent" in _e) is want_absent, out2[:80])
+            check("%s backend: it still echoes verb + requested" % label,
+                  wb2.get("verb") == "volume" and wb2.get("requested") == "50", out2[:80])
+
     # The usage arms must NOT have moved: exit 2 is still reserved for bad input, and widening
     # the JSON contract to the write verbs is exactly the change that could have swallowed them
     # into {ok:false} bodies. Asserted here so the fix cannot quietly eat its own guard rails.
