@@ -109,7 +109,20 @@ KNOWN_UNWIRED_DEBT = frozenset({
     # Found in the first sweep (#153): referenced only by tests/run-local.sh, a manual runner.
     "anthropic-transport-battery.py",
     "audit-signing-battery.py",
-    "bip340-battery.py",
+    # bip340-battery.py was here until 2026-08-23, and it is the entry that should NOT have
+    # been a routine line on this list. Its own header states, as fact, that it satisfies
+    # "binding condition 2 of Geist's 2026-08-19 Path-A ruling: the FULL official test-vector
+    # set runs in CI." It ran in no lane. The repo held both claims at once — "runs in CI" in
+    # the file, "runs nowhere" in this list — and nothing ever made them meet.
+    #
+    # A RULING CONDITION DISCHARGED BY WRITING A FILE IS DISCHARGED BY PROSE. Condition 2 asks
+    # for an EXECUTION; the only evidence of one is a lane that goes red when it stops. The
+    # header was read as the receipt for four days.
+    #
+    # Now wired as `bip340-contract` in flake.nix. Note what specifically had not been running:
+    # the must-fail vectors (5-15) and check I's control arm, i.e. the forgery-acceptance
+    # coverage the ruling singled out — a verifier returning True unconditionally passes every
+    # TRUE vector, so the unrun half was the half that matters.
     "escalate-consent-battery.py",
     # frontdoor-kick-battery.py was here until 2026-08-23. WIRED, not merely delisted: flake.nix
     # gained a `frontdoor-kick-contract` derivation that reconstructs tests/ + modules/ and runs
