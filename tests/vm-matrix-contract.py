@@ -103,7 +103,14 @@ KNOWN_UNWIRED_DEBT = frozenset({
     # `builtins.pathExists` assert and its error string, and by nothing else in the repository.
     # The guard that names them proves they have not been DELETED; nothing proves they RUN.
     "calendar-battery.py",
-    "agos-calc-battery.py",
+    # agos-calc-battery.py left on 2026-08-24 — the FIRST of these eight to run anywhere, and
+    # the entry that shows why the group resisted for so long. Its reason ("self-disarms: SKIP
+    # rc=0 with its CLI off PATH") named a property of the BATTERY, and the battery was only
+    # half the problem: `agos-calc` was a `let` binding inside a NixOS module, so no expression
+    # in the repo could put it on a PATH. Fixing only the disarm would have produced a red that
+    # nothing could turn green; fixing only the packaging would have produced a vacuous green.
+    # Now: modules/pkgs/agos-calc.nix + AGENT_OS_STRICT=1 + an agos-calc-contract derivation.
+    # The other seven are the same shape and should follow mechanically.
     "agos-sys-battery.py",
     "agos-files-battery.py",
     "agos-notes-battery.py",

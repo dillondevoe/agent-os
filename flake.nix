@@ -1500,6 +1500,44 @@
               python3 tests/bip340-battery.py
               touch $out
             '';
+
+        # THE FIRST OF THE EIGHT AMBIENT HANDS TO ACTUALLY RUN ANYWHERE (2026-08-24).
+        #
+        # tests/agos-calc-battery.py has been on KNOWN_UNWIRED_DEBT since the list existed, in
+        # the group whose reason is "self-disarms: SKIP rc=0 with its CLI off PATH." Both halves
+        # of that had to be fixed, and neither alone would have been worth anything:
+        #
+        #   1. NOTHING COULD SUPPLY THE CLI. `agos-calc` was a `let` binding inside
+        #      modules/calculator-open.nix — unreachable from any other expression in the repo.
+        #      It is now modules/pkgs/agos-calc.nix, imported by the module (which installs
+        #      exactly what it installed before) and by this derivation.
+        #
+        #   2. THE BATTERY EXITED 0 WHEN THE CLI WAS ABSENT. Wiring it without fixing that buys
+        #      a green that proves the derivation ran, not that the hand works — the `vacuous`
+        #      state vm-matrix-contract.py already flags, and worse than the debt it replaces
+        #      because debt is on a ledger someone reads. AGENT_OS_STRICT=1 makes absence rc=1,
+        #      and also refuses the qalc fallback: qalc is libqalculate, not the hand under test.
+        #
+        # The obvious alternative — a nixosTest importing calculator-open.nix — was rejected on
+        # cost, and the cost is a design smell worth naming: all eight ambient modules weld a
+        # ~50-line agent CLI to a human GUI (qalculate-gtk here; firefox, gnome-calendar, thunar,
+        # zathura, imv+mpv, apostrophe in the others). Testing the CLI that way means building a
+        # desktop image to exercise a shell script. The hand and the GUI are separate things and
+        # only one of them is a contract; splitting the package is what makes this cheap.
+        agos-calc-contract =
+          let
+            pkgs = nixpkgs.legacyPackages.${system};
+            agos-calc = import ./modules/pkgs/agos-calc.nix { inherit pkgs; };
+          in
+          pkgs.runCommand "agos-calc-contract-check"
+            { nativeBuildInputs = [ pkgs.python3 agos-calc ]; } ''
+              work="$(mktemp -d)"
+              mkdir -p "$work/tests"
+              cp ${./tests/agos-calc-battery.py} "$work/tests/agos-calc-battery.py"
+              cd "$work"
+              AGENT_OS_STRICT=1 python3 tests/agos-calc-battery.py
+              touch $out
+            '';
       };
     };
 }

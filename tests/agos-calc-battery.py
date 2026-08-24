@@ -3,7 +3,7 @@
 # Verifies the eval contract: agos-calc eval '<expr>' -> {input,result,ok,messages}.
 # qalc (libqalculate) is pure math, no backend — fully testable headless.
 # Run: PYTHONPATH=modules python3 tests/agos-calc-battery.py
-import subprocess, json, shutil, sys
+import subprocess, json, os, shutil, sys
 
 EX = 0
 def check(name, cond, detail=""):
@@ -20,12 +20,29 @@ def run(cmd):
     except Exception as e:
         return 1, "", str(e)
 
+# STRICT MODE (AGENT_OS_STRICT=1), added 2026-08-24 with the derivation that wires this file.
+# Without it, wiring this battery would buy nothing: it exits 0 when `agos-calc` is absent, so a
+# derivation that silently lost the dependency would stay green while testing NOTHING. That is
+# the state vm-matrix-contract.py calls `vacuous` — wired and self-disarming — and it is worse
+# than the unwired debt it replaces, because the debt at least appears on a ledger someone reads.
+#
+# Strict mode ALSO kills the qalc fallback, which is the sharper half. That fallback is right for
+# a developer at a half-built box, and wrong for CI: qalc is libqalculate, i.e. someone else's
+# program. A green from the fallback says the math library works and says nothing about
+# `agos-calc`, which is the only thing in this repo under test. THE SUBJECT MUST BE THE SUBJECT.
+STRICT = os.environ.get("AGENT_OS_STRICT") == "1"
+
 calc = shutil.which("agos-calc")
 qalc = shutil.which("qalc")
 
 if calc:
     print("  using REAL agos-calc CLI: " + calc)
     def ev(expr): return run([calc, "eval", expr])
+elif STRICT:
+    print("  FAIL agos-calc-battery: AGENT_OS_STRICT=1 and `agos-calc` is not on PATH.")
+    print("       The fallback is deliberately NOT taken here: qalc is libqalculate, not the")
+    print("       hand under test. Whatever was meant to put agos-calc on PATH did not.")
+    sys.exit(1)
 elif qalc:
     print("  agos-calc absent — fallback: qalc")
     def ev(expr):
