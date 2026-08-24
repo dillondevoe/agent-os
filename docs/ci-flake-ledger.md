@@ -364,3 +364,52 @@ Until that exists, add nothing to this entry but occurrences and their landmark 
 | **Occurrences** | 4 |
 | **Tests** | identity-boot ×2, fetch-proxy-allowlist ×1, seal-faildown ×1 |
 | **Status** | open — not test-specific, not stage-consistent, not speed-consistent; driver side never examined |
+
+### A base rate at last — and `gh run list` was hiding a third of it
+
+Two findings from the same query, taken when `9c631e6` came back **green**.
+
+**1. The adjacent-commit counterexample.** `1f97e23` (docs-only) FAILED; `9c631e6` (docs-only, same
+branch, the very next commit) PASSED. Two neighbouring commits, neither containing code, opposite
+results. Nothing about the commit predicts the outcome, which is what "flaky" means and is now
+demonstrated rather than inferred.
+
+**2. `gh run list --json conclusion` UNDERCOUNTS FLAKES, and the error is not small.** A rerun
+overwrites the run's conclusion, so every flake that someone reran to green reads as `success`
+forever. The naive query says 2 failures in 19 runs. Asking each run for its **`attempt`** count
+instead:
+
+| sha | attempts | final | hidden failures |
+|---|---|---|---|
+| `03b210a` | **3** | success | 2 |
+| `6fbd328` | **2** | success | 1 |
+| `1f97e23` | 1 | failure | — |
+
+22 attempts across 19 runs; one attempt was the cancelled `8ccec01` (self-inflicted, not a failure),
+leaving **21 attempts that reached a verdict, 4 of them failures — 19%.** The naive reading was
+10.5%. **The instrument was reporting green over half the failures it was asked to count.**
+
+That 4 independently matches the four occurrences catalogued above, which is the first confirmation
+that this entry's count is complete for this branch rather than merely the ones that happened to be
+noticed.
+
+**This is the same root as the `--log` scar recorded earlier**, and finding it twice is the point.
+That one was: `gh run view --log` returns the LATEST attempt, so reading a reran run shows a clean
+pass. This one is: `gh run list`'s `conclusion` is the LATEST attempt, so counting reran runs shows
+a clean history. **One behaviour — gh defaults to the latest attempt — surfacing at the log level
+and at the aggregate level.** I only looked for the second because the first had already bitten me,
+and the second was doing quiet statistical damage where the first did loud local damage.
+
+> **AN INSTRUMENT THAT SUMMARISES RETRIES REPORTS THE HEALTH OF THE RETRY, NOT OF THE SYSTEM.**
+> Wherever a green is reachable by re-running, the count of greens is not a measurement.
+
+**What this changes for the open investigation:** ~19% per-attempt is high enough to make single-run
+observations nearly worthless as evidence — a hypothesis "confirmed" by one green run has roughly a
+4-in-5 chance of looking confirmed regardless of truth. That is very likely how the two refuted
+hypotheses above got their initial support. **Future claims about this flake need a sample size, and
+this entry should state one before it asserts anything again.**
+
+| | |
+|---|---|
+| **Per-attempt failure rate** | 4/21 ≈ **19%** (branch `mirror/dead-sentinel-covers-flags-and-counters`) |
+| **Measured via** | `gh run view <id> --json attempt` — NOT `gh run list --json conclusion` |
