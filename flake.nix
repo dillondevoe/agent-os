@@ -1580,12 +1580,12 @@
               mkdir -p "$work/tests"
               cp ${./tests/agos-notes-battery.py} "$work/tests/agos-notes-battery.py"
               cd "$work"
-              # agos-notes bakes its store path in at build time, so it cannot be redirected
-              # here. Try to create it: if the sandbox allows it the lane exercises the REAL
-              # write path, and if it does not the lane exercises the documented ok:false
-              # degrade. Both are contract-honoring; before b55c017's follow-up the second
-              # one emitted nothing at all and the battery could not tell you which it got.
-              mkdir -p /var/lib/agos-notes 2>/dev/null || true
+              # Point the hand at a writable store so the write paths actually RUN. Before
+              # AGOS_NOTES_DIR existed this lane could only reach the ok:false degrade — the
+              # sandbox cannot create /var/lib/agos-notes — so `new`, `read` and `append` had
+              # never executed off the Dell. They were green by never running.
+              export AGOS_NOTES_DIR="$work/notes"
+              mkdir -p "$AGOS_NOTES_DIR"
               AGENT_OS_STRICT=1 python3 tests/agos-notes-battery.py
               touch $out
             '';

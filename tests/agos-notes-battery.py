@@ -81,6 +81,15 @@ try:
         check("`append appended line` exits 0", rc == 0, "rc=%s err=%s" % (rc, err[:60]))
         ad = json.loads(out)
         check("append -> ok:true", ad.get("ok") is True, out[:60])
+    elif os.environ.get("AGENT_OS_STRICT") == "1":
+        # A SECOND DISARM BEHIND THE FIRST ONE. The strict block at the top of this file only
+        # guarantees the CLI is on PATH; this branch could still swallow a broken write path
+        # as a "skip" and print ALL PASS. That was unavoidable while the store was baked in at
+        # build time — but the wired lane now sets AGOS_NOTES_DIR to a writable dir, so in
+        # strict mode an un-writable store is a BUILD FAILURE, not a reason to pass.
+        check("strict: write path must be exercised, not skipped", False,
+              "ok=%r err=%r — AGOS_NOTES_DIR=%s" %
+              (d.get("ok"), d.get("error"), os.environ.get("AGOS_NOTES_DIR", "<unset>")))
     else:
         print("  SKIP write-path detail: store not writable here (Dell gate owns /var/lib/agos-notes)")
 except Exception as e:

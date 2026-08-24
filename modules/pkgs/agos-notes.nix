@@ -17,7 +17,16 @@ pkgs.writeShellApplication {
   name = "agos-notes";
   runtimeInputs = with pkgs; [ coreutils gnused findutils jq ];
   text = ''
-    NOTES="${notesDir}"
+    # The store path is baked in at build time, and until 2026-08-24 that was the WHOLE story:
+    # the write paths could only ever execute on the one host where /var/lib/agos-notes exists
+    # and is writable. Every other lane took the documented ok:false degrade, so `new`, `read`
+    # and `append` had NEVER run anywhere but the Dell — three assertions that were, in every
+    # CI run the repo has ever produced, indistinguishable from passing ones.
+    #
+    # AGOS_NOTES_DIR overrides it at runtime. The baked value remains the default, so nothing
+    # about the deployed behaviour changes; what changes is that a sandbox can now point the
+    # hand at a writable dir and make those three assertions EXECUTE.
+    NOTES="''${AGOS_NOTES_DIR:-${notesDir}}"
 
     usage() {
       cat >&2 <<'USAGE'
