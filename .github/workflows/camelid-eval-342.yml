@@ -77,7 +77,14 @@ jobs:
             ls -l ./result/bin || true
             ./result/bin/camelid --version || true
           else
-            echo "CLAIM 1: NO BUILD RESULT — see the hash lines above."
+            echo "CLAIM 1: NO BUILD RESULT"
+            # Reprinted HERE, inside the step that actually goes red, and not only in the
+            # build step above. The build step ends `|| true` on purpose, so `gh run view
+            # --log-failed` shows only THIS step — and on run 1 that view carried the
+            # instruction to read the hashes without carrying the hashes. A measurement
+            # that is one step away from the place a reader lands is a measurement they
+            # have to already know to go looking for.
+            grep -E 'specified:|got:' /tmp/camelid-build.log || true
             echo "If run 1: pin the reported \`got:\` hashes into eval/camelid/default.nix and re-run."
             echo "If the hashes are already pinned, this is a REAL claim-1 failure and the eval stops here"
             echo "(Rabbot: 'If claim 1 fails, stop there and report — the rest is moot under the clean-room rule')."

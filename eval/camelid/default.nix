@@ -31,8 +31,10 @@ pkgs.rustPlatform.buildRustPackage {
     owner = "timtoole02";
     repo = "Camelid";
     inherit rev;
-    # Same rule as cargoHash: unknown until something fetches it. First run reports it.
-    hash = "";
+    # MEASURED by run 1 (32799282259): nix reported
+    #   got: sha256-fqLglkSQ5MrXadcsENn01nIV03L24+6pgkYUssQ/ld4=
+    # for a 105.4 MB source tarball. Pinned from nix's own output, not computed by hand.
+    hash = "sha256-fqLglkSQ5MrXadcsENn01nIV03L24+6pgkYUssQ/ld4=";
   };
 
   cargoHash = "";
