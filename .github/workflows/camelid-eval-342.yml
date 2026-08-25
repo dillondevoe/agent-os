@@ -1,0 +1,85 @@
+# task 342, claim 1 — an EVAL lane, not a gate. It builds a THIRD-PARTY tree
+# (github.com/timtoole02/Camelid, pinned) to answer one question: does it build under
+# Nix from source, and what does the closure contain?
+#
+# IT IS SCOPED TO ITS OWN BRANCH AND PATHS ON PURPOSE. It is not in `checks`, nothing in
+# flake.nix references it, and it must never become a required check — a lane that can go
+# red because someone ELSE's repo moved is not a gate on this repo's correctness.
+#
+# THE FIRST RUN IS EXPECTED TO BE RED, AND THAT IS THE MEASUREMENT. Neither the src hash
+# nor the cargo vendor hash can be computed on a box with no nix (DVo has none, measured
+# tick 550). Nix reports both as `got: sha256-...` on mismatch. This lane's job on run 1 is
+# to SURFACE those two lines rather than bury them in a 900-line log; run 2 pins them and
+# answers the real question.
+#
+# WHAT THIS LANE CANNOT TELL YOU: that Camelid WORKS. A green build is "it compiles from
+# source with nixpkgs inputs" and nothing more — claims 2-5 (fail-closed, OpenAI-compat
+# parse rate, adapters, parity vs ollama) are behavioural and none of them are tested here.
+
+name: camelid eval (task 342, claim 1)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ 'mirror/eval-342-camelid-nix-build' ]
+    paths:
+      - 'eval/camelid/**'
+      - '.github/workflows/camelid-eval-342.yml'
+
+concurrency:
+  group: camelid-eval-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Install Nix (flakes + sandbox)
+        uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25  # v22
+        with:
+          extra-conf: |
+            experimental-features = nix-command flakes
+            sandbox = true
+
+      # Same assert as flake-check: the whole point of "builds under Nix from source" is
+      # that it built in a SANDBOX. An unsandboxed build that reached the host's cc, cmake
+      # or network would answer a different question than the one Rabbot asked.
+      - name: Assert sandbox is enabled
+        run: test "$(nix config show sandbox)" = "true"
+
+      # `|| true` then a hash grep, NOT `continue-on-error`: continue-on-error marks the
+      # whole job green, which would report a successful build for a tree that did not
+      # build. The step below decides red/green from the build's own output.
+      - name: Build Camelid from source (pinned rev)
+        id: build
+        run: |
+          set -o pipefail
+          nix-build eval/camelid/default.nix --option sandbox true 2>&1 | tee /tmp/camelid-build.log || true
+          echo "--- run-1 measurement: any hash nix computed for us ---"
+          # `got:` is what nix computed. If these lines exist, run 1 did its job.
+          grep -nE 'specified:|got:' /tmp/camelid-build.log || echo "(no hash mismatch lines — hashes are already pinned)"
+
+      - name: Verdict — did it actually build?
+        run: |
+          if [ -e ./result ]; then
+            echo "CLAIM 1: BUILD PRODUCED A RESULT"
+            echo "--- runtime closure size ---"
+            nix path-info -Sh ./result
+            echo "--- runtime closure contents (every dep that ships, not just build-time) ---"
+            nix-store -qR ./result | sed 's|/nix/store/[a-z0-9]*-||' | sort
+            echo "--- the binary itself ---"
+            ls -l ./result/bin || true
+            ./result/bin/camelid --version || true
+          else
+            echo "CLAIM 1: NO BUILD RESULT — see the hash lines above."
+            echo "If run 1: pin the reported \`got:\` hashes into eval/camelid/default.nix and re-run."
+            echo "If the hashes are already pinned, this is a REAL claim-1 failure and the eval stops here"
+            echo "(Rabbot: 'If claim 1 fails, stop there and report — the rest is moot under the clean-room rule')."
+            exit 1
+          fi
