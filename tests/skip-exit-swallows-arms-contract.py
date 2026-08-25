@@ -162,5 +162,45 @@ check("every arm needs the CLI", True)
 check("control: and does NOT fire on a skip that precedes every arm",
       offenders(_LEGIT) == [], "offenders=%r" % (offenders(_LEGIT),))
 
+# THE DETECTOR NEXT DOOR HAS THIS FILE'S OWN BUG, AND FOUND IT BY ACCUSING THIS FILE.
+# vm-matrix-contract.self_disarms() is a line scan for `sys.exit(0)` with a nearby "SKIP".
+# The control arms ABOVE are triple-quoted fixtures containing exactly that pair, so on
+# 2026-08-25 it turned CI red on this battery -- reading test data as a confession. Narrowed
+# to real `exit(0)` CALL nodes for .py (2026-08-25). These two arms are that fix's controls,
+# and they live here rather than in a one-off shell run because a check demonstrated once at
+# a terminal is the same instrument this whole file exists to retire.
+_vmc_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vm-matrix-contract.py")
+_vmc = None
+try:
+    import importlib.util
+    _spec = importlib.util.spec_from_file_location("_vmc_for_arms", _vmc_path)
+    _vmc = importlib.util.module_from_spec(_spec)
+    _argv = sys.argv[:]
+    sys.argv = [_vmc_path]        # it argparses; do not let OUR flags reach it
+    try:
+        _spec.loader.exec_module(_vmc)
+    finally:
+        sys.argv = _argv
+except Exception as e:
+    # FAIL, never skip. A missing neighbour is exactly the "green proves nothing" shape.
+    check("neighbour: vm-matrix-contract.py is importable for its control arms", False, str(e)[:90])
+
+if _vmc is not None:
+    import tempfile
+    def _disarms(body):
+        fd, fp = tempfile.mkstemp(suffix=".py"); os.close(fd)
+        with open(fp, "w") as fh: fh.write(body)
+        try:
+            return _vmc.self_disarms(fp)
+        finally:
+            os.unlink(fp)
+
+    _REAL_DISARM = 'import shutil, sys\ncli = shutil.which("agos-thing")\nif not cli:\n    print("  SKIP: agos-thing not on PATH")\n    sys.exit(0)\n'
+    _FIXTURE_ONLY = '_F = """\\\n    print("SKIP")\n    sys.exit(0)\n"""\nprint(_F)\n'
+    check("neighbour: self_disarms STILL fires on a genuine self-disarming battery",
+          _disarms(_REAL_DISARM) is True, "expected True")
+    check("neighbour: and no longer fires on a SKIP/exit(0) pair inside a string fixture",
+          _disarms(_FIXTURE_ONLY) is False, "expected False — this file is that case")
+
 print("skip-exit-swallows-arms-contract: " + ("ALL PASS" if EX == 0 else "FAILURES"))
 sys.exit(EX)

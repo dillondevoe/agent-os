@@ -430,7 +430,39 @@ def self_disarms(path):
         # evaluate the derivation, so it cannot confirm the env var is actually set. What it can
         # do is stop pointing at a file whose author has already answered the question.
         return False
+    # For PYTHON files, only lines holding a REAL `sys.exit(0)` CALL count. The scan below is
+    # textual, and text does not know what is code: on 2026-08-25 this check turned CI red on
+    # tests/skip-exit-swallows-arms-contract.py, whose `print("SKIP")` / `sys.exit(0)` pairs are
+    # triple-quoted FIXTURES -- the control arms of the battery written to catch this very shape.
+    # A detector that reads its own test data as a confession. The docstring above tunes this
+    # check to UNDER-report precisely because its failure arm turns CI red, and a false positive
+    # here costs a wrong fix: the only ways out were an exemption entry (a suppression list
+    # grown to hide a detector bug) or deleting the control arms (removing the evidence the
+    # battery works). Both are worse than parsing. `.sh` has no parser here and keeps the text
+    # scan, so this narrowing is Python-only and the shell arm is unchanged.
+    code_exit_lines = None
+    if path.endswith(".py"):
+        try:
+            tree = ast.parse("\n".join(lines))
+        except SyntaxError:
+            code_exit_lines = None   # unparseable: fall back to text rather than pass silently
+        else:
+            code_exit_lines = set()
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Call) or not node.args:
+                    continue
+                fn = node.func
+                name = (fn.attr if isinstance(fn, ast.Attribute)
+                        else fn.id if isinstance(fn, ast.Name) else None)
+                if name != "exit":
+                    continue
+                a = node.args[0]
+                if isinstance(a, ast.Constant) and a.value == 0:
+                    code_exit_lines.add(node.lineno)
+
     for i, line in enumerate(lines):
+        if code_exit_lines is not None and (i + 1) not in code_exit_lines:
+            continue
         # Two spellings, because the check is named for a BEHAVIOUR and the behaviour is not
         # Python's. Shipped .py-only in #155 — its own disguise-8, a name wider than its scope,
         # in the check written to catch scope/claim mismatches. Swept the 12 shell batteries by
