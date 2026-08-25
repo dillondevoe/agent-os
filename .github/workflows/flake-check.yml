@@ -102,6 +102,20 @@ jobs:
       - name: no agos-* hand blames its subject for an absent backend
         run: python3 tests/backend-absence-contract.py
 
+      # Third static contract, and it exists because the FIX for the previous two was a grep.
+      # On 2026-08-24 a battery's skip path was found discarding the verdict of arms placed
+      # above it: `sys.exit(0)` was correct when written, an arm moved earlier, and neither
+      # line was edited. The battery printed FAIL and reported success. I found both instances
+      # by hand-sweeping, which is right the day it is run and silent every day after.
+      #
+      # Validated against a reconstructed pre-fix tree (`git archive 9d84f71 tests`) rather
+      # than trusted for returning zero: it fires there on agos-media-battery.py:79. It does
+      # NOT fire on calendar-battery at that commit, because that file only became an offender
+      # when the span arms were added -- so this ratchet would have caught one of the two, not
+      # both, and the honest claim is the smaller one.
+      - name: no battery exits 0 after one of its arms has already run
+        run: python3 tests/skip-exit-swallows-arms-contract.py
+
       # The nix-free battery suite itself. Until 2026-08-24 these 23 batteries ran ONLY on a
       # developer's machine: four of them — anthropic-transport, audit-signing, escalate-consent,
       # transport — sat on vm-matrix-contract.py's KNOWN_UNWIRED_DEBT list precisely because no
