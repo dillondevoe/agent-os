@@ -37,7 +37,15 @@ pkgs.rustPlatform.buildRustPackage {
     hash = "sha256-fqLglkSQ5MrXadcsENn01nIV03L24+6pgkYUssQ/ld4=";
   };
 
-  cargoHash = "";
+  # MEASURED by run 2 (32799807646), transcribed from nix's own `got:` line.
+  #
+  # NOTE WHAT THE VENDOR STAGE FETCHED: tao, windows-core, windows-future, system-deps.
+  # Those are `camelid-desktop`'s (Tauri) dependencies. `default-members = ["."]` scopes
+  # what BUILDS, but cargo vendors from the WORKSPACE lockfile, so the desktop member's
+  # crates are downloaded regardless. It inflates the vendor derivation; it does not enter
+  # the server binary's runtime closure. Recorded rather than worked around — the runtime
+  # closure printed by the verdict step is what settles the clean-room question.
+  cargoHash = "sha256-Gr9fT4H2TYbqfQlDqv4Lvr93RCnt40S1VlSYGK9xtYM=";
 
   # Server binary only. `--bin camelid` is upstream's own CI scope; the camelid-desktop
   # workspace member is a Tauri app and is NOT part of the claim being tested.
