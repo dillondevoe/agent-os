@@ -25,16 +25,15 @@ The entry criterion is: *the failing job cannot be explained by the change under
 
 ---
 
-## "Shell did not start in time" — first seen in test-identity-boot, NOT specific to it
+## test-identity-boot — "Shell did not start in time"
 
 | | |
 |---|---|
 | **First observed** | 2026-08-24T01:11Z |
-| **Last observed** | 2026-08-24T16:36:45Z |
-| **Occurrences** | 3 — see the third-occurrence section below; NOT identity-boot-only |
-| **Commits** | `3c99650` (PR #161); `6fbd328` (PR #162) |
+| **Occurrences** | 1 here; superseded by the four-job entry below — see 2026-08-25 |
+| **Commit** | `3c99650` (branch `mirror/wire-frontdoor-kick-battery`, PR #161) |
 | **Job** | `vm-test (test-identity-boot)` |
-| **Status** | open — non-determinism now DEMONSTRATED (same-SHA green re-run); cause still unidentified |
+| **Status** | open — folded into the harness entry below, which answers this entry's own "what would change this verdict" |
 
 ```
 RuntimeError: Shell did not start in time
@@ -70,443 +69,79 @@ A green run is not evidence the first red was spurious in either case — it is 
 the failure is not deterministic, which is what "flake" means. This entry stays open at one
 occurrence, now with the added note that the confirming observation was never actually taken.
 
-### Second occurrence, 2026-08-24 — and it supplies the observation the first one lacked
+---
 
-`6fbd328`, run `32751833582`, job `vm-test (test-identity-boot)`. Same terminal error,
-`RuntimeError: Shell did not start in time`. This time the failure is located precisely: it is
-**subtest 5, "a REAL reboot does not rotate the keys — the leg a battery cannot show"** — subtests
-1-4 passed and finished cleanly first. So the shell that did not start is the one after
-`machine.shutdown(); machine.start()`, i.e. the VM's SECOND cold boot, not its first. That is new
-information the first entry did not have, and it narrows the suspect from "our VM is slow to reach
-a usable shell" to "our VM is slow to reach a usable shell *the second time*."
-
-**The same-SHA control was taken this time.** `gh run rerun 32751833582 --failed` completed:
-`attempt=2 completed success 6fbd328`. Same tree, same test, green. That is the observation the
-first entry explicitly records as never taken, and it is the strong form: it isolates
-non-determinism without resting on any argument about what an intervening commit could plausibly
-have changed. **`flake` is now demonstrated rather than inferred.** The cause is still not
-identified, and this entry stays open.
-
-**The change under test still cannot explain it**, by the same criterion as before, checked rather
-than assumed: `6fbd328` touches `modules/pkgs/agos-sys.nix` and `tests/agos-sys-battery.py`, and
-`grep -c 'agos-sys' tests/identity-boot-battery.py` -> 0. The eleven vm-tests runs immediately
-preceding this one were all green.
-
-**What the second occurrence changes about the next step.** The first entry said two occurrences
-would make "runner load" weaker than "our VM is slow to reach a usable shell." It has happened, and
-the subtest-5 localisation points somewhere more specific than either: the reboot leg calls
-`machine.start()` and then waits, with no timeout of its own, on the test driver's default backdoor
-connect. A third occurrence should not be re-triaged from scratch — it should go straight to that
-wait.
-
-**What was deliberately NOT done.** No retry loop was wrapped around `machine.start()`. A retry
-there would make this ledger entry stop accruing occurrences while changing nothing about the
-underlying slowness, and — worse — it would silently absorb a REAL failure of identity-boot to come
-back from a reboot, which is the exact thing subtest 5 exists to detect. Masking the only detector
-of a defect in order to quiet its false positives costs more than the false positives do.
-
-### Third occurrence, 2026-08-24T19:58Z — and it FALSIFIES this entry's title and its next step
-
-`03b210a`, run `32770548874`, job **`vm-test (test-fetch-proxy-allowlist)`**. Same terminal
-error, `RuntimeError: Shell did not start in time`.
-
-**It is not test-identity-boot.** It is a different VM test, on a different machine (`sealed`),
-reaching the error through a different call — `wait_for_unit` -> `systemctl` -> `execute` ->
-`connect`, on the machine's **FIRST** boot, not through `machine.start()` on a second one. The
-second occurrence's localisation ("slow to reach a usable shell *the second time*") does not
-survive this, and neither does the prescribed next step. **The previous entry said a third
-occurrence "should not be re-triaged from scratch — it should go straight to that wait." Going
-straight to that wait would have been going straight to code this occurrence never executed.**
-Recording that plainly: the narrowing was real evidence at the time and it was still wrong, because
-two occurrences of a symptom in one test is also what a fleet-wide symptom looks like early.
-
-**The new information, and it is about the failure's SHAPE rather than its location.** The guest's
-serial log stops dead at guest-time **9.05s**, mid-boot, on `Starting Virtual Console Setup...`
-(wall clock 19:53:37Z). The next line in the log is the driver's traceback at **19:58:27Z** —
-**4 minutes 50 seconds of total silence from a guest that was emitting several lines per second.**
-
-That distinguishes two hypotheses this ledger has so far treated as one. "Slow to reach a usable
-shell" predicts boot messages continuing, just late. What actually happened is that the guest
-**stopped emitting entirely** — a wedge, not a slowness. **No timeout increase fixes a wedge**, and
-every remedy considered across the first two occurrences (raise the limit, add a wait, retry the
-start) assumed slowness. The retry loop deliberately NOT written at occurrence 2 is, on this
-evidence, even less likely to have helped than the entry gave it credit for.
-
-`Starting Virtual Console Setup...` appears three times in the final seconds (19:53:37.127,
-.218, .302). Recorded as an observation, not a diagnosis — systemd restarting a unit is one
-reading among several and this entry does not have enough to pick.
-
-**The change under test still cannot explain it, checked rather than assumed — but the check is
-weaker this time and that is worth saying.** `03b210a` touches `modules/pkgs/agos-sys.nix`, and
-`agos-sys` IS in `systemPackages` via `settings-open.nix`, so it is in the image every one of
-these VMs boots. That is a real path, unlike the previous two occurrences' subjects. Against it:
-`agos-sys` is a `writeShellApplication` that nothing runs at boot, the wedge is in
-`systemd-vconsole-setup` which has no relation to it, the other VM legs on the same commit passed,
-and **occurrence 1 (`3c99650`) touched only `tests/vm-matrix-contract.py`** — a file no VM image
-contains — which refutes any strict dependency on agos-sys. Noted rather than dismissed: **2 of 3
-occurrences are on commits touching `agos-sys.nix`**, occurrence 1 is the disconfirming case, and
-a fourth occurrence on a commit that touches neither would settle it.
-
-**Same-SHA control, attempt 1: TRIGGERED, THEN CANCELLED BY MY OWN NEXT PUSH — the identical
-mistake this file's first entry had to retract, repeated one tick later, in the file that
-documents it.** `gh run rerun 32770548874 --failed` was started, and then the commit carrying
-this very section was pushed to the same branch, superseding it: `03b210a cancelled`. The first
-entry above says, verbatim, *"it was re-triggered, and it never reached a verdict ... superseded
-by the next push to the branch."* I read that sentence while writing this section and still did it.
-
-**Why the prose did not prevent the repeat, which is the part worth generalising.** The lesson was
-recorded as a thing to remember, and the actual cause is structural: on this repo a branch rerun
-and a push to that branch are *in conflict by construction*, and nothing in the sequence
-"trigger control -> finish work -> push" knows that. A rule phrased as vigilance loses to an
-ordering defect every time. **The control must be started and RESOLVED before the tick pushes
-anything, or started from a commit the tick will not move past.**
-
-**What is NOT evidence here.** `93558da` — the markdown-only commit that cancelled the control —
-ran vm-tests green. That is a green on a LATER tree, which this file already ruled the weak form:
-it cannot separate "flaky" from "the intervening commit changed it," and the fact that a
-docs-only commit could not plausibly have changed it is exactly the plausibility argument this
-ledger exists to replace. Recorded as not-a-control.
-
-**Same-SHA control, attempt 2: TAKEN, and it is GREEN.** Re-triggered on `03b210a` with the tick's
-push deliberately withheld until it reached a verdict — the ordering fix above, applied to itself.
-`attempt=2 completed success 03b210a`, and verified by the job list rather than the run's
-conclusion: all nine legs succeeded, **`vm-test (test-fetch-proxy-allowlist)` included**. Same
-tree, same test, green. Occurrence 3 is therefore non-determinism DEMONSTRATED, not inferred —
-the strong form, on the third occurrence and for the second time in this file.
-
-Note in passing: this rerun also put `vm-test (test-identity-boot)` green on the same tree.
-
-**What the control does NOT settle.** It shows the wedge is not deterministic. It says nothing
-about what wedged. The next step below is unchanged by it.
+## The harness, not the tests — `backdoor.service` unreachable across four different jobs
 
 | | |
 |---|---|
-| **Occurrences** | 3 |
-| **Jobs** | `vm-test (test-identity-boot)` ×2; `vm-test (test-fetch-proxy-allowlist)` ×1 |
-| **Status** | open — NOT identity-boot-specific; symptom is a mid-boot wedge, not slowness |
+| **First observed** | 2026-08-24T01:11Z (the entry above) |
+| **Occurrences** | 4 visible, across 4 **different** jobs; more are hidden — see below |
+| **Jobs** | `test-identity-boot`, `test-seal-faildown`, `test-selfimprove-loop-runs`, `test-egress-uid-scope` |
+| **Status** | open — root cause NOT established |
 
-**Next step, replacing the one this occurrence falsified.** Stop looking at which test waits and
-start looking at what the guest was doing when it went quiet. Concretely: capture the guest's
-last serial line on every future occurrence (this entry now has one data point: `9.05s, Virtual
-Console Setup`), and compare it against the two identity-boot occurrences' logs, which were never
-read for this. If the wedge point is the same across tests, it is a boot-path defect in our image
-and belongs to the image, not to any test. **Do not raise a timeout in the meantime** — on this
-evidence it would convert a 5-minute red into a longer red, or worse, into a green that means
-nothing.
+**This entry answers the question the one above asked.** That entry said a second occurrence
+would weaken "runner load" and point at "our VM is slow to reach a usable shell." Three more
+arrived — and the discriminating fact is that they are on *different jobs*, with a signature that
+does not vary:
 
-### The wedge point is the SAME in both tests — first application of the new next step
-
-The previous section's next step was: *"capture the guest's last serial line on every occurrence
-and compare it against the two identity-boot occurrences' logs, which were never read for this."*
-Done, and it produced the first cross-test evidence this entry has ever had.
-
-**Occurrence 3** — `test-fetch-proxy-allowlist`, `03b210a`, machine `sealed`. Last guest line,
-guest-time **9.05s**:
-
-```
-[    9.053528] systemd[1]: Starting Virtual Console Setup...
-        <4m50s of total silence>
-RuntimeError: Shell did not start in time
-```
-
-**Occurrence 2** — `test-identity-boot`, `6fbd328`, run `32751833582` **attempt 1** (note: `gh run
-view --log` returns the LATEST attempt, which for this run is the green rerun; `--attempt 1` is
-required to see the failing one, and reading the wrong attempt would have shown a clean 278s pass).
-Last guest lines, guest-time **13.0-13.8s**:
-
-```
-[   13.011831] systemd[1]: Starting Virtual Console Setup...
-[   13.127372] systemd[1]: systemd-vconsole-setup.service: Deactivated successfully.
-[   13.130212] systemd[1]: Stopped Virtual Console Setup.
-[   13.169598] systemd[1]: Starting Virtual Console Setup...
-[   13.227441] systemd[1]: systemd-vconsole-setup.service: Deactivated successfully.
-[   13.231150] systemd[1]: Stopped Virtual Console Setup.
-[   13.236991] systemd[1]: Starting Virtual Console Setup...
-[   13.832705] systemd[1]: Finished Virtual Console Setup.
-        <silence>
-RuntimeError: Shell did not start in time
-```
-
-**Two different tests, two different machines, two different commits — and the guest goes silent at
-the same boot stage, with `systemd-vconsole-setup` cycling repeatedly immediately before it, in
-both.** That is the first evidence in this entry that is about the IMAGE rather than about any
-test, and it is what finally justifies the retitle: this was never an identity-boot bug.
-
-**Hypothesis, stated as a hypothesis.** `systemd-vconsole-setup` and the nixos test driver's serial
-backdoor both want the console device. A race between them would produce exactly this silhouette:
-the guest is alive and healthy (occurrence 2 shows vconsole-setup *Finished* cleanly), but the
-backdoor shell never becomes reachable, so the driver waits out its full timeout and reports the
-only thing it can see — "Shell did not start in time." **Not confirmed.** Two data points at the
-same stage is suggestive and is also what you would get from any stage that happens to be where the
-boot log naturally thins out.
-
-**What would confirm or kill it, chosen so that a null result is informative either way.** On a
-GREEN run of the same tests, find where the backdoor shell comes up relative to
-`systemd-vconsole-setup`. If the backdoor consistently connects BEFORE vconsole-setup runs on green
-boots and the two failures are the cases where the ordering inverted, the race is real and the fix
-is an ordering constraint, not a timeout. If the backdoor comes up after vconsole-setup on green
-boots too, then vconsole-setup is merely the last chatty unit before a quiet stretch, this
-correlation is an artifact of where the log thins, and the next place to look is what the driver
-does between spawning qemu and its first successful connect.
-
-**Occurrence 1 (`3c99650`) could not be read**: it has aged out of `gh run list --limit 60` on this
-repo. Recorded as unavailable rather than omitted — the third data point that would have made this
-a pattern instead of a pair is simply gone, which is an argument for capturing the last serial line
-into this file AT THE TIME rather than planning to go back for it.
-
-| | |
-|---|---|
-| **Occurrences** | 3 (logs read: 2 of 3; occurrence 1 aged out of the run list) |
-| **Status** | open — image-level, not test-level; wedge stage identified, cause still hypothesis |
-
-### The confirming observation was taken immediately, and it WEAKENS the hypothesis it tested
-
-Taken in the same tick rather than deferred, from `32773211071` (green `93558da`,
-`test-identity-boot`):
-
-```
-[    3.384650] systemd[1]: Starting Virtual Console Setup...
-[    3.519639] systemd[1]: Finished Virtual Console Setup.
-[    3.837610] systemd[1]: systemd-vconsole-setup.service: Deactivated successfully.
-[    3.853525] systemd[1]: Stopping Virtual Console Setup...
-[    3.856360] systemd[1]: Starting Virtual Console Setup...
-         OK   Finished Virtual Console Setup.
-```
-
-**The repeated start/stop cycling is NORMAL.** It happens on green boots too, in the same shape.
-The previous section flagged the cycling as "an observation, not a diagnosis" and was right to; it
-is not distinctive and carries no signal. The vconsole-contention hypothesis is not confirmed, and
-the null result is the informative one this entry asked for.
-
-**But the timing is a real signal, and it corrects something I asserted two sections ago.** The
-green boot reaches vconsole-setup at **3.4-3.9s**. The two failures reach the same stage at
-**9.05s** and **13.0-13.8s** — three to four times later, at an identical point in the boot
-sequence. Those guests were already far behind before they went quiet.
-
-**Correction, and it changes the recommended action, which is why it is stated rather than
-quietly folded in.** The third-occurrence section says *"That is a WEDGE, not a slowness"* and
-*"Do not raise a timeout in the meantime."* The first half is over-strong on this evidence: the
-failing boots were demonstrably slow *as well as* eventually silent, and "wedge" was inferred from
-the silence alone without ever comparing against a green boot's clock. What the evidence now
-supports is **a guest running 3-4x slow that then stops emitting** — which is compatible with a
-wedge, and equally compatible with a guest so starved of CPU that it makes no visible progress
-inside the driver's window.
-
-The **operational** advice does not change, for a different reason than the one first given. Do not
-raise the timeout — not because a timeout cannot help a wedge, but because a 3-4x slowdown against
-a shared CI runner points at resource contention, and raising the limit would convert a fast red
-into a slow one while removing the only signal that the runner is oversubscribed.
-
-**Next step, revised again.** Stop looking at the boot log's content and start looking at its
-clock. On every future occurrence record the guest timestamp of a fixed early landmark (e.g.
-`Starting Virtual Console Setup`) alongside the same landmark from a green run of the same test.
-If the ratio is consistently >2x, this is runner contention and belongs to the workflow's
-concurrency/resource settings, not to the image and not to any test. Two data points say 3-4x;
-that is a hypothesis with a cheap test and a clear owner.
-
-### Fourth occurrence KILLS both hypotheses, one tick after each was proposed
-
-`1f97e23`, run `32779702396`, job **`vm-test (test-seal-faildown)`** — a **third** distinct test.
-Four occurrences now span three different VM tests, which retires "test-specific" for good.
-
-**It kills the timing hypothesis, which was proposed in the section immediately above.** That
-section predicted the failing boots would show a consistent >2x slowdown at a fixed early landmark.
-Measured:
-
-| run | test | `Starting Virtual Console Setup` |
+| run | job | date (UTC) |
 |---|---|---|
-| green `93558da` | identity-boot | 3.38s |
-| occurrence 2 | identity-boot | 13.01s |
-| occurrence 3 | fetch-proxy-allowlist | 9.05s |
-| **occurrence 4** | **seal-faildown** | **2.47s** |
+| `32792191355` | `vm-test (test-selfimprove-loop-runs)` | 2026-08-25T00:05Z |
+| `32784416040` | `vm-test (test-identity-boot)` | 2026-08-24T22:23Z |
+| `32779702396` | `vm-test (test-seal-faildown)` | 2026-08-24T21:28Z |
+| `32808436764` attempt 1 | `vm-test (test-egress-uid-scope)` | 2026-08-25T04:18Z |
 
-Occurrence 4 reaches the landmark **faster than the green run.** There is no consistent ratio, so
-there is no runner-contention signal at this landmark. The hypothesis was specified with a null
-result that would be informative, and this is it.
+Every one: the driver cannot reach `backdoor.service`, retries 20 times, and gives up after
+~7m07s with `RuntimeError: Shell did not start in time.`
 
-**It also kills the same-stage reading from the section before that.** Occurrence 4 goes silent
-after `Finished register-nix-paths.service` at 9.88s, not at vconsole-setup. Two occurrences
-sharing a stage was a coincidence of two points, and it was reported here as "the first evidence
-about the IMAGE rather than any test." That claim does not survive a third sample. **Two points
-define a line no matter where they fall**, and this entry has now spent two sections learning that
-at one section apiece.
-
-**And it settles the agos-sys correlation as coincidence.** `1f97e23` touches exactly one file,
-`docs/ci-flake-ledger.md` — this file. It contains no code, changes no image, and could not have
-influenced any boot. The "2 of 3 occurrences touch agos-sys.nix" note is now 2 of 4 with two
-disconfirming cases. Dropped.
-
-**What actually survives four occurrences**, stated as the whole of it:
-
-- Three different tests, four commits, one symptom: `RuntimeError: Shell did not start in time`.
-- The guest is alive and making normal progress right up to the silence, every time.
-- The stage at which it goes silent is **not** consistent.
-- The speed at which it reaches a fixed landmark is **not** consistent, and is sometimes faster
-  than a green run.
-- The failure is always in the driver's backdoor connect, before any assertion in the test body.
-- Same-SHA reruns pass (demonstrated twice).
-
-**That last-but-one point is where this file STARTED.** The first entry wrote: *"The failure is in
-the nixos test harness's initial shell connect, before any assertion in the test body runs."* Three
-sections of narrowing — to identity-boot, to the second boot, to a boot stage, to a timing ratio —
-have each been refuted by the next occurrence, and the reading with the most evidence behind it is
-the one taken before any narrowing happened. Recorded because the narrowings were not careless;
-each was the best reading of the data then available, and each was wrong. **A localisation drawn
-from every sample you have is still a localisation drawn from a small sample.**
-
-**Next step, and this time it is not another guess about the guest.** Instrument the DRIVER side:
-capture what the test driver is doing during the silent window (it is the only participant whose
-behaviour has never been looked at) and check whether the backdoor socket is ever opened at all.
-Until that exists, add nothing to this entry but occurrences and their landmark timings.
-
-| | |
-|---|---|
-| **Occurrences** | 4 |
-| **Tests** | identity-boot ×2, fetch-proxy-allowlist ×1, seal-faildown ×1 |
-| **Status** | open — not test-specific, not stage-consistent, not speed-consistent; driver side never examined |
-
-### A base rate at last — and `gh run list` was hiding a third of it
-
-Two findings from the same query, taken when `9c631e6` came back **green**.
-
-**1. The adjacent-commit counterexample.** `1f97e23` (docs-only) FAILED; `9c631e6` (docs-only, same
-branch, the very next commit) PASSED. Two neighbouring commits, neither containing code, opposite
-results. Nothing about the commit predicts the outcome, which is what "flaky" means and is now
-demonstrated rather than inferred.
-
-**2. `gh run list --json conclusion` UNDERCOUNTS FLAKES, and the error is not small.** A rerun
-overwrites the run's conclusion, so every flake that someone reran to green reads as `success`
-forever. The naive query says 2 failures in 19 runs. Asking each run for its **`attempt`** count
-instead:
-
-| sha | attempts | final | hidden failures |
-|---|---|---|---|
-| `03b210a` | **3** | success | 2 |
-| `6fbd328` | **2** | success | 1 |
-| `1f97e23` | 1 | failure | — |
-
-22 attempts across 19 runs; one attempt was the cancelled `8ccec01` (self-inflicted, not a failure),
-leaving **21 attempts that reached a verdict, 4 of them failures — 19%.** The naive reading was
-10.5%. **The instrument was reporting green over half the failures it was asked to count.**
-
-That 4 independently matches the four occurrences catalogued above, which is the first confirmation
-that this entry's count is complete for this branch rather than merely the ones that happened to be
-noticed.
-
-**This is the same root as the `--log` scar recorded earlier**, and finding it twice is the point.
-That one was: `gh run view --log` returns the LATEST attempt, so reading a reran run shows a clean
-pass. This one is: `gh run list`'s `conclusion` is the LATEST attempt, so counting reran runs shows
-a clean history. **One behaviour — gh defaults to the latest attempt — surfacing at the log level
-and at the aggregate level.** I only looked for the second because the first had already bitten me,
-and the second was doing quiet statistical damage where the first did loud local damage.
-
-> **AN INSTRUMENT THAT SUMMARISES RETRIES REPORTS THE HEALTH OF THE RETRY, NOT OF THE SYSTEM.**
-> Wherever a green is reachable by re-running, the count of greens is not a measurement.
-
-**What this changes for the open investigation:** ~19% per-attempt is high enough to make single-run
-observations nearly worthless as evidence — a hypothesis "confirmed" by one green run has roughly a
-4-in-5 chance of looking confirmed regardless of truth. That is very likely how the two refuted
-hypotheses above got their initial support. **Future claims about this flake need a sample size, and
-this entry should state one before it asserts anything again.**
-
-| | |
-|---|---|
-| **Per-attempt failure rate** | 4/21 ≈ **19%** (branch `mirror/dead-sentinel-covers-flags-and-counters`) |
-| **Measured via** | `gh run view <id> --json attempt` — NOT `gh run list --json conclusion` |
-
-### Occurrence 5, and a same-commit failure that is NOT this flake
-
-`6ae7c32` — **both lanes failed**, and they are two unrelated causes. Recorded together
-because "both lanes red" invites the inference that one thing broke, and that inference
-would have been wrong.
-
-- **vm-tests: occurrence 5.** `test-identity-boot`, subtest 5 (the real-reboot leg), the
-  same `Shell did not start in time`. Updated rate: **5 failed attempts of 22 ≈ 23%.**
-- **flake-check: NOT this flake, and not flaky at all.** `calendar-battery` failed a real
-  assertion: `add` reported `ok:true` for `2026-08-25 00:25` and `agenda 1` returned `[]`.
-  The arm hardcoded a one-calendar-day window while adding an event at `now + 2h`, so for
-  the two hours after 22:00 the event lands on tomorrow and the window correctly excludes
-  it. Reproduced across all 1440 minutes of a day: **wrong for 120 of them, 8.3%**, right
-  for the rest. Fixed by deriving the span from the event. See the commit.
-
-**The distinction is the point.** One of these is a non-deterministic infrastructure flake;
-the other is a test that was *deterministically wrong for 8.3% of the day* and had simply
-never been run in that window. They present identically — a red lane on a docs-only commit —
-and only reading each failure's own output separates them. **A base rate for one failure mode
-does not license attributing the next red to it.**
-
-| | |
-|---|---|
-| **Per-attempt failure rate** | 5/22 ≈ **23%** |
-
-### The calendar fix got a LIVE confirmation, and it was luck
-
-Run `32787907053` on `0188505` executed at **23:09Z — inside the 22:00-23:59 window**, the
-two hours where the old code was wrong. Its own output lines:
+The guest does **not** report a problem — no unit failure, no OOM, no panic. The last console
+line is an ordinary one,
 
 ```
-PASS span: the derived agenda window covers now+2h at every minute of the day  — 0 uncovered
-PASS span: and the OLD hardcoded `1` demonstrably did NOT (the arm can fail)  — ... got 120
-PASS `agenda 2` exits 0
-PASS agenda → shows the added event (span=2, event 2026-08-25 01:09)
+[    9.221984] systemd[1]: etc-machine\x2did.mount: Deactivated successfully.
 ```
 
-`span=2`, not 1. The old code would have asked `agenda 1` about an event on 2026-08-25 and
-got `[]`. The fix was exercised in the exact window it exists for, and held.
+— and then the console is silent for the rest of the run.
 
-**This does not retire the wall-clock-independent arms, and the reason matters.** I built
-those because a live confirmation was not available on demand — a run inside a 2-hour window
-is not something you can schedule, and waiting for one is not a control. The live
-confirmation then arrived anyway, on the second consecutive commit to land in the window.
-That is luck, and luck is not a method: the next run will be outside the window, and the span
-arms will still be checking the arithmetic while the live arm quietly passes for free.
+**So this is one harness defect, not four flaky tests.** The four job names are the four places
+the harness happened to be standing. Filing them as four separate test problems would be the
+wrong unit of work, and — per this file's entry criterion — none of the four can be explained by
+the change under test.
 
-**Verified by the log's own output lines rather than the lane's conclusion**, per the standing
-rule in this file — which is the only reason the `span=2` is visible at all. A green
-`conclusion` would have said nothing about which window was queried.
+### The rate is a lower bound, and the mechanism is worth knowing
 
-| | |
-|---|---|
-| **Per-attempt failure rate** | 5/24 ≈ **21%** |
+Over the last 60 `vm-tests.yml` runs (2026-08-23T23:13Z → 2026-08-25T04:18Z): 53 success,
+4 failure, 3 cancelled — 4 of 57 concluded, ~7.0%. An earlier count over a 40-run window gave
+4 of 38, ~10.5%. Same underlying data, sliding window. **Neither figure is precise and neither
+should be quoted as one.**
 
-### Occurrence 6 — a third distinct landmark, and the first REPEAT of one
+Both also undercount *by construction*, which sharpens this file's opening rule:
 
-`a841976` — vm-tests, `test-selfimprove-loop-runs`, attempt 1. Same
-`RuntimeError: Shell did not start in time`, raised from the driver's `connect()`.
+- `gh run list` reports only the **latest attempt**. Re-running failed jobs rewrites the run's
+  conclusion in place, so a failure re-run to green **leaves the population entirely**.
+- Confirmed directly: run `32808436764` lists `conclusion: success` and is `attempt: 2`; its
+  attempt-1 `test-egress-uid-scope` failure appears nowhere in the listing.
+- Five runs in this window are `attempt > 1` (`32808436764`, `32770548874` at attempt 3,
+  `32751833582`, `32708993068`, `32678457976`). One is a confirmed instance of this defect. The
+  other four are **not** claimed as such — a re-attempt can follow a cancel or a real fix, and
+  that has not been checked one by one.
 
-Last guest line before the silence:
+"A flaky job that is re-run green leaves no trace" is stated at the top of this file as a reason
+to write things down. It is also literally true of the GitHub API, and that is why the ledger
+cannot be reconstructed later from run history.
 
-```
-machine # [   15.115573] systemd[1]: Finished register-nix-paths.service.
-```
+### What is NOT established
 
-**This is the first landmark this file has seen TWICE** — occurrence 3 died at
-`register-nix-paths` too. That is worth stating carefully, because it is exactly the shape
-that has now killed two hypotheses in this file: three of six occurrences are the only
-samples of their landmark, and a repeat drawn from a small set of boot-stage landmarks is
-not evidence of a preferred stage until the set is enumerated. **Recording it as an
-observation, not as a pattern.** The landmark timings across occurrences (3.38s green,
-13.01s, 9.05s, 2.47s, and now 15.12s) continue to span the whole boot rather than cluster.
+- **Root cause.** Two shapes fit every observation equally: (a) the console/backdoor channel is
+  lost while the VM keeps running, or (b) the VM wedges outright. Nothing measured here separates
+  them. Separating them needs a nix-capable box that can hold a wedged guest open for inspection;
+  DVo has none. Raised as a resourcing question, not answered here.
+- **Whether this is new.** No run data exists before 2026-08-24T07:41Z.
+- **Whether the rate is stable.** Two windows, two numbers, roughly one day of data.
 
-Third distinct *test* to carry it — `test-identity-boot`, and now `test-selfimprove-loop-runs`
-— which is consistent with the reading this file returned to after occurrence 4: the failure
-is in the driver's backdoor connect, and the test that happens to be running is incidental.
+### Why it matters at 7%
 
-**Updated base rate: 6 failed attempts of 28 that reached a verdict ≈ 21%.** The denominator
-is vm-tests attempts only, counted with `gh run view <id> --json attempt`, because
-`gh run list --json conclusion` reports the run's conclusion AFTER reruns and was found on
-2026-08-24 to be hiding roughly a third of these.
-
-**Same commit, flake-check also red — and that one was real and mine.** `self_disarms()` in
-vm-matrix-contract flagged the anti-skip battery shipped in that very commit, matching the
-`print("SKIP")` / `sys.exit(0)` pairs inside its triple-quoted control-arm fixtures. Fixed in
-`b3a75bc` by keying the detector on real `exit(0)` call nodes for `.py`. **This is the second
-consecutive commit where both lanes went red from two unrelated causes**, and the second time
-the flake-check half was a genuine defect while the vm-tests half was this flake. The
-occurrence-5 warning holds and is now doubly earned: a base rate for one failure mode does
-not license attributing the next red to it, and "both lanes red" has meant "two separate
-things" every time it has happened here.
-
-| | |
-|---|---|
-| **Per-attempt failure rate** | 6/28 ≈ **21%** |
+An ambiguous gate gets re-run until green regardless of whether the red was noise or a
+regression. A real regression landing during a flaky period is indistinguishable from the flake,
+and the standard response — re-run — is the one that hides it.
