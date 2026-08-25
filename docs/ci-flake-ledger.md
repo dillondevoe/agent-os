@@ -468,3 +468,45 @@ rule in this file — which is the only reason the `span=2` is visible at all. A
 | | |
 |---|---|
 | **Per-attempt failure rate** | 5/24 ≈ **21%** |
+
+### Occurrence 6 — a third distinct landmark, and the first REPEAT of one
+
+`a841976` — vm-tests, `test-selfimprove-loop-runs`, attempt 1. Same
+`RuntimeError: Shell did not start in time`, raised from the driver's `connect()`.
+
+Last guest line before the silence:
+
+```
+machine # [   15.115573] systemd[1]: Finished register-nix-paths.service.
+```
+
+**This is the first landmark this file has seen TWICE** — occurrence 3 died at
+`register-nix-paths` too. That is worth stating carefully, because it is exactly the shape
+that has now killed two hypotheses in this file: three of six occurrences are the only
+samples of their landmark, and a repeat drawn from a small set of boot-stage landmarks is
+not evidence of a preferred stage until the set is enumerated. **Recording it as an
+observation, not as a pattern.** The landmark timings across occurrences (3.38s green,
+13.01s, 9.05s, 2.47s, and now 15.12s) continue to span the whole boot rather than cluster.
+
+Third distinct *test* to carry it — `test-identity-boot`, and now `test-selfimprove-loop-runs`
+— which is consistent with the reading this file returned to after occurrence 4: the failure
+is in the driver's backdoor connect, and the test that happens to be running is incidental.
+
+**Updated base rate: 6 failed attempts of 28 that reached a verdict ≈ 21%.** The denominator
+is vm-tests attempts only, counted with `gh run view <id> --json attempt`, because
+`gh run list --json conclusion` reports the run's conclusion AFTER reruns and was found on
+2026-08-24 to be hiding roughly a third of these.
+
+**Same commit, flake-check also red — and that one was real and mine.** `self_disarms()` in
+vm-matrix-contract flagged the anti-skip battery shipped in that very commit, matching the
+`print("SKIP")` / `sys.exit(0)` pairs inside its triple-quoted control-arm fixtures. Fixed in
+`b3a75bc` by keying the detector on real `exit(0)` call nodes for `.py`. **This is the second
+consecutive commit where both lanes went red from two unrelated causes**, and the second time
+the flake-check half was a genuine defect while the vm-tests half was this flake. The
+occurrence-5 warning holds and is now doubly earned: a base rate for one failure mode does
+not license attributing the next red to it, and "both lanes red" has meant "two separate
+things" every time it has happened here.
+
+| | |
+|---|---|
+| **Per-attempt failure rate** | 6/28 ≈ **21%** |
