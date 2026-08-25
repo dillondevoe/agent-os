@@ -1,0 +1,28 @@
+# THE DEBT RATCHET. One battery per line, sorted.
+#
+# tests/vm-matrix-contract.py's KNOWN_UNWIRED_DEBT must match this file EXACTLY.
+# The list is documented as "THIS LIST MAY ONLY SHRINK" — this file is what makes
+# that a check instead of a sentence. Without it, adding a name to KNOWN_UNWIRED_DEBT
+# is a one-line diff that turns an unwired test green, and the check whose entire job
+# is to catch unwired tests prints a LARGER number and exits 0.
+#
+# Equality, not a count: a count alone lets one entry be swapped for another silently.
+#
+# Removing a line (wiring a battery up) is the point. Do it in the same commit that
+# removes the name from KNOWN_UNWIRED_DEBT. ADDING a line is the thing under review:
+# it means a test that runs nowhere was just made permanently invisible, and the diff
+# to this file is where a reviewer sees it.
+agos-calc-battery.py
+agos-doc-battery.py
+agos-files-battery.py
+agos-media-battery.py
+agos-notes-battery.py
+agos-sys-battery.py
+agos-web-battery.py
+anthropic-transport-battery.py
+audit-signing-battery.py
+bip340-battery.py
+calendar-battery.py
+escalate-consent-battery.py
+frontdoor-kick-battery.py
+transport-battery.py
