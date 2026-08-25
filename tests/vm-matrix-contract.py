@@ -73,6 +73,21 @@ TEST_SUFFIXES = (".nix", ".py", ".sh")
 UNWIRED_BY_DESIGN = frozenset({
     "run-local.sh",           # the manual at-a-box runner; it INVOKES batteries, it is not one
     "vm-matrix-contract.py",  # this file; invoked directly by flake-check.yml, not via flake.nix
+    "flake-input-provenance-contract.py",  # ditto: a text contract on flake.lock, run by flake-check.yml
+})
+
+# The two entries above make the same CLAIM — "not wired into flake.nix because a WORKFLOW runs
+# it directly" — and until now nothing checked it. That is this file's own subject one level out:
+# an exemption whose justification is prose reads as accounted-for while the step that justified
+# it can be deleted in an unrelated diff, leaving a file exempt from the orphan check AND run by
+# nobody. Both suppressors, no ratchet.
+#
+# So the claim is now machine-checked: an entry listed here as workflow-invoked must actually
+# appear in a workflow. Enforced by workflow_invoked_stale() below, which is called from the same
+# staleness loop that already catches "no such file" and "wired into flake.nix now".
+WORKFLOW_INVOKED = frozenset({
+    "vm-matrix-contract.py",
+    "flake-input-provenance-contract.py",
 })
 
 # DEBT, NOT DESIGN — and the two must never share a list.
@@ -265,7 +280,33 @@ def unwired_test_files(tests_dir, flake_path):
             stale.append((base, "no such file in %s/" % tests_dir))
         elif wiring_references(flake_src, tests_dir, base):
             stale.append((base, "is wired into %s now — remove the exemption" % flake_path))
+        elif base in WORKFLOW_INVOKED and not _named_in_any_workflow(base):
+            stale.append((base, "is exempted as workflow-invoked but is named in NO workflow "
+                                "under .github/workflows/ — it is now exempt from the orphan "
+                                "check AND run by nobody, which is the worst of both"))
     return unwired, vacuous, stale
+
+
+def _named_in_any_workflow(base, workflows_dir=None):
+    """Is this test file named in any .github/workflows/*.yml? Text scan, deliberately.
+
+    A YAML walk would have to model `run:` shells, matrices and composite steps to answer the
+    same question, and would fail CLOSED-looking (green) on any shape it did not model. A plain
+    substring scan over the workflow text can be fooled only by naming the file in a comment,
+    which is a far narrower failure and one a reviewer sees in the diff.
+    """
+    if workflows_dir is None:
+        workflows_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                                     ".github", "workflows")
+    for path in sorted(glob.glob(os.path.join(workflows_dir, "*.yml"))
+                       + glob.glob(os.path.join(workflows_dir, "*.yaml"))):
+        try:
+            with open(path) as fh:
+                if base in fh.read():
+                    return True
+        except OSError:
+            continue
+    return False
 
 
 def flake_test_packages(system):
