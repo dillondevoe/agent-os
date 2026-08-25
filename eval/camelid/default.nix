@@ -18,12 +18,21 @@
 # CI run is EXPECTED to fail with `hash mismatch ... got: sha256-...`; that `got:` value is
 # the measurement, and it gets pinned here in a second commit. A red first run is the
 # instrument working, not the claim failing — the workflow says so in its own output.
-{ pkgs ? import <nixpkgs> { } }:
+# `rustPlatform` is a PARAMETER so the same expression can be built against a different
+# compiler with nothing else changed. That is the whole point of rustc-1_95.nix next to
+# this file: a controlled pair needs one variable to move, and only one.
+{ pkgs ? import <nixpkgs> { }
+, rustPlatform ? pkgs.rustPlatform
+  # Overridable because the vendor derivation is nixpkgs' code, not Camelid's: a different
+  # nixpkgs rev can vendor the same Cargo.lock to a different hash. Sharing one literal
+  # across two nixpkgs would make a hash mismatch look like a finding about Camelid.
+, cargoHash ? "sha256-Gr9fT4H2TYbqfQlDqv4Lvr93RCnt40S1VlSYGK9xtYM="
+}:
 
 let
   rev = "bfd5e02698165754fd2491dc45ae8223e6fbba29";
 in
-pkgs.rustPlatform.buildRustPackage {
+rustPlatform.buildRustPackage {
   pname = "camelid-eval-342";
   version = "0.6.1-${builtins.substring 0 12 rev}";
 
@@ -45,7 +54,7 @@ pkgs.rustPlatform.buildRustPackage {
   # crates are downloaded regardless. It inflates the vendor derivation; it does not enter
   # the server binary's runtime closure. Recorded rather than worked around — the runtime
   # closure printed by the verdict step is what settles the clean-room question.
-  cargoHash = "sha256-Gr9fT4H2TYbqfQlDqv4Lvr93RCnt40S1VlSYGK9xtYM=";
+  inherit cargoHash;
 
   # Server binary only. `--bin camelid` is upstream's own CI scope; the camelid-desktop
   # workspace member is a Tauri app and is NOT part of the claim being tested.

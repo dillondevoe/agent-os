@@ -65,6 +65,32 @@ jobs:
           # `got:` is what nix computed. If these lines exist, run 1 did its job.
           grep -nE 'specified:|got:' /tmp/camelid-build.log || echo "(no hash mismatch lines — hashes are already pinned)"
 
+      # THE CONTROLLED PAIR. Same expression, same rev, same x86_64-linux, one variable
+      # moved: the compiler. It runs even when the default build failed, because a red
+      # default is exactly the condition this run exists to explain. `|| true` for the same
+      # reason as above — the verdict steps decide red/green, not the build.
+      - name: Build against rustc 1.95.0 (upstream's declared channel)
+        run: |
+          set -o pipefail
+          nix-build eval/camelid/rustc-1_95.nix --option sandbox true -o result-1_95             2>&1 | tee /tmp/camelid-1_95.log || true
+          grep -nE 'specified:|got:' /tmp/camelid-1_95.log || echo "(no hash mismatch lines)"
+
+      - name: Verdict — the controlled pair
+        run: |
+          echo "default nixpkgs rustc: $(nix-instantiate --eval -E '(import <nixpkgs> {}).rustc.version' 2>/dev/null || echo unknown)"
+          if [ -e ./result-1_95 ]; then
+            echo "RUSTC 1.95.0: BUILT. The x86_64-linux failure is TOOLCHAIN-SPECIFIC."
+            nix path-info -Sh ./result-1_95
+            echo "--- runtime closure (this is the clean-room evidence) ---"
+            nix-store -qR ./result-1_95 | sed 's|/nix/store/[a-z0-9]*-||' | sort
+            ./result-1_95/bin/camelid --version || true
+          else
+            echo "RUSTC 1.95.0: DID NOT BUILD."
+            echo "If this is a hash mismatch, pin the got: hash in eval/camelid/rustc-1_95.nix and re-run."
+            echo "If it is the SAME intrinsic error, the version hypothesis is REFUTED and must be"
+            echo "retracted outright — not softened. That is what this run is for."
+          fi
+
       - name: Verdict — did it actually build?
         run: |
           if [ -e ./result ]; then
