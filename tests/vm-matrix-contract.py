@@ -132,6 +132,17 @@ WIRED_VIA_WORKFLOW = {
     # "it went red" and "the red points at the fault" are not the same claim.
     "audit-signing-battery.py": "flake-check.yml",
     "escalate-consent-battery.py": "flake-check.yml",
+
+    # THE FIRST SELF-DISARMING BATTERY TO BE WIRED, AND IT TOOK THREE COMMITS, NOT ONE.
+    # #193 gave it a strict gate so it can refuse to exit 0 when khal is absent; #194 fixed the
+    # two defects that made it red WITH khal present (a khal.conf that never declared the date
+    # format the battery constructs, and `out[:4] == "20"`, a four-char slice against a two-char
+    # literal that no input could satisfy). Only now is wiring it worth anything: the step below
+    # installs khal AND sets AGENT_OS_STRICT=1, so a runner without the backend goes red by name
+    # instead of announcing SKIP and passing. That combination is what strict_callers_unarmed()
+    # below exists to keep true — the battery half was checkable from here already, the caller
+    # half was not, and a wired-but-unarmed step buys back the exact green the gate removed.
+    "calendar-battery.py": "flake-check.yml",
 }
 
 # DEBT, NOT DESIGN — and the two must never share a list.
@@ -149,10 +160,12 @@ WIRED_VIA_WORKFLOW = {
 # escalate-consent-battery.py deserves its own line: it is referenced by nothing at all, not even
 # tests/run-local.sh, so before this check it was invisible to every reader as well as to CI.
 KNOWN_UNWIRED_DEBT = frozenset({
-    # The eight ambient-hand acceptance batteries. Each is named in flake.nix by exactly one
-    # `builtins.pathExists` assert and its error string, and by nothing else in the repository.
-    # The guard that names them proves they have not been DELETED; nothing proves they RUN.
-    "calendar-battery.py",
+    # The seven remaining ambient-hand acceptance batteries. Each is named in flake.nix by
+    # exactly one `builtins.pathExists` assert and its error string, and by nothing else in the
+    # repository. The guard that names them proves they have not been DELETED; nothing proves
+    # they RUN. calendar-battery.py was the eighth and left this list in the commit that wired
+    # it — see WIRED_VIA_WORKFLOW above for why that took three commits and not one. The seven
+    # get the strict pattern second-hand, now that one has been through it end to end.
     "agos-calc-battery.py",
     "agos-sys-battery.py",
     "agos-files-battery.py",
@@ -270,6 +283,24 @@ def wiring_references(flake_src, tests_dir, base):
 # So the debt list is NOT homogeneous, and the count alone hides the split. Measured 2026-08-23:
 # 8 of the 14 self-disarm, 6 do not. Wiring one of the 6 needs a derivation. Wiring one of the 8
 # needs a derivation AND a guarantee its CLI is on PATH inside that derivation.
+# A READ, NOT A MENTION. `os.environ.get("AGENT_OS_STRICT")` and `os.environ["AGENT_OS_STRICT"]`
+# are the two spellings that actually consult the variable; prose about it consults nothing.
+_STRICT_READ = re.compile(r'os\.environ(?:\.get\(|\[)\s*["\']AGENT_OS_STRICT["\']')
+
+
+def reads_strict_env_lines(lines):
+    """True if any NON-COMMENT line reads AGENT_OS_STRICT from the environment."""
+    return any(_STRICT_READ.search(l) for l in lines if not l.lstrip().startswith("#"))
+
+
+def reads_strict_env(path):
+    try:
+        with open(path) as fh:
+            return reads_strict_env_lines(fh.read().splitlines())
+    except OSError:
+        return False
+
+
 SELF_DISARM_WINDOW = 3
 _SH_EXIT = re.compile(r"^\s*exit 0\s*(#.*)?$")
 
@@ -288,11 +319,20 @@ def self_disarms(path):
             lines = fh.read().splitlines()
     except OSError:
         return False
-    if any("AGENT_OS_STRICT" in l for l in lines):
-        # The file has a strict mode: the skip is opt-out, and the derivation that wires it opts
-        # out. Named by convention rather than proven here — this check reads source, it does not
-        # evaluate the derivation, so it cannot confirm the env var is actually set. What it can
-        # do is stop pointing at a file whose author has already answered the question.
+    if reads_strict_env_lines(lines):
+        # The file has a strict mode: the skip is opt-out, and the caller that wires it opts out.
+        # Named by convention rather than proven here — this check reads source, it does not run
+        # the step, so it cannot confirm the env var is actually set. What it CAN do is stop
+        # pointing at a file whose author has already answered the question, and separately
+        # check the caller (strict_callers_unarmed(), below).
+        #
+        # THIS WAS A TOKEN SCAN UNTIL THIS COMMIT AND THAT WAS A DEFECT WITH A DEMONSTRATION.
+        # Geist appended `# TODO: consider AGENT_OS_STRICT` to main's calendar-battery.py and
+        # self_disarms() returned False: a COMMENT claiming to think about a strict mode
+        # disarmed the check that checks disarming. The exemption now requires the shape of a
+        # READ on a non-comment line, and the selftest below carries the comment-only mention as
+        # its control arm — without that arm this tightening could be reverted and every case
+        # would still pass.
         return False
     for i, line in enumerate(lines):
         # Two spellings, because the check is named for a BEHAVIOUR and the behaviour is not
@@ -612,6 +652,134 @@ def check_ruling_conditions(flake_src, tests_dir, rows=None, debt=None):
     return problems
 
 
+# THE CALLER HALF. #193 closed the battery's half of the self-disarm hole: a strict-gated
+# battery knows what it needs and refuses to exit 0 without it. It could not close the caller's
+# half — nothing inside a battery can verify that whoever ran it set the variable — and a wired
+# step that forgets `AGENT_OS_STRICT: "1"` gets the old meaningless green back with no diagnostic
+# at all. That hole was named in #193's own commit message as real, checkable from the workflow
+# side, and not fixed there.
+#
+# It is checkable from HERE because this file already reads the workflow text for other reasons.
+# One more predicate on the same read: for every battery that reads AGENT_OS_STRICT in code and
+# is named on a running line of a workflow, the step that names it must arm it.
+#
+# WHAT THIS DOES NOT DO, stated so nobody reads it as more: it does not evaluate the workflow,
+# does not resolve `${{ }}`, and does not know whether the CLI the battery wants is actually on
+# PATH inside that step. It asserts one textual fact — the step that runs a strict-gated battery
+# says so — which is exactly the fact whose absence is silent.
+_STEP_START = re.compile(r"^\s*-\s+name:")
+_ARMS_STRICT = re.compile(r"""AGENT_OS_STRICT\s*:\s*["']?1["']?\s*$""")
+
+
+def _workflow_steps(lines):
+    """[(step_name, block_lines)] — crude, textual, and sufficient for the one fact asked of it."""
+    starts = [i for i, l in enumerate(lines) if _STEP_START.match(l)]
+    out = []
+    for n, i in enumerate(starts):
+        end = starts[n + 1] if n + 1 < len(starts) else len(lines)
+        name = lines[i].split("name:", 1)[1].strip()
+        out.append((name, lines[i:end]))
+    return out
+
+
+def _armed(block):
+    return any(_ARMS_STRICT.search(l) for l in block if not l.lstrip().startswith("#"))
+
+
+def strict_unarmed_in(lines, strict_bases):
+    """[(base, step_name)] for steps that RUN a strict-gated battery without arming it.
+
+    A job-level `env:` counts: it arms every step in the job, and refusing to see it would make
+    this check demand a redundant line and be wrong about it.
+    """
+    steps = _workflow_steps(lines)
+    covered = set()
+    starts = [i for i, l in enumerate(lines) if _STEP_START.match(l)]
+    if starts:
+        covered = set(range(starts[0], len(lines)))
+    job_level = [l for i, l in enumerate(lines) if i not in covered]
+    if any(_ARMS_STRICT.search(l) for l in job_level if not l.lstrip().startswith("#")):
+        return []
+    found = []
+    for name, blk in steps:
+        if _armed(blk):
+            continue
+        for base in strict_bases:
+            if _named_on_a_running_line(blk, base):
+                found.append((base, name))
+    return found
+
+
+def strict_callers_unarmed(tests_dir, workflows_dir=None):
+    """Sweep the real tree: every strict-gated battery, every workflow that runs it."""
+    if workflows_dir is None:
+        workflows_dir = os.path.join(os.path.dirname(os.path.abspath(tests_dir)),
+                                     ".github", "workflows")
+    # THIS FILE IS EXCLUDED FROM ITS OWN SWEEP, and the reason is not tidiness. Its selftest
+    # carries `os.environ.get("AGENT_OS_STRICT")` as a FIXTURE STRING — the arm that proves the
+    # exemption predicate recognises a real read — so a source-reading check finds a read here
+    # and concludes this contract is a strict-gated battery. It is not; it is the checker. Found
+    # by running the sweep before trusting it: the first output was this file naming the step
+    # that runs it. A predicate that reads source cannot distinguish code from a string that
+    # looks like code, and the honest fix is to say which file that costs.
+    me = os.path.basename(os.path.abspath(__file__))
+    strict = sorted(os.path.basename(f) for f in glob.glob(os.path.join(tests_dir, "*.py"))
+                    if os.path.basename(f) != me and reads_strict_env(f))
+    out = []
+    for wf in sorted(glob.glob(os.path.join(workflows_dir, "*.yml"))
+                     + glob.glob(os.path.join(workflows_dir, "*.yaml"))):
+        try:
+            with open(wf) as fh:
+                lines = fh.read().splitlines()
+        except OSError:
+            continue
+        for base, step in strict_unarmed_in(lines, strict):
+            out.append((base, os.path.basename(wf), step))
+    return out
+
+
+def strict_caller_selftest():
+    """Show the caller-half check red and green on synthetic input, every run.
+
+    The NEGATIVE arm is the point (Geist, #193 §5): wired-but-unarmed must be NAMED. The three
+    controls stop a checker that reports everything, or nothing, from passing this.
+    """
+    failures = []
+    unarmed = ["      - name: calendar battery",
+               "        run: python3 tests/calendar-battery.py"]
+    armed = ["      - name: calendar battery",
+             "        env:",
+             '          AGENT_OS_STRICT: "1"',
+             "        run: python3 tests/calendar-battery.py"]
+    commented = ["      - name: calendar battery",
+                 '        # env: AGENT_OS_STRICT: "1"',
+                 "        run: python3 tests/calendar-battery.py"]
+    B = ["calendar-battery.py"]
+    # ARM: wired, strict-gated, not armed -> named.
+    if not strict_unarmed_in(unarmed, B):
+        failures.append("selftest arm NOT caught: a step running a strict-gated battery without "
+                        "AGENT_OS_STRICT was not reported — the wired-but-unarmed green is back")
+    # CONTROL 1: armed -> silent. Without this a check that reported every step would pass above.
+    if strict_unarmed_in(armed, B):
+        failures.append("selftest control: an ARMED step was reported unarmed")
+    # CONTROL 2: the arming line in a COMMENT arms nothing. Same class as the self_disarms
+    # token-scan defect this commit also fixes; prose does not set an environment variable.
+    if not strict_unarmed_in(commented, B):
+        failures.append("selftest control: a COMMENTED env line counted as arming the step")
+    # CONTROL 3: a battery that does not read the variable is none of this check's business.
+    if strict_unarmed_in(unarmed, ["some-other-battery.py"]):
+        failures.append("selftest control: a step was reported for a battery it does not name")
+    # CONTROL 4: the exemption predicate itself — a MENTION is not a READ. This is the arm that
+    # would have caught the token scan, and it is here rather than in a comment.
+    if reads_strict_env_lines(["# TODO: consider AGENT_OS_STRICT"]):
+        failures.append("selftest control: a comment-only mention of AGENT_OS_STRICT counted as "
+                        "a read — self_disarms() is back to a token scan")
+    if not reads_strict_env_lines(['    strict = os.environ.get("AGENT_OS_STRICT") == "1"']):
+        failures.append("selftest arm: a real os.environ.get read was not recognised, so "
+                        "CONTROL 4 above passes vacuously")
+    return failures
+
+
 def exemption_staleness_selftest(tmpdir_lines=None):
     """Show the WORKFLOW-AWARE exemption check red and green, on synthetic input.
 
@@ -752,13 +920,15 @@ def main():
     # going red, its green verdict on the real table below means nothing.
     ruling = exemption_staleness_selftest()
     ruling += ruling_conditions_selftest()
+    ruling += strict_caller_selftest()
+    unarmed = strict_callers_unarmed(args.tests_dir)
     ruling += check_ruling_conditions(open(args.flake).read(), args.tests_dir)
 
     # Both sides of this merge added an INDEPENDENT failure mode to the same guard, so the
     # resolution is a union and not a choice. Dropping either term is the silent-pass direction:
     # the checker would still exit 0 while one of its own checks had findings.
     if (not unlisted and not dangling and not unwired and not vacuous and not stale
-            and not ruling and not debt_added and not debt_removed):
+            and not ruling and not debt_added and not debt_removed and not unarmed):
         print(f"OK: {len(tests)} test-* package(s), all present in the vm-tests matrix:")
         for name in sorted(tests):
             print(f"  {name}")
@@ -779,6 +949,20 @@ def main():
                   f"{', '.join(row['run_ids']) or '(none)'}  [{', '.join(row['lanes'])}]")
         return 0
 
+    if unarmed:
+        print("FAIL: a strict-gated battery is WIRED BUT UNARMED. The battery refuses to exit 0",
+              file=sys.stderr)
+        print("      on a missing backend only when AGENT_OS_STRICT=1; the step below runs it",
+              file=sys.stderr)
+        print("      without setting it, so an absent backend announces SKIP and the step is",
+              file=sys.stderr)
+        print("      green. That is the meaningless green the [self-disarming] tag names:",
+              file=sys.stderr)
+        for base, wf, step in unarmed:
+            print(f"  {base}  <-  {wf}  step {step!r}", file=sys.stderr)
+        print('      Add `env: {AGENT_OS_STRICT: "1"}` to that step — and make sure the step',
+              file=sys.stderr)
+        print("      actually stages the backend, which this check cannot see.", file=sys.stderr)
     if debt_added:
         print("FAIL: KNOWN_UNWIRED_DEBT GREW. It is documented as may-only-shrink, and these",
               file=sys.stderr)

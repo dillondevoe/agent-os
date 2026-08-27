@@ -125,6 +125,19 @@ jobs:
       - name: escalate consent battery
         run: python3 tests/escalate-consent-battery.py
 
+      # THE FIRST SELF-DISARMING BATTERY WIRED, AND BOTH HALVES OF THE GATE ARE HERE.
+      # `AGENT_OS_STRICT: "1"` is the caller half: without it this battery announces SKIP and
+      # exits 0 when khal is absent, which is the meaningless green the debt ledger's
+      # `[self-disarming]` tag was invented to name. `nix shell nixpkgs#khal` is why the
+      # variable is honest to set — the step stages the backend it then promises. Removing
+      # either line reds tests/vm-matrix-contract.py by name (strict_callers_unarmed for the
+      # env, the battery itself for the CLI), which is the only reason this pair can be
+      # trusted to stay a pair.
+      - name: calendar battery (khal-backed, strict)
+        env:
+          AGENT_OS_STRICT: "1"
+        run: nix shell nixpkgs#khal --command python3 tests/calendar-battery.py
+
       - name: vm-tests matrix covers every test-* package
         # Run under a nix-provided python rather than the runner image's: if PyYAML were merely
         # assumed present, an image change would turn this check into a no-op or a spurious red.
