@@ -292,6 +292,47 @@ check("E. control arm: a broken verifier is ALSO caught at sign time by upstream
 check("E. real verifiers restored",
       bip340.schnorr_verify is _real_low and identity.verify is _real_verify)
 
+# -- E2. IDENTITY DRIFT: the key on disk is not the key the registry records --
+#
+# The roundtrip arms above cannot see this failure, and that is not an oversight in them, it is
+# the defect they were built on top of. `boot_self_test` used to verify against `npub_of(name)`,
+# which DERIVES the pubkey from the private key file — sign with K, verify against pubkey(K),
+# true for every well-formed K. Swap the key and the reference point swaps with it. Found by a
+# negative arm in tests/identity-boot.nix (leg 9, 2026-08-27): the unit printed
+# `identity boot self-test PASSED for agent` and exited 0 on a corrupted key.
+#
+# The corruption below flips ONE hex digit: length, hex-ness and file mode are all preserved, so
+# the key still parses and still signs. A truncated or non-hex key would die in the PARSER, which
+# is layers above the thing under test and would let this case pass for the wrong reason.
+_kp = identity._key_path("alice")
+_orig_key = open(_kp).read().strip()
+check("E2. the arm's input is a well-formed key, so a pass here is not a parser artifact",
+      len(_orig_key) == 64 and int(_orig_key, 16) >= 0)
+_drift_key = ("1" if _orig_key[0] == "0" else "0") + _orig_key[1:]
+check("E2. corruption is not a no-op", _drift_key != _orig_key)
+open(_kp, "w").write(_drift_key)
+try:
+    _drift_caught = raises(lambda: identity.boot_self_test("alice"), identity.IdentityError)
+    # THE PRE-FIX ARM. Without it this case passes on any implementation that rejects
+    # everything, and — more to the point — it would have passed against the OLD code too if
+    # the drift happened to break the roundtrip. Reproduce what the old code actually did:
+    # derive the reference from the key file itself, and assert it sees NOTHING wrong.
+    _prefix_blind = identity.verify(
+        identity.npub_of("alice"),
+        bip340.tagged_hash("AgentOS/boot-self-test", b"\x07" * 32),
+        identity.sign_as("alice", bip340.tagged_hash("AgentOS/boot-self-test", b"\x07" * 32)))
+finally:
+    open(_kp, "w").write(_orig_key)
+check("E2. a substituted key FAILS LOUD against the RECORDED npub", _drift_caught)
+check("E2. pre-fix arm: the old derive-from-key check is BLIND to the same substitution",
+      _prefix_blind is True)
+# THE CONTROL. An assertion that only ever goes red is as uninformative as one that only ever
+# goes green: show the same call recovers once the real key is back.
+check("E2. control: self-test green again after the original key is restored",
+      identity.boot_self_test("alice") is True)
+check("E2. control: the restore actually put the original bytes back",
+      open(_kp).read().strip() == _orig_key)
+
 # -- F. preflight, control-armed on both surfaces --
 os.chmod(kp, 0o644)
 check("F. control arm: world-readable KEY FILE is caught", raises(identity.preflight, identity.IdentityError))
