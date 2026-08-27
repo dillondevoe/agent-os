@@ -230,6 +230,13 @@ over an earlier 40-run one — the same data through a sliding window, neither p
    numeric `run=` counts those and reads ~200% at baseline: a saturated instrument, the mirror
    image of the silently-dead one below. Only a marker that actually fired has digits there.
 
+   **Measured, so it is a size and not an argument** (geist, off the 47 post-stagger archives,
+   2026-08-27): the bare string `FLAKE-A-RETRY` occurs **416** times across that window against
+   **2** markers with digits in `run=`. Without the numeric tail the census would have read
+   roughly **98% of job executions** as flake retries. 416-vs-2 is the measured size of what one
+   regex fragment removes — and the reason it is not negotiable in an edit that finds the pattern
+   verbose.
+
    **Each marker is one shape-A instance and MUST be counted in the table below**, even though
    the attempt it belongs to concluded `success`. A mitigation that swallows a failure without
    leaving a countable trace is not a mitigation, it is a delete — Geist's condition, and the
@@ -473,7 +480,33 @@ Window pinned to vm-tests runs created after `185a937` (the commit that extracte
     FLAKE-A-RETRY test=test-identity-boot run=33086970966 attempt=1
     FLAKE-A-RETRY test=test-identity-boot run=33100997366 attempt=1
 
-**2 / 423 = 0.47%** as first counted; **2 / 378 = 0.53%** over the jobs that could actually emit (a cancelled job cannot reach the emitter, so it belongs in neither numerator nor denominator — geist's correction at the gate, reproduced independently: 47 runs, 9 jobs each, same two marker run ids, 0 fetch errors). Against **19 / 1309 = 1.45%** before the stagger. Both runs concluded
+**2 / 423 = 0.47%** as first counted; **2 / 378 = 0.53%** over the jobs that could actually emit (a cancelled job cannot reach the emitter, so it belongs in neither numerator nor denominator — geist's correction at the gate, reproduced independently: 47 runs, 9 jobs each, same two marker run ids, 0 fetch errors).
+
+**The pre-stagger side has to be filtered the same way, and this is the correction to the sentence that first stood here.** As published, this paragraph put the filtered **0.53%** against the *unfiltered* **19 / 1309 = 1.45%**. That is a mismatched pair: filtering only the post-stagger side removes jobs that could not emit from one denominator and not the other, which inflates the post-stagger rate and makes the stagger look **worse** than like-for-like. Small in magnitude, wrong in kind. Geist filed it against his own fix (`01530e1`) before this file was amended; the numbers below are the counterpart he asked for, measured rather than assumed.
+
+**Per-attempt job conclusions across the pre-stagger window** (149 attempts, `gh api .../attempts/N/jobs`, conclusions tallied, fetch errors counted separately):
+
+| | count |
+|---|---|
+| attempts fetched | 149 |
+| fetches that errored | **0** |
+| **job executions** | **1298** |
+| `success` / `failure` | 1234 / 21 |
+| of which `cancelled` — could not emit | **43** |
+| **job executions that could emit** | **1255** |
+
+**So the two honest pairs are:**
+
+| | pre-stagger | post-stagger |
+|---|---|---|
+| **raw** (every job the API returned) | 19 / 1309 = **1.45%** | 2 / 423 = **0.47%** |
+| **emit-capable** (cancelled removed from both) | 19 / 1255 = **1.51%** | 2 / 378 = **0.53%** |
+
+Filtering lifts both sides, and **the conclusion does not move**: two events still do not separate the post-stagger rate from the pre-stagger one at this N.
+
+**One discrepancy, disclosed rather than papered over.** This re-listing found **1298 job executions over 149 attempts** where the block above records **1309 over 150**. The window predicate is the same; the difference is that `--limit 300` on a later day no longer reaches back to one attempt it reached before. The numerator 19 was enumerated against the 150-attempt listing, so `19 / 1255` pairs a numerator from one enumeration with a denominator from another. The gap is 11 job executions — under 1% — and it moves the rate by less than a hundredth of a point, but it is a seam and the reader should see it rather than infer that one census was run twice. **A window bounded by listing depth is not a fixed window; it shrinks from the far end as the repo ages.**
+
+Both runs concluded
 `success`: the retry recovered them, which is exactly the case steps 1–3 of the census method
 cannot see and the marker exists for. **A count of 2 is not a fixed harness.** It is also not a
 measured improvement — two events do not separate 0.47% from 1.45% at this N, and saying otherwise
