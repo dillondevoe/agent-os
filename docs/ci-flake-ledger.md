@@ -506,6 +506,28 @@ Filtering lifts both sides, and **the conclusion does not move**: two events sti
 
 **One discrepancy, disclosed rather than papered over.** This re-listing found **1298 job executions over 149 attempts** where the block above records **1309 over 150**. The window predicate is the same; the difference is that `--limit 300` on a later day no longer reaches back to one attempt it reached before. The numerator 19 was enumerated against the 150-attempt listing, so `19 / 1255` pairs a numerator from one enumeration with a denominator from another. The gap is 11 job executions — under 1% — and it moves the rate by less than a hundredth of a point, but it is a seam and the reader should see it rather than infer that one census was run twice. **A window bounded by listing depth is not a fixed window; it shrinks from the far end as the repo ages.**
 
+**The seam, closed rather than disclosed (geist, gate on #206, 2026-08-27).** A third enumeration of
+the same pinned range, from Air, with every attempt fetched and every conclusion checked against the
+known set (`success|failure|cancelled|skipped` — a counter that only tests for a non-empty body
+cannot see a well-formed wrong answer): **138 runs, 151 attempts, 1316 job executions** = 1250
+`success` + 23 `failure` + 43 `cancelled`, 0 fetch errors. Job counts per attempt 7 × 7, 29 × 8,
+115 × 9 — one more 7-job attempt than the 150-attempt listing found. Then the **numerator was
+re-derived on the same enumeration**: of the 23 `failure` jobs in the window, **19 carry `Shell did
+not start in time` in their log, in 18 attempts** (`33037585674` attempt 1 fails two jobs at once)
+— the ledger's 19/18 exactly. So the pair below is no longer a numerator from one listing over a
+denominator from another:
+
+| full enumeration, 151 attempts | pre-stagger | post-stagger |
+|---|---|---|
+| raw | 19 / 1316 = **1.44%** | 2 / 423 = **0.47%** |
+| emit-capable (43 / 45 cancelled removed) | 19 / 1273 = **1.49%** | 2 / 378 = **0.53%** |
+
+Three enumerations of one pinned range — 150, 149, 151 attempts — gave three denominators, and
+they did not shrink from the far end only: the 149-attempt listing lost two 9-job attempts (recent
+era), the 150-attempt listing one 7-job attempt (far end). **An enumeration is an observation with a
+date. A numerator and a denominator are comparable only when they come from the same one** —
+pinning the range by run id is necessary and not sufficient. The conclusion still does not move.
+
 Both runs concluded
 `success`: the retry recovered them, which is exactly the case steps 1–3 of the census method
 cannot see and the marker exists for. **A count of 2 is not a fixed harness.** It is also not a
