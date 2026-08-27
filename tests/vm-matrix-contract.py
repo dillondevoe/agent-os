@@ -109,6 +109,15 @@ WIRED_VIA_WORKFLOW = {
     # can. Wiring it is still right — a red for the wrong reason beats no red at all — but the
     # distinction is the same one #160 records, so it is written down rather than assumed away.
     "transport-battery.py": "flake-check.yml",
+    # Third entry off the ledger (11->10). The pair-mate of the line above, and the pair the
+    # bounded predicate below was written to protect — wiring it is the first time that fix has
+    # a live customer on BOTH names at once rather than one.
+    #
+    # Subject-absent checked before wiring, as with the entry above: it is red-by-CRASH
+    # (FileNotFoundError from py_compile on modules/agent-brain.py), while a broken arm is
+    # red-by-VERDICT ("FAIL B. env://... rejected" + "anthropic-transport-battery: FAIL").
+    # Both exit 1; only the log separates them.
+    "anthropic-transport-battery.py": "flake-check.yml",
 }
 
 # DEBT, NOT DESIGN — and the two must never share a list.
@@ -138,7 +147,6 @@ KNOWN_UNWIRED_DEBT = frozenset({
     "agos-media-battery.py",
     "agos-web-battery.py",
     # Found in the first sweep (#153): referenced only by tests/run-local.sh, a manual runner.
-    "anthropic-transport-battery.py",
     "audit-signing-battery.py",
     # bip340-battery.py was here until today, and it is the entry that should NOT have been a
     # routine line on this list. Its own header states, as fact, that it satisfies "binding

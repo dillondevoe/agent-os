@@ -6,7 +6,18 @@
 # implementation satisfies that same contract from a completely different wire protocol (SSE,
 # not NDJSON) — which is the whole point of having built the seam first.
 #
-# Run: PYTHONPATH=modules python3 tests/anthropic-transport-battery.py
+# Run: python3 tests/anthropic-transport-battery.py   (from the repo root)
+#
+# Wired into .github/workflows/flake-check.yml as "anthropic transport seam battery" (the third
+# entry taken off tests/known-unwired-debt.txt). THAT STEP IS THE AUTHORITATIVE INVOCATION and
+# this line exists to agree with it, not to compete with it.
+#
+# The `PYTHONPATH=modules` this line used to carry was inert: the battery does its own
+# sys.path.insert and loads modules/agent-brain.py by path, so the environment never mattered.
+# Harmless while the file ran nowhere. The moment it got wired it became a second, divergent
+# spelling of "how to run this" — and per PR #189, a Run: header can only disagree with
+# something once the file is WIRED, which is why this edit rides along with the wiring commit
+# instead of trailing it as a follow-up.
 #
 # The two genuinely tricky parts, and why each gets its own checks:
 #   * Tool calls stream as content_block_start(tool_use) → input_json_delta fragments →
