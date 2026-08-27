@@ -361,7 +361,7 @@ _RUN_ID = re.compile(r"^\d{6,}$")
 _VALID_STATUS = ("enforced", "half", "prose")
 
 
-_BLOCK = re.compile(r"/\*.*?\*/", re.S)
+_BLOCK = re.compile(r"(?<![^\s])/\*.*?\*/", re.S)
 
 
 def _blank_block_comments(src):
@@ -518,6 +518,18 @@ def ruling_conditions_selftest():
     if not executing_references(glob, TESTS_DIR, "latent-battery.py"):
         failures.append("selftest control: an unpaired `/*` (a shell glob, not a comment) "
                         "blanked real wiring downstream of it")
+    # CONTROL 5 (Geist, gate, 2026-08-27): the glob PAIRED with a LATER real block comment. A
+    # non-greedy `/\*.*?\*/` pairs the glob's `/*` with the first `*/` in the file, and everything
+    # between — real wiring included — goes blank SILENTLY: unlike CONTROL 4 nothing fails loudly
+    # unless a cited row happens to sit in the erased span. Latent today (zero block comments);
+    # it opens the day one is added below line ~315. The opener must be preceded by whitespace
+    # or line start — a glob's `/*` is preceded by `}`.
+    paired = ('  for f in ${./modules}/*.nix; do :; done\n'
+              '  checks.w = mk { script = "python3 tests/latent-battery.py"; };\n'
+              '  /* a real comment, later */\n')
+    if not executing_references(paired, TESTS_DIR, "latent-battery.py"):
+        failures.append("selftest control: a shell glob `/*` PAIRED with a later real `*/` "
+                        "blanked the real wiring between them")
     return failures
 
 
