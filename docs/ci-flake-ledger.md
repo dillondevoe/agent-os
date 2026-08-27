@@ -57,7 +57,7 @@ rate.** Recorded so the second instance has something to be the second of.
 
 ## The signature
 
-Fourteen observed failures, six **different** jobs, one **byte-identical** signature:
+Nineteen observed failures, six **different** jobs, one **byte-identical** signature:
 
 | run | job | date (UTC) |
 |---|---|---|
@@ -75,8 +75,14 @@ Fourteen observed failures, six **different** jobs, one **byte-identical** signa
 | `32751833582` attempt 1 | `vm-test (test-identity-boot)` | 2026-08-24T16:36Z |
 | `32708993068` attempt 1 | `vm-test (test-identity-boot)` | 2026-08-24T08:58Z |
 | `32678457976` attempt 1 | `vm-test (test-identity-boot)` | 2026-08-24T01:01Z |
+| `32655978802` attempt 1 | `vm-test (test-egress-uid-scope)` | 2026-08-23T17:47Z |
+| `32652029344` attempt 1 | `vm-test (test-identity-boot)` | 2026-08-23T16:33Z |
+| `32615318593` attempt 1 | `vm-test (test-egress-mesh-uid-scope)` | 2026-08-23T03:25Z |
+| `32592787891` attempt 1 | `vm-test (test-egress-uid-scope)` | 2026-08-22T19:07Z |
+| `32534142304` attempt 1 | `vm-test (test-egress-uid-scope)` | 2026-08-21T22:43Z |
 
-Rows 7–14 were added by the 2026-08-27 census below, not by anyone watching CI. Four of them
+Rows 7–19 were added by the 2026-08-27 census below, not by anyone watching CI (rows 15–19 by
+its second, deeper pass — see the superseded block). Four of them
 (`32654129939`, `32622321722`, `32574669452`, `32442249749`) were plainly visible failures this
 file simply never recorded; the four `attempt 1` rows were recovered from the attempts API. Every
 one is `Shell did not start in time`, checked in its own attempt log.
@@ -196,7 +202,9 @@ bounded by listing depth, not by choice):
 | shape B instances | 1 (`33031952158` attempt 1) |
 | failures that are **neither** shape | 3 |
 
-**Fourteen shape-A instances, where this file had six.** The seven recovered from hidden attempts
+**Fourteen shape-A instances, where this file had six** — itself later corrected upward to
+nineteen; see the superseding block below, and note that this sentence is left standing rather
+than quietly rewritten because the *sequence* of counts is the exhibit. The seven recovered from hidden attempts
 are `33037585674` attempt 1 (two jobs), `32808436764`, `32770548874`, `32751833582`,
 `32708993068`, `32678457976` — each confirmed by `Shell did not start in time` in its own attempt
 log, 6 or 8 occurrences apiece. The seven visible ones include four this ledger never recorded at
@@ -208,11 +216,46 @@ undercount was *reruns hide instances*. Half the missing instances were sitting 
 enumerated. **The mechanism I could explain was not the mechanism doing most of the damage.** A
 tidy causal story for a gap is not a measurement of the gap.
 
-**Rate, stated only as far as the enumeration supports it.** The denominator is *attempts*, not
-runs: 131 runs never re-attempted, plus the 7 re-attempted runs contributing 2+2+2+3+2+2+2 = 15
-attempts between them, **= 146 attempts**. Thirteen of those carried at least one shape-A failure
-(7 visible attempts, 6 hidden ones — `33037585674` attempt 1 contributes two *instances* but only
-one *attempt*, which is why 14 instances live in 13 attempts): **13 / 146 ≈ 8.9% of attempts.** The per-*job* rate is
+**SUPERSEDED 2026-08-27, ~40 minutes after it was published — by the same person, off the same
+method, run deeper.** The paragraph here reported *"7 re-attempted runs … 146 attempts … 14
+instances … ~8.9%"*. Those numbers are low. The recipe above said `--limit N` without saying how
+large N has to be, and the first census ran it at `--limit 200` **across all workflows**, which
+does not reach far enough back into this one workflow's history. Re-run at `--limit 300` filtered
+to `vm-tests (slow lane)`, the same window contains **12** re-attempted runs, not 7. The five it
+missed — `32655978802`, `32652029344`, `32615318593`, `32592787891`, `32534142304` — each have an
+attempt-1 failure carrying six `Shell did not start in time` lines.
+
+**That is the third time in one day, and this time the instrument was one I had just built.**
+"DVo has no `nix`" was `PATH`-scoped. "The rerun erased it" was `gh run list`-scoped. This one was
+`--limit`-scoped: a census whose depth was a parameter nobody pinned, publishing a count as though
+depth were not a variable. **A method is not more trustworthy than a single observation just
+because it is a method — an under-specified parameter in a recipe is an unstated assumption with
+better handwriting.** The recipe above now pins both the limit and the workflow filter, and the
+window below is pinned by run-id range so the numbers are reproducible rather than sliding.
+
+**The census, corrected — window pinned to run ids `32404178598` … `33037585674`
+(2026-08-20T18:37Z → 2026-08-27T03:50Z):**
+
+| | count |
+|---|---|
+| `vm-tests (slow lane)` runs | 137 |
+| attempts (sum of each run's `attempt`) | **150** |
+| job executions (sum of `.jobs\|length` over all 150 attempts) | **1309** |
+| runs with `attempt > 1` | 12 |
+| **shape-A instances** | **19** (7 visible, 12 recovered from hidden attempts) |
+| attempts carrying ≥1 shape-A instance | 18 |
+
+- **Per attempt: 18 / 150 = 12.0%.**
+- **Per job execution: 19 / 1309 = 1.45%.**
+
+(19 instances live in 18 attempts because `33037585674` attempt 1 failed two jobs at once.)
+
+**The per-job denominator was worth refusing to guess.** Job counts per attempt are **7, 8 and
+9** — three values, not one (6 attempts at 7, 29 at 8, 115 at 9), because the matrix changed twice
+in the window. A `runs × 9` denominator would have given 1350 against a measured 1309. The error
+is only 3%, which is the useful part: **the assumption would have been wrong and would have looked
+right**, and nothing downstream would ever have flagged it. All 150 job-count fetches returned a
+number; zero errors, so the sum is not hiding a silently-skipped attempt. The per-*job* rate is
 **not** computed here, and the reason is a live trap: runs in this window do not all have the same
 number of jobs — `32426451466` has 8 where `33037585674` has 9, because the matrix changed. Any
 `runs × 9` denominator is an assumption wearing a number. Summing `.jobs|length` over every
