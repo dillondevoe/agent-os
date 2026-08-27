@@ -276,6 +276,46 @@ For the multi-job attempts here that is not load-bearing — a passing job does 
 line — but a future attempt with one shape-A failure and one real failure would be mis-read by
 this method, and the fix is a per-job log fetch.
 
+## What the 19 specimens say about the standing hypothesis (2026-08-27)
+
+The three two-VM tests carry a comment, shipped `6c7ff06` on 2026-08-23T09:25Z, that diagnoses
+this failure as **intra-job** contention — two QEMU guests booting at once on one 4-vCPU runner —
+and staggers their boots as the mitigation. Its argument rested on a distribution: *"all FOUR
+landed in the three two-VM tests and ZERO in the six single-VM tests… under a uniform model that
+is (3/9)^4 ~ 1%."* It also named its own falsification condition: *"if it returns in a two-VM
+test, the next move is the targeted one-shot retry."*
+
+The census gives that comment 19 data points where it had 4. Three findings, in descending order
+of how much they survive scrutiny.
+
+**1. The "ZERO in single-VM tests" premise is FALSIFIED. Eight of the nineteen are single-VM.**
+By job: `egress-uid-scope` 6, `identity-boot` 5, `egress-mesh-uid-scope` 3,
+`fetch-proxy-allowlist` 2, `selfimprove-loop-runs` 2, `seal-faildown` 1 — that is 11 two-VM and
+**8 single-VM**. Whatever this defect is, it is not confined to tests that boot two guests, and
+the premise the mitigation was reasoned from does not hold.
+
+**2. The two-VM enrichment is real but far weaker than claimed.** 11 of 19 against 6.3 expected
+under a uniform 3-of-9 model: **p ≈ 0.024**, not ~1%. Worth keeping as a signal; not worth
+treating as a mechanism established.
+
+**3. The mitigation's own falsification condition is met — five times — and yet it looks like it
+helped.** Two-VM instances split 6 before the stagger and 5 after, against 40 and 110 attempts:
+**15.0% → 4.5% of attempts.** So both of these are true at once and neither cancels the other:
+staggering did not stop the failure, and the two-VM rate after it is about a third of what it was.
+The pre-authorised next move (a targeted one-shot retry on this exact `RuntimeError`, never a
+blanket retry) has had its trigger fire.
+
+**4. And the finding I thought I had, which did not survive its own control check — recorded
+because the check is the point.** All eight single-VM instances land *after* the stagger date and
+none before, which reads as a regression appearing around 2026-08-23. It is mostly an artifact of
+**the matrix changing under the window**: `identity-boot` accounts for 5 of the 8 and *was added*
+`9c74fd4` on 2026-08-23T04:40Z — it existed for the last 4.7 hours of a 2.7-day "before" window.
+Excluding it leaves 3 instances, expected 1.1 in the before-window at the after-rate, P(0) = 0.33.
+Nothing. **A rate compared across a window in which the population itself changed is not a
+comparison**, and this file already had the same fact wearing another hat: the 7/8/9 job counts
+above *are* the matrix changing twice mid-window. The lesson is cheap and the alternative was
+publishing a regression that does not exist.
+
 ## What is NOT established
 
 - **Root cause.** Two shapes fit every observation equally well: (a) the console/backdoor channel
