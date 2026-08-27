@@ -87,6 +87,13 @@ jobs:
         # above the arms it did not run.
         run: ./tests/flake-input-provenance-battery.sh
 
+      - name: front-door kick battery (the wall the 3B exfil case proved)
+        # First entry taken OFF known-unwired-debt.txt rather than added to it. Pure decision
+        # layer — frontdoor_decide() never executes and do_tool is a recorder — so no ollama and
+        # no VM: runner python is enough, and the battery FAILS rather than skips if the brain
+        # module is missing.
+        run: python3 tests/frontdoor-kick-battery.py
+
       - name: vm-tests matrix covers every test-* package
         # Run under a nix-provided python rather than the runner image's: if PyYAML were merely
         # assumed present, an image change would turn this check into a no-op or a spurious red.

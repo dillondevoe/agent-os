@@ -23,5 +23,4 @@ anthropic-transport-battery.py
 audit-signing-battery.py
 calendar-battery.py
 escalate-consent-battery.py
-frontdoor-kick-battery.py
 transport-battery.py
