@@ -49,6 +49,16 @@ elif khal:
             [locale]
             default_timezone = America/Chicago
             local_timezone = America/Chicago
+            # ISO formats, stated rather than defaulted. khal's built-in dateformat is
+            # `%d.%m.` (European day-first) and its longdateformat `%d.%m.%Y`, so the
+            # `YYYY-MM-DD HH:MM` this battery constructs below was unparseable by the very
+            # khal it was invoking: `critical: Could not parse "2026-08-27 11:48 ..."`.
+            # The battery builds the string, so the battery must declare the format.
+            timeformat = %H:%M
+            dateformat = %Y-%m-%d
+            longdateformat = %Y-%m-%d
+            datetimeformat = %Y-%m-%d %H:%M
+            longdatetimeformat = %Y-%m-%d %H:%M
             [default]
             default_calendar = agent
         """))
@@ -107,7 +117,11 @@ try:
         check("now → JSON instant with epoch(int)+tz", epoch_ok, out[:60])
     else:
         # fallback `date`: looks like 2026-08-09T19:35:00-05:00
-        check("now → ISO instant", out[:4] == "20" and "T" in out, out)
+        # `out[:4] == "20"` was the original and it is unsatisfiable: a four-character
+        # slice never equals a two-character literal, so this arm failed on every input
+        # including correct ones. It printed the conforming timestamp as its own FAIL
+        # detail — the assertion and the evidence disagreeing in the same line.
+        check("now → ISO instant", out[:2] == "20" and "T" in out, out)
 except Exception as e:
     check("now parses", False, str(e))
 
