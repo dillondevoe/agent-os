@@ -233,5 +233,82 @@ jobs:
 
       # `-L` streams the full VM console + testScript output. When a leg goes red, the subtest
       # name and the assertion message are the report — do not swallow them.
+      #
+      # TARGETED ONE-SHOT RETRY on the shape-A harness flake. Authorised by Geist 2026-08-27
+      # (re-scoped disposition) after the 19-specimen census in docs/ci-flake-ledger.md falsified
+      # the premise the earlier two-VM-only pre-authorisation rested on. Read that file before
+      # touching this step; the short version and the invariants that must hold:
+      #
+      #   KEYED TO THE SIGNATURE, NOT THE MECHANISM. Retry iff the first attempt's log contains
+      #   `Shell did not start in time` AND contains no test-assertion failure. The root cause is
+      #   NOT established, so this cannot be keyed to a mechanism — and it deliberately is not
+      #   keyed to the job list either: 8 of the 19 specimens are single-VM tests, which is what
+      #   killed the "two-VM contention" scoping. All nine matrix entries get the same treatment.
+      #
+      #   THE PREDICATE IS SHOWN TO DISCRIMINATE, not assumed to. Checked against real archived
+      #   logs before shipping: shape-A attempts `32652029344` and `32615318593` score
+      #   signature=6 / assertion=0 (retry fires), while the genuine assertion failure in
+      #   `32630978544` scores signature=0 / assertion=3 (retry does NOT fire). Both arms
+      #   exercised — a predicate only tested on the failures it is meant to catch cannot show
+      #   it declines anything.
+      #
+      #   `subtest` IS NOT AN ASSERTION MARKER. It appears ~70 times in a perfectly healthy log,
+      #   so matching it would make the retry unreachable — an armed control that never fires,
+      #   which is this repo's most-repeated scar. The markers below appear only on failure.
+      #
+      #   ONE SHOT, and a second failure is final with BOTH logs kept.
+      #
+      #   IT MUST LEAVE A COUNTABLE TRACE — this is the condition the whole thing is gated on.
+      #   A wrapper retry produces no second GitHub attempt, so a swallowed failure vanishes from
+      #   `gh run list` AND from the attempts API that the census in the ledger is built on. That
+      #   is the ledger's own "a rerun hides, it does not erase" one layer deeper, and it would
+      #   blind the instrument. So every retry emits `FLAKE-A-RETRY` to the job log and to the
+      #   step summary, and the ledger's census recipe greps for it. A mitigation that swallows
+      #   a failure without leaving something to count is not a mitigation, it is a delete.
       - name: nix build .#${{ matrix.test }}
-        run: nix build --option sandbox true -L --print-build-logs '.#${{ matrix.test }}'
+        id: vmbuild
+        shell: bash
+        run: |
+          set -o pipefail
+
+          run_once() {
+            nix build --option sandbox true -L --print-build-logs '.#${{ matrix.test }}' 2>&1 \
+              | tee "$1"
+          }
+
+          if run_once vm-build-attempt-1.log; then
+            exit 0
+          fi
+
+          # THE DECISION AND THE CENSUS MARKER LIVE IN A SCRIPT, NOT HERE. Inline, this logic sat
+          # behind a failed build and two gates and could never be run: 45 job executions since
+          # the retry shipped, all first-attempt greens, emit path executed zero times. The census
+          # counts those markers, so a dead emitter and a fixed harness produce the same zero.
+          # tests/flake-retry-decide-battery.sh exercises every arm, including the shape-A+
+          # assertion case the real corpus cannot produce, and asserts the emitted marker matches
+          # the ledger's own census grep.
+          ./scripts/flake-retry-decide.sh vm-build-attempt-1.log \
+            '${{ matrix.test }}' "${GITHUB_RUN_ID}" "${GITHUB_RUN_ATTEMPT}" || exit 1
+
+          echo "Shape-A signature matched and no assertion failure present — retrying ONCE."
+          if run_once vm-build-attempt-2.log; then
+            echo "Retry passed. The attempt-1 failure is recorded above as FLAKE-A-RETRY and is" \
+                 "a countable instance for docs/ci-flake-ledger.md — it is NOT a non-event."
+            exit 0
+          fi
+
+          echo "::error::${{ matrix.test }} failed TWICE with the shape-A signature. This is not" \
+               "the one-shot case; both logs are retained as artifacts. Stop and read them."
+          exit 1
+
+      # Both attempts' logs, kept whenever the step above ran at all. The job log already holds
+      # them (the step tees rather than redirects), so this is convenience, not the preservation
+      # mechanism — preservation must not depend on an upload succeeding.
+      - name: Upload VM build logs
+        if: always() && hashFiles('vm-build-attempt-1.log') != ''
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: vm-build-logs-${{ matrix.test }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: vm-build-attempt-*.log
+          if-no-files-found: ignore
+          retention-days: 30
