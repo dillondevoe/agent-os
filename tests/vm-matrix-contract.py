@@ -72,8 +72,31 @@ TEST_SUFFIXES = (".nix", ".py", ".sh")
 # entry here should be a visible decision in a diff, not a pattern that swallows files.
 UNWIRED_BY_DESIGN = frozenset({
     "run-local.sh",           # the manual at-a-box runner; it INVOKES batteries, it is not one
-    "vm-matrix-contract.py",  # this file; invoked directly by flake-check.yml, not via flake.nix
 })
+
+# WIRED, BUT BY A WORKFLOW STEP RATHER THAN A flake.nix PACKAGE — and the claim is CHECKED.
+# (Geist, gate on #184, 2026-08-27.) Until now "invoked directly by flake-check.yml" was a
+# comment beside a name in UNWIRED_BY_DESIGN: a prose exemption. Delete the workflow step and
+# the comment stays true-looking while the battery stops running — the exact shape of the debt
+# this file exists to catch, wearing the exemption list as a coat. So the mapping is data, and
+# `unwired_tests()` fails unless a NON-COMMENT line of the named workflow references the file.
+# #184's battery tripped this check on the commit that added it, wired into flake-check.yml
+# exactly as the ledger demands — the ledger simply had no vocabulary for that kind of wiring.
+WIRED_VIA_WORKFLOW = {
+    "vm-matrix-contract.py":        "flake-check.yml",  # this file
+    "flake-retry-decide-battery.sh": "flake-check.yml",  # the census emitter's battery; pure bash
+    # Migrated here on the #163 merge (2026-08-27). This branch had independently grown a
+    # WORKFLOW_INVOKED frozenset + _named_in_any_workflow() making the SAME claim — filed 08-23,
+    # four days before #184 landed WIRED_VIA_WORKFLOW. Convergence, not conflict. Keeping both
+    # would be two registries for one rule, which is this file's own recurring scar (reader and
+    # writer spelling one rule in two languages, with nothing making them agree). Main's is
+    # strictly stronger on both axes mine was weak: it names WHICH workflow rather than accepting
+    # any, and it ignores `#` lines rather than counting a comment as wiring. So mine goes.
+    "flake-input-provenance-contract.py": "flake-check.yml",  # text contract on flake.lock
+    # Its control arms — docstring prose until 2026-08-27, now executed. Wired in the same
+    # commit that made them run: a battery landing unwired is the bug one line up.
+    "flake-input-provenance-battery.sh": "flake-check.yml",
+}
 
 # DEBT, NOT DESIGN — and the two must never share a list.
 #
@@ -104,11 +127,44 @@ KNOWN_UNWIRED_DEBT = frozenset({
     # Found in the first sweep (#153): referenced only by tests/run-local.sh, a manual runner.
     "anthropic-transport-battery.py",
     "audit-signing-battery.py",
-    "bip340-battery.py",
+    # bip340-battery.py was here until today, and it is the entry that should NOT have been a
+    # routine line on this list. Its own header states, as fact, that it satisfies "binding
+    # condition 2 of Geist's 2026-08-19 Path-A ruling: the FULL official test-vector set runs
+    # in CI." It ran in no lane. The repo held both claims at once -- "runs in CI" in the file,
+    # "runs nowhere" in this list -- and nothing ever made them meet.
+    #
+    # A RULING CONDITION DISCHARGED BY WRITING A FILE IS DISCHARGED BY PROSE. Condition 2 asks
+    # for an EXECUTION; the only evidence of one is a lane that goes red when it stops. The
+    # header was read as the receipt.
+    #
+    # Now wired as `bip340-contract` in flake.nix. Note what specifically had not been running:
+    # the must-fail vectors (5-15) and check I's control arm, i.e. the forgery-acceptance
+    # coverage the ruling singled out -- a verifier returning True unconditionally passes every
+    # TRUE vector, so the unrun half was exactly the half that matters.
     "escalate-consent-battery.py",
     "frontdoor-kick-battery.py",
     "transport-battery.py",
 })
+
+# NON-FILE DEBT, recorded here because this is the ledger people read, and NOT added to the set
+# above because the set means "a test file exists and no lane runs it". This debt has no test file
+# at all, so listing it would make the count claim coverage that was never written. A ledger whose
+# entries mean two different things is a ledger nobody can act on.
+#
+# PARTICIPANTS_DIR IS NOT MODE-CHECKED. Geist, 2026-08-27 (P3, gate on #172). As of #172 the boot
+# self-test's reference point is `participants/<name>.md` — the recorded npub — but `preflight()`
+# stats only KEYS_DIR and the `*.key` modes. PARTICIPANTS_DIR is created 0o755 and never checked.
+#
+# Why this is P3 and not a blocker, stated so the next reader does not have to re-derive it: a
+# principal with registry-write but not key-write can make every boot refuse with IDENTITY DRIFT.
+# That is fail-CLOSED and loud — a denial, not a bypass. A principal with key-write already owns
+# the box. The trust class is unchanged by #172; what changed is that a second path can now cause
+# a loud refusal.
+#
+# The real question underneath is spec 2.1's: re-attestation, and whether the registry should be
+# SIGNED rather than merely mode-guarded. Mode-guarding participants/ would close the denial path
+# without answering that, which is why this is recorded rather than patched. Owned by whoever
+# builds the RULING_CONDITIONS table (ruled item 3).
 
 
 def matrix_entries(path):
@@ -247,7 +303,7 @@ def unwired_test_files(tests_dir, flake_path):
         for path in sorted(glob.glob(os.path.join(tests_dir, "*" + suffix))):
             base = os.path.basename(path)
             present.add(base)
-            if base in UNWIRED_BY_DESIGN or base in KNOWN_UNWIRED_DEBT:
+            if base in UNWIRED_BY_DESIGN or base in KNOWN_UNWIRED_DEBT or base in WIRED_VIA_WORKFLOW:
                 continue
             if not wiring_references(flake_src, tests_dir, base):
                 unwired.append(path)
@@ -265,7 +321,69 @@ def unwired_test_files(tests_dir, flake_path):
             stale.append((base, "no such file in %s/" % tests_dir))
         elif wiring_references(flake_src, tests_dir, base):
             stale.append((base, "is wired into %s now — remove the exemption" % flake_path))
+    # A WORKFLOW-WIRING CLAIM IS VERIFIED, NOT TRUSTED: the named workflow must reference the
+    # file on a line that is not a comment. A mention inside `# ...` is prose; prose does not run.
+    workflows_dir = os.path.join(os.path.dirname(os.path.abspath(tests_dir)), ".github", "workflows")
+    for base, wf in sorted(WIRED_VIA_WORKFLOW.items()):
+        if base not in present:
+            stale.append((base, "no such file in %s/" % tests_dir))
+            continue
+        if wiring_references(flake_src, tests_dir, base):
+            stale.append((base, "is wired into %s now — remove it from WIRED_VIA_WORKFLOW" % flake_path))
+            continue
+        wf_path = os.path.join(workflows_dir, wf)
+        try:
+            with open(wf_path) as fh:
+                lines = fh.read().splitlines()
+        except OSError:
+            stale.append((base, "claims wiring via %s, which cannot be read" % wf_path))
+            continue
+        if not any(base in ln and not ln.lstrip().startswith("#") for ln in lines):
+            stale.append((base, "claims wiring via %s but NO non-comment line there names it — "
+                                "the battery runs NOWHERE" % wf))
     return unwired, vacuous, stale
+
+
+DEBT_BASELINE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                             "known-unwired-debt.txt")
+
+
+def _read_debt_baseline(path):
+    """The recorded debt ledger. Missing file is a FAILURE, never a skip.
+
+    A ratchet whose baseline can vanish is not a ratchet: `rm` would silently restore
+    exactly the freedom the file exists to remove, and this check would go green while
+    doing so. Same rule as flake-input-provenance's missing-lock case.
+    """
+    try:
+        with open(path) as fh:
+            text = fh.read()
+    except OSError as exc:
+        sys.exit(
+            f"FAIL: the debt ratchet baseline {path} could not be read: {exc!r}\n"
+            "      KNOWN_UNWIRED_DEBT is documented as may-only-shrink. That rule lives\n"
+            "      in this file; without it the list is unbounded and this check would\n"
+            "      pass while the debt grew. Refusing to exit 0."
+        )
+    return {ln.strip() for ln in text.splitlines()
+            if ln.strip() and not ln.lstrip().startswith("#")}
+
+
+def debt_ratchet(debt, baseline_path=DEBT_BASELINE):
+    """Compare KNOWN_UNWIRED_DEBT against the recorded baseline.
+
+    EQUALITY, not a count. A count alone permits a silent SWAP — remove one battery from
+    the list, add a different one, total unchanged — which is precisely a new unwired test
+    being made invisible while the ledger someone watches reads as flat.
+
+    Growth is the violation. Shrinkage is the goal, but it still fails here, deliberately:
+    the baseline must be updated in the SAME commit, or it goes stale and quietly re-permits
+    every name it still holds. A stale exemption is the bug this file is already about.
+    """
+    recorded = _read_debt_baseline(baseline_path)
+    added = sorted(debt - recorded)
+    removed = sorted(recorded - debt)
+    return added, removed
 
 
 def flake_test_packages(system):
@@ -280,6 +398,226 @@ def flake_test_packages(system):
     return json.loads(proc.stdout)
 
 
+# ---------------------------------------------------------------------------------------------
+# RULING_CONDITIONS — ruled item 3 (Geist, 2026-08-27)
+#
+# WHY THIS TABLE EXISTS, and it is one specific incident. `tests/bip340-battery.py` opened by
+# stating as settled fact that it satisfied "binding condition 2 ... the FULL official test-vector
+# set runs in CI." It ran in no lane for eight days, while THIS FILE's debt list simultaneously
+# recorded it as running nowhere. The repo asserted both things at once and nothing made them meet.
+# Geist's rule from that: A RULING CONDITION NAMING AN EXECUTION IS DISCHARGED ONLY BY A LANE THAT
+# GOES RED. A header is not a receipt, and neither is a table — which is why every row below is
+# checked against the same flake.nix the debt ledger is checked against, by the same function.
+#
+# THE ROW RULE, ruled: a row may say `enforced` ONLY with a run id. Anything else is `half` (one
+# of two halves discharged) or `prose` (claimed but not executed anywhere). The status column is
+# the claim; `run_ids` is the evidence; the checker below refuses to let them disagree.
+RULING_CONDITIONS = (
+    {
+        "id": "condition-2",
+        "ruling": "Geist 2026-08-19 Path-A",
+        "claim": "the boot identity self-test executes, and the full official BIP-340 vector set "
+                 "(INCLUDING must-fail vectors) runs in CI",
+        "status": "enforced",
+        "lanes": ("bip340-battery.py", "identity-boot.nix"),
+        # Two halves, two runs, deliberately cited separately: they were discharged eight days
+        # apart by different work and a single id would hide that.
+        "run_ids": ("33033802300", "33035705963"),
+        "note": "vectors-execute half: main flake-check 33033802300 (#170). Negative-arm half: "
+                "main vm-tests 33035705963 (#172), leg 9 — a corrupted agent key now makes the "
+                "boot self-test go red. Before #172 it went GREEN on a substituted key, because "
+                "it verified against a pubkey DERIVED from the key file: a tautology.",
+    },
+    {
+        "id": "condition-3",
+        "ruling": "Geist 2026-08-19 Path-A",
+        "claim": "the vendored non-timing-hardened BIP-340 implementation stays off any network "
+                 "reach path; network exposure makes libsecp256k1 (Path B) mandatory",
+        "status": "enforced",
+        "lanes": ("bip340-exposure-contract.py",),
+        "run_ids": ("33030523828",),
+        "note": "Importer tripwire (#169). Sees IMPORTS, not shell-outs — the subprocess gap is "
+                "recorded in that file's docstring as P3, deliberately not armed while no module "
+                "on the reach path shells out.",
+    },
+)
+
+_RUN_ID = re.compile(r"^\d{6,}$")
+_VALID_STATUS = ("enforced", "half", "prose")
+
+
+_BLOCK = re.compile(r"(?<![^\s])/\*.*?\*/", re.S)
+
+
+def _blank_block_comments(src):
+    """Replace every `/* ... */` span with spaces, PRESERVING newlines and column count.
+
+    `#` is not Nix's only comment. A test named inside a block comment is prose that the
+    line-start `#` filter cannot see, and prose discharging a ruling condition is the exact
+    failure the table one level up was built to end. flake.nix carries zero block comments as of
+    2026-08-27, so this closes a LATENT hole — written against a synthetic source in the selftest
+    rather than against a mention that happens to exist today.
+
+    Blanking rather than deleting keeps line structure intact, so a wiring statement sharing the
+    closing line (`*/ checks.x = ...`) survives. Nix block comments do not nest.
+
+    AN UNTERMINATED `/*` IS NOT TREATED AS A COMMENT, and that is not the timid choice — it is
+    the one the repo forced. The first version blanked from an unpaired `/*` to EOF, on the
+    reasoning that over-stripping fails loudly. It did fail loudly, immediately: flake.nix line
+    ~315 contains the shell glob `for f in ${./modules}/*.nix`, which is not a comment at all,
+    and the whole file downstream of it went blank — CONTROL 1 of the selftest rejected a row
+    that should pass. So the two cases are not symmetric here. A truly unterminated block comment
+    makes flake.nix a syntax error that `nix` refuses to evaluate, so it cannot reach a green
+    check; a bare `/*` inside a string demonstrably does exist. Pairing is required, and the glob
+    line is pinned as a control arm below so this cannot regress into the version that was wrong.
+    """
+    return _BLOCK.sub(lambda m: re.sub(r"[^\n]", " ", m.group(0)), src)
+
+
+def executing_references(flake_src, tests_dir, base):
+    """`wiring_references()` minus comment lines.
+
+    STRICTER THAN THE DEBT LEDGER, ON PURPOSE, and the difference is load-bearing here.
+    `wiring_references` counts a mention inside a `#` comment as possible wiring. For the debt
+    ledger that bias is safe: it can only make the ledger UNDER-report debt, never call a wired
+    test unwired. For a row claiming `enforced` the same bias is exactly wrong — it would let a
+    ruling condition be discharged by a COMMENT MENTIONING THE TEST, which is the prose-as-receipt
+    failure this table was built to end, one level up.
+
+    This is not hypothetical in this repo: `tests/bip340-battery.py` is named on flake.nix line
+    ~425 inside a comment block AND wired for real below it. A row citing it must pass on the
+    second, not the first.
+    """
+    return [ln for ln in wiring_references(_blank_block_comments(flake_src), tests_dir, base)
+            if not ln.lstrip().startswith("#")]
+
+
+def check_ruling_conditions(flake_src, tests_dir, rows=None, debt=None):
+    """Returns a list of failure strings; empty means every row is backed by what it claims."""
+    rows = RULING_CONDITIONS if rows is None else rows
+    debt = KNOWN_UNWIRED_DEBT if debt is None else debt
+    problems = []
+    for row in rows:
+        rid = row.get("id", "<unnamed row>")
+        status = row.get("status")
+        run_ids = tuple(row.get("run_ids", ()))
+        lanes = tuple(row.get("lanes", ()))
+
+        if status not in _VALID_STATUS:
+            problems.append(f"{rid}: status {status!r} is not one of {_VALID_STATUS}")
+        if not lanes:
+            problems.append(f"{rid}: names no lane at all, so nothing can ever make it go red")
+
+        # THE ROW RULE.
+        if status == "enforced" and not run_ids:
+            problems.append(
+                f"{rid}: says 'enforced' but cites NO run id. A condition is enforced by a run "
+                f"that happened, not by a row that says so — mark it 'half' or 'prose'.")
+        for r in run_ids:
+            if not _RUN_ID.match(r):
+                problems.append(
+                    f"{rid}: run id {r!r} is not a run id. 'see CI' and 'green on main' are the "
+                    f"prose this table replaces; cite the number so a reader can open it.")
+
+        for base in lanes:
+            path = os.path.join(tests_dir, base)
+            if not os.path.exists(path):
+                problems.append(f"{rid}: names {path}, which does not exist")
+                continue
+            if not executing_references(flake_src, tests_dir, base):
+                problems.append(
+                    f"{rid}: names {path}, which no lane in {FLAKE} executes. The condition is "
+                    f"discharged by prose — this is the bip340-battery shape, again.")
+            if status == "enforced" and base in debt:
+                problems.append(
+                    f"{rid}: says 'enforced' while {base} is on KNOWN_UNWIRED_DEBT, which is the "
+                    f"repo asserting 'runs in CI' and 'runs nowhere' at the same time.")
+    return problems
+
+
+def ruling_conditions_selftest():
+    """Show the checker RED before trusting it green. Runs on every invocation, by design.
+
+    A table-checker that has only ever been observed passing is the same instrument this table
+    exists to distrust. Each arm below is a row the checker MUST reject; the final control is a
+    row it must ACCEPT, without which a checker that rejected everything would pass this selftest.
+    """
+    src = open(FLAKE).read() if os.path.exists(FLAKE) else ""
+    good = {"id": "arm", "status": "enforced", "lanes": ("bip340-exposure-contract.py",),
+            "run_ids": ("33030523828",)}
+    arms = [
+        ("enforced with no run id", {**good, "run_ids": ()}),
+        ("run id that is prose", {**good, "run_ids": ("green on main",)}),
+        ("names a file that does not exist", {**good, "lanes": ("no-such-battery.py",)}),
+        ("names no lane at all", {**good, "lanes": ()}),
+        ("bogus status", {**good, "status": "probably"}),
+        ("enforced while on the debt list", {**good, "lanes": ("transport-battery.py",)}),
+    ]
+    failures = []
+    for label, row in arms:
+        if not check_ruling_conditions(src, TESTS_DIR, rows=(row,)):
+            failures.append(f"selftest arm NOT caught: {label}")
+    # CONTROL 1: the checker accepts a well-formed row.
+    if check_ruling_conditions(src, TESTS_DIR, rows=(good,)):
+        failures.append("selftest control: a well-formed row was REJECTED, so every arm above "
+                        "passed for the wrong reason")
+    # CONTROL 2 / PRE-FIX ARM: the comment-only reference. `wiring_references` accepts it and
+    # `executing_references` must not, or the strictness this table depends on is not there.
+    lenient = [ln for ln in wiring_references(src, TESTS_DIR, "bip340-battery.py")]
+    strict = executing_references(src, TESTS_DIR, "bip340-battery.py")
+    if len(strict) >= len(lenient):
+        failures.append(
+            "selftest pre-fix arm: executing_references() dropped NOTHING that "
+            "wiring_references() kept, so the comment-vs-code distinction is unproven here. "
+            "If flake.nix no longer mentions bip340-battery.py in a comment, re-point this arm "
+            "at another commented mention rather than deleting it.")
+
+    # BLOCK-COMMENT ARM. `#` is not Nix's only comment: `/* ... */` spans lines, and a name
+    # inside one is prose the `#` filter cannot see. flake.nix has zero block comments today, so
+    # this hole is LATENT — which is exactly why it gets a synthetic source rather than a
+    # sentence in a docstring. A row claiming `enforced` must not be dischargeable by a name
+    # sitting in a comment, whichever of the two spellings the comment uses.
+    block_only = (
+        "  # nothing here executes\n"
+        "  /*\n"
+        "     someday: checks.x = mk { script = \"python3 tests/latent-battery.py\"; };\n"
+        "  */\n"
+    )
+    if executing_references(block_only, TESTS_DIR, "latent-battery.py"):
+        failures.append("selftest arm NOT caught: a test named only inside a /* ... */ Nix "
+                        "block comment was counted as executing wiring")
+    # CONTROL 3: over-stripping fails LOUDLY (a real row would stop passing), under-stripping is
+    # the silent direction — so bias toward stripping. These two arms pin the bias in place:
+    # real wiring AFTER a closed block, and real wiring on the same line the block closes on.
+    after_block = block_only + '  checks.y = mk { script = "python3 tests/latent-battery.py"; };\n'
+    if not executing_references(after_block, TESTS_DIR, "latent-battery.py"):
+        failures.append("selftest control: a real wiring line following a CLOSED block comment "
+                        "was stripped, so the block-comment arm above passes by over-stripping")
+    same_line = '  */ checks.z = mk { script = "python3 tests/latent-battery.py"; };\n'
+    if not executing_references("  /*\n  x\n" + same_line, TESTS_DIR, "latent-battery.py"):
+        failures.append("selftest control: wiring after `*/` on the closing line was stripped")
+    # CONTROL 4 / REGRESSION PIN: an UNPAIRED `/*` is a glob, not a comment. flake.nix line ~315
+    # has `for f in ${./modules}/*.nix`. Blanking to EOF from there erased the real file and
+    # tripped CONTROL 1 — see `_blank_block_comments`. This arm holds that fix in place.
+    glob = '  for f in ${./modules}/*.nix; do :; done\n' + after_block.split("*/\n")[-1]
+    if not executing_references(glob, TESTS_DIR, "latent-battery.py"):
+        failures.append("selftest control: an unpaired `/*` (a shell glob, not a comment) "
+                        "blanked real wiring downstream of it")
+    # CONTROL 5 (Geist, gate, 2026-08-27): the glob PAIRED with a LATER real block comment. A
+    # non-greedy `/\*.*?\*/` pairs the glob's `/*` with the first `*/` in the file, and everything
+    # between — real wiring included — goes blank SILENTLY: unlike CONTROL 4 nothing fails loudly
+    # unless a cited row happens to sit in the erased span. Latent today (zero block comments);
+    # it opens the day one is added below line ~315. The opener must be preceded by whitespace
+    # or line start — a glob's `/*` is preceded by `}`.
+    paired = ('  for f in ${./modules}/*.nix; do :; done\n'
+              '  checks.w = mk { script = "python3 tests/latent-battery.py"; };\n'
+              '  /* a real comment, later */\n')
+    if not executing_references(paired, TESTS_DIR, "latent-battery.py"):
+        failures.append("selftest control: a shell glob `/*` PAIRED with a later real `*/` "
+                        "blanked the real wiring between them")
+    return failures
+
+
 def main():
     ap = argparse.ArgumentParser()
     # Injection points exist ONLY so the failing arm can be exercised without corrupting the
@@ -288,6 +626,7 @@ def main():
     ap.add_argument("--workflow", default=WORKFLOW)
     ap.add_argument("--flake", default=FLAKE)
     ap.add_argument("--tests-dir", default=TESTS_DIR)
+    ap.add_argument("--debt-baseline", default=DEBT_BASELINE)
     ap.add_argument("--packages-json", default=None,
                     help="JSON array of package names, for testing the failing arm")
     args = ap.parse_args()
@@ -299,8 +638,18 @@ def main():
     unlisted = sorted(tests - matrix)
     dangling = sorted(matrix - tests)
     unwired, vacuous, stale = unwired_test_files(args.tests_dir, args.flake)
+    debt_added, debt_removed = debt_ratchet(KNOWN_UNWIRED_DEBT, args.debt_baseline)
 
-    if not unlisted and not dangling and not unwired and not vacuous and not stale:
+    # Ruled item 3. The selftest runs FIRST and unconditionally: if the checker cannot be shown
+    # going red, its green verdict on the real table below means nothing.
+    ruling = ruling_conditions_selftest()
+    ruling += check_ruling_conditions(open(args.flake).read(), args.tests_dir)
+
+    # Both sides of this merge added an INDEPENDENT failure mode to the same guard, so the
+    # resolution is a union and not a choice. Dropping either term is the silent-pass direction:
+    # the checker would still exit 0 while one of its own checks had findings.
+    if (not unlisted and not dangling and not unwired and not vacuous and not stale
+            and not ruling and not debt_added and not debt_removed):
         print(f"OK: {len(tests)} test-* package(s), all present in the vm-tests matrix:")
         for name in sorted(tests):
             print(f"  {name}")
@@ -314,8 +663,44 @@ def main():
               f" so wiring one is not enough on its own — see self_disarms().")
         for base in sorted(KNOWN_UNWIRED_DEBT):
             print(f"  DEBT {base}" + ("  [self-disarming]" if base in disarming else ""))
+        print(f"OK: {len(RULING_CONDITIONS)} ruling condition(s), each backed by an executing "
+              f"lane; every 'enforced' row cites a run id:")
+        for row in RULING_CONDITIONS:
+            print(f"  {row['id']}: {row['status']} <- runs "
+                  f"{', '.join(row['run_ids']) or '(none)'}  [{', '.join(row['lanes'])}]")
         return 0
 
+    if debt_added:
+        print("FAIL: KNOWN_UNWIRED_DEBT GREW. It is documented as may-only-shrink, and these",
+              file=sys.stderr)
+        print("      names are not in the recorded baseline — each one is a test that runs in",
+              file=sys.stderr)
+        print(f"      NO CI lane and has just been made invisible to this check:", file=sys.stderr)
+        for base in debt_added:
+            print(f"  +{base}", file=sys.stderr)
+        print(f"      Wire it up. Editing {os.path.basename(DEBT_BASELINE)} to admit it is a",
+              file=sys.stderr)
+        print("      reviewable act, not a formality.", file=sys.stderr)
+    if debt_removed:
+        print("FAIL: KNOWN_UNWIRED_DEBT shrank but the baseline still lists these — which is the",
+              file=sys.stderr)
+        print("      right direction and the wrong commit. Update the baseline in the SAME commit,",
+              file=sys.stderr)
+        print("      or it goes stale and silently re-permits every name it still holds:",
+              file=sys.stderr)
+        for base in debt_removed:
+            print(f"  -{base}", file=sys.stderr)
+    if ruling:
+        print("FAIL: RULING_CONDITIONS — a row claims more than the repo can show:",
+              file=sys.stderr)
+        for problem in ruling:
+            print(f"  {problem}", file=sys.stderr)
+        print("  -> either wire the lane so it can go red, cite the run id that proves it ran,",
+              file=sys.stderr)
+        print("     or downgrade the row to 'half'/'prose'. A ruling condition discharged by a",
+              file=sys.stderr)
+        print("     table entry is discharged by prose, which is what this table is FOR.",
+              file=sys.stderr)
     if stale:
         print("FAIL: stale exemption(s) in this file — a suppression list that names things no",
               file=sys.stderr)
