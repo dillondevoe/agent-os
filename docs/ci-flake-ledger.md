@@ -197,8 +197,22 @@ over an earlier 40-run one — the same data through a sliding window, neither p
    ```bash
    # per run id, over the same window as step 1
    gh api "repos/dillondevoe/agent-os/actions/runs/$ID/attempts/$N/logs" > /tmp/l.zip
-   unzip -p /tmp/l.zip '*' | grep -oE 'FLAKE-A-RETRY test=[a-z0-9-]+ run=[0-9]+' | sort | uniq -c
+   unzip -p /tmp/l.zip '*' | grep -oE 'FLAKE-A-RETRY test=[a-z0-9-]+ run=[0-9]+' | sort -u | wc -l
    ```
+
+   **`sort -u`, not `uniq -c`, and it is load-bearing for the same reason `run=[0-9]+` is.**
+   GitHub's logs zip contains every job's log **twice** — a flat whole-job entry
+   (`0_vm-test (test-x).txt`) *and* a per-step folder that repeats the same lines. `unzip -p '*'`
+   therefore reads each line twice, and a naive count doubles. Verified on `33044089747`: the
+   pre-fix grep returned **36 hits on a fully green run** — 9 jobs × 2 marker-bearing source
+   lines × 2 copies — where the truth is zero.
+
+   Deduplication is *sound* here rather than merely convenient, and only because the retry is
+   **one shot**: at most one marker can fire per job execution, so a distinct
+   `test=X run=Y` pair *is* one instance. Fetch per attempt (step 2 already does), dedupe within
+   the attempt, and sum across attempts — `GITHUB_RUN_ID` is identical across attempts of the
+   same run, so deduping across a whole run instead would silently merge two real instances
+   into one.
 
    The `run=[0-9]+` tail is load-bearing, not decoration (Geist, gate, 2026-08-27 — verified on
    run `33037585674`): the runner echoes every `run:` script body into the job log with
@@ -365,6 +379,15 @@ only reason to trust either.
 3. **Roughly 11 of every 19 markers carry a two-VM job name.** The enrichment measured at
    p ≈ 0.024 above. If the marker stream comes back near-uniform across the nine jobs, the
    enrichment was a small-sample artefact and the stagger's rationale weakens further.
+
+**First window, `33044089747` (main @ `5f195db`, the first run carrying the retry).** Nine jobs,
+all green, **zero markers** under the corrected grep. That is the exact case step 4 warns about —
+zero markers *and* zero shape-A failures — so per this file's own rule the marker was checked for
+emissibility rather than read as "the flake is gone": the source lines are present in all nine job
+logs and the predicate was control-tested on archived logs before shipping. One green run at a
+1.45%/job baseline is entirely unremarkable (P ≈ 0.88 of a clean nine-job attempt), and nothing
+about the rate can be said until the window has enough job executions to distinguish 1.45% from
+zero — on the order of a few hundred.
 
 **What none of these tests.** The retry is keyed to the *signature*, not to a mechanism, and the
 root cause stays OPEN. A green lane after this ships is not evidence the harness was fixed; it is
