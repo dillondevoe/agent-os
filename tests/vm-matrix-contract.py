@@ -1133,7 +1133,51 @@ def findings_selftest():
                         "guard slot and the second would overwrite the first")
     except KeyError:
         pass
+    # RED N's own arms. `missing_ruling` is what now stands between a dropped selftest and a
+    # green tree, so it gets the same two directions `missing_checks` gets.
+    if missing_ruling(REQUIRED_RULING) != ([], []):
+        failures.append("selftest: a COMPLETE ruling chain was reported as missing/extra — "
+                        "missing_ruling() would red every run and get exempted")
+    if not missing_ruling(sorted(REQUIRED_RULING)[1:])[0]:
+        failures.append("selftest: a selftest dropped from the chain was NOT named — RED N is "
+                        "back, and the sum that guards the guard is hand-maintained again")
+    if not missing_ruling(sorted(REQUIRED_RULING) + ["surprise"])[1]:
+        failures.append("selftest: an UNDECLARED ruling term was not named — a term could run "
+                        "without ever being required to")
     return failures
+
+
+# THE SUM ONE LEVEL UP (Geist's RED N on #199). Retiring main()'s ten-term `and` left the
+# selftest chain `_ruling += a(); _ruling += b(); ...` — six hand-maintained terms with exactly
+# the exposure the Findings registry was built to close, and dropping one is silent: with
+# `findings_selftest()` gone from the chain, forcing `any()` constant-False passes rc=0 again.
+# So the terms are a tuple, the tuple is compared by name against REQUIRED_RULING, and an
+# omission is a NAMED red rather than a shorter sum.
+#
+# The recursion terminates HERE, at the same residue as the checks registry: a new selftest whose
+# author touches neither the tuple nor REQUIRED_RULING is invisible — but it is a two-line
+# absence sitting beside five present ones, loud in review, not a silently dropped `+=`.
+# Naming that floor is better than pretending a registry has no registry of its own.
+SELFTESTS = (
+    exemption_staleness_selftest,
+    ruling_conditions_selftest,
+    strict_caller_selftest,
+    wired_disarm_selftest,
+    findings_selftest,
+)
+
+# The five above PLUS the real ruling-table check, which is not a selftest and takes arguments;
+# main() pairs its name with its call in ONE tuple literal so the name cannot outlive the call.
+REQUIRED_RULING = {
+    "exemption_staleness_selftest", "ruling_conditions_selftest", "strict_caller_selftest",
+    "wired_disarm_selftest", "findings_selftest", "ruling_table",
+}
+
+
+def missing_ruling(names):
+    """Names REQUIRED_RULING expects that nothing ran, plus the reverse."""
+    have = set(names)
+    return sorted(REQUIRED_RULING - have), sorted(have - REQUIRED_RULING)
 
 
 def main():
@@ -1170,15 +1214,33 @@ def main():
     # collector suppress its own alarm: with any() forced constant-False the tree went green
     # while findings_selftest's failures sat unread in the same dict any() was lying about.
     # These decide before anything the collector touches.
-    _ruling = exemption_staleness_selftest()
-    _ruling += ruling_conditions_selftest()
-    _ruling += strict_caller_selftest()
     unarmed = f.add("unarmed", strict_callers_unarmed(args.tests_dir))
-    _ruling += wired_disarm_selftest()
-    _ruling += findings_selftest()
     wired_disarming = f.add("wired_disarming", wired_but_disarming(args.tests_dir))
-    _ruling += check_ruling_conditions(open(args.flake).read(), args.tests_dir)
-    ruling = _ruling
+
+    # ONE ITERATION, NOT A SUM. Each term's NAME comes from the object that gets called, so a
+    # term cannot be dropped from the chain while still counting as having run.
+    terms = [(fn.__name__, fn) for fn in SELFTESTS]
+    terms.append(("ruling_table",
+                  lambda: check_ruling_conditions(open(args.flake).read(), args.tests_dir)))
+    # NAME AND CALL IN ONE EXPRESSION (geist, R2 on #200): with `ran.append(name)` and
+    # `ruling += fn()` as two statements, deleting the call line left every term recorded as
+    # ran and none of them called — rc=0 green. `ran` is derived from the results, so a name
+    # can be recorded only by a call that happened.
+    results = [(name, fn()) for name, fn in terms]
+    ran = [name for name, _ in results]
+    ruling = [problem for _, problems in results for problem in problems]
+    missing_terms, extra_terms = missing_ruling(ran)
+    if missing_terms or extra_terms:
+        print("FAIL: the ruling chain does not match REQUIRED_RULING. A selftest dropped from",
+              file=sys.stderr)
+        print("      the chain cannot go red, so nothing it guards is guarded — that is RED N:",
+              file=sys.stderr)
+        for k in missing_terms:
+            print(f"  MISSING      {k}  — required, but nothing ran it", file=sys.stderr)
+        for k in extra_terms:
+            print(f"  UNDECLARED   {k}  — ran, but REQUIRED_RULING does not name it",
+                  file=sys.stderr)
+        return 1
     if ruling:
         print("FAIL: RULING_CONDITIONS / selftest — the checker cannot be shown going red, so",
               file=sys.stderr)
