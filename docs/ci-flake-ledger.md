@@ -113,7 +113,26 @@ only ever see part of what it is counting should say "lower bound" out loud.
 - **Root cause.** Two shapes fit every observation equally well: (a) the console/backdoor channel
   is lost while the VM keeps running, or (b) the VM wedges outright. Nothing measured here
   separates them. Separating them needs a nix-capable box that can hold a wedged guest open for
-  inspection; DVo has no `nix` binary and cannot do it. Flagged as a resourcing question.
+  inspection.
+
+  **RETRACTED 2026-08-27 — this line used to read "DVo has no `nix` binary and cannot do it.
+  Flagged as a resourcing question." That is false, and the author of this file is the one who
+  wrote it.** Measured on DVo the same day: `nix (Determinate Nix 3.21.9) 2.34.8` at
+  `/nix/var/nix/profiles/default/bin/nix`, `/dev/kvm` present, 6 cores, 7 GB. What was true is
+  that `nix` is not on the *default* `PATH` here, and that fact got generalised into a property of
+  the machine. The repo's own capability probe already draws exactly this distinction in the
+  opposite direction — an rc=127 there means "I could not run the instrument", never "the
+  capability is down" — and this line is that rule broken by the person who relies on it.
+
+  The cost is the part worth recording: a root-cause investigation sat parked as a *resourcing
+  question* for two days, and the whole blocker was one `export PATH`. **A claim that a capability
+  is absent is a claim about the machine, and it needs the same control arm as a claim that one is
+  present** — run the thing on the box before writing down that the box cannot.
+
+  So the root cause is still NOT established, but it is no longer blocked on hardware. What it is
+  actually blocked on is narrower and should be stated as such: reproducing shape A *locally*,
+  which a ~7% flake does not oblige to happen on demand. A local pass is uninformative by
+  construction; only a local FAILURE, held open, separates (a) from (b).
 - **Whether this is new.** No data exists before 2026-08-24T07:41Z. It may be long-standing.
 - **Whether the rate is stable.** Two windows, two different numbers, one day of data.
 - **Whether all five re-attempts in the window were this defect.** One is confirmed; four are not
