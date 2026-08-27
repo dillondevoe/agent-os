@@ -100,7 +100,16 @@ def main() -> int:
             lock = json.load(fh)
         src = path
 
-    nodes = {k: v for k, v in lock.get("nodes", {}).items() if k != "root"}
+    # THE ROOT NODE IS NAMED BY THE LOCK, NOT BY THIS FILE. `lock["root"]` holds the key of the
+    # root node; it is `"root"` in every lock nix has written, which is exactly why the literal
+    # went unnoticed. The failure if it ever differs is not an error — it is a SILENT WIDENING:
+    # the real root would stop being filtered and get walked as though it were an input, and the
+    # actual root key would be filtered out of a set it was never in. The first half is the
+    # dangerous one, since the root node carries no `locked` and would trip the "no locked key"
+    # arm, turning a healthy lock red for a reason the message would not explain.
+    # Reading the field costs nothing and removes the assumption. (Geist, P3 on the #163 gate.)
+    root_key = lock.get("root", "root")
+    nodes = {k: v for k, v in lock.get("nodes", {}).items() if k != root_key}
     failures = []
 
     # Check 3 first: it is the one that decides whether the other two mean anything.

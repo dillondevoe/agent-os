@@ -93,6 +93,9 @@ WIRED_VIA_WORKFLOW = {
     # strictly stronger on both axes mine was weak: it names WHICH workflow rather than accepting
     # any, and it ignores `#` lines rather than counting a comment as wiring. So mine goes.
     "flake-input-provenance-contract.py": "flake-check.yml",  # text contract on flake.lock
+    # Its control arms — docstring prose until 2026-08-27, now executed. Wired in the same
+    # commit that made them run: a battery landing unwired is the bug one line up.
+    "flake-input-provenance-battery.sh": "flake-check.yml",
 }
 
 # DEBT, NOT DESIGN — and the two must never share a list.
