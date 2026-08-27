@@ -1222,10 +1222,13 @@ def main():
     terms = [(fn.__name__, fn) for fn in SELFTESTS]
     terms.append(("ruling_table",
                   lambda: check_ruling_conditions(open(args.flake).read(), args.tests_dir)))
-    ruling, ran = [], []
-    for name, fn in terms:
-        ran.append(name)
-        ruling += fn()
+    # NAME AND CALL IN ONE EXPRESSION (geist, R2 on #200): with `ran.append(name)` and
+    # `ruling += fn()` as two statements, deleting the call line left every term recorded as
+    # ran and none of them called — rc=0 green. `ran` is derived from the results, so a name
+    # can be recorded only by a call that happened.
+    results = [(name, fn()) for name, fn in terms]
+    ran = [name for name, _ in results]
+    ruling = [problem for _, problems in results for problem in problems]
     missing_terms, extra_terms = missing_ruling(ran)
     if missing_terms or extra_terms:
         print("FAIL: the ruling chain does not match REQUIRED_RULING. A selftest dropped from",
