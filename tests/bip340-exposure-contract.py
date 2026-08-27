@@ -37,6 +37,15 @@ and `bin/broker` for splitting, not fetching. A checker that flagged it would be
 that is fine, and a check that cries wolf is uninstalled long before the day it is right.
 Control arm A5 pins this.
 
+IT SEES IMPORTS, NOT SHELL-OUTS. A module that reaches the network via `subprocess` or
+`os.system` — a `curl` shell-out — and also reaches `bip340` is invisible to an import scanner:
+the network edge never appears in an `ast.Import` node. Measured 2026-08-27: no module on the
+reach path (`identity`, `audit`, `bip340`) imports `subprocess` or calls `os.system`/`os.popen`,
+so the gap is latent, not live. Recorded rather than armed on Geist's ruling (2026-08-27, P3):
+adding `subprocess` to NETWORK_ROOTS today would be an arm with no world that exercises it. If it
+is armed later, it needs a control asserting that a subprocess user NOT on the reach path stays
+green — otherwise the rule is "no module may ever shell out", which is not the condition.
+
 RESIDUAL SCOPE, STATED — this reads `modules/*.py` and python scripts in `bin/`, and it does NOT
 read python embedded inside `.nix` files. There is already one such caller:
 `modules/identity-pkg.nix` wraps `sys.path.insert(...); import identity;
@@ -52,7 +61,7 @@ the class of bug it exists to catch — docs/cancelled-boundaries.md, members 3,
 
 Local use:
     python3 tests/bip340-exposure-contract.py
-    python3 tests/bip340-exposure-selftest.py     # 8 arms, 3 of them controls
+    python3 tests/bip340-exposure-selftest.py     # arm + control counts printed by the selftest itself
 
 Control arms (each MUST be red — if one is not, that rule is not a rule):
     see tests/bip340-exposure-selftest.py, which runs them all in-process.
