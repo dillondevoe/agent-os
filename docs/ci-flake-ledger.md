@@ -65,8 +65,8 @@ Six observed failures, five **different** jobs, one **byte-identical** signature
 | `32784416040` | `vm-test (test-identity-boot)` | 2026-08-24T22:23Z |
 | `32779702396` | `vm-test (test-seal-faildown)` | 2026-08-24T21:28Z |
 | `32808436764` attempt 1 | `vm-test (test-egress-uid-scope)` | 2026-08-25T04:18Z |
-| `33037585674` | `vm-test (test-fetch-proxy-allowlist)` | 2026-08-27T03:58Z |
-| `33037585674` | `vm-test (test-selfimprove-loop-runs)` | 2026-08-27T03:59Z |
+| `33037585674` attempt 1 | `vm-test (test-fetch-proxy-allowlist)` | 2026-08-27T03:58Z |
+| `33037585674` attempt 1 | `vm-test (test-selfimprove-loop-runs)` | 2026-08-27T03:59Z |
 
 Every one fails the same way: the driver cannot reach `backdoor.service` in the guest, retries
 20 times, and gives up after ~7m07s with
@@ -106,6 +106,28 @@ The diff on that sha touched `tests/vm-matrix-contract.py` only — a host-side 
 runs in `flake-check`, boots no VM, and is imported by no VM test — and the previous main sha
 `45ebb4e` was green on all nine. The exclusion rests on that reachability argument, **not** on
 "it's a known flake", which is the reasoning this file exists to refuse.
+
+**Rerun on the same sha: BOTH jobs green (attempt 2, 2026-08-27T04:50Z).** That is the cheap
+discriminator, and it was Geist's, not mine — `gh run rerun <id> --failed` re-runs only the failed
+jobs on the identical commit. A pass confirms the flake; a second failure on the same two jobs
+would have falsified the diff argument above and been a stop-and-summon, not a re-rerun. It also
+restores main's latest `vm-tests` to green, which every future "the previous sha was green"
+argument depends on — the exclusion reasoning used here is only available to the next person if
+somebody keeps that column true.
+
+**And then this file's own undercount mechanism ran on its own newest rows, in front of the
+author.** The section below asserts that `gh run list` reports only the latest attempt, so a
+failure re-run to green "leaves the population entirely" — an assertion previously resting on one
+reconstructed specimen (`32808436764`). This time it was watched prospectively: `33037585674` was
+read as `completed/failure` at 03:58Z with two named failed jobs, and after the rerun the same
+query returns `conclusion: success` with nine green jobs and no trace of attempt 1. **The two
+instances above are now unreachable from any run listing; they survive only because they were
+written down before the rerun.**
+
+Hence the `attempt 1` qualifier on their rows, matching `32808436764`. The ordering is the
+transferable part: **record the instance BEFORE you re-run it, because the re-run is what destroys
+the evidence** — and the re-run is also the correct thing to do, so there is no version of this
+where waiting helps.
 
 **This is one harness defect, not five flaky tests.** The job names are just the places the
 harness happened to be standing when it failed; treating them as separate test problems is the
