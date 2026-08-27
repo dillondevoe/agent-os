@@ -270,9 +270,6 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
-          SIG='Shell did not start in time'
-          # Failure-only markers. NOT `subtest`: see the note above.
-          ASSERT='RequestedAssertionFailed|AssertionError|Test .* failed'
 
           run_once() {
             nix build --option sandbox true -L --print-build-logs '.#${{ matrix.test }}' 2>&1 \
@@ -283,26 +280,15 @@ jobs:
             exit 0
           fi
 
-          if ! grep -q "$SIG" vm-build-attempt-1.log; then
-            echo "::error::${{ matrix.test }} failed WITHOUT the shape-A signature. Not retrying."
-            exit 1
-          fi
-          if grep -qE "$ASSERT" vm-build-attempt-1.log; then
-            echo "::error::${{ matrix.test }} carries a real assertion failure. Not retrying," \
-                 "even though the shape-A signature is also present — a retry here would hide" \
-                 "a genuine red."
-            exit 1
-          fi
-
-          # The countable trace. Both destinations on purpose: the job log is what the census
-          # greps, the step summary is what a human sees without opening logs.
-          # `attempt=` is load-bearing, not decoration. GITHUB_RUN_ID is IDENTICAL across
-          # attempts of the same run, so a `test=X run=Y` pair alone is not unique within a
-          # run: dedupe the census across a whole run rather than within one attempt and two
-          # real instances silently merge into one. The triple closes that by construction,
-          # so the census's correctness stops depending on a prose caveat nobody re-reads.
-          echo "::warning::FLAKE-A-RETRY test=${{ matrix.test }} run=${GITHUB_RUN_ID} attempt=${GITHUB_RUN_ATTEMPT}"
-          echo "FLAKE-A-RETRY test=${{ matrix.test }} run=${GITHUB_RUN_ID} attempt=${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_STEP_SUMMARY"
+          # THE DECISION AND THE CENSUS MARKER LIVE IN A SCRIPT, NOT HERE. Inline, this logic sat
+          # behind a failed build and two gates and could never be run: 45 job executions since
+          # the retry shipped, all first-attempt greens, emit path executed zero times. The census
+          # counts those markers, so a dead emitter and a fixed harness produce the same zero.
+          # tests/flake-retry-decide-battery.sh exercises every arm, including the shape-A+
+          # assertion case the real corpus cannot produce, and asserts the emitted marker matches
+          # the ledger's own census grep.
+          ./scripts/flake-retry-decide.sh vm-build-attempt-1.log \
+            '${{ matrix.test }}' "${GITHUB_RUN_ID}" "${GITHUB_RUN_ATTEMPT}" || exit 1
 
           echo "Shape-A signature matched and no assertion failure present — retrying ONCE."
           if run_once vm-build-attempt-2.log; then
