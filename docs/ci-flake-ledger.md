@@ -197,7 +197,8 @@ over an earlier 40-run one — the same data through a sliding window, neither p
    ```bash
    # per run id, over the same window as step 1
    gh api "repos/dillondevoe/agent-os/actions/runs/$ID/attempts/$N/logs" > /tmp/l.zip
-   unzip -p /tmp/l.zip '*' | grep -oE 'FLAKE-A-RETRY test=[a-z0-9-]+ run=[0-9]+' | sort -u | wc -l
+   unzip -p /tmp/l.zip '*' \
+     | grep -oE 'FLAKE-A-RETRY test=[a-z0-9-]+ run=[0-9]+ attempt=[0-9]+' | sort -u | wc -l
    ```
 
    **`sort -u`, not `uniq -c`, and it is load-bearing for the same reason `run=[0-9]+` is.**
@@ -217,7 +218,10 @@ over an earlier 40-run one — the same data through a sliding window, neither p
    `test=X run=Y` pair *is* one instance. Fetch per attempt (step 2 already does), dedupe within
    the attempt, and sum across attempts — `GITHUB_RUN_ID` is identical across attempts of the
    same run, so deduping across a whole run instead would silently merge two real instances
-   into one.
+   into one. **That trap is now closed at the source rather than by this paragraph:** the marker
+   carries `attempt=${GITHUB_RUN_ATTEMPT}`, so the `test=X run=Y attempt=Z` triple is unique
+   across an entire run and the dedupe is correct at any scope. The caveat is kept because it
+   explains why the field exists — a future edit that drops `attempt=` as redundant reopens it.
 
    The `run=[0-9]+` tail is load-bearing, not decoration (Geist, gate, 2026-08-27 — verified on
    run `33037585674`): the runner echoes every `run:` script body into the job log with
