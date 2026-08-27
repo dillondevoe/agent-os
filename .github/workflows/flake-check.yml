@@ -94,6 +94,16 @@ jobs:
         # module is missing.
         run: python3 tests/frontdoor-kick-battery.py
 
+      # Second entry taken OFF tests/known-unwired-debt.txt (12 -> 11). Host-side python; the
+      # brain/provider modules are read from the checkout, so no nix and no VM.
+      #
+      # It exits 1 on a failing arm AND on an absent subject — but by different routes: a named
+      # "transport-battery: FAIL" in the first case, a FileNotFoundError traceback in the second.
+      # The exit code cannot tell them apart. That is the red-by-crash / red-by-verdict split, and
+      # it is why the ledger check is not satisfied by "it goes red".
+      - name: transport seam battery
+        run: python3 tests/transport-battery.py
+
       - name: vm-tests matrix covers every test-* package
         # Run under a nix-provided python rather than the runner image's: if PyYAML were merely
         # assumed present, an image change would turn this check into a no-op or a spurious red.

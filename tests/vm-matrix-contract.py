@@ -100,6 +100,15 @@ WIRED_VIA_WORKFLOW = {
     # baseline shrinks in this same commit, which is what the ratchet demands and what makes
     # the diff to that file the reviewable act.
     "frontdoor-kick-battery.py": "flake-check.yml",
+    # Second entry off the ledger (13->12 was #187, this is 12->11). Host-side python, no nix,
+    # no VM, no network. Checked before wiring, because member 16's third fix is that nobody had
+    # asked what a WIRED battery does when its subject is absent — two of them exited 0. This one
+    # exits 1 both ways, and the two ways are not the same evidence: subject absent gives a
+    # FileNotFoundError traceback (red-by-crash), a broken arm gives "transport-battery: FAIL"
+    # (red-by-verdict). CI cannot tell them apart from the exit code alone; a reader of the log
+    # can. Wiring it is still right — a red for the wrong reason beats no red at all — but the
+    # distinction is the same one #160 records, so it is written down rather than assumed away.
+    "transport-battery.py": "flake-check.yml",
 }
 
 # DEBT, NOT DESIGN — and the two must never share a list.
@@ -146,7 +155,6 @@ KNOWN_UNWIRED_DEBT = frozenset({
     # coverage the ruling singled out -- a verifier returning True unconditionally passes every
     # TRUE vector, so the unrun half was exactly the half that matters.
     "escalate-consent-battery.py",
-    "transport-battery.py",
 })
 
 # NON-FILE DEBT, recorded here because this is the ledger people read, and NOT added to the set
