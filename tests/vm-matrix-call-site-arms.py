@@ -36,6 +36,14 @@ this file prints `ALL PASS (3 arms)` at rc=0. The count is PRINTED, not asserted
 asserting it would be one more literal maintained by the same hand that maintains the tuple, which
 is the shape every scar in this directory is about. So the floor stays where it is, in daylight: a
 reviewer who sees the arm count drop in a diff is the control, and there is no second one.
+
+AND THE FLOOR UNDER THAT ONE (geist's E2, gate on #203): `got = WRONG_REASON` -> `got = expect`
+makes this file agree with its own tuple on every row, negative control included, at rc=0. One
+assignment turns every verdict here into `assert True`. The negative control CANNOT reach it — a
+row expecting `wrong-reason` is satisfied by anything that merely *says* wrong-reason — and that is
+the precise relationship between the two mutations: N1 deletes the second operand of the comparison,
+E2 replaces it with the first. Nothing in this file closes E2; a reviewer does. It is written here
+so that "the negative control passes" is never read as "the comparison happened".
 """
 import os
 import shutil
