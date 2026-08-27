@@ -21,7 +21,6 @@ agos-sys-battery.py
 agos-web-battery.py
 anthropic-transport-battery.py
 audit-signing-battery.py
-bip340-battery.py
 calendar-battery.py
 escalate-consent-battery.py
 frontdoor-kick-battery.py

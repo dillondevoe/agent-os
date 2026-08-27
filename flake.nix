@@ -387,6 +387,77 @@
               touch $out
             '';
 
+        # Phase 1.5B · ruling condition 3 — the INTERIM-SIGNER EXPOSURE TRIPWIRE. modules/bip340.py
+        # opens by stating its own binding condition in prose: "INTERIM SIGNER — MUST be replaced by
+        # libsecp256k1 (Path B) before any network exposure of these keys." Geist's 2026-08-19 Path-A
+        # ruling rests entirely on that clause — the vendored reference implementation is not timing
+        # hardened, and that is ACCEPTABLE only while a local same-UID adversary (who can just read the
+        # key file, a strictly stronger capability) is the whole threat model. The day a remote party
+        # can invoke and time this signer, the argument inverts and Path B becomes mandatory.
+        #
+        # Until now that condition was enforced by the paragraph and by nobody reading it. This check
+        # computes the transitive set of modules that can REACH bip340 — statically AND through
+        # `importlib.import_module`, which is not optional here: bin/audit reaches both `identity` and
+        # `bip340` that way (bin/audit:114) and appears in NO static import grep, so the naive
+        # extractor is blind to the one caller holding the signing key. Two distinct reds: EXPOSURE (a
+        # network-facing module can reach the signer — the condition is violated) and ALLOWLIST DRIFT
+        # (a new local caller — not a violation, but a widening someone should clear deliberately).
+        # Green today (identity, audit); red the day a network-facing module imports it.
+        #
+        # The selftest runs in the same derivation ON PURPOSE — 8 arms, 3 of them controls: A2 pins
+        # that a healthy tree is GREEN (without it a checker that fails on everything passes), A5 that
+        # `urllib.parse` is string surgery and not network I/O (without it the check is noise and gets
+        # uninstalled before the day it is right), and A6 runs the naive static-only extractor against
+        # the importlib edge and asserts it MISSES, so A3 is shown catching what a plausible
+        # implementation does not. A4 is the vacuity arm: no sources discovered must FAIL, not pass.
+        bip340-exposure =
+          nixpkgs.legacyPackages.${system}.runCommand "bip340-exposure-check"
+            { nativeBuildInputs = [ nixpkgs.legacyPackages.${system}.python3 ]; } ''
+              cp -r ${./.}/. src && chmod -R u+w src
+              cd src
+              python3 tests/bip340-exposure-selftest.py
+              python3 tests/bip340-exposure-contract.py
+              touch $out
+            '';
+
+        # bip340-contract -- ruling condition 2, and this one is NOT routine debt repayment.
+        #
+        # tests/bip340-battery.py opens by stating, as settled fact:
+        #
+        #     Binding condition 2 of Geist's 2026-08-19 Path-A ruling: the FULL official
+        #     test-vector set runs in CI, INCLUDING the must-fail verification vectors,
+        #     control-armed.
+        #
+        # It did not run in CI. Not via flake.nix, not via any workflow step. It has been on
+        # KNOWN_UNWIRED_DEBT the whole time, so the repo simultaneously recorded "this runs in
+        # CI" in the file's own header and "this runs nowhere" in the ledger, and neither
+        # statement ever had to meet the other.
+        #
+        # THE CLASS: A RULING CONDITION THAT IS DISCHARGED BY WRITING A FILE IS DISCHARGED BY
+        # PROSE. What condition 2 actually demands is an EXECUTION, and the only evidence that
+        # an execution happens is a lane that goes red when it stops.
+        #
+        # The must-fail half is why this is worth flagging rather than quietly fixing. A
+        # verifier returning True unconditionally passes every TRUE vector; vectors 5-15 and
+        # the control arm at check I are what catch it. So the unrun battery was specifically
+        # the forgery-acceptance coverage, which is the half the ruling singled out.
+        #
+        # Pure stdlib, reads its vectors from a committed CSV, and hard-fails if that CSV is
+        # absent (csv.DictReader on a missing path raises) -- so it cannot go vacuously green
+        # the way the self-disarming agos-* batteries would.
+        bip340-contract =
+          nixpkgs.legacyPackages.${system}.runCommand "bip340-contract-check"
+            { nativeBuildInputs = [ nixpkgs.legacyPackages.${system}.python3 ]; } ''
+              work="$(mktemp -d)"
+              mkdir -p "$work/tests" "$work/modules"
+              cp ${./tests/bip340-battery.py} "$work/tests/bip340-battery.py"
+              cp ${./tests/bip340-test-vectors.csv} "$work/tests/bip340-test-vectors.csv"
+              cp ${./modules/bip340.py} "$work/modules/bip340.py"
+              cd "$work"
+              python3 tests/bip340-battery.py
+              touch $out
+            '';
+
         # Phase 2 · Step 2 — the audit-log primitive's property battery. Proves
         # append-only NDJSON, SHA-256 chain tamper/truncation evidence, no-log->no-execute
         # fail-closed, hostile-newline single-line safety, and reserved-field forgery

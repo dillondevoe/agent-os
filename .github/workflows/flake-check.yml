@@ -71,6 +71,17 @@ jobs:
         # assumed present, an image change would turn this check into a no-op or a spurious red.
         run: nix shell nixpkgs#python3Packages.pyyaml --command python3 tests/vm-matrix-contract.py
 
+      # The retry decider's own battery. WIRED HERE DELIBERATELY, in the lane no path filter can
+      # skip: a test file that lands unrun is the exact trap tests/vm-matrix-contract.py's debt
+      # ledger exists to catch, and this battery's whole subject is a code path that had never
+      # executed. Adding it unwired would reproduce the defect it was written about.
+      #
+      # Pure bash against synthetic logs — no nix, no VM, no network — because the arms that
+      # matter (shape A alone; shape A plus a genuine assertion) are cases the real corpus cannot
+      # produce on demand.
+      - name: flake-retry decider battery
+        run: ./tests/flake-retry-decide-battery.sh
+
       # `--option sandbox true` is the whole point: it reproduces the clean-room build
       # (no /usr/bin/env, patchShebangs load-bearing) that a laptop's non-sandbox check hides.
       # `-L` prints full build logs so a battery failure is legible in the run output.
