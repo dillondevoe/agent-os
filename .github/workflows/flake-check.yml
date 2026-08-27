@@ -78,6 +78,15 @@ jobs:
         # contract FAILS rather than skips if flake.lock is missing, so there is no silent no-op.
         run: python3 tests/flake-input-provenance-contract.py
 
+      - name: the provenance contract's own control arms actually run
+        # Those arms lived in that file's module docstring under the line "Control arms (each MUST
+        # fail — if one does not, that check is not a check)". A MUST, in prose, executed by
+        # nobody: the contract could have degraded to `return 0` for every input — the single
+        # worst failure available to it — and this lane would have stayed green, because the only
+        # input it ever ran was the healthy one. Same shape the contract is ABOUT, four lines
+        # above the arms it did not run.
+        run: ./tests/flake-input-provenance-battery.sh
+
       - name: vm-tests matrix covers every test-* package
         # Run under a nix-provided python rather than the runner image's: if PyYAML were merely
         # assumed present, an image change would turn this check into a no-op or a spurious red.
