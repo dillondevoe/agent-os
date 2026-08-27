@@ -1014,6 +1014,128 @@ def ruling_conditions_selftest():
     return failures
 
 
+class Findings:
+    """One place every check's output goes, so the OK verdict cannot forget a check.
+
+    THE HOLE THIS CLOSES, found by geist as RED G on #198: main()'s OK-branch was guarded by a
+    hand-maintained `and not X` over ten terms. Dropping one term left the finding COMPUTED,
+    printed nowhere, and the tree green — and no selftest could reach it, because the selftests
+    exercise predicates and that conjunction was the one piece of logic with no predicate. Every
+    term added since #165 had the same exposure; the shape predates the check that exposed it.
+
+    Registration is the same act as computation (`f.add(key, value)`), so a check that runs is a
+    check that is guarded. Two directions are then closed by construction rather than by care:
+
+      * `f[key]` on an unregistered key raises, so a print branch for a check nobody ran is a
+        crash and not a silent skip.
+      * `unread()` names keys that HAVE findings and were never looked at — the computed-but-
+        never-printed direction, which is RED G's exact shape one level down.
+
+    THE FIRST VERSION OF THIS CLASS DID NOT CLOSE RED G, and the reason is worth more than the
+    fix. Registration-at-computation makes an un-registered check invisible to any(), so the OK
+    branch is taken and RETURNS before the print branch that would have raised on the missing
+    key. The crash I was relying on sat downstream of the verdict it was supposed to protect.
+    Two things answer it, and neither is "care":
+
+      * REQUIRED_CHECKS below is compared against the registered keys, so a check that stops
+        registering is named — the OK path can no longer be reached by a shrinking set.
+      * The selftests DO NOT flow through this collector (see main()). Routing them through it
+        made a broken any() suppress the very arm that detects a broken any(): constant-False
+        passed the tree green while findings_selftest was screaming into a list nobody read.
+        A guard whose alarm is wired through the guard has no alarm.
+
+    What it does NOT close: a check that never calls add() AND is never added to REQUIRED_CHECKS
+    — i.e. a wholly new check whose author skips both. That residue is named here rather than
+    papered over; it is smaller than the conjunction it replaces, and it is loud in review
+    (a new check with no entry beside the others) rather than invisible.
+    """
+
+    def __init__(self):
+        self._d = {}
+        self._read = set()
+
+    def add(self, key, value):
+        if key in self._d:
+            raise KeyError("finding %r registered twice — one key, one check" % key)
+        self._d[key] = value
+        return value
+
+    def __getitem__(self, key):
+        if key not in self._d:
+            raise KeyError("no finding registered under %r — a print branch is reading a check "
+                           "that never ran" % key)
+        self._read.add(key)
+        return self._d[key]
+
+    def any(self):
+        return any(bool(v) for v in self._d.values())
+
+    def unread(self):
+        return sorted(k for k, v in self._d.items() if v and k not in self._read)
+
+
+# EVERY f-registered check, by key. Compared against what actually registered, so removing a
+# check's add() call is a NAMED failure instead of a smaller conjunction. `ruling` is absent on
+# purpose: the selftests are deliberately kept out of the collector — see Findings' docstring.
+REQUIRED_CHECKS = {
+    "unlisted", "dangling", "unwired", "vacuous", "stale",
+    "debt_added", "debt_removed", "unarmed", "wired_disarming",
+}
+
+
+def missing_checks(f):
+    """Keys REQUIRED_CHECKS names that nothing registered, plus the reverse."""
+    have = set(f._d)
+    return sorted(REQUIRED_CHECKS - have), sorted(have - REQUIRED_CHECKS)
+
+
+def findings_selftest():
+    """Drive Findings itself. Without these arms the class is a container with opinions."""
+    failures = []
+    f = Findings()
+    f.add("a", [])
+    f.add("b", ["x"])
+    if not f.any():
+        failures.append("selftest: Findings.any() missed a non-empty finding — the OK branch "
+                        "would be reached with a check reporting a problem (RED G's shape)")
+    # CONTROL: all-empty must NOT trip any(), or the checker could never pass at all.
+    if Findings().any():
+        failures.append("selftest control: an EMPTY Findings reported findings — any() is "
+                        "constant-True and the arm above proves nothing")
+    if f.unread() != ["b"]:
+        failures.append("selftest: unread() did not name a finding that was never read — "
+                        "computed-but-never-printed goes silent again")
+    f["b"]
+    if f.unread():
+        failures.append("selftest control: unread() still named a finding AFTER it was read, "
+                        "so the arm above passes on a constant list")
+    try:
+        f["nope"]
+        failures.append("selftest: reading an UNREGISTERED key was silent — a print branch for "
+                        "a check that never ran would skip instead of crashing")
+    except KeyError:
+        pass
+    g = Findings()
+    for k in REQUIRED_CHECKS:
+        g.add(k, [])
+    if missing_checks(g) != ([], []):
+        failures.append("selftest: a COMPLETE registration was reported as missing/extra — "
+                        "missing_checks() would red every run and get exempted")
+    h = Findings()
+    for k in sorted(REQUIRED_CHECKS)[1:]:
+        h.add(k, [])
+    if not missing_checks(h)[0]:
+        failures.append("selftest: a check that stopped registering was NOT named — RED G is "
+                        "back, because an unregistered check is invisible to any()")
+    try:
+        f.add("a", [])
+        failures.append("selftest: a duplicate key was accepted — two checks would share one "
+                        "guard slot and the second would overwrite the first")
+    except KeyError:
+        pass
+    return failures
+
+
 def main():
     ap = argparse.ArgumentParser()
     # Injection points exist ONLY so the failing arm can be exercised without corrupting the
@@ -1031,27 +1153,63 @@ def main():
     tests = {n for n in names if n.startswith("test-")}
     matrix = matrix_entries(args.workflow)
 
-    unlisted = sorted(tests - matrix)
-    dangling = sorted(matrix - tests)
-    unwired, vacuous, stale = unwired_test_files(args.tests_dir, args.flake)
-    debt_added, debt_removed = debt_ratchet(KNOWN_UNWIRED_DEBT, args.debt_baseline)
+    f = Findings()
+    unlisted = f.add("unlisted", sorted(tests - matrix))
+    dangling = f.add("dangling", sorted(matrix - tests))
+    _unwired, _vacuous, _stale = unwired_test_files(args.tests_dir, args.flake)
+    unwired = f.add("unwired", _unwired)
+    vacuous = f.add("vacuous", _vacuous)
+    stale = f.add("stale", _stale)
+    _added, _removed = debt_ratchet(KNOWN_UNWIRED_DEBT, args.debt_baseline)
+    debt_added = f.add("debt_added", _added)
+    debt_removed = f.add("debt_removed", _removed)
 
     # Ruled item 3. The selftest runs FIRST and unconditionally: if the checker cannot be shown
     # going red, its green verdict on the real table below means nothing.
-    ruling = exemption_staleness_selftest()
-    ruling += ruling_conditions_selftest()
-    ruling += strict_caller_selftest()
-    unarmed = strict_callers_unarmed(args.tests_dir)
-    ruling += wired_disarm_selftest()
-    wired_disarming = wired_but_disarming(args.tests_dir)
-    ruling += check_ruling_conditions(open(args.flake).read(), args.tests_dir)
+    # SELFTESTS FIRST, AND OUTSIDE f. Routing them through the collector made a broken
+    # collector suppress its own alarm: with any() forced constant-False the tree went green
+    # while findings_selftest's failures sat unread in the same dict any() was lying about.
+    # These decide before anything the collector touches.
+    _ruling = exemption_staleness_selftest()
+    _ruling += ruling_conditions_selftest()
+    _ruling += strict_caller_selftest()
+    unarmed = f.add("unarmed", strict_callers_unarmed(args.tests_dir))
+    _ruling += wired_disarm_selftest()
+    _ruling += findings_selftest()
+    wired_disarming = f.add("wired_disarming", wired_but_disarming(args.tests_dir))
+    _ruling += check_ruling_conditions(open(args.flake).read(), args.tests_dir)
+    ruling = _ruling
+    if ruling:
+        print("FAIL: RULING_CONDITIONS / selftest — the checker cannot be shown going red, so",
+              file=sys.stderr)
+        print("      its verdict on the real tree means nothing:", file=sys.stderr)
+        for problem in ruling:
+            print(f"  {problem}", file=sys.stderr)
+        print("  -> either wire the lane so it can go red, cite the run id that proves it ran,",
+              file=sys.stderr)
+        print("     or downgrade the row to 'half'/'prose'. A ruling condition discharged by a",
+              file=sys.stderr)
+        print("     table entry is discharged by prose, which is what this table is FOR.",
+              file=sys.stderr)
+        return 1
 
-    # Both sides of this merge added an INDEPENDENT failure mode to the same guard, so the
-    # resolution is a union and not a choice. Dropping either term is the silent-pass direction:
-    # the checker would still exit 0 while one of its own checks had findings.
-    if (not unlisted and not dangling and not unwired and not vacuous and not stale
-            and not ruling and not debt_added and not debt_removed and not unarmed
-            and not wired_disarming):
+    missing, extra = missing_checks(f)
+    if missing or extra:
+        print("FAIL: the registered check set does not match REQUIRED_CHECKS. A check that",
+              file=sys.stderr)
+        print("      stops registering is invisible to the OK guard — that is RED G:",
+              file=sys.stderr)
+        for k in missing:
+            print(f"  MISSING  {k}", file=sys.stderr)
+        for k in extra:
+            print(f"  UNDECLARED  {k}", file=sys.stderr)
+        return 1
+
+    # ONE GUARD, AND IT IS NOT A LIST OF NAMES. This was a hand-maintained conjunction over ten
+    # terms until #199; dropping a term left the finding computed, unprinted, and the tree green
+    # (geist, RED G on #198). Every check now registers where it computes, so there is no second
+    # place to keep in sync and nothing to forget.
+    if not f.any():
         print(f"OK: {len(tests)} test-* package(s), all present in the vm-tests matrix:")
         for name in sorted(tests):
             print(f"  {name}")
@@ -1072,7 +1230,7 @@ def main():
                   f"{', '.join(row['run_ids']) or '(none)'}  [{', '.join(row['lanes'])}]")
         return 0
 
-    if wired_disarming:
+    if f["wired_disarming"]:
         print("FAIL: a WIRED battery still SELF-DISARMS. It exits 0 announcing SKIP when its",
               file=sys.stderr)
         print("      backend is absent, and it runs in a CI lane, so that green is reported to",
@@ -1083,7 +1241,7 @@ def main():
             print(f"  {base}  <-  {WIRED_VIA_WORKFLOW[base]}", file=sys.stderr)
         print("      Gate the skip on AGENT_OS_STRICT (see calendar-battery.py), or unwire it.",
               file=sys.stderr)
-    if unarmed:
+    if f["unarmed"]:
         print("FAIL: a strict-gated battery is WIRED BUT UNARMED. The battery refuses to exit 0",
               file=sys.stderr)
         print("      on a missing backend only when AGENT_OS_STRICT=1; the step below runs it",
@@ -1097,7 +1255,7 @@ def main():
         print('      Add `env: {AGENT_OS_STRICT: "1"}` to that step — and make sure the step',
               file=sys.stderr)
         print("      actually stages the backend, which this check cannot see.", file=sys.stderr)
-    if debt_added:
+    if f["debt_added"]:
         print("FAIL: KNOWN_UNWIRED_DEBT GREW. It is documented as may-only-shrink, and these",
               file=sys.stderr)
         print("      names are not in the recorded baseline — each one is a test that runs in",
@@ -1108,7 +1266,7 @@ def main():
         print(f"      Wire it up. Editing {os.path.basename(DEBT_BASELINE)} to admit it is a",
               file=sys.stderr)
         print("      reviewable act, not a formality.", file=sys.stderr)
-    if debt_removed:
+    if f["debt_removed"]:
         print("FAIL: KNOWN_UNWIRED_DEBT shrank but the baseline still lists these — which is the",
               file=sys.stderr)
         print("      right direction and the wrong commit. Update the baseline in the SAME commit,",
@@ -1117,24 +1275,13 @@ def main():
               file=sys.stderr)
         for base in debt_removed:
             print(f"  -{base}", file=sys.stderr)
-    if ruling:
-        print("FAIL: RULING_CONDITIONS — a row claims more than the repo can show:",
-              file=sys.stderr)
-        for problem in ruling:
-            print(f"  {problem}", file=sys.stderr)
-        print("  -> either wire the lane so it can go red, cite the run id that proves it ran,",
-              file=sys.stderr)
-        print("     or downgrade the row to 'half'/'prose'. A ruling condition discharged by a",
-              file=sys.stderr)
-        print("     table entry is discharged by prose, which is what this table is FOR.",
-              file=sys.stderr)
-    if stale:
+    if f["stale"]:
         print("FAIL: stale exemption(s) in this file — a suppression list that names things no",
               file=sys.stderr)
         print("      longer true silently exempts whatever takes the name next:", file=sys.stderr)
         for base, why in stale:
             print(f"  {base}: {why}", file=sys.stderr)
-    if unwired:
+    if f["unwired"]:
         print(f"FAIL: test file(s) in {args.tests_dir}/ that {args.flake} never references —",
               file=sys.stderr)
         print("      these have no package, so they run NOWHERE and no other check sees them:",
@@ -1147,7 +1294,7 @@ def main():
               file=sys.stderr)
         print("     UNWIRED_BY_DESIGN in this file so the exemption is visible in a diff.",
               file=sys.stderr)
-    if vacuous:
+    if f["vacuous"]:
         print(f"FAIL: test file(s) wired into {args.flake} that EXIT 0 when the thing they test",
               file=sys.stderr)
         print("      is absent — a green here proves the CLI was missing, not that it works:",
@@ -1158,17 +1305,30 @@ def main():
               file=sys.stderr)
         print("     FAIL rather than skip when it is not. Wiring alone pays the debt on paper.",
               file=sys.stderr)
-    if unlisted:
+    if f["unlisted"]:
         print("FAIL: test-* package(s) with NO vm-tests matrix entry — these NEVER RUN in CI:",
               file=sys.stderr)
         for name in unlisted:
             print(f"  {name}", file=sys.stderr)
         print(f"  -> add each to the matrix in {args.workflow}", file=sys.stderr)
-    if dangling:
+    if f["dangling"]:
         print("FAIL: vm-tests matrix entr(ies) naming no such package:", file=sys.stderr)
         for name in dangling:
             print(f"  {name}", file=sys.stderr)
         print("  -> the job would fail at `nix build` with an attribute error", file=sys.stderr)
+
+    # THE OTHER DIRECTION. A finding can be registered — and so correctly turn the tree red —
+    # while no print branch above ever names it, which leaves a red build with no diagnostic.
+    # That is RED G one level down, and it is only reachable on this path, so it is checked here
+    # rather than in a selftest.
+    silent = f.unread()
+    if silent:
+        print("FAIL: check(s) reported findings that NOTHING printed — the build is red with no",
+              file=sys.stderr)
+        print("      diagnostic, which is the same silence RED G found in the OK guard:",
+              file=sys.stderr)
+        for key in silent:
+            print(f"  {key}", file=sys.stderr)
     return 1
 
 
