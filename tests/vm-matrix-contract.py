@@ -96,6 +96,10 @@ WIRED_VIA_WORKFLOW = {
     # Its control arms — docstring prose until 2026-08-27, now executed. Wired in the same
     # commit that made them run: a battery landing unwired is the bug one line up.
     "flake-input-provenance-battery.sh": "flake-check.yml",
+    # FIRST ENTRY EVER TAKEN OFF known-unwired-debt.txt. Debt paid, not re-labelled: the
+    # baseline shrinks in this same commit, which is what the ratchet demands and what makes
+    # the diff to that file the reviewable act.
+    "frontdoor-kick-battery.py": "flake-check.yml",
 }
 
 # DEBT, NOT DESIGN — and the two must never share a list.
@@ -142,7 +146,6 @@ KNOWN_UNWIRED_DEBT = frozenset({
     # coverage the ruling singled out -- a verifier returning True unconditionally passes every
     # TRUE vector, so the unrun half was exactly the half that matters.
     "escalate-consent-battery.py",
-    "frontdoor-kick-battery.py",
     "transport-battery.py",
 })
 
@@ -277,6 +280,41 @@ def self_disarms(path):
     return False
 
 
+
+def _named_on_a_running_line(lines, base):
+    """True if `base` appears on a line that is not a comment. Prose does not run.
+
+    One predicate, two callers (the WIRED_VIA_WORKFLOW verifier and the debt-staleness sweep).
+    Two spellings of one rule with nothing making them agree is this file's recurring scar.
+    """
+    # BOUNDED, not a substring test. `transport-battery.py` is a suffix of
+    # `anthropic-transport-battery.py`; a bare `base in ln` would let a line wiring the longer
+    # file satisfy a WIRED_VIA_WORKFLOW claim for the shorter one — a claim passing on a file
+    # that runs nowhere, the silent direction. Found at the #187 gate (Geist); both names sat on
+    # the debt ledger so nothing had tripped it yet.
+    pat = re.compile(r"(?<![A-Za-z0-9_.-])" + re.escape(base) + r"(?![A-Za-z0-9_])")
+    return any(pat.search(ln) and not ln.lstrip().startswith("#") for ln in lines)
+
+
+def _wired_by_any_workflow(base, tests_dir):
+    """True if ANY workflow names `base` on a running line.
+
+    Deliberately ANY rather than a named workflow: this answers "is this exemption stale",
+    and an exemption is stale the moment the file runs ANYWHERE. WIRED_VIA_WORKFLOW asks the
+    stricter question (does the workflow it CLAIMS actually run it) and keeps its own check.
+    """
+    workflows_dir = os.path.join(os.path.dirname(os.path.abspath(tests_dir)), ".github", "workflows")
+    for wf in sorted(glob.glob(os.path.join(workflows_dir, "*.yml"))
+                     + glob.glob(os.path.join(workflows_dir, "*.yaml"))):
+        try:
+            with open(wf) as fh:
+                lines = fh.read().splitlines()
+        except OSError:
+            continue
+        if _named_on_a_running_line(lines, base):
+            return True
+    return False
+
 def unwired_test_files(tests_dir, flake_path):
     """tests/*.nix files that flake.nix never references.
 
@@ -321,6 +359,17 @@ def unwired_test_files(tests_dir, flake_path):
             stale.append((base, "no such file in %s/" % tests_dir))
         elif wiring_references(flake_src, tests_dir, base):
             stale.append((base, "is wired into %s now — remove the exemption" % flake_path))
+        elif _wired_by_any_workflow(base, tests_dir):
+            # THE EXEMPTION LISTS WERE ONLY EVER CHECKED AGAINST flake.nix. A file wired by a
+            # WORKFLOW stayed on the debt ledger with nothing objecting — and workflow wiring is
+            # how every battery in this repo actually runs, so the blind spot covered the normal
+            # case rather than an exotic one. The ledger would have gone on claiming debt that
+            # had already been paid, which understates progress in the harmless direction and,
+            # in the harmful one, keeps a live suppression on a name: the NEXT file to take that
+            # name inherits an exemption nobody granted it. That is this function's own docstring
+            # turned on the list instead of the file. Found 2026-08-27 wiring the first entry OFF
+            # this ledger — the check went silent at precisely the moment it had something to say.
+            stale.append((base, "is wired by a workflow now — remove the exemption"))
     # A WORKFLOW-WIRING CLAIM IS VERIFIED, NOT TRUSTED: the named workflow must reference the
     # file on a line that is not a comment. A mention inside `# ...` is prose; prose does not run.
     workflows_dir = os.path.join(os.path.dirname(os.path.abspath(tests_dir)), ".github", "workflows")
@@ -338,7 +387,7 @@ def unwired_test_files(tests_dir, flake_path):
         except OSError:
             stale.append((base, "claims wiring via %s, which cannot be read" % wf_path))
             continue
-        if not any(base in ln and not ln.lstrip().startswith("#") for ln in lines):
+        if not _named_on_a_running_line(lines, base):
             stale.append((base, "claims wiring via %s but NO non-comment line there names it — "
                                 "the battery runs NOWHERE" % wf))
     return unwired, vacuous, stale
@@ -535,6 +584,37 @@ def check_ruling_conditions(flake_src, tests_dir, rows=None, debt=None):
     return problems
 
 
+def exemption_staleness_selftest(tmpdir_lines=None):
+    """Show the WORKFLOW-AWARE exemption check red and green, on synthetic input.
+
+    The check it guards was blind for as long as it existed: exemptions were only ever tested
+    against flake.nix, while workflow wiring is how every battery in this repo actually runs.
+    A check with that shape passes quietly forever, so this arm exists to make the blindness
+    reproducible rather than remembered.
+    """
+    failures = []
+    running = ["      - name: x", "        run: python3 tests/some-battery.py"]
+    commented = ["      # run: python3 tests/some-battery.py"]
+    # ARM: a running line names it -> stale.
+    if not _named_on_a_running_line(running, "some-battery.py"):
+        failures.append("selftest arm NOT caught: a running `run:` line did not count as wiring")
+    # CONTROL 1: a comment naming it must NOT count. Prose does not run, and without this arm
+    # the predicate could be `base in text` and every arm above would still pass.
+    if _named_on_a_running_line(commented, "some-battery.py"):
+        failures.append("selftest control: a COMMENTED line counted as wiring, so the arm above "
+                        "passed for the wrong reason")
+    # CONTROL 2: a file nobody names must NOT be reported stale, or the sweep would mark every
+    # exemption stale at once and read as a spectacular success.
+    if _named_on_a_running_line(running, "unnamed-battery.py"):
+        failures.append("selftest control: an unnamed file counted as wired")
+    # CONTROL 3: a running line naming a LONGER file that merely ENDS in this name must NOT
+    # count. Without it the predicate could be a bare substring test and every arm above passes.
+    if _named_on_a_running_line(["        run: python3 tests/anthropic-some-battery.py"], "some-battery.py"):
+        failures.append("selftest control: a SUFFIX collision counted as wiring "
+                        "(anthropic-some-battery.py satisfied some-battery.py) — substring test")
+    return failures
+
+
 def ruling_conditions_selftest():
     """Show the checker RED before trusting it green. Runs on every invocation, by design.
 
@@ -642,7 +722,8 @@ def main():
 
     # Ruled item 3. The selftest runs FIRST and unconditionally: if the checker cannot be shown
     # going red, its green verdict on the real table below means nothing.
-    ruling = ruling_conditions_selftest()
+    ruling = exemption_staleness_selftest()
+    ruling += ruling_conditions_selftest()
     ruling += check_ruling_conditions(open(args.flake).read(), args.tests_dir)
 
     # Both sides of this merge added an INDEPENDENT failure mode to the same guard, so the
