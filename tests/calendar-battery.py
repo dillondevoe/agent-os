@@ -69,7 +69,32 @@ elif khal:
             return run([khal, "-c", khalconf, "list", "today", days + "d"])
         return 127, "", "unknown verb"
 else:
-    print("  SKIP calendar-battery: neither agos-cal nor khal on PATH (image not built in this env).")
+    # SELF-DISARM, NOW GATED. Until this commit the branch below was an unconditional exit 0:
+    # on a host with neither binary the battery announced SKIP and reported success, so wiring
+    # it into CI would have bought a green that proved nothing. That is the shape the ledger
+    # check calls `[self-disarming]`, and it is why the eight remaining debt entries could not
+    # simply be wired.
+    #
+    # The gate is AGENT_OS_STRICT, NOT `CI` — deliberately, and it is the second instance of a
+    # convention this repo already has (tests/agent-loop-dispatch-battery.py, whose comment
+    # states the reasoning: one exit code has to serve two callers). `CI` is ambient: GitHub
+    # sets it for every step, including steps that legitimately run on a host without khal, so
+    # a `CI` gate cannot distinguish "this invocation is authoritative" from "this happens to
+    # be running on a runner". AGENT_OS_STRICT is set by exactly the callers that mean it.
+    #
+    # Note what this does and does not fix. It closes the battery's half: the battery knows
+    # what it needs and now refuses to report success without it. It does NOT close the
+    # caller's half — nothing here can verify the caller set the variable, and a wired step
+    # that forgets it gets the old meaningless green back with no diagnostic. That hole is
+    # real, it is checkable from the workflow side, and it is not fixed in this commit.
+    strict = os.environ.get("AGENT_OS_STRICT") == "1"
+    msg = "neither agos-cal nor khal on PATH (image not built in this env)"
+    if strict:
+        sys.exit("FAIL (AGENT_OS_STRICT=1) calendar-battery: " + msg + " — refusing to exit 0; "
+                 "under strict this means the caller promised the calendar backend and did not "
+                 "stage it.")
+    print("  SKIP calendar-battery: " + msg + " — run on a host with the image or with khal "
+          "installed, or set AGENT_OS_STRICT=1 to make the absence fatal.")
     print("  (Dell gate validates the live half — see tasks/active/294-...)")
     sys.exit(0)
 
