@@ -111,6 +111,20 @@ jobs:
       - name: anthropic transport seam battery
         run: python3 tests/anthropic-transport-battery.py
 
+      # Fourth and fifth entries off tests/known-unwired-debt.txt (10 -> 8). Picked because they
+      # are the only two of the remaining ten that do NOT self-disarm; the other eight exit 0
+      # when their CLI is absent, so wiring one of those first would buy a meaningless green.
+      #
+      # audit-signing exercises bin/audit end to end in a scratch dir. Note that with bin/audit
+      # ABSENT it still reds, but the traceback points at a missing scratch audit.log rather
+      # than at the missing binary — the red is real and its location is misleading.
+      - name: audit signing battery
+        run: python3 tests/audit-signing-battery.py
+
+      # Host-side python against modules/agent-brain.py; no nix, no VM, no network.
+      - name: escalate consent battery
+        run: python3 tests/escalate-consent-battery.py
+
       - name: vm-tests matrix covers every test-* package
         # Run under a nix-provided python rather than the runner image's: if PyYAML were merely
         # assumed present, an image change would turn this check into a no-op or a spurious red.

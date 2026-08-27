@@ -31,7 +31,15 @@
 #      off the end, chat_stream_safe returned None and turn() crashed on msg.pop.
 #
 # Zero network, zero model: _stream_events is exercised through a stub transport table.
-# Run: PYTHONPATH=modules python3 tests/escalate-consent-battery.py
+# Run: python3 tests/escalate-consent-battery.py   (from the repo root)
+#
+# Wired into .github/workflows/flake-check.yml as "escalate consent battery". THAT STEP IS THE
+# AUTHORITATIVE INVOCATION and this line exists to agree with it, not to compete with it.
+#
+# The `PYTHONPATH=modules` this carried was inert — MOD is an absolute path built from
+# __file__ and loaded via spec_from_file_location, so the environment never mattered. Fixed in
+# the wiring commit rather than after it: per PR #189, a Run: header can only diverge from the
+# workflow once the file is WIRED, so that is the moment to make them agree.
 import importlib.util, io, json, os, subprocess, sys, tempfile, textwrap, urllib.error
 
 MOD = os.path.join(os.path.dirname(__file__), "..", "modules", "agent-brain.py")
