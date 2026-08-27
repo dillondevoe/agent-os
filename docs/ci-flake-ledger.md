@@ -155,10 +155,21 @@ only ever see part of what it is counting should say "lower bound" out loud.
   is absent is a claim about the machine, and it needs the same control arm as a claim that one is
   present** — run the thing on the box before writing down that the box cannot.
 
+  **And the retraction is not merely "the binary exists" — the whole harness was run here to
+  check.** `nix build .#test-selfimprove-loop-runs` on DVo, 2026-08-27, at drv
+  `b1vli8yv…-vm-test-run-agentos-selfimprove-loop-runs` — the *same* derivation that failed as
+  instance six in CI. The guest booted, the driver reached `backdoor.service`, the assertions ran,
+  and the script finished in **100.12s**, green. That is the claim's control arm, run after the
+  fact: a statement that this box cannot host the investigation had to survive actually hosting it,
+  and it did not.
+
   So the root cause is still NOT established, but it is no longer blocked on hardware. What it is
   actually blocked on is narrower and should be stated as such: reproducing shape A *locally*,
-  which a ~7% flake does not oblige to happen on demand. A local pass is uninformative by
-  construction; only a local FAILURE, held open, separates (a) from (b).
+  which a ~7% flake does not oblige to happen on demand. **The local green above is worth exactly
+  nothing as evidence about the flake** — one pass against a ~7% failure rate is the expected
+  outcome and would look identical if the defect were universal-but-rare or absent-here-entirely.
+  It is evidence about the *machine* and nothing else. Only a local FAILURE, held open for
+  inspection, separates (a) from (b).
 - **Whether this is new.** No data exists before 2026-08-24T07:41Z. It may be long-standing.
 - **Whether the rate is stable.** Two windows, two different numbers, one day of data.
 - **Whether all five re-attempts in the window were this defect.** One is confirmed; four are not
