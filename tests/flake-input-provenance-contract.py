@@ -48,10 +48,19 @@ degrades to a no-op when its input is absent is the bug it was written to catch.
 Local use:
     python3 tests/flake-input-provenance-contract.py
 
-Control arms (each MUST fail — if one does not, that check is not a check):
-    python3 tests/flake-input-provenance-contract.py --lock-json '{"nodes":{"root":{},"evil":{"locked":{"type":"github","owner":"someone","repo":"somelib"}}}}'
-    python3 tests/flake-input-provenance-contract.py --lock-json '{"nodes":{"root":{},"nixpkgs":{"locked":{"type":"github","owner":"a-fork","repo":"nixpkgs"}}}}'
-    python3 tests/flake-input-provenance-contract.py --lock-json '{"nodes":{"root":{}}}'
+Control arms: tests/flake-input-provenance-battery.sh, run by flake-check.yml on every push.
+
+    This block used to LIST three arms, under the header "each MUST fail — if one does not, that
+    check is not a check". They were command lines in a docstring: a MUST, in prose, executed by
+    nobody, four lines under the paragraph directly above about checks that degrade to no-ops.
+    They now run, along with three more and both MUST-PASS directions (a battery of only
+    MUST-FAILs is satisfied by a checker that rejects everything, and a crash makes every
+    MUST-FAIL arm "pass" — the MUST-PASS arms are what tell red-by-verdict from red-by-crash).
+
+    The list is gone rather than kept-and-annotated on purpose. A reader who found three arms
+    here would have reasonably taken them for the complete set, and the battery is where the set
+    is defined. Two places naming one set, with nothing making them agree, is this repo's
+    recurring scar. (Geist, residual on the #185 gate.)
 """
 import argparse
 import json
