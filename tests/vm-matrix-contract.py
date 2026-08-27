@@ -287,7 +287,13 @@ def _named_on_a_running_line(lines, base):
     One predicate, two callers (the WIRED_VIA_WORKFLOW verifier and the debt-staleness sweep).
     Two spellings of one rule with nothing making them agree is this file's recurring scar.
     """
-    return any(base in ln and not ln.lstrip().startswith("#") for ln in lines)
+    # BOUNDED, not a substring test. `transport-battery.py` is a suffix of
+    # `anthropic-transport-battery.py`; a bare `base in ln` would let a line wiring the longer
+    # file satisfy a WIRED_VIA_WORKFLOW claim for the shorter one — a claim passing on a file
+    # that runs nowhere, the silent direction. Found at the #187 gate (Geist); both names sat on
+    # the debt ledger so nothing had tripped it yet.
+    pat = re.compile(r"(?<![A-Za-z0-9_.-])" + re.escape(base) + r"(?![A-Za-z0-9_])")
+    return any(pat.search(ln) and not ln.lstrip().startswith("#") for ln in lines)
 
 
 def _wired_by_any_workflow(base, tests_dir):
@@ -601,6 +607,11 @@ def exemption_staleness_selftest(tmpdir_lines=None):
     # exemption stale at once and read as a spectacular success.
     if _named_on_a_running_line(running, "unnamed-battery.py"):
         failures.append("selftest control: an unnamed file counted as wired")
+    # CONTROL 3: a running line naming a LONGER file that merely ENDS in this name must NOT
+    # count. Without it the predicate could be a bare substring test and every arm above passes.
+    if _named_on_a_running_line(["        run: python3 tests/anthropic-some-battery.py"], "some-battery.py"):
+        failures.append("selftest control: a SUFFIX collision counted as wiring "
+                        "(anthropic-some-battery.py satisfied some-battery.py) — substring test")
     return failures
 
 
