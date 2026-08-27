@@ -528,7 +528,29 @@ era), the 150-attempt listing one 7-job attempt (far end). **An enumeration is a
 date. A numerator and a denominator are comparable only when they come from the same one** —
 pinning the range by run id is necessary and not sufficient. The conclusion still does not move.
 
-Both runs concluded
+**And the cause of the 149-attempt gap was then measured, which retires BOTH stories told about
+it above.** Re-run on DVo, same machine, same `--limit 300`, pinned by run-id range instead of by
+timestamp: **138 runs, 151 attempts** — identical to Air's, run for run, attempt for attempt, zero
+disagreements. So listing depth was never the constraint on this surface, and "shrinks from the far
+end as the repo ages" was diagnosing a mechanism that was not operating. The whole gap is **one
+run**: `33037585674`, `attempt=2`, 18 job executions. The 149-attempt census filtered on
+`createdAt <= "2026-08-27T03:50"` as a string; that run was created at **`03:50:54Z`**. A truncated
+timestamp bound compared as a string excludes the entire minute it names, and the excluded minute
+happened to hold the range's own endpoint — the very run the ledger cites for failing two jobs at
+once.
+
+Note what each of us inferred before measuring. The census said *listing depth, far end*. The gate
+said *two 9-job attempts, recent era* — arithmetically consistent with 18 jobs, and wrong: it is one
+run with two attempts. Both stories fit the size of the hole and neither was the hole.
+**This ledger's own line applies to the ledger: a tidy causal story for a gap is not a measurement
+of the gap** — and it is now the third time that sentence has had to be spent on this file's own
+instruments. The operational form: **an inclusive-looking bound that is a string prefix is
+exclusive of everything after it in that unit; pin ranges by id, and if a timestamp bound is
+unavoidable, make it a full instant and say which side is closed.**
+
+**Back to the two markers** (`33086970966`, `33100997366` — the lines are three blocks up; three
+corrections were inserted between them and this sentence, and a sentence whose referent has moved
+out of sight is the kind of thing this ledger exists to catch). Both marker runs concluded
 `success`: the retry recovered them, which is exactly the case steps 1–3 of the census method
 cannot see and the marker exists for. **A count of 2 is not a fixed harness.** It is also not a
 measured improvement — two events do not separate 0.47% from 1.45% at this N, and saying otherwise
