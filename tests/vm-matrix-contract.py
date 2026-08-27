@@ -668,7 +668,15 @@ def check_ruling_conditions(flake_src, tests_dir, rows=None, debt=None):
 # PATH inside that step. It asserts one textual fact — the step that runs a strict-gated battery
 # says so — which is exactly the fact whose absence is silent.
 _STEP_START = re.compile(r"^\s*-\s+name:")
-_ARMS_STRICT = re.compile(r"""AGENT_OS_STRICT\s*:\s*["']?1["']?\s*$""")
+# Two spellings arm a step: the YAML `env:` form (`AGENT_OS_STRICT: "1"`) and the inline shell
+# form on a run line (`run: AGENT_OS_STRICT=1 python3 ...`) — the latter is how flake.nix's own
+# agent-loop-dispatch derivation spells it, so a workflow author copying that would be armed in
+# fact and, under the `:`-only, end-anchored first version, reported unarmed. A trailing comment
+# after the value was the same false red. Both were LOUD failures (a red on an armed step), never
+# silent, which is why they are folded in here rather than filed — but a check that cries wolf on
+# the reference spelling teaches people to add exemptions. The value must still be exactly 1:
+# `"10"` and `1x` do not match (Geist gate fix, #195).
+_ARMS_STRICT = re.compile(r"""AGENT_OS_STRICT\s*[:=]\s*["']?1["']?(?=\s|$)""")
 
 
 def _workflow_steps(lines):
@@ -777,6 +785,51 @@ def strict_caller_selftest():
     if not reads_strict_env_lines(['    strict = os.environ.get("AGENT_OS_STRICT") == "1"']):
         failures.append("selftest arm: a real os.environ.get read was not recognised, so "
                         "CONTROL 4 above passes vacuously")
+    # CONTROL 5: CONTROL 4 tests the PREDICATE; this tests its USE. Reverting self_disarms() to
+    # `any("AGENT_OS_STRICT" in l ...)` at the call site leaves reads_strict_env_lines() correct
+    # and CONTROL 4 green — measured at the #195 gate: that exact revert, contract rc=0. An
+    # off-path mutation: the guarded thing moved, the guard's fixture did not. So drive
+    # self_disarms() itself on a file whose only strict-looking line is a comment, and again on
+    # one with a real read. Real files, because self_disarms() takes a path.
+    import tempfile
+    body = ['import sys', 'print("  SKIP x-battery: tool not on PATH")', 'sys.exit(0)']
+    with tempfile.TemporaryDirectory() as td:
+        mention = os.path.join(td, "mention-battery.py")
+        with open(mention, "w") as fh:
+            fh.write("\n".join(["# TODO: consider AGENT_OS_STRICT"] + body) + "\n")
+        if not self_disarms(mention):
+            failures.append("selftest control: self_disarms() exempted a file on a COMMENT-ONLY "
+                            "mention of AGENT_OS_STRICT — the call site is back to a token scan "
+                            "(CONTROL 4 cannot see this; it tests the predicate, not its use)")
+        read = os.path.join(td, "read-battery.py")
+        with open(read, "w") as fh:
+            fh.write("\n".join(['import os', 'strict = os.environ.get("AGENT_OS_STRICT") == "1"']
+                               + body) + "\n")
+        if self_disarms(read):
+            failures.append("selftest arm: self_disarms() did not exempt a file with a real "
+                            "AGENT_OS_STRICT read, so CONTROL 5 above passes vacuously")
+    # CONTROL 6 + 7: the two spellings that ARM in fact must be silent — inline shell form on the
+    # run line (flake.nix's spelling) and a trailing comment after the YAML value. Both were false
+    # reds in the first version. And the value must be exactly 1: "10" does not arm.
+    inline = ["      - name: calendar battery",
+              "        run: AGENT_OS_STRICT=1 nix shell nixpkgs#khal --command python3 tests/calendar-battery.py"]
+    trailing = ["      - name: calendar battery",
+                "        env:",
+                '          AGENT_OS_STRICT: "1"  # armed on purpose',
+                "        run: python3 tests/calendar-battery.py"]
+    ten = ["      - name: calendar battery",
+           "        env:",
+           '          AGENT_OS_STRICT: "10"',
+           "        run: python3 tests/calendar-battery.py"]
+    if strict_unarmed_in(inline, B):
+        failures.append("selftest control: the inline `AGENT_OS_STRICT=1` run-line spelling was "
+                        "reported unarmed")
+    if strict_unarmed_in(trailing, B):
+        failures.append("selftest control: an armed env line with a trailing comment was "
+                        "reported unarmed")
+    if not strict_unarmed_in(ten, B):
+        failures.append('selftest arm: AGENT_OS_STRICT: "10" counted as armed — the value '
+                        "check widened past exactly 1")
     return failures
 
 
