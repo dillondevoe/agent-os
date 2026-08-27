@@ -333,6 +333,48 @@ def unwired_test_files(tests_dir, flake_path):
     return unwired, vacuous, stale
 
 
+DEBT_BASELINE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                             "known-unwired-debt.txt")
+
+
+def _read_debt_baseline(path):
+    """The recorded debt ledger. Missing file is a FAILURE, never a skip.
+
+    A ratchet whose baseline can vanish is not a ratchet: `rm` would silently restore
+    exactly the freedom the file exists to remove, and this check would go green while
+    doing so. Same rule as flake-input-provenance's missing-lock case.
+    """
+    try:
+        with open(path) as fh:
+            text = fh.read()
+    except OSError as exc:
+        sys.exit(
+            f"FAIL: the debt ratchet baseline {path} could not be read: {exc!r}\n"
+            "      KNOWN_UNWIRED_DEBT is documented as may-only-shrink. That rule lives\n"
+            "      in this file; without it the list is unbounded and this check would\n"
+            "      pass while the debt grew. Refusing to exit 0."
+        )
+    return {ln.strip() for ln in text.splitlines()
+            if ln.strip() and not ln.lstrip().startswith("#")}
+
+
+def debt_ratchet(debt, baseline_path=DEBT_BASELINE):
+    """Compare KNOWN_UNWIRED_DEBT against the recorded baseline.
+
+    EQUALITY, not a count. A count alone permits a silent SWAP — remove one battery from
+    the list, add a different one, total unchanged — which is precisely a new unwired test
+    being made invisible while the ledger someone watches reads as flat.
+
+    Growth is the violation. Shrinkage is the goal, but it still fails here, deliberately:
+    the baseline must be updated in the SAME commit, or it goes stale and quietly re-permits
+    every name it still holds. A stale exemption is the bug this file is already about.
+    """
+    recorded = _read_debt_baseline(baseline_path)
+    added = sorted(debt - recorded)
+    removed = sorted(recorded - debt)
+    return added, removed
+
+
 def flake_test_packages(system):
     """Attribute NAMES only — this evaluates the package set's keys, it builds nothing."""
     proc = subprocess.run(
@@ -573,6 +615,7 @@ def main():
     ap.add_argument("--workflow", default=WORKFLOW)
     ap.add_argument("--flake", default=FLAKE)
     ap.add_argument("--tests-dir", default=TESTS_DIR)
+    ap.add_argument("--debt-baseline", default=DEBT_BASELINE)
     ap.add_argument("--packages-json", default=None,
                     help="JSON array of package names, for testing the failing arm")
     args = ap.parse_args()
@@ -584,14 +627,18 @@ def main():
     unlisted = sorted(tests - matrix)
     dangling = sorted(matrix - tests)
     unwired, vacuous, stale = unwired_test_files(args.tests_dir, args.flake)
+    debt_added, debt_removed = debt_ratchet(KNOWN_UNWIRED_DEBT, args.debt_baseline)
 
     # Ruled item 3. The selftest runs FIRST and unconditionally: if the checker cannot be shown
     # going red, its green verdict on the real table below means nothing.
     ruling = ruling_conditions_selftest()
     ruling += check_ruling_conditions(open(args.flake).read(), args.tests_dir)
 
+    # Both sides of this merge added an INDEPENDENT failure mode to the same guard, so the
+    # resolution is a union and not a choice. Dropping either term is the silent-pass direction:
+    # the checker would still exit 0 while one of its own checks had findings.
     if (not unlisted and not dangling and not unwired and not vacuous and not stale
-            and not ruling):
+            and not ruling and not debt_added and not debt_removed):
         print(f"OK: {len(tests)} test-* package(s), all present in the vm-tests matrix:")
         for name in sorted(tests):
             print(f"  {name}")
@@ -612,6 +659,26 @@ def main():
                   f"{', '.join(row['run_ids']) or '(none)'}  [{', '.join(row['lanes'])}]")
         return 0
 
+    if debt_added:
+        print("FAIL: KNOWN_UNWIRED_DEBT GREW. It is documented as may-only-shrink, and these",
+              file=sys.stderr)
+        print("      names are not in the recorded baseline — each one is a test that runs in",
+              file=sys.stderr)
+        print(f"      NO CI lane and has just been made invisible to this check:", file=sys.stderr)
+        for base in debt_added:
+            print(f"  +{base}", file=sys.stderr)
+        print(f"      Wire it up. Editing {os.path.basename(DEBT_BASELINE)} to admit it is a",
+              file=sys.stderr)
+        print("      reviewable act, not a formality.", file=sys.stderr)
+    if debt_removed:
+        print("FAIL: KNOWN_UNWIRED_DEBT shrank but the baseline still lists these — which is the",
+              file=sys.stderr)
+        print("      right direction and the wrong commit. Update the baseline in the SAME commit,",
+              file=sys.stderr)
+        print("      or it goes stale and silently re-permits every name it still holds:",
+              file=sys.stderr)
+        for base in debt_removed:
+            print(f"  -{base}", file=sys.stderr)
     if ruling:
         print("FAIL: RULING_CONDITIONS — a row claims more than the repo can show:",
               file=sys.stderr)
