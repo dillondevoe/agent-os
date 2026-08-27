@@ -548,7 +548,9 @@ instruments. The operational form: **an inclusive-looking bound that is a string
 exclusive of everything after it in that unit; pin ranges by id, and if a timestamp bound is
 unavoidable, make it a full instant and say which side is closed.**
 
-Both runs concluded
+**Back to the two markers** (`33086970966`, `33100997366` — the lines are three blocks up; three
+corrections were inserted between them and this sentence, and a sentence whose referent has moved
+out of sight is the kind of thing this ledger exists to catch). Both marker runs concluded
 `success`: the retry recovered them, which is exactly the case steps 1–3 of the census method
 cannot see and the marker exists for. **A count of 2 is not a fixed harness.** It is also not a
 measured improvement — two events do not separate 0.47% from 1.45% at this N, and saying otherwise
