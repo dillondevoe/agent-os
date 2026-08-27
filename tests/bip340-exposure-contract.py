@@ -37,6 +37,15 @@ and `bin/broker` for splitting, not fetching. A checker that flagged it would be
 that is fine, and a check that cries wolf is uninstalled long before the day it is right.
 Control arm A5 pins this.
 
+RESIDUAL SCOPE, STATED — this reads `modules/*.py` and python scripts in `bin/`, and it does NOT
+read python embedded inside `.nix` files. There is already one such caller:
+`modules/identity-pkg.nix` wraps `sys.path.insert(...); import identity;
+identity.ensure_boot_identities(...)` in a `writeShellScriptBin`, which reaches the signer and is
+absent from the closure below. It is local-only today, so the condition holds — but a future
+network-facing wrapper written the same way would be silently green, and a boundary that is not
+written down is indistinguishable from one nobody thought about. Named here rather than left for
+a reader to discover, on the same principle as the importlib paragraph above.
+
 DELIBERATELY NOT SILENT-SKIPPABLE. If discovery finds no sources, or finds no `bip340` module at
 all, this exits non-zero. A check that degrades to a no-op when its input vanishes is precisely
 the class of bug it exists to catch — docs/cancelled-boundaries.md, members 3, 8 and 10.
@@ -98,6 +107,13 @@ def imports_of_static_only(src: str) -> set:
         elif isinstance(node, ast.ImportFrom):
             if node.module and not node.level:
                 out.add(node.module)
+                # `from http import client` names the network module in the ALIAS, not in
+                # node.module: recording only the latter yields {"http"}, and `http` is
+                # deliberately not a NETWORK_ROOT (http.client is; urllib.parse is not). So the
+                # dotted form has to be reconstructed or ordinary Python defeats the detector.
+                # Arms A11/A12 pin both directions.
+                for a in node.names:
+                    out.add(f"{node.module}.{a.name}")
     return out
 
 
@@ -121,7 +137,7 @@ def imports_of(src: str) -> set:
     return out
 
 
-def evaluate(sources, allowlist=ALLOWLIST, _imports_of=None):
+def evaluate(sources, allowlist=ALLOWLIST, _imports_of=None, _net_direct_only=False):
     """sources: {module_name: source_text}. Returns (rc, report_lines)."""
     get = _imports_of or imports_of
     rep = []
@@ -148,8 +164,34 @@ def evaluate(sources, allowlist=ALLOWLIST, _imports_of=None):
                 reaches.add(name)
                 changed = True
 
-    exposed = sorted(n for n in reaches
-                     if n != TARGET and any(_is_network(i) for i in edges.get(n, ())))
+    # NETWORK REACHABILITY IS TRANSITIVE, and the first shipped version of this file got that
+    # wrong (caught in review, 2026-08-27, before it merged). It filtered on the reacher's OWN
+    # import list, so one local wrapper hid the network completely: `netutil` imports socket,
+    # `relay` imports netutil and bip340 -> reported as ALLOWLIST DRIFT and nothing else. The
+    # documented remedy for drift is "add it to the allowlist", which would then have made a
+    # GENUINE condition-3 violation permanently green — the check actively talking its reader
+    # into silencing it. Not hypothetical: modules/agos_events.py imports socket and is already
+    # imported by agos_comms_shadow, agos_comms_live, agos_subagents and agos_advisor.
+    #
+    # Note the asymmetry that made this easy to miss: the bip340 side was a closure from the
+    # start (arm A8), the network side was a single hop. One direction was thought through and
+    # the other was assumed. Arms A9 + A10 (pre-fix) pin it.
+    direct_net = {n for n, imps in edges.items() if any(_is_network(i) for i in imps)}
+    if _net_direct_only:
+        tainted = direct_net
+    else:
+        tainted = set(direct_net)
+        changed = True
+        while changed:
+            changed = False
+            for name, imps in edges.items():
+                if name in tainted:
+                    continue
+                if any(i.split(".")[0] in tainted for i in imps):
+                    tainted.add(name)
+                    changed = True
+
+    exposed = sorted(n for n in reaches if n != TARGET and n in tainted)
     drift = sorted(n for n in reaches if n not in allowlist)
 
     rep.append(f"reachers of `{TARGET}`: {', '.join(sorted(reaches))}")
@@ -162,7 +204,11 @@ def evaluate(sources, allowlist=ALLOWLIST, _imports_of=None):
                    f"can reach the interim signer `{TARGET}`:")
         for n in exposed:
             nets = sorted(i for i in edges.get(n, ()) if _is_network(i))
-            rep.append(f"  {n}  (network: {', '.join(nets)})")
+            if nets:
+                rep.append(f"  {n}  (network: {', '.join(nets)})")
+            else:
+                via = sorted(i for i in edges.get(n, ()) if i.split(".")[0] in tainted)
+                rep.append(f"  {n}  (reaches the network via: {', '.join(via)})")
         rep.append("modules/bip340.py's own header states the condition: the interim signer MUST "
                    "be replaced by libsecp256k1 (Path B) before any network exposure of these "
                    "keys. Either revert the reach, or do Path B.")
@@ -180,11 +226,30 @@ def evaluate(sources, allowlist=ALLOWLIST, _imports_of=None):
     return rc, rep
 
 
+def duplicate_names(by_root):
+    """by_root: {root: [filenames]}. Returns the module names claimed by more than one root.
+
+    `discover` keys on the bare stem across BOTH roots, so `modules/audit.py` and `bin/audit`
+    would collide and the second scanned would silently overwrite the first — an exposure edge
+    could vanish from the graph with no diagnostic at all. No collision exists today (checked
+    against the 29 discovered names); this is a latent hole, closed cheaply because the file's
+    whole argument is that a silent degrade is worse than a red. Arm A13."""
+    seen, dupes = {}, []
+    for root, names in by_root.items():
+        for n in names:
+            stem = n[:-3] if n.endswith(".py") else n
+            if stem in seen and seen[stem] != root:
+                dupes.append(stem)
+            seen[stem] = root
+    return sorted(set(dupes))
+
+
 def discover(repo: pathlib.Path):
     """Module-name -> source, over modules/ and bin/. bin/ scripts carry no .py suffix, so they
     are taken by python shebang; a bin script that stops being python simply drops out, which is
     the safe direction (it can no longer import anything)."""
     out = {}
+    claimed = {}
     for root in ROOTS:
         d = repo / root
         if not d.is_dir():
@@ -193,6 +258,7 @@ def discover(repo: pathlib.Path):
             if not p.is_file():
                 continue
             if p.suffix == ".py":
+                claimed.setdefault(root, []).append(p.name)
                 out[p.stem] = p.read_text(encoding="utf-8", errors="replace")
             elif p.suffix == "":
                 try:
@@ -200,7 +266,14 @@ def discover(repo: pathlib.Path):
                 except OSError:
                     continue
                 if head.startswith(b"#!") and b"python" in head:
+                    claimed.setdefault(root, []).append(p.name)
                     out[p.name] = p.read_text(encoding="utf-8", errors="replace")
+    dupes = duplicate_names(claimed)
+    if dupes:
+        sys.exit("FAIL: these module names are claimed by more than one of "
+                 f"{'/'.join(ROOTS)}: {', '.join(dupes)}. One would silently overwrite the "
+                 "other in the import graph and an exposure edge could vanish with no "
+                 "diagnostic. Disambiguate before this check can mean anything.")
     return out
 
 

@@ -35,15 +35,31 @@ mod = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(mod)
 
 FAILURES = []
+ARMS = 0
+CONTROLS = 0
 
 
-def arm(name, world, expect_red, got_red, detail=""):
+def arm(name, world, expect_red, got_red, detail="", rep=None, reason=None):
+    """reason: a substring that MUST appear in the report when the arm is red. An arm that
+    asserts only `rc != 0` passes on an implementation that reports every reacher as ALLOWLIST
+    DRIFT and never emits EXPOSURE at all — the binding condition would go unreported in CI
+    under its own name while the battery stayed green. A7 always checked its reason; the
+    exposure arms did not, which is the same defect this file exists to catch."""
+    global ARMS, CONTROLS
+    ARMS += 1
+    if "control arm" in detail or "pre-fix arm" in detail:
+        CONTROLS += 1
     ok = (expect_red == got_red)
     verdict = "RED" if got_red else "GREEN"
     want = "RED" if expect_red else "GREEN"
     print(f"  {'ok  ' if ok else 'FAIL'} {name}: {world} -> {verdict} (want {want}) {detail}")
     if not ok:
         FAILURES.append(name)
+        return
+    if got_red and reason is not None:
+        if not any(reason.lower() in l.lower() for l in (rep or ())):
+            FAILURES.append(name + "-reason")
+            print(f"  FAIL {name}-reason: red, but for the wrong reason — no {reason!r} in report")
 
 
 def run(sources, allowlist=None):
@@ -64,7 +80,7 @@ print("bip340-exposure-selftest")
 s = dict(HEALTHY); s["relay"] = "import socket\nimport bip340\n"
 rc, rep = run(s, allowlist=mod.ALLOWLIST | {"relay"})
 arm("A1", "network module imports bip340 (allowlisted, so only the network rule can catch it)",
-    True, rc != 0)
+    True, rc != 0, rep=rep, reason="EXPOSURE")
 
 # A2 — CONTROL: the real shape of the tree today must be GREEN.
 rc, rep = run(HEALTHY)
@@ -73,7 +89,8 @@ arm("A2", "healthy tree (identity + audit only)", False, rc != 0, "<- control ar
 # A3 — the edge a static grep cannot see: importlib, plus socket.
 s = dict(HEALTHY); s["relay"] = 'import socket, importlib\nimportlib.import_module("bip340")\n'
 rc, rep = run(s, allowlist=mod.ALLOWLIST | {"relay"})
-arm("A3", "network module reaches bip340 via importlib.import_module", True, rc != 0)
+arm("A3", "network module reaches bip340 via importlib.import_module", True, rc != 0,
+    rep=rep, reason="EXPOSURE")
 
 # A4 — vacuity: no sources at all must FAIL, never pass quietly.
 rc, rep = run({})
@@ -86,7 +103,6 @@ arm("A5", "importer uses urllib.parse only", False, rc != 0, "<- control arm")
 
 # A6 — PRE-FIX arm: the naive static-only extractor must MISS A3's edge.
 s = dict(HEALTHY); s["relay"] = 'import socket, importlib\nimportlib.import_module("bip340")\n'
-rc, rep = run(s, allowlist=mod.ALLOWLIST | {"relay"})
 rc_naive, _ = mod.evaluate(s, allowlist=mod.ALLOWLIST | {"relay"}, _imports_of=mod.imports_of_static_only)
 arm("A6", "SAME input as A3, naive static-only extractor", False, rc_naive != 0,
     "<- pre-fix arm: proves A3 catches what a plausible impl misses")
@@ -102,10 +118,50 @@ if rc != 0 and not any("allowlist" in l.lower() for l in rep):
 # A8 — transitive: network module imports identity, which imports bip340.
 s = dict(HEALTHY); s["relay"] = "import socket\nimport identity\n"
 rc, rep = run(s, allowlist=mod.ALLOWLIST | {"relay"})
-arm("A8", "network module reaches bip340 transitively via identity", True, rc != 0)
+arm("A8", "network module reaches bip340 transitively via identity", True, rc != 0,
+    rep=rep, reason="EXPOSURE")
+
+# A9 — REVIEW FINDING (2026-08-27, /code-review medium): network reached through ONE LOCAL HOP.
+# The first version filtered `exposed` on the reacher's OWN import list, so a wrapper hid the
+# network entirely and the tool reported only ALLOWLIST DRIFT — whose documented remedy is "add
+# it to the allowlist", which would have made a genuine condition-3 violation permanently GREEN.
+# Not hypothetical: modules/agos_events.py imports socket and is already imported by four
+# modules.
+s = dict(HEALTHY)
+s["netutil"] = "import socket\n"
+s["relay"] = "import netutil, bip340\n"
+rc, rep = run(s, allowlist=mod.ALLOWLIST | {"relay", "netutil"})
+arm("A9", "reacher reaches the network through a local wrapper (one hop)", True, rc != 0,
+    rep=rep, reason="EXPOSURE")
+
+# A10 — PRE-FIX arm for A9. The direct-only network test against A9's input must MISS.
+rc_direct, _ = mod.evaluate(s, allowlist=mod.ALLOWLIST | {"relay", "netutil"},
+                            _net_direct_only=True)
+arm("A10", "SAME input as A9, direct-only network test", False, rc_direct != 0,
+    "<- pre-fix arm: proves A9 catches what the shipped first version missed")
+
+# A11 — REVIEW FINDING: `from http import client` names the network module in the ALIAS, not in
+# node.module, so recording only node.module yields {"http"} — and `http` is deliberately not a
+# NETWORK_ROOT (http.client is, urllib.parse is not). Ordinary, non-adversarial Python.
+for stmt in ("from http import client", "from urllib import request"):
+    s = dict(HEALTHY); s["relay"] = f"{stmt}\nimport bip340\n"
+    rc, rep = run(s, allowlist=mod.ALLOWLIST | {"relay"})
+    arm(f"A11[{stmt}]", "network module named in the from-import ALIAS", True, rc != 0,
+        rep=rep, reason="EXPOSURE")
+
+# A12 — CONTROL for A11: `from urllib import parse` is still string surgery and must stay GREEN.
+s = dict(HEALTHY); s["identity"] = "from urllib import parse\nimport bip340, bech32\n"
+rc, rep = run(s)
+arm("A12", "from urllib import parse (the alias form of A5)", False, rc != 0, "<- control arm")
+
+# A13 — discover() must not silently drop a module when modules/X.py and bin/X collide.
+arm("A13", "duplicate module name across modules/ and bin/", True,
+    mod.duplicate_names({"modules": ["audit.py"], "bin": ["audit"]}) != [], "<- latent-collision arm")
 
 print()
 if FAILURES:
     print(f"SELFTEST FAILED: {', '.join(FAILURES)}")
     sys.exit(1)
-print(f"selftest ok — {8} arms, 3 of them controls")
+# Counted, not asserted: a hardcoded arm count keeps claiming N after the N+1th is added —
+# a summary line making a claim nothing verifies (cf. commit 5323203).
+print(f"selftest ok — {ARMS} arms, {CONTROLS} of them controls/pre-fix")
