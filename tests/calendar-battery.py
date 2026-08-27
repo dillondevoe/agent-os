@@ -47,8 +47,17 @@ def run(cmd):
 import datetime
 
 def span_covering(now, event):
-    """Days of agenda window, starting today, that will contain `event`. Never < 1."""
-    return max(1, (event.date() - now.date()).days + 1)
+    """Days of agenda window, starting today, that will contain `event`. Never < 1.
+
+    REFUSES a past event rather than clamping to 1 (Geist, gate on #209): every caller here
+    builds `event` as now+2h, so a past event is not a valid input but a broken clock or a
+    misuse — and a clamp would turn that impossible state into a well-formed `agenda 1`
+    query that reads exactly like a pass. Fail loud at the precondition, not soft at the
+    assertion. A window starting today cannot contain yesterday anyway."""
+    if event.date() < now.date():
+        raise AssertionError("span_covering: event %s precedes now %s — a today-anchored "
+                             "window cannot contain it" % (event.date(), now.date()))
+    return (event.date() - now.date()).days + 1
 
 _bad = []
 for _h in range(24):
