@@ -44,7 +44,29 @@ if ! grep -q "$SIG" "$log"; then
   exit 1
 fi
 
-if grep -qE "$ASSERT" "$log"; then
+# ASSERT IS EVALUATED ONLY ON LINES THAT DO NOT THEMSELVES CARRY THE SIGNATURE.
+#
+# `Test .* failed` was written to catch a genuine red. But the nix vm-test driver reports a
+# shell timeout inside a named subtest AS A FAILED TEST, quoting the signature as its error:
+#
+#   !!! Test "2. token re-asserts ..." failed with error: "Shell did not start in time"
+#
+# That is shape A wearing an assert-shaped sentence, and it is the ONLY shape shape-A takes in
+# production — the bare SIG line the battery fixtured is one the driver never emits. So the
+# whole-file `grep -qE` classified every real shape-A flake as a genuine red: rc=2, no retry,
+# no marker, and a census that reads near-zero for exactly the wrong reason. Measured on job
+# 98504220231 of run 33068427490 (test-seal-faildown, 2026-08-27T11:40Z): 2 ASSERT matches in
+# 8159 lines, ZERO of them free of the signature.
+#
+# The predicate wanted is `SIG AND (an assert that is NOT this signature)`. Geist filed the
+# two-predicate row for the CENSUS side on 2026-08-27 — retry wants `SIG AND NOT ASSERT`,
+# census wants `SIG AND (NOT ASSERT OR ASSERT-carries-SIG)` — and recorded that the gate does
+# not move. It does. The same second term belongs on both sides; only the polarity differs.
+#
+# The line-scoped form is what makes the co-occurrence case still work: a genuine assertion on
+# ITS OWN line survives the filter and blocks the retry (battery ARM 8), so this narrows the
+# gate rather than removing it.
+if grep -E "$ASSERT" "$log" | grep -qv "$SIG"; then
   echo "::error::${test_name} carries a real assertion failure. Not retrying, even though the" \
        "shape-A signature is also present — a retry here would hide a genuine red."
   exit 2
