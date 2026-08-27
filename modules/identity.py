@@ -237,17 +237,65 @@ def verify(npub, msg, sig):
     return bip340.schnorr_verify(msg, bech32.npub_decode(npub), sig)
 
 
+def recorded_npub(name):
+    """The npub the REGISTRY holds for `name` — the identity past signatures were made under.
+
+    Distinct from `npub_of()`, and the distinction is the whole point: `npub_of()` DERIVES the
+    pubkey from the private key currently on disk, so it answers "who is this key?", which moves
+    whenever the key moves. This answers "who is this participant?", which does not.
+    """
+    pp = _participant_path(name)
+    if not os.path.exists(pp):
+        raise IdentityError("no registry entry for %r (expected %s)" % (name, pp))
+    for line in open(pp, "rb").read().decode("utf-8", "replace").splitlines():
+        if line.startswith("npub:"):
+            return line.split(":", 1)[1].strip()
+    raise IdentityError("registry entry for %r has no npub: line (%s)" % (name, pp))
+
+
 def boot_self_test(name="agent"):
     """Sign/verify roundtrip on every boot — ruling condition 3. Fails LOUD, never silently.
 
     A signer that has degraded to producing unverifiable signatures is worse than one that is
     plainly absent: the audit trail keeps accumulating records that nothing can check later.
+
+    THE ROUNDTRIP ALONE PROVED ALMOST NOTHING, and a negative arm is what showed it (2026-08-27,
+    ruled item 2; note the module has always cited this as condition 3 while the leg comments in
+    tests/identity-boot.nix cite condition 2 — the numbering discrepancy is flagged to Geist, NOT
+    silently resolved here). This function used to verify against `npub_of(name)` — but `npub_of` derives
+    the pubkey FROM THE PRIVATE KEY FILE via `pubkey_gen`. Sign with key K, verify against
+    pubkey(K): self-consistent for EVERY well-formed K. Replace the agent key with any other
+    valid key and this test still passed, on every boot, while every signature in the existing
+    audit log became unverifiable. **The reference point moved with the thing it was checking.**
+
+    Measured, not reasoned: leg 9 of tests/identity-boot.nix corrupts the key on disk and the
+    unit reported `identity boot self-test PASSED for agent` and exited 0.
+
+    So the roundtrip is now anchored to the REGISTRY npub, which does not move when the key
+    moves. Two failures, deliberately separate, because they mean different things:
+
+      * IDENTITY DRIFT — the key on disk is not the key this participant is recorded as. Key
+        substitution, restore from a stale backup, a half-finished re-mint. Every prior
+        signature is now unattributable and the operator must know before anything else signs.
+      * SIGNER DEGRADED — key and registry agree, but a signature does not verify. The original
+        condition: the BIP-340 code itself has broken.
+
+    The roundtrip is still run. It is not redundant with the drift check: matching keys with a
+    broken signer is exactly the case drift cannot see.
     """
+    recorded = recorded_npub(name)
+    derived = npub_of(name)
+    if derived != recorded:
+        raise IdentityError(
+            "identity boot self-test FAILED for %r — the key on disk is NOT this participant's "
+            "recorded key. Registry says %s, the key derives %s. Every signature made under the "
+            "recorded identity is now unverifiable by this key; refusing to proceed."
+            % (name, recorded, derived))
     msg = bip340.tagged_hash("AgentOS/boot-self-test", secrets.token_bytes(32))
     sig = sign_as(name, msg)
-    if not verify(npub_of(name), msg, sig):
+    if not verify(recorded, msg, sig):
         raise IdentityError("identity boot self-test FAILED for %r — signer produced a signature "
-                            "that does not verify against its own pubkey" % name)
+                            "that does not verify against its recorded pubkey" % name)
     return True
 
 

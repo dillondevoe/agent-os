@@ -230,5 +230,85 @@ pkgs.testers.runNixOSTest {
         # a PASS isolates the pin as the cause. Same discipline as PR #144's negative arm
         # dying at leg 1: the control has to fail for the reason you named.
         machine.succeed("env -u AGENT_OS_AUDIT_REQUIRE_SIGNED audit verify")
+
+    # ── LEG 9: THE CONDITION-2 NEGATIVE ARM (Geist's ruling 2026-08-27, item 2) ──────────
+    # Legs 1 and 3 assert the boot self-test PASSES. That is a green, and a green from an
+    # instrument nobody has shown can go red is not evidence. `boot_self_test()` is the sole
+    # runtime guard that the signer still produces verifiable signatures; if it had degraded to
+    # `return True` — or if the unit swallowed IdentityError — legs 1 and 3 would read exactly
+    # as they read today, on every boot, forever.
+    #
+    # So: corrupt the agent key ON DISK and require the unit to fail LOUD.
+    #
+    # TWO CLAIMS, NOT ONE, and this is the whole point of the leg. "The unit failed" alone is
+    # satisfied for free by a unit that dies before writing anything — a missing binary, a
+    # python traceback at import, a typo in ExecStart. Such a unit is red for a reason that has
+    # nothing to do with the signer, and it would let a `return True` self-test through. So the
+    # arm demands BOTH: rc != 0 AND the PASSED line absent AND the FAILED line present with the
+    # signer's own wording. The third is what pins the cause.
+    #
+    # The corruption flips ONE hex nibble and preserves length, hex-ness and mode 0600. That
+    # matters: a truncated or non-hex key fails in the PARSER, several layers above the thing
+    # under test, and would pass this leg while proving nothing about sign/verify. What we want
+    # is a perfectly well-formed key that is simply the WRONG one — the signature is then valid
+    # under the new key and does not verify against the npub in participants/agent.md, which is
+    # exactly the "signer has silently degraded" scenario condition 2 exists for.
+    with subtest("9. NEGATIVE ARM — a corrupted agent key makes the boot self-test FAIL LOUD"):
+        key = f"{root}/keys/agent.key"
+        machine.succeed(f"cp -p {key} /root/agent.key.bak")
+        before_key = machine.succeed(f"cat {key}").strip()
+        assert len(before_key) == 64, f"key is not 64 hex chars, leg assumptions void: {len(before_key)}"
+
+        machine.succeed(
+            "python3 - <<'PYEOF'\n"
+            f"p = {key!r}\n"
+            "h = open(p).read().strip()\n"
+            "flip = '1' if h[0] == '0' else '0'\n"
+            "open(p, 'w').write(flip + h[1:])\n"
+            "PYEOF"
+        )
+        after_key = machine.succeed(f"cat {key}").strip()
+        assert len(after_key) == 64, "corruption changed the key LENGTH — wrong failure mode"
+        assert after_key != before_key, "corruption was a no-op; the arm would pass vacuously"
+        mode = machine.succeed(f"stat -c %a {key}").strip()
+        assert mode == "600", f"corruption changed the key MODE to {mode!r}"
+
+        # CLAIM 1: the unit fails.
+        machine.fail("systemctl restart agent-os-identity-boot.service")
+        state = machine.succeed(
+            "systemctl show -p ActiveState --value agent-os-identity-boot.service"
+        ).strip()
+        assert state == "failed", f"unit did not enter failed state, it is {state!r}"
+
+        # CLAIMS 2 and 3: scoped to THIS invocation, so a PASSED line from an earlier boot
+        # cannot satisfy — or falsify — either one.
+        inv = machine.succeed(
+            "systemctl show -p InvocationID --value agent-os-identity-boot.service"
+        ).strip()
+        assert inv, "no InvocationID; the log assertions below would read an empty journal"
+        fail_log = machine.succeed(f"journalctl _SYSTEMD_INVOCATION_ID={inv} --no-pager")
+        assert "identity boot self-test PASSED for agent" not in fail_log, (
+            f"the unit FAILED but still claimed the self-test PASSED:\n{fail_log}"
+        )
+        assert "identity boot self-test FAILED" in fail_log, (
+            "the unit failed WITHOUT the signer's own failure message, so it died for some "
+            f"other reason and this leg proves nothing about condition 2:\n{fail_log}"
+        )
+
+        # THE CONTROL. Without it this leg passes on a machine where the unit can never start
+        # at all, and "always red" is as uninformative as "always green".
+        machine.succeed(f"cp -p /root/agent.key.bak {key}")
+        restored = machine.succeed(f"cat {key}").strip()
+        assert restored == before_key, "restore did not put the original key back"
+        machine.succeed("systemctl restart agent-os-identity-boot.service")
+        inv2 = machine.succeed(
+            "systemctl show -p InvocationID --value agent-os-identity-boot.service"
+        ).strip()
+        assert inv2 != inv, "InvocationID did not change; reading the same journal twice"
+        ok_log = machine.succeed(f"journalctl _SYSTEMD_INVOCATION_ID={inv2} --no-pager")
+        assert "identity boot self-test PASSED for agent" in ok_log, (
+            f"self-test did not recover after restoring the key:\n{ok_log}"
+        )
+        print("leg 9: self-test went red on a corrupted key and green again on restore")
   '';
 }
