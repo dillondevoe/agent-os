@@ -207,6 +207,11 @@ over an earlier 40-run one — the same data through a sliding window, neither p
    pre-fix grep returned **36 hits on a fully green run** — 9 jobs × 2 marker-bearing source
    lines × 2 copies — where the truth is zero.
 
+   The duplication is not even guaranteed: the attempt-1 zip of `33037585674` fetched the same
+   day carried **18 flat entries and no per-step folder** (Geist, 2026-08-27 — same endpoint,
+   126 entries with per-step copies on `33044089747`). A count that depends on the zip's shape is
+   not a count; `sort -u` is correct under both shapes, which is the real reason to prefer it.
+
    Deduplication is *sound* here rather than merely convenient, and only because the retry is
    **one shot**: at most one marker can fire per job execution, so a distinct
    `test=X run=Y` pair *is* one instance. Fetch per attempt (step 2 already does), dedupe within
