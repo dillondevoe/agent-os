@@ -190,6 +190,23 @@ over an earlier 40-run one — the same data through a sliding window, neither p
    `/actions/runs/<id>/attempts/<n>/logs` → `Shell did not start in time` is shape A,
    `HTTP error 416` / `no substituter` is shape B, **neither is neither** — see below.
 
+4. **Since the one-shot retry shipped (2026-08-27), steps 1–3 no longer see every instance —
+   a retried instance ends in a green job.** The retry emits a marker for exactly this reason.
+   Grep the job logs of *successful* attempts too:
+
+   ```bash
+   # per run id, over the same window as step 1
+   gh api "repos/dillondevoe/agent-os/actions/runs/$ID/attempts/$N/logs" > /tmp/l.zip
+   unzip -p /tmp/l.zip '*' | grep -o 'FLAKE-A-RETRY test=[a-z0-9-]*' | sort | uniq -c
+   ```
+
+   **Each marker is one shape-A instance and MUST be counted in the table below**, even though
+   the attempt it belongs to concluded `success`. A mitigation that swallows a failure without
+   leaving a countable trace is not a mitigation, it is a delete — Geist's condition, and the
+   thing this step exists to prevent. If a window returns zero markers *and* zero shape-A
+   failures, verify the marker is still emitted before concluding the flake is gone: an
+   instrument that has quietly stopped reporting looks identical to a fixed harness.
+
 **Result over 2026-08-20T18:37Z → 2026-08-27T03:50Z** (138 `vm-tests (slow lane)` runs; window
 bounded by listing depth, not by choice):
 
@@ -315,6 +332,37 @@ Nothing. **A rate compared across a window in which the population itself change
 comparison**, and this file already had the same fact wearing another hat: the 7/8/9 job counts
 above *are* the matrix changing twice mid-window. The lesson is cheap and the alternative was
 publishing a regression that does not exist.
+
+## The prediction the retry is falsifiable against (written BEFORE it shipped, 2026-08-27)
+
+Recorded here ahead of the mitigation landing, so that it cannot be fitted to the outcome
+afterwards. Geist's §3 item 5; the arithmetic is this file's own census.
+
+**Baseline, measured:** 19 shape-A instances across 1309 job executions = **1.45% per job
+execution**. A 9-job attempt therefore fails from shape A with probability
+`1 - (1 - 0.0145)^9` ≈ **12.3%** — which is the independently-derived 12.0% per-attempt rate in
+the census table. The two numbers were computed from different columns and agree; that is the
+only reason to trust either.
+
+**Predictions, in the order they falsify:**
+
+1. **Attempt-level red from shape A falls to ≈0.2%.** One shot converts a single-instance attempt
+   to green; only an attempt hit *twice on the same job* stays red, at ≈0.0145² per job ≈ 0.02%,
+   ~0.2% over nine. If red-from-shape-A stays anywhere near 12%, the retry is not firing —
+   check the predicate before believing the rate.
+2. **Marker count tracks ≈1.45% of job executions.** This is the load-bearing one: the markers
+   are now the census, so the instrument's own calibration is the claim. Materially *below* 1.45%
+   means instances are escaping the signature and being recorded as genuine reds. Materially
+   *above* means the predicate is catching something `Shell did not start in time` does not
+   isolate — **stop and summon, do not widen the retry.**
+3. **Roughly 11 of every 19 markers carry a two-VM job name.** The enrichment measured at
+   p ≈ 0.024 above. If the marker stream comes back near-uniform across the nine jobs, the
+   enrichment was a small-sample artefact and the stagger's rationale weakens further.
+
+**What none of these tests.** The retry is keyed to the *signature*, not to a mechanism, and the
+root cause stays OPEN. A green lane after this ships is not evidence the harness was fixed; it is
+evidence a known failure is being absorbed and counted. The day the marker count goes to zero on
+its own is the day there is something to explain.
 
 ## What is NOT established
 
