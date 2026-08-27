@@ -118,6 +118,20 @@ WIRED_VIA_WORKFLOW = {
     # red-by-VERDICT ("FAIL B. env://... rejected" + "anthropic-transport-battery: FAIL").
     # Both exit 1; only the log separates them.
     "anthropic-transport-battery.py": "flake-check.yml",
+    # Fourth and fifth off the ledger (10->8), taken on Geist's steer: of the ten remaining,
+    # EIGHT self-disarm (exit 0 when their CLI is absent), so wiring one of those buys a green
+    # that proves nothing until the disarm is fixed first. These two are the ones that do not.
+    # Verified independently rather than taken on faith — both exit 1 with their subject absent.
+    #
+    # Both are red-by-CRASH when the subject is gone and red-by-VERDICT on a broken arm, the
+    # same split recorded on the two entries above. One texture worth naming, because it is a
+    # third thing and not a restatement: audit-signing's subject-absent crash lands on
+    # `open(LOG)` for a scratch-dir audit.log that the MISSING BINARY NEVER WROTE. The
+    # traceback names the symptom, not the cause. A reader debugging that red goes looking in
+    # /tmp for a log file, not in bin/ for the binary. Red is still better than no red, but
+    # "it went red" and "the red points at the fault" are not the same claim.
+    "audit-signing-battery.py": "flake-check.yml",
+    "escalate-consent-battery.py": "flake-check.yml",
 }
 
 # DEBT, NOT DESIGN — and the two must never share a list.
@@ -147,7 +161,6 @@ KNOWN_UNWIRED_DEBT = frozenset({
     "agos-media-battery.py",
     "agos-web-battery.py",
     # Found in the first sweep (#153): referenced only by tests/run-local.sh, a manual runner.
-    "audit-signing-battery.py",
     # bip340-battery.py was here until today, and it is the entry that should NOT have been a
     # routine line on this list. Its own header states, as fact, that it satisfies "binding
     # condition 2 of Geist's 2026-08-19 Path-A ruling: the FULL official test-vector set runs
@@ -162,7 +175,6 @@ KNOWN_UNWIRED_DEBT = frozenset({
     # the must-fail vectors (5-15) and check I's control arm, i.e. the forgery-acceptance
     # coverage the ruling singled out -- a verifier returning True unconditionally passes every
     # TRUE vector, so the unrun half was exactly the half that matters.
-    "escalate-consent-battery.py",
 })
 
 # NON-FILE DEBT, recorded here because this is the ledger people read, and NOT added to the set

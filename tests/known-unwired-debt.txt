@@ -19,6 +19,4 @@ agos-media-battery.py
 agos-notes-battery.py
 agos-sys-battery.py
 agos-web-battery.py
-audit-signing-battery.py
 calendar-battery.py
-escalate-consent-battery.py
