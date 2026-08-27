@@ -138,6 +138,18 @@ jobs:
           AGENT_OS_STRICT: "1"
         run: nix shell nixpkgs#khal --command python3 tests/calendar-battery.py
 
+      # THE SECOND SELF-DISARMING BATTERY WIRED, AND THE LAST ONE THAT CAN BE.
+      # The other six ledger entries have no second binary at all — `shutil.which("agos-X")`
+      # with nothing to fall back to — so strict on them is a guaranteed red outside the
+      # image lane. They are blocked on the image, not on this pattern. `agos-calc` was the
+      # only remaining battery with calendar's shape, and `nix shell nixpkgs#libqalculate`
+      # is what makes AGENT_OS_STRICT honest to set here: the step stages the backend it
+      # then promises. Removing either line reds tests/vm-matrix-contract.py by name.
+      - name: agos-calc battery (qalc-backed, strict)
+        env:
+          AGENT_OS_STRICT: "1"
+        run: nix shell nixpkgs#libqalculate --command python3 tests/agos-calc-battery.py
+
       - name: vm-tests matrix covers every test-* package
         # Run under a nix-provided python rather than the runner image's: if PyYAML were merely
         # assumed present, an image change would turn this check into a no-op or a spurious red.

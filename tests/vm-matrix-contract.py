@@ -143,6 +143,14 @@ WIRED_VIA_WORKFLOW = {
     # below exists to keep true — the battery half was checkable from here already, the caller
     # half was not, and a wired-but-unarmed step buys back the exact green the gate removed.
     "calendar-battery.py": "flake-check.yml",
+
+    # THE SECOND, AND THE LAST ONE THE LEDGER CAN GIVE UP WITHOUT THE IMAGE. Its step stages
+    # qalc via `nix shell nixpkgs#libqalculate` and sets AGENT_OS_STRICT=1, same pair as
+    # calendar's. The six names left below are NOT a queue behind it: each does a bare
+    # `shutil.which("agos-X")` with no second binary to fall back to, so strict there is a
+    # guaranteed red outside the image lane. They are blocked on the image, not the pattern —
+    # a count of seven read as a backlog and was not one.
+    "agos-calc-battery.py": "flake-check.yml",
 }
 
 # DEBT, NOT DESIGN — and the two must never share a list.
@@ -160,13 +168,16 @@ WIRED_VIA_WORKFLOW = {
 # escalate-consent-battery.py deserves its own line: it is referenced by nothing at all, not even
 # tests/run-local.sh, so before this check it was invisible to every reader as well as to CI.
 KNOWN_UNWIRED_DEBT = frozenset({
-    # The seven remaining ambient-hand acceptance batteries. Each is named in flake.nix by
+    # The six remaining ambient-hand acceptance batteries. Each is named in flake.nix by
     # exactly one `builtins.pathExists` assert and its error string, and by nothing else in the
     # repository. The guard that names them proves they have not been DELETED; nothing proves
-    # they RUN. calendar-battery.py was the eighth and left this list in the commit that wired
-    # it — see WIRED_VIA_WORKFLOW above for why that took three commits and not one. The seven
-    # get the strict pattern second-hand, now that one has been through it end to end.
-    "agos-calc-battery.py",
+    # they RUN. calendar-battery.py was the eighth and agos-calc-battery.py the seventh; both
+    # left this list in the commit that wired them.
+    #
+    # THESE SIX ARE NOT A QUEUE. Each does `shutil.which("agos-X")` and has NO second binary,
+    # so there is nothing a workflow step could stage and strict on them would be a guaranteed
+    # red outside the image lane. They are blocked on the built image (Dell gate), not on the
+    # strict pattern — which is why the two that left did so out of order with this list.
     "agos-sys-battery.py",
     "agos-files-battery.py",
     "agos-notes-battery.py",
