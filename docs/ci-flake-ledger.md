@@ -584,3 +584,46 @@ and *was this the defect?* — and only the first of them wants to fail closed. 
 than fixed: changing the retry gate to count it would weaken the gate, and a census-only classifier
 is a second instrument that has to earn its own control arm before it is trusted with a rate.
 So the honest reading of the window is **2 counted, 1 uncounted-and-arguable**, not a flat 2.
+
+### The retry gate did move, and it was the reason the census read near-zero
+
+The paragraph above closes with "recorded here rather than fixed: changing the retry gate to count
+it would weaken the gate." That reasoning was sound about the *census* term and wrong about the
+gate, because it assumed the gate was classifying correctly and only the counter was conservative.
+It was not. Measured on run `33068427490`, job `98504220231` (`test-seal-faildown`, created
+2026-08-27T11:40:38Z, the single `failure` in the 40 runs after the census window's endpoint):
+
+| | count |
+|---|---|
+| log lines | 8159 |
+| lines matching `ASSERT` | 2 |
+| of those, lines NOT carrying `Shell did not start in time` | **0** |
+| `scripts/flake-retry-decide.sh` verdict | **rc=2 — "a real assertion failure"** |
+
+The whole log's only assert-shaped lines *are* the shape-A timeout. The nix vm-test driver does not
+emit a bare signature line when a shell times out inside a named subtest; it reports the timeout as
+a failed test and quotes the signature as the error string —
+`!!! Test "2. token re-asserts on a real reboot ..." failed with error: "Shell did not start in time"`
+— which matches `Test .* failed`. **Shape A wearing an assert-shaped sentence.** So the gate refused
+a retry on every shape-A flake that occurred inside a named subtest, emitted no marker, and the
+census counted none of them. A number that reads 2 because the emitter was gated shut is not a
+measurement of a 0.5% rate; it is a measurement of the gate.
+
+The battery did not catch it because ARM 1's fixture was a bare signature line — a shape the
+producer cannot produce. **A fixture the producer cannot produce is not coverage of the producer.**
+That is the same class as the dead emitter this file already records at `185a937`: there, the emit
+path had never executed; here, it executed against an input no real run supplies. Both read green.
+
+Fixed by scoping the assert predicate to lines that do not themselves carry the signature — the
+second term Geist filed for the census side (`SIG ∧ (¬ASSERT ∨ ASSERT-carries-SIG)`) belongs on the
+retry side too, at the opposite polarity. This **narrows** the gate rather than removing it: a
+genuine assertion on its own line still blocks the retry, control-armed as battery ARM 8. ARM 7 uses
+the real driver shape; ARM 9 runs the pre-fix whole-file predicate against ARM 7's input and asserts
+it matches, so ARM 7 cannot silently go vacuous.
+
+**What this does to the numbers: nothing yet, and that is the point.** Every rate in this file was
+computed from markers the gate was suppressing, so the post-stagger numerator of 2 is a floor of
+unknown looseness and the pre/post comparison cannot be re-derived from the existing corpus — the
+suppressed instances left no marker to count. The rates above stand as *what the instrument
+recorded*; they are not restated as what happened. The window has to be re-run forward from the
+first run that carries this fix before either side of the comparison means what it says.
