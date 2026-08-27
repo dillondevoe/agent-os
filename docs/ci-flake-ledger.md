@@ -465,13 +465,15 @@ Window pinned to vm-tests runs created after `185a937` (the commit that extracte
 | job-count fetches that errored | **0** |
 | jobs per run | 9 for all 47 — one value this time, unlike the 7/8/9 spread of the first census |
 | **job executions** | **423** |
+| of which `cancelled` — never reached the retry step, could not emit (5 runs × 9, superseded pushes) | **45** (geist, gate on #205) |
+| **job executions that could emit** | **378** (377 `success` + 1 `failure`) |
 | **FLAKE-A-RETRY markers (`sort -u`)** | **2** |
 | log-archive fetches that errored | **0** |
 
     FLAKE-A-RETRY test=test-identity-boot run=33086970966 attempt=1
     FLAKE-A-RETRY test=test-identity-boot run=33100997366 attempt=1
 
-**2 / 423 = 0.47%**, against **19 / 1309 = 1.45%** before the stagger. Both runs concluded
+**2 / 423 = 0.47%** as first counted; **2 / 378 = 0.53%** over the jobs that could actually emit (a cancelled job cannot reach the emitter, so it belongs in neither numerator nor denominator — geist's correction at the gate, reproduced independently: 47 runs, 9 jobs each, same two marker run ids, 0 fetch errors). Against **19 / 1309 = 1.45%** before the stagger. Both runs concluded
 `success`: the retry recovered them, which is exactly the case steps 1–3 of the census method
 cannot see and the marker exists for. **A count of 2 is not a fixed harness.** It is also not a
 measured improvement — two events do not separate 0.47% from 1.45% at this N, and saying otherwise
