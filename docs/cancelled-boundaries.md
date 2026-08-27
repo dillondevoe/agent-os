@@ -604,6 +604,57 @@ red-by-crash — exactly the distinction instance 1 blurred. This is member 16's
 different clothes: the guard that ends the class has to be shown failing for the *named* reason,
 and "it went red" is not that.
 
+### Instances 4 and 5, later the same day: neither defect is in the diff
+
+The rule above is entirely about the diff — did the mutation land, did *one* thing move. Two more
+instances arrived within one hour, from the same two brains, and **both satisfy the rule completely
+while producing a worthless verdict.** The rule was not wrong. It was aimed at one of three places
+a control can fail.
+
+**Instance 4 — the exit code was read off the wrong process.** Measuring whether a wired battery
+reds when its subject is absent, Mirror ran `python3 tests/…-battery.py 2>&1 | tail -6` and read
+`$?`. That is `tail`'s exit status. It printed `rc=0`; the true answer was `rc=1`. Geist's first
+pass on the same question the same hour hit the sibling of this — reaching for `PIPESTATUS` in
+`zsh`, which spells it `pipestatus`, printing an EMPTY rc rather than a wrong one.
+
+Note the direction, because only one of the two is dangerous. A pipe ending in `tail` essentially
+always succeeds, so this instrument **cannot report a false red** — it can only report a false
+green. And a false green is precisely the finding member 16 exists to catch: a wired battery that
+exits 0 when its subject is gone. The instrument agrees with the truth in the harmless direction
+and conceals it in the harmful one. Mirror's reading happened to be wrong-in-the-safe-direction and
+the true rc was 1; that is luck, and the earlier `#188` claim built on the same pipe survived only
+because Geist had measured it independently, unpiped.
+
+**Instance 5 — the baseline was reverted out from under the control.** Running three negative
+controls against an uncommitted working tree, Mirror reverted each mutation with
+`git checkout -- <file>`. That restores from the **index**, and the change under test was unstaged
+— so every "revert" discarded *the wiring being proved* rather than the mutation. All three
+controls ran against a progressively more corrupted tree.
+
+Two of the three still printed plausible output. One printed the exactly-correct diagnostic string
+for its scenario — **the right words, produced by the wrong state.** Nothing in the output was the
+tell. The tells were structural and off to the side: the tree finished at one modified file where
+four were expected, and a control that should have shown `1 insertion, 1 deletion` for a
+comment-out reported `7 insertions, 0 deletions`. Redone against a committed baseline with
+`git checkout -q HEAD -- .`, all three fired distinctly and one of them changed its answer.
+
+> **ANCHOR THE MUTATION. ANCHOR THE BASELINE. AND READ THE RESULT OFF THE PROCESS THAT PRODUCED
+> IT.**
+
+Three places, not one: what you changed, what you changed it *from*, and the channel the verdict
+came back through. The original rule covers the first. Instance 5 is a corrupt second. Instance 4
+is a lying third, and it is the one with no diff to inspect at all — the command was correct, the
+mutation was correct, the program was correct, and the number was somebody else's.
+
+Both new instances fail **quiet**, which by the asymmetry above is the half with no upper bound on
+how long it survives. Both were caught by noticing a structural oddity rather than by any control
+that existed. That is not a method, and saying so is the point of writing them down.
+
+**A closing note on provenance, since this file is about stale records.** Instance 4 occurred in
+both brains independently inside the same hour on 2026-08-27, which is what promoted it from a
+slip to a class. Instance 5 is Mirror's alone. Neither was found by review of the other's work;
+each brain reported its own.
+
 ### Why this belongs in this file rather than a style guide
 
 A boundary cancelled by something that reads like it belongs is the class. An instrument error is
