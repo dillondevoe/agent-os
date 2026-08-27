@@ -7,6 +7,54 @@ does not start from zero.
 Measured 2026-08-25 by Mirror. Window and method are stated below so the numbers can be
 re-derived, disagreed with, or superseded.
 
+## TWO SHAPES, NOT ONE — read this before filing a failure below
+
+Everything under "The signature" describes **shape A**: the driver cannot reach `backdoor.service`,
+retries 20 times, dies at ~7m07s with `RuntimeError: Shell did not start in time`.
+
+**Shape B is different and was first recorded 2026-08-27** (run `33031952158`, job
+`vm-test (test-selfimprove-loop-runs)`, PR #170). It is a substituter failure, not a guest
+failure. No VM is ever booted.
+
+```
+warning: unable to download '.../*.nar.zst': HTTP error 200
+         (curl error: Failed sending data to the peer); retrying from offset 78331904
+error:   unable to download '.../*.nar.zst': HTTP error 416
+error:   path '/nix/store/...-libqmi-1.38.0' is required, but there is no substituter that can build it
+error:   some substitutes for the outputs of derivation '...-fwupd-2.1.6.drv' failed
+         (usually happens due to networking issues); try '--fallback' to build derivation from source
+```
+
+The mechanism is visible in those two lines together: a large NAR download is interrupted, nix
+retries it as a **ranged** request from a byte offset, and cache.nixos.org answers **416 Range Not
+Satisfiable**. Nix then treats the path as unsubstitutable rather than falling back to building it,
+and the whole `nixos-system` closure cascades to `Reason: 1 dependency failed`.
+
+**How to tell them apart in one glance — use the DURATION.**
+
+| | shape A | shape B |
+|---|---|---|
+| dies at | ~7m07s | ~2m |
+| last useful line | a normal guest console line, then silence | `HTTP error 416` / `no substituter` |
+| VM booted | yes | **no** |
+| plausible remedy | unknown, root cause NOT established | `--fallback`, or a retry |
+
+**Do not fold B into A's count.** A's rate figures above were derived from A's signature, and
+adding B's instances to them would inflate a number whose whole point is that it is already a
+floor. They are separate populations until someone shows otherwise.
+
+**Why B is worth a section rather than a re-run.** B is *more* invisible than A, not less: it is
+transient infra, a re-run clears it, and it never produces a test failure anyone would investigate.
+The instance above was caught only because it landed on a PR whose diff was a flake check and one
+comment — nothing in that change can touch a VM, so the failure could not be mine, and the only
+remaining question was which shape it was. On a PR with a real diff it would have been read as
+"my change broke the VM tests", re-run, gone green, and left no trace.
+
+Unresolved and stated rather than guessed: whether `--fallback` belongs in the workflow's
+`nix build` invocation. It would convert B from a hard failure into a long build, which is a
+tradeoff with a real cost, and nobody has measured how often B occurs. **One instance is not a
+rate.** Recorded so the second instance has something to be the second of.
+
 ## The signature
 
 Four observed failures, four **different** jobs, one **byte-identical** signature:
