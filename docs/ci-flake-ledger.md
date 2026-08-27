@@ -57,7 +57,7 @@ rate.** Recorded so the second instance has something to be the second of.
 
 ## The signature
 
-Four observed failures, four **different** jobs, one **byte-identical** signature:
+Six observed failures, five **different** jobs, one **byte-identical** signature:
 
 | run | job | date (UTC) |
 |---|---|---|
@@ -65,6 +65,8 @@ Four observed failures, four **different** jobs, one **byte-identical** signatur
 | `32784416040` | `vm-test (test-identity-boot)` | 2026-08-24T22:23Z |
 | `32779702396` | `vm-test (test-seal-faildown)` | 2026-08-24T21:28Z |
 | `32808436764` attempt 1 | `vm-test (test-egress-uid-scope)` | 2026-08-25T04:18Z |
+| `33037585674` | `vm-test (test-fetch-proxy-allowlist)` | 2026-08-27T03:58Z |
+| `33037585674` | `vm-test (test-selfimprove-loop-runs)` | 2026-08-27T03:59Z |
 
 Every one fails the same way: the driver cannot reach `backdoor.service` in the guest, retries
 20 times, and gives up after ~7m07s with
@@ -82,9 +84,33 @@ is a normal one —
 
 — and then the console is silent for the rest of the run.
 
-**This is one harness defect, not four flaky tests.** The four job names are the four places the
-harness happened to be standing when it failed; treating them as four separate test problems is
-the wrong unit of work.
+**Instances five and six landed in the SAME run, and that is the first co-occurrence recorded
+here.** Both on main at `18ca0b6`, both shape A, both the byte-identical
+`RuntimeError: Shell did not start in time` out of `test_driver/machine/__init__.py:1075`. The
+other seven jobs in that run — including `test-identity-boot`, which had itself been an instance
+two days earlier — were green.
+
+Be careful what this licenses. GitHub-hosted runners are per-job VMs, so two failures in one run
+are **two independent draws, not one machine wedging twice**. This is not evidence of a run-level
+or runner-level cause and must not be written up as one.
+
+What it does say is about *dispersion*, not mechanism: the instantaneous rate can be 2 of 9 in a
+single run, which the ~7% figure below does not prepare a reader for. A rate quoted as a scalar
+invites the reading "roughly one job every fourteen runs", and that reading would have made this
+run look anomalous when it is an ordinary draw from a distribution nobody has characterised. The
+rate stays a lower bound; it is not recomputed here, because the window that produced it has not
+been re-derived and splicing two new points onto an old window is the arithmetic this file already
+warns about.
+
+The diff on that sha touched `tests/vm-matrix-contract.py` only — a host-side contract check that
+runs in `flake-check`, boots no VM, and is imported by no VM test — and the previous main sha
+`45ebb4e` was green on all nine. The exclusion rests on that reachability argument, **not** on
+"it's a known flake", which is the reasoning this file exists to refuse.
+
+**This is one harness defect, not five flaky tests.** The job names are just the places the
+harness happened to be standing when it failed; treating them as separate test problems is the
+wrong unit of work. `test-selfimprove-loop-runs` appearing twice, two days apart, is the same
+non-fact as any of the others — it is where the harness was standing, not what was wrong.
 
 ## Rate — and why the rate is a lower bound, not a measurement
 
