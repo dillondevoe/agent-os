@@ -313,6 +313,154 @@ def flake_test_packages(system):
     return json.loads(proc.stdout)
 
 
+# ---------------------------------------------------------------------------------------------
+# RULING_CONDITIONS — ruled item 3 (Geist, 2026-08-27)
+#
+# WHY THIS TABLE EXISTS, and it is one specific incident. `tests/bip340-battery.py` opened by
+# stating as settled fact that it satisfied "binding condition 2 ... the FULL official test-vector
+# set runs in CI." It ran in no lane for eight days, while THIS FILE's debt list simultaneously
+# recorded it as running nowhere. The repo asserted both things at once and nothing made them meet.
+# Geist's rule from that: A RULING CONDITION NAMING AN EXECUTION IS DISCHARGED ONLY BY A LANE THAT
+# GOES RED. A header is not a receipt, and neither is a table — which is why every row below is
+# checked against the same flake.nix the debt ledger is checked against, by the same function.
+#
+# THE ROW RULE, ruled: a row may say `enforced` ONLY with a run id. Anything else is `half` (one
+# of two halves discharged) or `prose` (claimed but not executed anywhere). The status column is
+# the claim; `run_ids` is the evidence; the checker below refuses to let them disagree.
+RULING_CONDITIONS = (
+    {
+        "id": "condition-2",
+        "ruling": "Geist 2026-08-19 Path-A",
+        "claim": "the boot identity self-test executes, and the full official BIP-340 vector set "
+                 "(INCLUDING must-fail vectors) runs in CI",
+        "status": "enforced",
+        "lanes": ("bip340-battery.py", "identity-boot.nix"),
+        # Two halves, two runs, deliberately cited separately: they were discharged eight days
+        # apart by different work and a single id would hide that.
+        "run_ids": ("33033802300", "33035705963"),
+        "note": "vectors-execute half: main flake-check 33033802300 (#170). Negative-arm half: "
+                "main vm-tests 33035705963 (#172), leg 9 — a corrupted agent key now makes the "
+                "boot self-test go red. Before #172 it went GREEN on a substituted key, because "
+                "it verified against a pubkey DERIVED from the key file: a tautology.",
+    },
+    {
+        "id": "condition-3",
+        "ruling": "Geist 2026-08-19 Path-A",
+        "claim": "the vendored non-timing-hardened BIP-340 implementation stays off any network "
+                 "reach path; network exposure makes libsecp256k1 (Path B) mandatory",
+        "status": "enforced",
+        "lanes": ("bip340-exposure-contract.py",),
+        "run_ids": ("33030523828",),
+        "note": "Importer tripwire (#169). Sees IMPORTS, not shell-outs — the subprocess gap is "
+                "recorded in that file's docstring as P3, deliberately not armed while no module "
+                "on the reach path shells out.",
+    },
+)
+
+_RUN_ID = re.compile(r"^\d{6,}$")
+_VALID_STATUS = ("enforced", "half", "prose")
+
+
+def executing_references(flake_src, tests_dir, base):
+    """`wiring_references()` minus comment lines.
+
+    STRICTER THAN THE DEBT LEDGER, ON PURPOSE, and the difference is load-bearing here.
+    `wiring_references` counts a mention inside a `#` comment as possible wiring. For the debt
+    ledger that bias is safe: it can only make the ledger UNDER-report debt, never call a wired
+    test unwired. For a row claiming `enforced` the same bias is exactly wrong — it would let a
+    ruling condition be discharged by a COMMENT MENTIONING THE TEST, which is the prose-as-receipt
+    failure this table was built to end, one level up.
+
+    This is not hypothetical in this repo: `tests/bip340-battery.py` is named on flake.nix line
+    ~425 inside a comment block AND wired for real below it. A row citing it must pass on the
+    second, not the first.
+    """
+    return [ln for ln in wiring_references(flake_src, tests_dir, base)
+            if not ln.lstrip().startswith("#")]
+
+
+def check_ruling_conditions(flake_src, tests_dir, rows=None, debt=None):
+    """Returns a list of failure strings; empty means every row is backed by what it claims."""
+    rows = RULING_CONDITIONS if rows is None else rows
+    debt = KNOWN_UNWIRED_DEBT if debt is None else debt
+    problems = []
+    for row in rows:
+        rid = row.get("id", "<unnamed row>")
+        status = row.get("status")
+        run_ids = tuple(row.get("run_ids", ()))
+        lanes = tuple(row.get("lanes", ()))
+
+        if status not in _VALID_STATUS:
+            problems.append(f"{rid}: status {status!r} is not one of {_VALID_STATUS}")
+        if not lanes:
+            problems.append(f"{rid}: names no lane at all, so nothing can ever make it go red")
+
+        # THE ROW RULE.
+        if status == "enforced" and not run_ids:
+            problems.append(
+                f"{rid}: says 'enforced' but cites NO run id. A condition is enforced by a run "
+                f"that happened, not by a row that says so — mark it 'half' or 'prose'.")
+        for r in run_ids:
+            if not _RUN_ID.match(r):
+                problems.append(
+                    f"{rid}: run id {r!r} is not a run id. 'see CI' and 'green on main' are the "
+                    f"prose this table replaces; cite the number so a reader can open it.")
+
+        for base in lanes:
+            path = os.path.join(tests_dir, base)
+            if not os.path.exists(path):
+                problems.append(f"{rid}: names {path}, which does not exist")
+                continue
+            if not executing_references(flake_src, tests_dir, base):
+                problems.append(
+                    f"{rid}: names {path}, which no lane in {FLAKE} executes. The condition is "
+                    f"discharged by prose — this is the bip340-battery shape, again.")
+            if status == "enforced" and base in debt:
+                problems.append(
+                    f"{rid}: says 'enforced' while {base} is on KNOWN_UNWIRED_DEBT, which is the "
+                    f"repo asserting 'runs in CI' and 'runs nowhere' at the same time.")
+    return problems
+
+
+def ruling_conditions_selftest():
+    """Show the checker RED before trusting it green. Runs on every invocation, by design.
+
+    A table-checker that has only ever been observed passing is the same instrument this table
+    exists to distrust. Each arm below is a row the checker MUST reject; the final control is a
+    row it must ACCEPT, without which a checker that rejected everything would pass this selftest.
+    """
+    src = open(FLAKE).read() if os.path.exists(FLAKE) else ""
+    good = {"id": "arm", "status": "enforced", "lanes": ("bip340-exposure-contract.py",),
+            "run_ids": ("33030523828",)}
+    arms = [
+        ("enforced with no run id", {**good, "run_ids": ()}),
+        ("run id that is prose", {**good, "run_ids": ("green on main",)}),
+        ("names a file that does not exist", {**good, "lanes": ("no-such-battery.py",)}),
+        ("names no lane at all", {**good, "lanes": ()}),
+        ("bogus status", {**good, "status": "probably"}),
+        ("enforced while on the debt list", {**good, "lanes": ("transport-battery.py",)}),
+    ]
+    failures = []
+    for label, row in arms:
+        if not check_ruling_conditions(src, TESTS_DIR, rows=(row,)):
+            failures.append(f"selftest arm NOT caught: {label}")
+    # CONTROL 1: the checker accepts a well-formed row.
+    if check_ruling_conditions(src, TESTS_DIR, rows=(good,)):
+        failures.append("selftest control: a well-formed row was REJECTED, so every arm above "
+                        "passed for the wrong reason")
+    # CONTROL 2 / PRE-FIX ARM: the comment-only reference. `wiring_references` accepts it and
+    # `executing_references` must not, or the strictness this table depends on is not there.
+    lenient = [ln for ln in wiring_references(src, TESTS_DIR, "bip340-battery.py")]
+    strict = executing_references(src, TESTS_DIR, "bip340-battery.py")
+    if len(strict) >= len(lenient):
+        failures.append(
+            "selftest pre-fix arm: executing_references() dropped NOTHING that "
+            "wiring_references() kept, so the comment-vs-code distinction is unproven here. "
+            "If flake.nix no longer mentions bip340-battery.py in a comment, re-point this arm "
+            "at another commented mention rather than deleting it.")
+    return failures
+
+
 def main():
     ap = argparse.ArgumentParser()
     # Injection points exist ONLY so the failing arm can be exercised without corrupting the
@@ -333,7 +481,13 @@ def main():
     dangling = sorted(matrix - tests)
     unwired, vacuous, stale = unwired_test_files(args.tests_dir, args.flake)
 
-    if not unlisted and not dangling and not unwired and not vacuous and not stale:
+    # Ruled item 3. The selftest runs FIRST and unconditionally: if the checker cannot be shown
+    # going red, its green verdict on the real table below means nothing.
+    ruling = ruling_conditions_selftest()
+    ruling += check_ruling_conditions(open(args.flake).read(), args.tests_dir)
+
+    if (not unlisted and not dangling and not unwired and not vacuous and not stale
+            and not ruling):
         print(f"OK: {len(tests)} test-* package(s), all present in the vm-tests matrix:")
         for name in sorted(tests):
             print(f"  {name}")
@@ -347,8 +501,24 @@ def main():
               f" so wiring one is not enough on its own — see self_disarms().")
         for base in sorted(KNOWN_UNWIRED_DEBT):
             print(f"  DEBT {base}" + ("  [self-disarming]" if base in disarming else ""))
+        print(f"OK: {len(RULING_CONDITIONS)} ruling condition(s), each backed by an executing "
+              f"lane; every 'enforced' row cites a run id:")
+        for row in RULING_CONDITIONS:
+            print(f"  {row['id']}: {row['status']} <- runs "
+                  f"{', '.join(row['run_ids']) or '(none)'}  [{', '.join(row['lanes'])}]")
         return 0
 
+    if ruling:
+        print("FAIL: RULING_CONDITIONS — a row claims more than the repo can show:",
+              file=sys.stderr)
+        for problem in ruling:
+            print(f"  {problem}", file=sys.stderr)
+        print("  -> either wire the lane so it can go red, cite the run id that proves it ran,",
+              file=sys.stderr)
+        print("     or downgrade the row to 'half'/'prose'. A ruling condition discharged by a",
+              file=sys.stderr)
+        print("     table entry is discharged by prose, which is what this table is FOR.",
+              file=sys.stderr)
     if stale:
         print("FAIL: stale exemption(s) in this file — a suppression list that names things no",
               file=sys.stderr)
