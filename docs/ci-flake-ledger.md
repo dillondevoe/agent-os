@@ -453,3 +453,55 @@ real regression landing during a flaky period is indistinguishable from the flak
 standard response — re-run — is the one that hides it.
 
 Recording it beats losing it to another green re-run.
+
+## The post-stagger census, run 2026-08-27T19:59Z — the defect is NOT gone
+
+Window pinned to vm-tests runs created after `185a937` (the commit that extracted the emitter into
+`scripts/flake-retry-decide.sh`, 2026-08-27T08:19Z), so every run in it could emit a marker.
+
+| | count |
+|---|---|
+| `vm-tests` runs in window | 47 (all `attempt=1`) |
+| job-count fetches that errored | **0** |
+| jobs per run | 9 for all 47 — one value this time, unlike the 7/8/9 spread of the first census |
+| **job executions** | **423** |
+| **FLAKE-A-RETRY markers (`sort -u`)** | **2** |
+| log-archive fetches that errored | **0** |
+
+    FLAKE-A-RETRY test=test-identity-boot run=33086970966 attempt=1
+    FLAKE-A-RETRY test=test-identity-boot run=33100997366 attempt=1
+
+**2 / 423 = 0.47%**, against **19 / 1309 = 1.45%** before the stagger. Both runs concluded
+`success`: the retry recovered them, which is exactly the case steps 1–3 of the census method
+cannot see and the marker exists for. **A count of 2 is not a fixed harness.** It is also not a
+measured improvement — two events do not separate 0.47% from 1.45% at this N, and saying otherwise
+would be the ledger's own §"true of the instrument and false of the world" mistake a third time.
+
+**The zero would have been a live zero.** `tests/flake-retry-decide-battery.sh` (6/6 arms) was run
+against the same emitter in the same session, so this census is not the dead-instrument case the
+method warns about. That check is the reason a number here is worth anything.
+
+**Marker provenance is self-evident and that is by design.** The battery emits a marker too, with
+the fixed synthetic id `run=33049576961`. Neither counted marker carries it; each carries the id of
+the run it was found in. This is the concrete reason `run=[0-9]+` is in the census regex rather
+than a bare `FLAKE-A-RETRY` — without it the instrument would count its own test fixture.
+
+### The boundary case: an assertion whose error text IS the shape-A signature
+
+`33068427490` (main, `failure`) carries 8 `Shell did not start in time` lines and **no marker**.
+The failing job is `vm-test (test-seal-faildown)` and the log reads:
+
+    Test "2. token re-asserts on a real reboot (written every boot, before getty)" failed with
+    error: "... RuntimeError: Shell did not start in time"
+
+`flake-retry-decide.sh` declines correctly — `ASSERT='…|Test .* failed'` matches, so it exits 2
+rather than retrying, and **that conservatism is right at the retry**: a retry granted here could
+mask a genuine red, and the fail-closed direction is the one that cannot hide anything.
+
+But the census inherits the same predicate, and for *counting* it is the wrong answer: the
+assertion's cause is the shape-A signature itself, so this is plausibly a shape-A instance that no
+number above contains. **One predicate is answering two different questions** — *may I retry this?*
+and *was this the defect?* — and only the first of them wants to fail closed. Recorded here rather
+than fixed: changing the retry gate to count it would weaken the gate, and a census-only classifier
+is a second instrument that has to earn its own control arm before it is trusted with a rate.
+So the honest reading of the window is **2 counted, 1 uncounted-and-arguable**, not a flat 2.
