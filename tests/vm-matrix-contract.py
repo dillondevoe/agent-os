@@ -1079,7 +1079,7 @@ class Findings:
 # purpose: the selftests are deliberately kept out of the collector — see Findings' docstring.
 REQUIRED_CHECKS = {
     "unlisted", "dangling", "unwired", "vacuous", "stale",
-    "debt_added", "debt_removed", "unarmed", "wired_disarming",
+    "debt_added", "debt_removed", "unarmed", "wired_disarming", "ruling_table",
 }
 
 
@@ -1166,11 +1166,14 @@ SELFTESTS = (
     findings_selftest,
 )
 
-# The five above PLUS the real ruling-table check, which is not a selftest and takes arguments;
-# main() pairs its name with its call in ONE tuple literal so the name cannot outlive the call.
+# SELFTESTS ONLY, now that `ruling_table` has moved to the checks registry where it belongs.
+# It produced findings about the REAL TREE, not about the checker, and sitting in this chain it
+# was the one term that could not be a bare function — which is what forced the tuple-literal
+# join whose two halves let geist's R2 through. Written out rather than derived from SELFTESTS:
+# a set computed from the tuple would shrink with it, and then nothing compares anything.
 REQUIRED_RULING = {
     "exemption_staleness_selftest", "ruling_conditions_selftest", "strict_caller_selftest",
-    "wired_disarm_selftest", "findings_selftest", "ruling_table",
+    "wired_disarm_selftest", "findings_selftest",
 }
 
 
@@ -1216,12 +1219,14 @@ def main():
     # These decide before anything the collector touches.
     unarmed = f.add("unarmed", strict_callers_unarmed(args.tests_dir))
     wired_disarming = f.add("wired_disarming", wired_but_disarming(args.tests_dir))
+    # A finding about the REAL TREE — an 'enforced' row citing no executing lane — so it belongs
+    # with the checks, not with the selftests that prove the checker can go red.
+    ruling_table = f.add("ruling_table",
+                         check_ruling_conditions(open(args.flake).read(), args.tests_dir))
 
     # ONE ITERATION, NOT A SUM. Each term's NAME comes from the object that gets called, so a
     # term cannot be dropped from the chain while still counting as having run.
     terms = [(fn.__name__, fn) for fn in SELFTESTS]
-    terms.append(("ruling_table",
-                  lambda: check_ruling_conditions(open(args.flake).read(), args.tests_dir)))
     # NAME AND CALL IN ONE EXPRESSION (geist, R2 on #200): with `ran.append(name)` and
     # `ruling += fn()` as two statements, deleting the call line left every term recorded as
     # ran and none of them called — rc=0 green. `ran` is derived from the results, so a name
@@ -1242,17 +1247,11 @@ def main():
                   file=sys.stderr)
         return 1
     if ruling:
-        print("FAIL: RULING_CONDITIONS / selftest — the checker cannot be shown going red, so",
+        print("FAIL: SELFTEST — the checker cannot be shown going red, so its verdict on the",
               file=sys.stderr)
-        print("      its verdict on the real tree means nothing:", file=sys.stderr)
+        print("      real tree below means nothing:", file=sys.stderr)
         for problem in ruling:
             print(f"  {problem}", file=sys.stderr)
-        print("  -> either wire the lane so it can go red, cite the run id that proves it ran,",
-              file=sys.stderr)
-        print("     or downgrade the row to 'half'/'prose'. A ruling condition discharged by a",
-              file=sys.stderr)
-        print("     table entry is discharged by prose, which is what this table is FOR.",
-              file=sys.stderr)
         return 1
 
     missing, extra = missing_checks(f)
@@ -1292,6 +1291,18 @@ def main():
                   f"{', '.join(row['run_ids']) or '(none)'}  [{', '.join(row['lanes'])}]")
         return 0
 
+    if f["ruling_table"]:
+        print("FAIL: RULING_CONDITIONS — a row claims a ruling is enforced by something that",
+              file=sys.stderr)
+        print("      does not execute, or cites no run id proving it ran:", file=sys.stderr)
+        for problem in ruling_table:
+            print(f"  {problem}", file=sys.stderr)
+        print("  -> either wire the lane so it can go red, cite the run id that proves it ran,",
+              file=sys.stderr)
+        print("     or downgrade the row to 'half'/'prose'. A ruling condition discharged by a",
+              file=sys.stderr)
+        print("     table entry is discharged by prose, which is what this table is FOR.",
+              file=sys.stderr)
     if f["wired_disarming"]:
         print("FAIL: a WIRED battery still SELF-DISARMS. It exits 0 announcing SKIP when its",
               file=sys.stderr)
