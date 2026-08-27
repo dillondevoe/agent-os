@@ -104,6 +104,13 @@ jobs:
       - name: transport seam battery
         run: python3 tests/transport-battery.py
 
+      # Third entry taken OFF tests/known-unwired-debt.txt (11 -> 10). Same shape as the step
+      # above: host-side python, brain/provider modules read from the checkout, no nix, no VM.
+      # Subject absent gives a FileNotFoundError traceback; a broken arm gives a named
+      # "anthropic-transport-battery: FAIL". Both are rc=1 and CI cannot tell them apart.
+      - name: anthropic transport seam battery
+        run: python3 tests/anthropic-transport-battery.py
+
       - name: vm-tests matrix covers every test-* package
         # Run under a nix-provided python rather than the runner image's: if PyYAML were merely
         # assumed present, an image change would turn this check into a no-op or a spurious red.
