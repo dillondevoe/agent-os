@@ -72,8 +72,20 @@ TEST_SUFFIXES = (".nix", ".py", ".sh")
 # entry here should be a visible decision in a diff, not a pattern that swallows files.
 UNWIRED_BY_DESIGN = frozenset({
     "run-local.sh",           # the manual at-a-box runner; it INVOKES batteries, it is not one
-    "vm-matrix-contract.py",  # this file; invoked directly by flake-check.yml, not via flake.nix
 })
+
+# WIRED, BUT BY A WORKFLOW STEP RATHER THAN A flake.nix PACKAGE — and the claim is CHECKED.
+# (Geist, gate on #184, 2026-08-27.) Until now "invoked directly by flake-check.yml" was a
+# comment beside a name in UNWIRED_BY_DESIGN: a prose exemption. Delete the workflow step and
+# the comment stays true-looking while the battery stops running — the exact shape of the debt
+# this file exists to catch, wearing the exemption list as a coat. So the mapping is data, and
+# `unwired_tests()` fails unless a NON-COMMENT line of the named workflow references the file.
+# #184's battery tripped this check on the commit that added it, wired into flake-check.yml
+# exactly as the ledger demands — the ledger simply had no vocabulary for that kind of wiring.
+WIRED_VIA_WORKFLOW = {
+    "vm-matrix-contract.py":        "flake-check.yml",  # this file
+    "flake-retry-decide-battery.sh": "flake-check.yml",  # the census emitter's battery; pure bash
+}
 
 # DEBT, NOT DESIGN — and the two must never share a list.
 #
@@ -280,7 +292,7 @@ def unwired_test_files(tests_dir, flake_path):
         for path in sorted(glob.glob(os.path.join(tests_dir, "*" + suffix))):
             base = os.path.basename(path)
             present.add(base)
-            if base in UNWIRED_BY_DESIGN or base in KNOWN_UNWIRED_DEBT:
+            if base in UNWIRED_BY_DESIGN or base in KNOWN_UNWIRED_DEBT or base in WIRED_VIA_WORKFLOW:
                 continue
             if not wiring_references(flake_src, tests_dir, base):
                 unwired.append(path)
@@ -298,6 +310,26 @@ def unwired_test_files(tests_dir, flake_path):
             stale.append((base, "no such file in %s/" % tests_dir))
         elif wiring_references(flake_src, tests_dir, base):
             stale.append((base, "is wired into %s now — remove the exemption" % flake_path))
+    # A WORKFLOW-WIRING CLAIM IS VERIFIED, NOT TRUSTED: the named workflow must reference the
+    # file on a line that is not a comment. A mention inside `# ...` is prose; prose does not run.
+    workflows_dir = os.path.join(os.path.dirname(os.path.abspath(tests_dir)), ".github", "workflows")
+    for base, wf in sorted(WIRED_VIA_WORKFLOW.items()):
+        if base not in present:
+            stale.append((base, "no such file in %s/" % tests_dir))
+            continue
+        if wiring_references(flake_src, tests_dir, base):
+            stale.append((base, "is wired into %s now — remove it from WIRED_VIA_WORKFLOW" % flake_path))
+            continue
+        wf_path = os.path.join(workflows_dir, wf)
+        try:
+            with open(wf_path) as fh:
+                lines = fh.read().splitlines()
+        except OSError:
+            stale.append((base, "claims wiring via %s, which cannot be read" % wf_path))
+            continue
+        if not any(base in ln and not ln.lstrip().startswith("#") for ln in lines):
+            stale.append((base, "claims wiring via %s but NO non-comment line there names it — "
+                                "the battery runs NOWHERE" % wf))
     return unwired, vacuous, stale
 
 
