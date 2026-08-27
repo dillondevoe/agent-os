@@ -296,8 +296,13 @@ jobs:
 
           # The countable trace. Both destinations on purpose: the job log is what the census
           # greps, the step summary is what a human sees without opening logs.
-          echo "::warning::FLAKE-A-RETRY test=${{ matrix.test }} run=${GITHUB_RUN_ID}"
-          echo "FLAKE-A-RETRY test=${{ matrix.test }} run=${GITHUB_RUN_ID}" >> "$GITHUB_STEP_SUMMARY"
+          # `attempt=` is load-bearing, not decoration. GITHUB_RUN_ID is IDENTICAL across
+          # attempts of the same run, so a `test=X run=Y` pair alone is not unique within a
+          # run: dedupe the census across a whole run rather than within one attempt and two
+          # real instances silently merge into one. The triple closes that by construction,
+          # so the census's correctness stops depending on a prose caveat nobody re-reads.
+          echo "::warning::FLAKE-A-RETRY test=${{ matrix.test }} run=${GITHUB_RUN_ID} attempt=${GITHUB_RUN_ATTEMPT}"
+          echo "FLAKE-A-RETRY test=${{ matrix.test }} run=${GITHUB_RUN_ID} attempt=${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_STEP_SUMMARY"
 
           echo "Shape-A signature matched and no assertion failure present — retrying ONCE."
           if run_once vm-build-attempt-2.log; then
