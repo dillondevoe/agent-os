@@ -18,7 +18,7 @@
 # means "this file asserted nothing at all" and is what the vm-matrix contract's
 # self_disarms() heuristic looks for near a sys.exit(0). An arm-level skip is a
 # different claim, and one grep should not return two meanings.
-import subprocess, json, shutil, sys
+import subprocess, json, os, shutil, sys
 
 EX = 0
 DRIVEN = 0
@@ -59,7 +59,28 @@ elif qalc:
         return r[0], '{"input":"%s","result":%s,"ok":%s,"messages":null}' % (
             expr, json.dumps(r[1]), "true" if r[0] == 0 and r[1] else "false"), ""
 else:
-    print("  SKIP agos-calc-battery: neither agos-calc nor qalc on PATH (image not built).")
+    # SELF-DISARM, NOW GATED — the same shape calendar-battery.py closed, and the last
+    # battery in the ledger that could be closed without the built image. Until this commit
+    # the branch below was an unconditional exit 0: on a host with neither binary this file
+    # announced SKIP and reported success, so wiring it into CI would have bought a green
+    # that proved nothing. `AGENT_OS_STRICT` and not `CI`, for the reason calendar's comment
+    # gives at length: CI is ambient and cannot distinguish "this invocation is authoritative"
+    # from "this happens to be running on a runner"; AGENT_OS_STRICT is set by exactly the
+    # callers that mean it. The caller half is checked from the workflow side by
+    # tests/vm-matrix-contract.py's strict_callers_unarmed(), which this file now inherits
+    # for free — a wired step that names this battery without arming it reds by name.
+    #
+    # Note the scope precisely: strict makes the absence of BOTH binaries fatal. It says
+    # nothing about the SKIP-ARM lines above, which are a different claim (arms the fallback
+    # cannot speak to) on a path where a backend IS present.
+    strict = os.environ.get("AGENT_OS_STRICT") == "1"
+    msg = "neither agos-calc nor qalc on PATH (image not built in this env)"
+    if strict:
+        sys.exit("FAIL (AGENT_OS_STRICT=1) agos-calc-battery: " + msg + " — refusing to exit 0; "
+                 "under strict this means the caller promised a calculator backend and did not "
+                 "stage it.")
+    print("  SKIP agos-calc-battery: " + msg + " — run on a host with the image or with qalc "
+          "installed, or set AGENT_OS_STRICT=1 to make the absence fatal.")
     sys.exit(0)
 
 # `ok` is computed by the shim on the fallback path, so asserting it there asserts

@@ -12,7 +12,6 @@
 # removes the name from KNOWN_UNWIRED_DEBT. ADDING a line is the thing under review:
 # it means a test that runs nowhere was just made permanently invisible, and the diff
 # to this file is where a reviewer sees it.
-agos-calc-battery.py
 agos-doc-battery.py
 agos-files-battery.py
 agos-media-battery.py
