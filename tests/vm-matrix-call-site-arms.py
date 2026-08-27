@@ -30,6 +30,12 @@ cannot be isolated to a single check does not go in: fault B was first written a
 ruling row's lane out of flake.nix", which reds the RULING selftest instead of the ruling_table
 check, because ruling_conditions_selftest reads the same flake for its own control row. An arm
 whose red comes from somewhere other than the check it names proves nothing about that check.
+
+THE FLOOR, named rather than built for (geist's D2, gate on #202): delete an entry from ARMS and
+this file prints `ALL PASS (3 arms)` at rc=0. The count is PRINTED, not asserted — and anything
+asserting it would be one more literal maintained by the same hand that maintains the tuple, which
+is the shape every scar in this directory is about. So the floor stays where it is, in daylight: a
+reviewer who sees the arm count drop in a diff is the control, and there is no second one.
 """
 import os
 import shutil
@@ -78,16 +84,27 @@ def drop_ruled_file(fixture):
     os.remove(path)
 
 
-# (label, plant, packages_json, expected token). The token is the DIAGNOSTIC, not the rc: a check
-# whose call site was neutered leaves some OTHER check to red the run, and an arm that only
-# asserted rc=1 would sit there green through exactly the defect it was written for.
+# (label, plant, packages_json, expected token, expect). The token is the DIAGNOSTIC, not the rc:
+# a check whose call site was neutered leaves some OTHER check to red the run, and an arm that
+# only asserted rc=1 would sit there green through exactly the defect it was written for.
+#
+# `expect` is geist's D8, closed. He neutered `elif token not in out:` to `elif False:` and this
+# file went green on all three arms — the diagnostic operand deleted, nothing noticing, which is
+# the second operand of my own §3 sentence removed from under it. The last row below plants a REAL
+# fault and expects a token nothing prints, so the ONLY way it can pass is for the token check to
+# actually run and reject. Neutering that check now reds this file on its own run, and C4 stops
+# being an arm a human has to remember to do by hand.
+NAMED, WRONG_REASON = "named", "wrong-reason"
+
 ARMS = (
     ("unlisted: a test-* package with no matrix entry",
-     drop_matrix_entry, None, "test-seal-faildown"),
+     drop_matrix_entry, None, "test-seal-faildown", NAMED),
     ("unlisted: a package that exists nowhere in the tree",
-     None, '["test-does-not-exist"]', "test-does-not-exist"),
+     None, '["test-does-not-exist"]', "test-does-not-exist", NAMED),
     ("ruling_table: an 'enforced' row naming a file that no longer exists",
-     drop_ruled_file, None, "tests/identity-boot.nix, which does not exist"),
+     drop_ruled_file, None, "tests/identity-boot.nix, which does not exist", NAMED),
+    ("NEGATIVE CONTROL: a real fault, a token the diagnostic does not carry",
+     drop_ruled_file, None, "a diagnostic no check in that file prints", WRONG_REASON),
 )
 
 
@@ -104,7 +121,7 @@ def main():
             print("\n".join(failures), file=sys.stderr)
             return 1
 
-    for i, (label, plant, packages_json, token) in enumerate(ARMS):
+    for i, (label, plant, packages_json, token, expect) in enumerate(ARMS):
         with tempfile.TemporaryDirectory() as tmp:
             fixture = build_fixture(os.path.join(tmp, "arm%d" % i))
             if plant:
@@ -112,12 +129,24 @@ def main():
             args = ["--packages-json", packages_json] if packages_json else base
             rc, out = run_contract(fixture, args)
             if rc == 0:
-                failures.append("ARM NOT CAUGHT (rc=0): %s" % label)
+                got = "not-caught"
             elif token not in out:
+                got = WRONG_REASON
+            else:
+                got = NAMED
+            if got == expect == NAMED:
+                print("  arm red, named: %s" % label)
+            elif got == expect == WRONG_REASON:
+                print("  negative control: token rejected as it must be — %s" % label)
+            elif got == "not-caught":
+                failures.append("ARM NOT CAUGHT (rc=0): %s" % label)
+            elif expect == WRONG_REASON:
+                failures.append("NEGATIVE CONTROL PASSED ITS OWN TOKEN: %s\n  %r was accepted as "
+                                "the diagnostic, so the token check is not running and every "
+                                "'named' above means only rc=1" % (label, token))
+            else:
                 failures.append("ARM red for the WRONG REASON: %s\n  expected %r in the "
                                 "diagnostic; got:\n%s" % (label, token, out))
-            else:
-                print("  arm red, named: %s" % label)
 
     if failures:
         print("FAIL: vm-matrix-contract.py's main() did not act on a planted tree fault — the",
