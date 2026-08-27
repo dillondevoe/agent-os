@@ -729,6 +729,62 @@ def strict_unarmed_in(lines, strict_bases):
     return found
 
 
+def wired_but_disarming(tests_dir):
+    """[base] for WIRED_VIA_WORKFLOW batteries that STILL self-disarm — an ungated exit 0.
+
+    FOUND BY A CONTROL THAT CAME BACK GREEN. Reverting `strict = os.environ.get(...)` to
+    `strict = False` in a wired battery left the whole tree passing, and the same mutation
+    on calendar-battery.py — wired since #195 — passed too, so the hole was PRE-EXISTING and
+    not introduced by the battery that exposed it.
+
+    The mechanism is that `self_disarms()` was only ever consulted over KNOWN_UNWIRED_DEBT,
+    in the OK-branch print loop. Wiring a battery therefore removed it from the only sweep
+    that would have noticed its gate going away — the ledger check stopped watching the file
+    at the exact moment the file started running in CI. A wired battery that self-disarms is
+    strictly worse than an unwired one: it reports success in a lane somebody trusts.
+
+    Nothing here re-checks the CALLER; that is strict_callers_unarmed(). This is the battery
+    half, asked of the wired set instead of the debt set.
+    """
+    return sorted(b for b in WIRED_VIA_WORKFLOW
+                  if self_disarms(os.path.join(tests_dir, b)))
+
+
+def wired_disarm_selftest(tmpdir_lines=None):
+    """Drive wired_but_disarming()'s predicate on files, not on the repo's current answer.
+
+    The repo's real answer is [] and must stay [], so a check asserting only that would pass
+    on a constant-empty implementation. These arms write two real files and call self_disarms()
+    directly — the same function wired_but_disarming() maps over.
+    """
+    import tempfile
+    failures = []
+    gated = ('import os, sys\n'
+             'if not shutil.which("x"):\n'
+             '    strict = os.environ.get("AGENT_OS_STRICT") == "1"\n'
+             '    if strict:\n'
+             '        sys.exit("FAIL")\n'
+             '    print("  SKIP thing: not here")\n'
+             '    sys.exit(0)\n')
+    ungated = ('import sys\n'
+               'if not shutil.which("x"):\n'
+               '    print("  SKIP thing: not here")\n'
+               '    sys.exit(0)\n')
+    with tempfile.TemporaryDirectory() as d:
+        g = os.path.join(d, "gated.py"); open(g, "w").write(gated)
+        u = os.path.join(d, "ungated.py"); open(u, "w").write(ungated)
+        if self_disarms(g):
+            failures.append("selftest: a STRICT-GATED battery was reported as self-disarming "
+                            "— the exemption is broken and every wired battery would red")
+        # THE ARM. Without it a self_disarms() that returned False unconditionally would pass
+        # the line above and this whole check would be decorative.
+        if not self_disarms(u):
+            failures.append("selftest: an UNGATED skip-then-exit-0 was NOT reported as "
+                            "self-disarming — wired_but_disarming() can no longer see the "
+                            "shape it exists to catch")
+    return failures
+
+
 def strict_callers_unarmed(tests_dir, workflows_dir=None):
     """Sweep the real tree: every strict-gated battery, every workflow that runs it."""
     if workflows_dir is None:
@@ -986,13 +1042,16 @@ def main():
     ruling += ruling_conditions_selftest()
     ruling += strict_caller_selftest()
     unarmed = strict_callers_unarmed(args.tests_dir)
+    ruling += wired_disarm_selftest()
+    wired_disarming = wired_but_disarming(args.tests_dir)
     ruling += check_ruling_conditions(open(args.flake).read(), args.tests_dir)
 
     # Both sides of this merge added an INDEPENDENT failure mode to the same guard, so the
     # resolution is a union and not a choice. Dropping either term is the silent-pass direction:
     # the checker would still exit 0 while one of its own checks had findings.
     if (not unlisted and not dangling and not unwired and not vacuous and not stale
-            and not ruling and not debt_added and not debt_removed and not unarmed):
+            and not ruling and not debt_added and not debt_removed and not unarmed
+            and not wired_disarming):
         print(f"OK: {len(tests)} test-* package(s), all present in the vm-tests matrix:")
         for name in sorted(tests):
             print(f"  {name}")
@@ -1013,6 +1072,17 @@ def main():
                   f"{', '.join(row['run_ids']) or '(none)'}  [{', '.join(row['lanes'])}]")
         return 0
 
+    if wired_disarming:
+        print("FAIL: a WIRED battery still SELF-DISARMS. It exits 0 announcing SKIP when its",
+              file=sys.stderr)
+        print("      backend is absent, and it runs in a CI lane, so that green is reported to",
+              file=sys.stderr)
+        print("      somebody who trusts it. Worse than an unwired battery, not better:",
+              file=sys.stderr)
+        for base in wired_disarming:
+            print(f"  {base}  <-  {WIRED_VIA_WORKFLOW[base]}", file=sys.stderr)
+        print("      Gate the skip on AGENT_OS_STRICT (see calendar-battery.py), or unwire it.",
+              file=sys.stderr)
     if unarmed:
         print("FAIL: a strict-gated battery is WIRED BUT UNARMED. The battery refuses to exit 0",
               file=sys.stderr)
