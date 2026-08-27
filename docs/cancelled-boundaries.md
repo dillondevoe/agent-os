@@ -669,6 +669,65 @@ indicts everything is usually about the instrument.** A single-item false positi
 tell, which is precisely why the control arm has to be routine rather than reserved for
 suspicious results.
 
+## 18. A comparison is a claim about both operands, and only an executed positive arm checks the second one
+
+Four instances, two brains, one day (2026-08-27), each arriving from a different side. In every
+one, half of a comparison was verified and the other half was assumed — and the assumption is
+invisible in the source, because a comparison looks equally correct whichever operand is wrong.
+
+**(a) The contract that nobody checked the value of.** `tests/calendar-battery.py`'s strict gate
+reads `os.environ.get("AGENT_OS_STRICT") == "1"`. Geist's control set `AGENT_OS_STRICT=true` and
+the battery exited 0: the gate was armed, in the caller's mind, and disarmed in fact. The
+left operand was checked by every arm; the right operand — *which strings count as "on"* — was a
+convention nobody had executed.
+
+**(b) The comparison that no input could satisfy.** The same file's `now` arm was
+`check("now → ISO instant", out[:4] == "20" and "T" in out, out)`. A four-character slice against
+a two-character literal is unsatisfiable, so the arm failed on **every** input including correct
+ones — printing a conforming timestamp as its own FAIL detail, the assertion and the evidence
+disagreeing on one line. Two wrong hypotheses were offered for it (`run()`'s return shape;
+`cond`/`detail` swapped) before anyone read the predicate as it *evaluates* rather than as it
+*means*.
+
+Note that (a) and (b) are the same shape from opposite sides. One is a contract, one is a defect,
+and **nothing in the code distinguishes them** — only a test that drives both operands does.
+
+**(c) Text that matches is not text that executes.** `strict_callers_unarmed()` in
+`tests/vm-matrix-contract.py` sweeps the tree for batteries that read `AGENT_OS_STRICT`. Its first
+output on the real tree was **the contract file itself**, naming the step that runs it. The
+contract is not a strict-gated battery; it is the checker, and its selftest carries
+`os.environ.get("AGENT_OS_STRICT")` as a **fixture string** — the arm proving the predicate
+recognises a real read. A source-reading predicate compares "text that matches" against "text that
+runs" and cannot tell them apart. The file is now excluded from its own sweep, commented as a cost
+rather than a tidy-up: a check that reads source has this hole permanently, and the honest move is
+to name which file it costs.
+
+**(d) The guard that tested the predicate and not the call site.** The commit that tightened
+`self_disarms()`'s exemption from a token scan to a code-shaped read carried a comment claiming
+its selftest control arm made the tightening irreversible: *"without that arm this tightening
+could be reverted and every case would still pass."* Geist reverted it — one line, at the **call
+site** — and the contract exited 0 with every case passing. The control called the predicate
+directly; the predicate stayed correct; the guarded thing moved while the guard stayed green. The
+comparison here was *the guard's fixture* against *the guarded behaviour*, and only the fixture had
+ever been driven. The fix (`CONTROL 5`) writes two real files and runs `self_disarms()` on them, so
+the call-site revert now reds by name.
+
+> **A COMPARISON IS A CLAIM ABOUT BOTH OPERANDS, AND ONLY AN EXECUTED POSITIVE ARM CHECKS THE
+> SECOND ONE.** Whether the second operand is a literal, a slice width, a grep hit, or the call
+> site a control arm is supposed to protect, the source reads identically when it is right and when
+> it is wrong. Drive it, or you have checked one side.
+
+**Why this is not member 17 and not the self-referential-guard scars.** Member 17 is about proving
+a mutation landed and moved something on the tested path. The guard scars are about *who* is being
+checked. This is about *what a comparison's second operand actually is* — the same question whether
+the operand is a value, a width, a string that looks like code, or a function you did not call.
+
+**How each was found, because the method is the transferable part.** (a) and (d) came from control
+arms designed to fail: someone ran the arm that should be red and it was green. (b) came from
+reading a predicate's evaluation instead of its intent, after a FAIL detail contradicted its own
+assertion. (c) came from running a new sweep on the real tree **before** trusting its green — its
+first output was the finding. None of the four was visible in a diff.
+
 ## Working against the class
 
 When adding or reviewing anything protective:
