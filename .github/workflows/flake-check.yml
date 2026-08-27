@@ -155,6 +155,13 @@ jobs:
         # assumed present, an image change would turn this check into a no-op or a spurious red.
         run: nix shell nixpkgs#python3Packages.pyyaml --command python3 tests/vm-matrix-contract.py
 
+      - name: that contract's checks actually run on the real invocation
+        # The step above proves the checker's PREDICATES work; this one proves main() USES them.
+        # It copies the tree, plants one fault per arm, and asserts the named diagnostic came back
+        # from the process — the only observation a neutered call site cannot satisfy. Same nix
+        # python, same reason: the fixture resolves its own packages via nix eval.
+        run: nix shell nixpkgs#python3Packages.pyyaml --command python3 tests/vm-matrix-call-site-arms.py
+
       # The retry decider's own battery. WIRED HERE DELIBERATELY, in the lane no path filter can
       # skip: a test file that lands unrun is the exact trap tests/vm-matrix-contract.py's debt
       # ledger exists to catch, and this battery's whole subject is a code path that had never

@@ -84,6 +84,10 @@ UNWIRED_BY_DESIGN = frozenset({
 # exactly as the ledger demands — the ledger simply had no vocabulary for that kind of wiring.
 WIRED_VIA_WORKFLOW = {
     "vm-matrix-contract.py":        "flake-check.yml",  # this file
+    # The call-site arms for the file above: it plants a fault in a COPY of the tree and reads
+    # the verdict off a subprocess, so it is wired exactly where its subject is and for the same
+    # reason — nix is on PATH there, which is what lets the fixture run without --packages-json.
+    "vm-matrix-call-site-arms.py":  "flake-check.yml",
     "flake-retry-decide-battery.sh": "flake-check.yml",  # the census emitter's battery; pure bash
     # Migrated here on the #163 merge (2026-08-27). This branch had independently grown a
     # WORKFLOW_INVOKED frozenset + _named_in_any_workflow() making the SAME claim — filed 08-23,
