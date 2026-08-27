@@ -361,6 +361,34 @@ _RUN_ID = re.compile(r"^\d{6,}$")
 _VALID_STATUS = ("enforced", "half", "prose")
 
 
+_BLOCK = re.compile(r"(?<![^\s])/\*.*?\*/", re.S)
+
+
+def _blank_block_comments(src):
+    """Replace every `/* ... */` span with spaces, PRESERVING newlines and column count.
+
+    `#` is not Nix's only comment. A test named inside a block comment is prose that the
+    line-start `#` filter cannot see, and prose discharging a ruling condition is the exact
+    failure the table one level up was built to end. flake.nix carries zero block comments as of
+    2026-08-27, so this closes a LATENT hole — written against a synthetic source in the selftest
+    rather than against a mention that happens to exist today.
+
+    Blanking rather than deleting keeps line structure intact, so a wiring statement sharing the
+    closing line (`*/ checks.x = ...`) survives. Nix block comments do not nest.
+
+    AN UNTERMINATED `/*` IS NOT TREATED AS A COMMENT, and that is not the timid choice — it is
+    the one the repo forced. The first version blanked from an unpaired `/*` to EOF, on the
+    reasoning that over-stripping fails loudly. It did fail loudly, immediately: flake.nix line
+    ~315 contains the shell glob `for f in ${./modules}/*.nix`, which is not a comment at all,
+    and the whole file downstream of it went blank — CONTROL 1 of the selftest rejected a row
+    that should pass. So the two cases are not symmetric here. A truly unterminated block comment
+    makes flake.nix a syntax error that `nix` refuses to evaluate, so it cannot reach a green
+    check; a bare `/*` inside a string demonstrably does exist. Pairing is required, and the glob
+    line is pinned as a control arm below so this cannot regress into the version that was wrong.
+    """
+    return _BLOCK.sub(lambda m: re.sub(r"[^\n]", " ", m.group(0)), src)
+
+
 def executing_references(flake_src, tests_dir, base):
     """`wiring_references()` minus comment lines.
 
@@ -375,7 +403,7 @@ def executing_references(flake_src, tests_dir, base):
     ~425 inside a comment block AND wired for real below it. A row citing it must pass on the
     second, not the first.
     """
-    return [ln for ln in wiring_references(flake_src, tests_dir, base)
+    return [ln for ln in wiring_references(_blank_block_comments(flake_src), tests_dir, base)
             if not ln.lstrip().startswith("#")]
 
 
@@ -458,6 +486,50 @@ def ruling_conditions_selftest():
             "wiring_references() kept, so the comment-vs-code distinction is unproven here. "
             "If flake.nix no longer mentions bip340-battery.py in a comment, re-point this arm "
             "at another commented mention rather than deleting it.")
+
+    # BLOCK-COMMENT ARM. `#` is not Nix's only comment: `/* ... */` spans lines, and a name
+    # inside one is prose the `#` filter cannot see. flake.nix has zero block comments today, so
+    # this hole is LATENT — which is exactly why it gets a synthetic source rather than a
+    # sentence in a docstring. A row claiming `enforced` must not be dischargeable by a name
+    # sitting in a comment, whichever of the two spellings the comment uses.
+    block_only = (
+        "  # nothing here executes\n"
+        "  /*\n"
+        "     someday: checks.x = mk { script = \"python3 tests/latent-battery.py\"; };\n"
+        "  */\n"
+    )
+    if executing_references(block_only, TESTS_DIR, "latent-battery.py"):
+        failures.append("selftest arm NOT caught: a test named only inside a /* ... */ Nix "
+                        "block comment was counted as executing wiring")
+    # CONTROL 3: over-stripping fails LOUDLY (a real row would stop passing), under-stripping is
+    # the silent direction — so bias toward stripping. These two arms pin the bias in place:
+    # real wiring AFTER a closed block, and real wiring on the same line the block closes on.
+    after_block = block_only + '  checks.y = mk { script = "python3 tests/latent-battery.py"; };\n'
+    if not executing_references(after_block, TESTS_DIR, "latent-battery.py"):
+        failures.append("selftest control: a real wiring line following a CLOSED block comment "
+                        "was stripped, so the block-comment arm above passes by over-stripping")
+    same_line = '  */ checks.z = mk { script = "python3 tests/latent-battery.py"; };\n'
+    if not executing_references("  /*\n  x\n" + same_line, TESTS_DIR, "latent-battery.py"):
+        failures.append("selftest control: wiring after `*/` on the closing line was stripped")
+    # CONTROL 4 / REGRESSION PIN: an UNPAIRED `/*` is a glob, not a comment. flake.nix line ~315
+    # has `for f in ${./modules}/*.nix`. Blanking to EOF from there erased the real file and
+    # tripped CONTROL 1 — see `_blank_block_comments`. This arm holds that fix in place.
+    glob = '  for f in ${./modules}/*.nix; do :; done\n' + after_block.split("*/\n")[-1]
+    if not executing_references(glob, TESTS_DIR, "latent-battery.py"):
+        failures.append("selftest control: an unpaired `/*` (a shell glob, not a comment) "
+                        "blanked real wiring downstream of it")
+    # CONTROL 5 (Geist, gate, 2026-08-27): the glob PAIRED with a LATER real block comment. A
+    # non-greedy `/\*.*?\*/` pairs the glob's `/*` with the first `*/` in the file, and everything
+    # between — real wiring included — goes blank SILENTLY: unlike CONTROL 4 nothing fails loudly
+    # unless a cited row happens to sit in the erased span. Latent today (zero block comments);
+    # it opens the day one is added below line ~315. The opener must be preceded by whitespace
+    # or line start — a glob's `/*` is preceded by `}`.
+    paired = ('  for f in ${./modules}/*.nix; do :; done\n'
+              '  checks.w = mk { script = "python3 tests/latent-battery.py"; };\n'
+              '  /* a real comment, later */\n')
+    if not executing_references(paired, TESTS_DIR, "latent-battery.py"):
+        failures.append("selftest control: a shell glob `/*` PAIRED with a later real `*/` "
+                        "blanked the real wiring between them")
     return failures
 
 
