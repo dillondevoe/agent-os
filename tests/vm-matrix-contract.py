@@ -85,6 +85,14 @@ UNWIRED_BY_DESIGN = frozenset({
 WIRED_VIA_WORKFLOW = {
     "vm-matrix-contract.py":        "flake-check.yml",  # this file
     "flake-retry-decide-battery.sh": "flake-check.yml",  # the census emitter's battery; pure bash
+    # Migrated here on the #163 merge (2026-08-27). This branch had independently grown a
+    # WORKFLOW_INVOKED frozenset + _named_in_any_workflow() making the SAME claim — filed 08-23,
+    # four days before #184 landed WIRED_VIA_WORKFLOW. Convergence, not conflict. Keeping both
+    # would be two registries for one rule, which is this file's own recurring scar (reader and
+    # writer spelling one rule in two languages, with nothing making them agree). Main's is
+    # strictly stronger on both axes mine was weak: it names WHICH workflow rather than accepting
+    # any, and it ignores `#` lines rather than counting a comment as wiring. So mine goes.
+    "flake-input-provenance-contract.py": "flake-check.yml",  # text contract on flake.lock
 }
 
 # DEBT, NOT DESIGN — and the two must never share a list.

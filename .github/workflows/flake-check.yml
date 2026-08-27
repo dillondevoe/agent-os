@@ -66,6 +66,18 @@ jobs:
       # enforced by whoever remembered. A test package with no matrix entry runs nowhere: the
       # nixosTests are held out of `checks` deliberately, so the fast lane does not build it
       # either, and nothing anywhere goes red.
+      # Every locked flake input is nixpkgs — the 2026-07-28 clean-room directive, which until
+      # now lived in prose only. modules/clean-room.nix is a *runtime egress* wall and says
+      # nothing about where the bytes in the closure came from at BUILD time; one added
+      # `inputs.foo.url` would have been fetched, locked and merged with every lane green.
+      # Placed BEFORE `nix flake check` deliberately: it is a text check on flake.lock, it takes
+      # milliseconds, and if a third-party input has entered the tree, the answer to "should we
+      # spend four minutes building it" is no.
+      - name: every flake input is nixpkgs (clean-room provenance)
+        # Runner python is fine here — stdlib only, no third-party import to go absent. The
+        # contract FAILS rather than skips if flake.lock is missing, so there is no silent no-op.
+        run: python3 tests/flake-input-provenance-contract.py
+
       - name: vm-tests matrix covers every test-* package
         # Run under a nix-provided python rather than the runner image's: if PyYAML were merely
         # assumed present, an image change would turn this check into a no-op or a spurious red.
