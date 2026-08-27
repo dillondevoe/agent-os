@@ -57,7 +57,7 @@ rate.** Recorded so the second instance has something to be the second of.
 
 ## The signature
 
-Six observed failures, five **different** jobs, one **byte-identical** signature:
+Fourteen observed failures, six **different** jobs, one **byte-identical** signature:
 
 | run | job | date (UTC) |
 |---|---|---|
@@ -67,6 +67,19 @@ Six observed failures, five **different** jobs, one **byte-identical** signature
 | `32808436764` attempt 1 | `vm-test (test-egress-uid-scope)` | 2026-08-25T04:18Z |
 | `33037585674` attempt 1 | `vm-test (test-fetch-proxy-allowlist)` | 2026-08-27T03:58Z |
 | `33037585674` attempt 1 | `vm-test (test-selfimprove-loop-runs)` | 2026-08-27T03:59Z |
+| `32654129939` | `vm-test (test-egress-uid-scope)` | 2026-08-23T17:13Z |
+| `32622321722` | `vm-test (test-egress-mesh-uid-scope)` | 2026-08-23T06:12Z |
+| `32574669452` | `vm-test (test-egress-uid-scope)` | 2026-08-22T13:03Z |
+| `32442249749` | `vm-test (test-egress-mesh-uid-scope)` | 2026-08-21T03:07Z |
+| `32770548874` attempt 1 | `vm-test (test-fetch-proxy-allowlist)` | 2026-08-24T19:51Z |
+| `32751833582` attempt 1 | `vm-test (test-identity-boot)` | 2026-08-24T16:36Z |
+| `32708993068` attempt 1 | `vm-test (test-identity-boot)` | 2026-08-24T08:58Z |
+| `32678457976` attempt 1 | `vm-test (test-identity-boot)` | 2026-08-24T01:01Z |
+
+Rows 7–14 were added by the 2026-08-27 census below, not by anyone watching CI. Four of them
+(`32654129939`, `32622321722`, `32574669452`, `32442249749`) were plainly visible failures this
+file simply never recorded; the four `attempt 1` rows were recovered from the attempts API. Every
+one is `Shell did not start in time`, checked in its own attempt log.
 
 Every one fails the same way: the driver cannot reach `backdoor.service` in the guest, retries
 20 times, and gives up after ~7m07s with
@@ -124,37 +137,101 @@ query returns `conclusion: success` with nine green jobs and no trace of attempt
 instances above are now unreachable from any run listing; they survive only because they were
 written down before the rerun.**
 
-Hence the `attempt 1` qualifier on their rows, matching `32808436764`. The ordering is the
-transferable part: **record the instance BEFORE you re-run it, because the re-run is what destroys
-the evidence** — and the re-run is also the correct thing to do, so there is no version of this
-where waiting helps.
+Hence the `attempt 1` qualifier on their rows, matching `32808436764`.
 
-**This is one harness defect, not five flaky tests.** The job names are just the places the
+**CORRECTED 2026-08-27, same day, by Geist — and the correction is the second instance of a class
+this file caught itself in an hour earlier.** The paragraph above used to end: *"record the
+instance BEFORE you re-run it, because the re-run is what destroys the evidence."* **A rerun does
+not destroy anything. It hides.** `gh run list` shows only the latest attempt; the prior attempt
+stays fully addressable at `/actions/runs/<id>/attempts/<n>`, with `/jobs` and `/logs`, for as
+long as GitHub retains logs (90 days by default). Verified here, not taken on report: attempt 1 of
+`33037585674` returns `conclusion: failure` with exactly the two job names in the rows above, and
+attempt 1 of `32808436764` — the specimen this file thought it had lost — returns its
+`test-egress-uid-scope` failure and the `Shell did not start in time` lines intact.
+
+The ordering advice survives, demoted to what it actually is: recording before you rerun is
+*cheaper* than reconstructing afterwards, not the only way the instance continues to exist.
+
+**The class, named because it is now twice in one day.** "DVo has no `nix`" was a `PATH`-scoped
+observation generalised to the machine. "The rerun erased it" was a `gh run list`-scoped
+observation generalised to GitHub. Both were **true of the instrument and false of the world**,
+and both were promoted to ledger law off a single instrument without a second one being tried.
+The rule that falls out: **before writing "X is gone" or "X cannot", reach for X one more way.**
+The prospective observation itself still stands and is still worth the space — it is the exhibit
+proving `gh run list` is the wrong census tool, which is exactly what the next section now does
+something about.
+
+**This is one harness defect, not six flaky tests.** The job names are just the places the
 harness happened to be standing when it failed; treating them as separate test problems is the
 wrong unit of work. `test-selfimprove-loop-runs` appearing twice, two days apart, is the same
 non-fact as any of the others — it is where the harness was standing, not what was wrong.
 
-## Rate — and why the rate is a lower bound, not a measurement
+## Rate — the census, run 2026-08-27
 
-Over the last 60 `vm-tests.yml` runs (2026-08-23T23:13Z → 2026-08-25T04:18Z): **53 success,
-4 failure, 3 cancelled** — 4 of 57 concluded, ~7.0%.
+**The earlier numbers in this section were floors quoted off `gh run list`. They have been
+replaced by an enumeration, because the attempts API makes one possible.** What the floors said,
+kept for the record: 4 of 57 concluded runs (~7.0%) over a 60-run window, and 4 of 38 (~10.5%)
+over an earlier 40-run one — the same data through a sliding window, neither precise.
 
-An earlier count on a 40-run window gave 4 of 38, ~10.5%. Both are the same underlying data seen
-through a sliding window. **Neither number is precise and neither should be quoted as one.**
+**Census method (reproducible; this is the ledger's counting instrument from here on):**
 
-More importantly, both **undercount by construction**:
+1. `gh run list --limit N --json databaseId,name,attempt,conclusion,createdAt` — every run, all
+   branches. **Not `--branch main`**: the same query scoped to `main` returned *one* rerun where
+   the unscoped one returned seven, and most of this harness's failures happen on PR branches.
+2. Every row with `attempt > 1` has hidden prior attempts. For each `n < attempt`, fetch
+   `/actions/runs/<id>/attempts/<n>` for the conclusion and `.../jobs` for the failed job names.
+3. Classify each failure **from its log**, never from its duration:
+   `/actions/runs/<id>/attempts/<n>/logs` → `Shell did not start in time` is shape A,
+   `HTTP error 416` / `no substituter` is shape B, **neither is neither** — see below.
 
-- `gh run list` reports only the **latest attempt** of a run. Re-running failed jobs rewrites the
-  run's conclusion in place, so a failure that was re-run to green **leaves the population
-  entirely**. Confirmed directly: run `32808436764` lists as `conclusion: success`, and it is
-  `attempt: 2`; its attempt-1 `test-egress-uid-scope` failure appears nowhere in the listing.
-- Five runs in this window are `attempt > 1` (`32808436764`, `32770548874` at attempt 3,
-  `32751833582`, `32708993068`, `32678457976`). At least one of those hidden prior attempts is a
-  confirmed instance of this defect. The others are **not** claimed as such — a re-attempt can
-  follow a cancel or a real fix, and that has not been checked one by one.
+**Result over 2026-08-20T18:37Z → 2026-08-27T03:50Z** (138 `vm-tests (slow lane)` runs; window
+bounded by listing depth, not by choice):
 
-So: the visible rate is a floor. The same shape as the wake-fire floor — an instrument that can
-only ever see part of what it is counting should say "lower bound" out loud.
+| | count |
+|---|---|
+| runs listed | 138 (121 success, 10 failure, 7 cancelled) |
+| runs with `attempt > 1` | 7, carrying 8 hidden prior attempts |
+| **shape A instances, visible** | **7** |
+| **shape A instances, recovered from hidden attempts** | **7** |
+| shape B instances | 1 (`33031952158` attempt 1) |
+| failures that are **neither** shape | 3 |
+
+**Fourteen shape-A instances, where this file had six.** The seven recovered from hidden attempts
+are `33037585674` attempt 1 (two jobs), `32808436764`, `32770548874`, `32751833582`,
+`32708993068`, `32678457976` — each confirmed by `Shell did not start in time` in its own attempt
+log, 6 or 8 occurrences apiece. The seven visible ones include four this ledger never recorded at
+all: `32654129939`, `32622321722`, `32574669452`, `32442249749`.
+
+**And that last sentence is the finding, not the reruns.** This file's stated theory of its own
+undercount was *reruns hide instances*. Half the missing instances were sitting in plain
+`gh run list` output the whole time, `conclusion: failure`, unrecorded — because nobody
+enumerated. **The mechanism I could explain was not the mechanism doing most of the damage.** A
+tidy causal story for a gap is not a measurement of the gap.
+
+**Rate, stated only as far as the enumeration supports it.** The denominator is *attempts*, not
+runs: 131 runs never re-attempted, plus the 7 re-attempted runs contributing 2+2+2+3+2+2+2 = 15
+attempts between them, **= 146 attempts**. Thirteen of those carried at least one shape-A failure
+(7 visible attempts, 6 hidden ones — `33037585674` attempt 1 contributes two *instances* but only
+one *attempt*, which is why 14 instances live in 13 attempts): **13 / 146 ≈ 8.9% of attempts.** The per-*job* rate is
+**not** computed here, and the reason is a live trap: runs in this window do not all have the same
+number of jobs — `32426451466` has 8 where `33037585674` has 9, because the matrix changed. Any
+`runs × 9` denominator is an assumption wearing a number. Summing `.jobs|length` over every
+attempt is the missing step and is left explicitly undone rather than guessed.
+
+**The three neither-shape failures are the census's control arm.** `32685877607`, `32630978544`
+and `32426451466` are `vm-tests` failures with zero `Shell did not start in time` lines and zero
+substituter lines; their logs carry `RequestedAssertionFailed` on real assertions (a `ping` that
+did not answer, a model pull that exited 2) after the guest booted fine. They are **not** this
+defect and are not counted as it. That matters more than the instances: a classifier that
+returned "flake" for everything would have produced a bigger, more impressive, entirely worthless
+number — **the count is only worth something because the method demonstrably declines to make
+one.**
+
+**Known limit of the classifier, stated rather than discovered later:** the log grep runs over the
+whole attempt's log archive, so it attributes a signature to the *attempt*, not to a specific job.
+For the multi-job attempts here that is not load-bearing — a passing job does not emit the shape-A
+line — but a future attempt with one shape-A failure and one real failure would be mis-read by
+this method, and the fix is a per-job log fetch.
 
 ## What is NOT established
 
