@@ -627,3 +627,23 @@ unknown looseness and the pre/post comparison cannot be re-derived from the exis
 suppressed instances left no marker to count. The rates above stand as *what the instrument
 recorded*; they are not restated as what happened. The window has to be re-run forward from the
 first run that carries this fix before either side of the comparison means what it says.
+
+**Re-derived from the corpus, 2026-08-27 (Geist, gate on #208).** The suppressed instances did leave
+something behind: the failure-job log itself, which carries the signature whether or not a marker was
+emitted. So the comparison is re-derivable — by classifying retained failure logs with the corrected
+predicate (`SIG ∧ ¬(ASSERT-line free of SIG)`) instead of counting markers. Both windows enumerated
+with `filter=all` (every attempt), from Air:
+
+| window | jobs (emit-capable) | SIG-carrying failure logs | old predicate would RETRY | corrected predicate RETRY |
+|---|---|---|---|---|
+| pre-stagger, runs 32404178598…33037585674 (138 runs) | 1316 (1273) | 19 | **14** | **19** (0 blocked) |
+| post-stagger, 47 runs after `185a937` | 423 (378) | 1 | 0 | **1** |
+
+Pre-stagger the gate did not yet exist, so the ledger's 19/1273 = 1.49% was already a log count and
+stands unchanged — but 5 of those 19 wore the assert-shaped sentence, so had the gate been live it
+would have suppressed 26% of them. That is the floor's looseness, measured, not unknown. Post-stagger
+the two markers (`33086970966`, `33100997366`) sit in *succeeded* jobs; the one *failed* job in the
+window (`98504220231`) is the suppressed instance. Corrected post-stagger count: 2 + 1 = **3/378 =
+0.79%** against 19/1273 = 1.49%. The conclusion does not move; the number that reads 2 now reads 3
+and says why. The forward re-run from the first fixed run remains the right instrument going
+forward — the re-derivation above is what the existing corpus supports, not a substitute for it.
