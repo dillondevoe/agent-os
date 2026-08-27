@@ -420,6 +420,44 @@
               touch $out
             '';
 
+        # bip340-contract -- ruling condition 2, and this one is NOT routine debt repayment.
+        #
+        # tests/bip340-battery.py opens by stating, as settled fact:
+        #
+        #     Binding condition 2 of Geist's 2026-08-19 Path-A ruling: the FULL official
+        #     test-vector set runs in CI, INCLUDING the must-fail verification vectors,
+        #     control-armed.
+        #
+        # It did not run in CI. Not via flake.nix, not via any workflow step. It has been on
+        # KNOWN_UNWIRED_DEBT the whole time, so the repo simultaneously recorded "this runs in
+        # CI" in the file's own header and "this runs nowhere" in the ledger, and neither
+        # statement ever had to meet the other.
+        #
+        # THE CLASS: A RULING CONDITION THAT IS DISCHARGED BY WRITING A FILE IS DISCHARGED BY
+        # PROSE. What condition 2 actually demands is an EXECUTION, and the only evidence that
+        # an execution happens is a lane that goes red when it stops.
+        #
+        # The must-fail half is why this is worth flagging rather than quietly fixing. A
+        # verifier returning True unconditionally passes every TRUE vector; vectors 5-15 and
+        # the control arm at check I are what catch it. So the unrun battery was specifically
+        # the forgery-acceptance coverage, which is the half the ruling singled out.
+        #
+        # Pure stdlib, reads its vectors from a committed CSV, and hard-fails if that CSV is
+        # absent (csv.DictReader on a missing path raises) -- so it cannot go vacuously green
+        # the way the self-disarming agos-* batteries would.
+        bip340-contract =
+          nixpkgs.legacyPackages.${system}.runCommand "bip340-contract-check"
+            { nativeBuildInputs = [ nixpkgs.legacyPackages.${system}.python3 ]; } ''
+              work="$(mktemp -d)"
+              mkdir -p "$work/tests" "$work/modules"
+              cp ${./tests/bip340-battery.py} "$work/tests/bip340-battery.py"
+              cp ${./tests/bip340-test-vectors.csv} "$work/tests/bip340-test-vectors.csv"
+              cp ${./modules/bip340.py} "$work/modules/bip340.py"
+              cd "$work"
+              python3 tests/bip340-battery.py
+              touch $out
+            '';
+
         # Phase 2 · Step 2 — the audit-log primitive's property battery. Proves
         # append-only NDJSON, SHA-256 chain tamper/truncation evidence, no-log->no-execute
         # fail-closed, hostile-newline single-line safety, and reserved-field forgery
