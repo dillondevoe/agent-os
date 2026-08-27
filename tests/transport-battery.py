@@ -6,7 +6,21 @@
 # renderer. This battery pins the CONTRACT between the two halves, so the Anthropic transport
 # (next slice) can be written against a spec rather than against chat_stream's internals.
 #
-# Run: PYTHONPATH=modules python3 tests/transport-battery.py
+# Run: python3 tests/transport-battery.py   (from the repo root)
+#
+# Wired into .github/workflows/flake-check.yml as "transport seam battery" (PR #188, the second
+# entry taken off tests/known-unwired-debt.txt). THAT STEP IS THE AUTHORITATIVE INVOCATION and
+# this line exists to agree with it, not to compete with it.
+#
+# It used to read `PYTHONPATH=modules python3 ...`. The variable was inert — this battery resolves
+# modules/agent-brain.py by PATH (spec_from_file_location, below), so the environment never
+# mattered. Harmless while the file ran nowhere; a second, divergent spelling of "how to run this"
+# the moment it got wired, which is the scar this repo keeps re-cutting.
+#
+# Note the direction that makes it worth fixing rather than annotating. The header is what a
+# HUMAN copies; the workflow is what actually runs. A reader who copied this line got a passing
+# run and no reason to doubt it — the two spellings agreed on the verdict while disagreeing on
+# the command, which is exactly the condition under which nobody looks again.
 #
 # Checks:
 #   A. modules compile clean
