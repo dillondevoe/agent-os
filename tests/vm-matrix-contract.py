@@ -123,6 +123,26 @@ KNOWN_UNWIRED_DEBT = frozenset({
     "transport-battery.py",
 })
 
+# NON-FILE DEBT, recorded here because this is the ledger people read, and NOT added to the set
+# above because the set means "a test file exists and no lane runs it". This debt has no test file
+# at all, so listing it would make the count claim coverage that was never written. A ledger whose
+# entries mean two different things is a ledger nobody can act on.
+#
+# PARTICIPANTS_DIR IS NOT MODE-CHECKED. Geist, 2026-08-27 (P3, gate on #172). As of #172 the boot
+# self-test's reference point is `participants/<name>.md` — the recorded npub — but `preflight()`
+# stats only KEYS_DIR and the `*.key` modes. PARTICIPANTS_DIR is created 0o755 and never checked.
+#
+# Why this is P3 and not a blocker, stated so the next reader does not have to re-derive it: a
+# principal with registry-write but not key-write can make every boot refuse with IDENTITY DRIFT.
+# That is fail-CLOSED and loud — a denial, not a bypass. A principal with key-write already owns
+# the box. The trust class is unchanged by #172; what changed is that a second path can now cause
+# a loud refusal.
+#
+# The real question underneath is spec 2.1's: re-attestation, and whether the registry should be
+# SIGNED rather than merely mode-guarded. Mode-guarding participants/ would close the denial path
+# without answering that, which is why this is recorded rather than patched. Owned by whoever
+# builds the RULING_CONDITIONS table (ruled item 3).
+
 
 def matrix_entries(path):
     try:

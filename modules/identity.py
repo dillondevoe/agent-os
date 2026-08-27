@@ -254,15 +254,13 @@ def recorded_npub(name):
 
 
 def boot_self_test(name="agent"):
-    """Sign/verify roundtrip on every boot — ruling condition 3. Fails LOUD, never silently.
+    """Sign/verify roundtrip on every boot — ruling condition 2. Fails LOUD, never silently.
 
     A signer that has degraded to producing unverifiable signatures is worse than one that is
     plainly absent: the audit trail keeps accumulating records that nothing can check later.
 
     THE ROUNDTRIP ALONE PROVED ALMOST NOTHING, and a negative arm is what showed it (2026-08-27,
-    ruled item 2; note the module has always cited this as condition 3 while the leg comments in
-    tests/identity-boot.nix cite condition 2 — the numbering discrepancy is flagged to Geist, NOT
-    silently resolved here). This function used to verify against `npub_of(name)` — but `npub_of` derives
+    ruled item 2). This function used to verify against `npub_of(name)` — but `npub_of` derives
     the pubkey FROM THE PRIVATE KEY FILE via `pubkey_gen`. Sign with key K, verify against
     pubkey(K): self-consistent for EVERY well-formed K. Replace the agent key with any other
     valid key and this test still passed, on every boot, while every signature in the existing
