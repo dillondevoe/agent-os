@@ -59,7 +59,7 @@ exercised is a comment with a CI badge.
 | 14 | A verification harness that manufactured the symptom it was looking for | Running a watcher piped to `\| head -3` closed the pipe; the process took **SIGPIPE** on a later `print()` and died before `_save_state`. The dedupe state was never written, and the result presented as a **dedupe bug in the feature under test**. Every other member here is a guard that failed to guard; this is a *harness* that produced a finding about code that was correct. | `agentos_merge_gate_watcher.py` (operational; found by Page while shipping the main-red alert) |
 | 15 | A coverage bound counted in FILES while the risk accrued in TIME | A comms-bus backstop scan read `ls -t *.md \| head -25` — a bound that reads like a considered budget ("the newest 25") and is one, in the wrong unit. The window it actually buys is `25 / arrival-rate`, so it narrows precisely when traffic is heaviest — i.e. exactly when a miss is likeliest. Measured at **under two hours** on a busy night; the same line reads as "recent traffic is covered" at every tree size. Fixed by making the window a TIME window (24h) unioned with the count. | `mirror-tick` §2 scan (operational; found by Mirror on his own surface, 2026-08-21). Geist ruled the same fix in `geist-inbound.sh`; Augur adopted it after finding his scan was a pure filename glob. |
 | 16 | Four consecutive fixes to the guard that ends this class, each cancelled by the next question it did not contain | `tests/vm-matrix-contract.py` globbed `*.nix` over a directory one third `.nix`; then counted its own `builtins.pathExists` assert as wiring; then never asked what a WIRED battery does when its subject is absent (two did exit 0); then shipped that new check gated on `.py` while naming a behaviour. No fix was found by the check before it. | `tests/vm-matrix-contract.py`, `tests/providers-battery.py`, `tests/agent-loop-dispatch-battery.py`, `flake.nix` (merged — PRs #153, #154, #155, #156, all 2026-08-23) |
-| 17 | An assertion about emptiness, and the mutation test sent to check it | `tests/frontdoor-kick-battery.py` bound `fired = []` and no code path ever appended, so `not fired` in "discarded, nothing fired" was a constant True. The executor genuinely was walled off — by a monkeypatch that RAISED — but a raising sentinel reports as an uncaught traceback, not a named failing check, and it is not the mechanism the label named. Then the same class one level up: Page's mutation test of their own fix **silently no-opped** (the anchor string did not match the real signature), reporting PASS where they had predicted FAIL. | `tests/frontdoor-kick-battery.py` (PR #159, 2026-08-23). Found by Page's widened two-claim generator; the no-op mutation found by Page on their own surface the same hour. |
+| 17 | An assertion about emptiness, and the mutation test sent to check it | `tests/frontdoor-kick-battery.py` bound `fired = []` and no code path ever appended, so `not fired` in "discarded, nothing fired" was a constant True. The executor genuinely was walled off — by a monkeypatch that RAISED — but a raising sentinel reports as an uncaught traceback, not a named failing check, and it is not the mechanism the label named. Then the same class one level up: Page's mutation test of their own fix **silently no-opped** (the anchor string did not match the real signature), reporting PASS where they had predicted FAIL. | `tests/frontdoor-kick-battery.py` (PR #159, filed 2026-08-23, merged 2026-08-27 as `3fe0ebb`). Found by Page's widened two-claim generator; the no-op mutation found by Page on their own surface the same hour. Extended 2026-08-27 — see the addendum, three further instances in one hour from two brains. |
 
 Members 6–7 are recorded here as in-flight rather than merged. If those PRs change shape in
 review, this table is wrong until someone fixes it — which is itself an instance of the class,
@@ -558,6 +558,51 @@ every control arm in every mutation test on this mesh, including the ones alread
 `self_disarms()`, `I2`, `D5` and this entry's own fix. Those four are re-confirmed by differential
 output — each showed a named RED that the unmutated tree does not produce — but that is evidence
 after the fact, not method.
+
+### Addendum, 2026-08-27: three more instances in one hour, and the rule needed a second half
+
+The paragraph above says the anchor assert is "the only thing standing behind every control arm."
+That was too narrow, and it took four days and three fresh instances to see how. Anchoring proves
+the *string* changed. It does not prove the *program* changed, and those are different claims.
+
+The three, all on 2026-08-27, from two brains inside one hour:
+
+1. **A mutation that failed to BE the mutation.** Testing whether a checker could be made vacuous,
+   I appended `def main(): return 0` to the end of the file — *after* the `if __name__` block. The
+   name was undefined when that block ran, so the checker crashed. The output was byte-identical to
+   the previous mutation's, and I read it as a result before noticing the two runs agreed for
+   different reasons. The anchor was fine; the edit landed exactly where I put it. Placement, not
+   matching, was the defect.
+2. **A mutation the platform silently discarded.** Geist commented out a line with a `sed` pattern
+   containing `\s` — not a valid atom in BSD `sed`. The substitution matched nothing, the file was
+   unchanged, and his "negative control" was a healthy tree re-run reported as a negative. This is
+   Page's original no-op, in a second dialect, four days later, on a different surface. The class
+   does not stay fixed by one brain fixing it.
+3. **A mutation that landed with a second mutation riding along.** Reproducing #159's own claim, I
+   swapped the pre-fix raising sentinel for a recorder *and* added the clobber, in one edit. It went
+   red — from the substitution, not from the assertion under test. A real red, about the wrong thing,
+   and it would have certified the arm.
+
+**The rule, in the form both brains adopted:**
+
+> **A NEGATIVE CONTROL NEEDS ITS OWN POSITIVE CONTROL — PROVE THE MUTATION LANDED BEFORE BELIEVING
+> THE RUN. AND PROVE THAT *ONE* THING MOVED.**
+
+Two halves, and instance 3 is the reason the second half is not decoration: it satisfies "the
+mutation landed" completely.
+
+**The asymmetry that decides how long each one survives.** A vacuous mutation that goes RED is
+noisy and carries its own contradiction — the MUST-PASS arms fire alongside it and the run
+disagrees with itself. A vacuous mutation that goes GREEN is indistinguishable from a passing
+negative control, and *has no upper bound on how long it lasts*. Instance 1 was caught in minutes
+because it reddened. Instance 2 was caught only because a second brain re-ran it.
+
+**Which is why a battery needs both polarities, and it is the same argument.** A MUST-FAIL-only
+battery is satisfied by a checker that rejects everything; worse, a crash makes every MUST-FAIL arm
+"pass". The MUST-PASS arms are the only thing in the room that can tell red-by-verdict from
+red-by-crash — exactly the distinction instance 1 blurred. This is member 16's fourth fix wearing
+different clothes: the guard that ends the class has to be shown failing for the *named* reason,
+and "it went red" is not that.
 
 ### Why this belongs in this file rather than a style guide
 
