@@ -197,8 +197,15 @@ over an earlier 40-run one — the same data through a sliding window, neither p
    ```bash
    # per run id, over the same window as step 1
    gh api "repos/dillondevoe/agent-os/actions/runs/$ID/attempts/$N/logs" > /tmp/l.zip
-   unzip -p /tmp/l.zip '*' | grep -o 'FLAKE-A-RETRY test=[a-z0-9-]*' | sort | uniq -c
+   unzip -p /tmp/l.zip '*' | grep -oE 'FLAKE-A-RETRY test=[a-z0-9-]+ run=[0-9]+' | sort | uniq -c
    ```
+
+   The `run=[0-9]+` tail is load-bearing, not decoration (Geist, gate, 2026-08-27 — verified on
+   run `33037585674`): the runner echoes every `run:` script body into the job log with
+   `${{ matrix.test }}` already substituted, so EVERY job — healthy or not — carries
+   `FLAKE-A-RETRY test=<job> run=${GITHUB_RUN_ID}` twice in the source echo. A grep without the
+   numeric `run=` counts those and reads ~200% at baseline: a saturated instrument, the mirror
+   image of the silently-dead one below. Only a marker that actually fired has digits there.
 
    **Each marker is one shape-A instance and MUST be counted in the table below**, even though
    the attempt it belongs to concluded `success`. A mitigation that swallows a failure without
