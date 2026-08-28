@@ -117,7 +117,18 @@ run "$TMP/does-not-exist.log"
 [ "$rc" -ne 0 ] || bad "ARM5 CONTROL: a missing log produced rc=0 — n=0 can no longer mean 'no connect'"
 
 # ARM 6 / VACUITY — the fixture in ARM 1 must actually contain the pattern the probe looks for.
+arms=$((arms+1))   # ARM 6 asserts without calling run(), so it must count itself
 grep -qE '\(connecting took [0-9.]+ seconds\)' "$TMP/green.log" \
   || bad "ARM6: the ARM1 fixture does not carry the driver's real shape — ARM1 is vacuous"
+
+# SELF-CHECK — the printed count must equal the number of arms this file DECLARES. `arms` is
+# incremented by run(), so an arm that asserts without invoking the probe (ARM 6, vacuity) was
+# silently uncounted: the battery reported "all 10 arms pass" with 11 arms present. Correcting
+# the number alone would leave the next such arm to drift the same way, so the count is now
+# checked against the `# ARM` labels rather than trusted. A battery that miscounts its own arms
+# is the instrument-miscounts-itself shape one level down from what this battery exists to catch.
+declared=$(grep -cE '^# ARM ' "$0")
+[ "$arms" -eq "$declared" ] \
+  || bad "SELF-CHECK: $arms arms counted but $declared declared — an arm is not being counted"
 
 if [ "$fails" -eq 0 ]; then echo "vm-connect-probe: all $arms arms pass"; else echo "$fails FAILING of $arms"; exit 1; fi
