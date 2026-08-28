@@ -89,6 +89,14 @@ WIRED_VIA_WORKFLOW = {
     # reason — nix is on PATH there, which is what lets the fixture run without --packages-json.
     "vm-matrix-call-site-arms.py":  "flake-check.yml",
     "flake-retry-decide-battery.sh": "flake-check.yml",  # the census emitter's battery; pure bash
+    # The time-to-connect probe's battery. Same lane and same reason as the line above: pure
+    # bash, no nix, no VM. Wired into flake-check rather than vm-tests DELIBERATELY — vm-tests
+    # carries a paths filter, so a scripts-only change could green with the battery never run,
+    # which is the shape this whole file exists to catch. It tripped this check on the commit
+    # that added it (PR #211), which is the check doing its job: I had wired it to a workflow
+    # step and never told the registry, and "wired somewhere I can see" is not "wired where the
+    # ledger can see." The claim below is CHECKED against a non-comment line of that workflow.
+    "vm-connect-probe-battery.sh": "flake-check.yml",
     # Migrated here on the #163 merge (2026-08-27). This branch had independently grown a
     # WORKFLOW_INVOKED frozenset + _named_in_any_workflow() making the SAME claim — filed 08-23,
     # four days before #184 landed WIRED_VIA_WORKFLOW. Convergence, not conflict. Keeping both

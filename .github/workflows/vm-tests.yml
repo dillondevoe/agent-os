@@ -77,6 +77,16 @@ on:
       # is the normal shape of a follow-up commit, and it would run zero VM tests while altering
       # the binary under confinement. Coverage that depends on a commit's habits is not coverage.
       - 'bin/**'
+      # ...and the scripts this job EXECUTES. Not adjacent to the lane — invoked by it.
+      # The `nix build` step runs scripts/flake-retry-decide.sh to decide whether a failure is
+      # retried and to emit the census marker the ledger counts, and the probe step runs
+      # scripts/vm-connect-probe.sh. Both change what this job DOES, and neither was reachable
+      # by any pattern above: a scripts-only change — a predicate fix, a marker reword — would
+      # have altered the retry decision and the census with this lane never running. Found while
+      # adding the probe, by asking the question this file's own header asks. Same shape as the
+      # `configuration.nix` omission recorded above: the filter was narrower than the thing it
+      # guards, and read exactly like full coverage.
+      - 'scripts/**'
       # ...and this file itself. A harness excluded from its own trigger set cannot object to
       # being gutted: without this line, a PR deleting the steps below would merge green.
       - '.github/workflows/vm-tests.yml'
@@ -90,6 +100,7 @@ on:
       - 'configuration.nix'
       - 'configuration-open.nix'
       - 'bin/**'
+      - 'scripts/**'
       - '.github/workflows/vm-tests.yml'
   schedule:
     # 07:00 UTC daily. Catches drift on main from anything the path filter above missed, and from
@@ -300,6 +311,36 @@ jobs:
           echo "::error::${{ matrix.test }} failed TWICE with the shape-A signature. This is not" \
                "the one-shot case; both logs are retained as artifacts. Stop and read them."
           exit 1
+
+      # TIME-TO-CONNECT PROBE — runs on EVERY job, green or red. This is the instrument Geist
+      # named after measuring the cheap contention hypothesis and getting a NEGATIVE: intra-repo
+      # run crowding does not predict shape A (13.5% SIG at 0 neighbours vs 12.5% at 1-2, hour of
+      # day flat), so our own queue is not the contention. What is left is the hosted runner's own
+      # speed, which is invisible in run metadata. The only way to see it is to record how long
+      # `connect()` takes on the runs that DID connect — a failure-only probe has no baseline to
+      # compare a failure against, which is why this is not conditioned on failure.
+      #
+      # It emits n=0 rather than staying silent when no connect completed. That case is not an
+      # absence of data: 14 of the 19 pre-stagger shape-A specimens carry no connect line at all,
+      # because the first connect never returned. Silence there would make a zero-connect job and
+      # a job where the probe never ran produce identical evidence — the census-reads-zero-for-
+      # the-wrong-reason shape this repo has now hit three times.
+      #
+      # STATED TRADEOFF: `continue-on-error` is true so that a broken probe can never turn a
+      # green build red — a measurement must not become a new way for the lane to fail. The cost
+      # is that a probe failure is non-fatal, so it is made visible two other ways instead: the
+      # missing-log path emits `::error::`, and a job with no `VM-CONNECT` line at all is itself
+      # countable by the same census grep that counts the markers.
+      - name: Probe time-to-connect
+        if: always() && steps.vmbuild.conclusion != 'skipped'
+        continue-on-error: true
+        shell: bash
+        run: |
+          for f in vm-build-attempt-1.log vm-build-attempt-2.log; do
+            [ -f "$f" ] || continue
+            ./scripts/vm-connect-probe.sh "$f" '${{ matrix.test }}' \
+              "${GITHUB_RUN_ID}" "${GITHUB_RUN_ATTEMPT}"
+          done
 
       # Both attempts' logs, kept whenever the step above ran at all. The job log already holds
       # them (the step tees rather than redirects), so this is convenience, not the preservation

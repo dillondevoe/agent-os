@@ -173,6 +173,19 @@ jobs:
       - name: flake-retry decider battery
         run: ./tests/flake-retry-decide-battery.sh
 
+      # The time-to-connect probe's own battery, wired here for the identical reason as the one
+      # above: this lane has no path filter to skip it. The probe runs in vm-tests, but its
+      # battery must not — the vm-tests path filter means a change to scripts/vm-connect-probe.sh
+      # alone would not trigger that lane, so a battery living there could be edited to green
+      # without ever running.
+      #
+      # Its load-bearing arms are ARM 2 (a zero-connect log must still emit n=0, not silence) and
+      # ARMs 7/8 (one connect rendered twice counts once; two real connects of equal duration
+      # still count twice). ARM 7 was found on the real corpus AFTER the hand-made fixtures were
+      # green — the fixtures omitted a rendering the producer does emit.
+      - name: vm-connect probe battery
+        run: ./tests/vm-connect-probe-battery.sh
+
       # `--option sandbox true` is the whole point: it reproduces the clean-room build
       # (no /usr/bin/env, patchShebangs load-bearing) that a laptop's non-sandbox check hides.
       # `-L` prints full build logs so a battery failure is legible in the run output.
