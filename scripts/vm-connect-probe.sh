@@ -43,7 +43,15 @@ fi
 # wrongly collapse two genuine connects that happened to take the same time; only the
 # stream-prefixed line is 1:1 with a connect event. Same class as PR #180, where the runner
 # echoed a marker's source into the job log.
-secs=$(grep -oE '[a-z0-9-]+> *machine: \(connecting took [0-9.]+ seconds\)' "$log" \
+# THE NODE NAME IS NOT `machine`. Found on the FIRST live run of the merged probe (fabb4da, run
+# 33128842725): 5 of 9 GREEN jobs reported n=0. Only seal-faildown and identity-boot name their
+# VM node `machine`; the others are `sealed`, `peer`, `meshpeer`, `box` (tests/*.nix `nodes.*`).
+# A green job reading n=0 is byte-identical to shape A's n=0 — the exact confusion this probe
+# exists to prevent, reintroduced by a fixture that carried the one node name the author had
+# seen. Match ANY node name after the stream prefix; the stream prefix is still the discriminator
+# against the indented summary copy. Multi-node tests (egress-uid-scope: sealed + peer) count
+# one connect per node, so n>1 on a single boot is expected there.
+secs=$(grep -oE '[a-z0-9-]+> *[A-Za-z0-9_-]+: \(connecting took [0-9.]+ seconds\)' "$log" \
        | grep -oE '[0-9.]+ seconds' | grep -oE '^[0-9.]+' || true)
 
 n=$(printf '%s' "$secs" | grep -c . || true)

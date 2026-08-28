@@ -83,6 +83,24 @@ echo "$out" | grep -q ' n=1' || bad "ARM7: one connect rendered twice was counte
 run "$TMP/twinsame.log"
 echo "$out" | grep -q ' n=2' || bad "ARM8 CONTROL: two real connects of equal duration were collapsed — got: $out"
 
+# ARM 9 — THE NODE IS NOT ALWAYS `machine`. Real shape from the first live run of the merged probe
+# (run 33128842725, job 98713342301, egress-uid-scope): the node is `sealed`, and the probe read
+# n=0 on a GREEN job — 5 of the 9 matrix entries did. Only seal-faildown and identity-boot use
+# `machine`; the rest are `sealed`, `peer`, `meshpeer`, `box`. Green-n=0 is byte-identical to
+# shape-A-n=0, which is the confusion this probe exists to prevent.
+{ printf '2026-08-28T00:13:31.7572097Z vm-test-run-agentos-egress-uid-scope> sealed: starting vm\n'
+  printf '2026-08-28T00:13:45.1201234Z vm-test-run-agentos-egress-uid-scope> sealed: (connecting took 13.14 seconds)\n'
+  printf '2026-08-28T00:13:47.9001234Z vm-test-run-agentos-egress-uid-scope> peer: (connecting took 14.02 seconds)\n'; } > "$TMP/sealed.log"
+run "$TMP/sealed.log"
+echo "$out" | grep -q ' n=2' || bad "ARM9: non-'machine' node names were not counted (two nodes, two connects) — got: $out"
+
+# ARM 10 / CONTROL for ARM 9 — the indented summary copy of a non-'machine' node must STILL be
+# excluded. Widening the node name must not widen past the stream prefix.
+{ printf '2026-08-28T00:13:45Z vm-test-run-agentos-egress-uid-scope> sealed: (connecting took 13.14 seconds)\n'
+  printf '2026-08-28T00:13:50Z     sealed: (connecting took 13.14 seconds)\n'; } > "$TMP/sealed-dual.log"
+run "$TMP/sealed-dual.log"
+echo "$out" | grep -q ' n=1' || bad "ARM10 CONTROL: widening the node name also admitted the summary copy — got: $out"
+
 # ARM 5 / CONTROL — a missing log file must be loud, not a quiet n=0. Otherwise ARM 2's n=0
 # loses its meaning: "no connect" and "no log" would print the same thing.
 run "$TMP/does-not-exist.log"
