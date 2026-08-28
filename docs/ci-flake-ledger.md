@@ -450,6 +450,83 @@ root cause stays OPEN. A green lane after this ships is not evidence the harness
 evidence a known failure is being absorbed and counted. The day the marker count goes to zero on
 its own is the day there is something to explain.
 
+## The prediction, answered: the post-fix census (2026-08-28)
+
+The window above closed. Every successful `vm-tests` run from `2026-08-27T11:40:38Z` was enumerated
+and its log grepped for the marker under the **guarded** pattern
+(`FLAKE-A-RETRY test=… run=[0-9]+ attempt=[0-9]+`), one line per run so that clean runs are
+recorded explicitly rather than inferred from absence.
+
+| window | shape-A instances | emit-capable jobs | rate |
+|---|---|---|---|
+| pre-stagger (this file's census) | 19 | 1255 | **1.51%** |
+| post-fix, 2026-08-27T11:40:38Z → 2026-08-28T13:00Z | 3 | 405 | **0.74%** |
+
+Fisher two-sided **p = 0.3205**, ratio 0.489. The three: `test-egress-uid-scope` run `33132316448`,
+`test-identity-boot` run `33100997366`, `test-identity-boot` run `33086970966` — all `attempt=1`,
+all retried, all rescued.
+
+**The point estimate halved and that is not a finding.** At this event rate the workflow does not
+produce enough job executions for a halving to be visible: separating 0.74% from 1.51% at p < 0.05
+needs roughly 2500–3000 post-fix emit-capable jobs, which is weeks at current volume. The ratio is
+reported here only so that a later reader does not re-derive it and mistake it for news.
+
+**One p-value refuses two opposite claims, and that is the useful part.** Prediction 2 above set a
+*floor* as well as a ceiling: a marker count materially **below** 1.45%/job would mean instances
+were escaping the signature and being recorded as genuine reds. Read carelessly, 0.74% is "half the
+baseline" and trips that alarm. It does not: p = 0.32 is exactly the statement that 3-in-405 is
+consistent with a 1.45% process. The same insufficient N that forbids "the harness improved" also
+forbids "instances are escaping" — and only one of those two readings is tempting, which is why the
+floor is worth stating out loud rather than leaving to whoever next looks at the table.
+
+**Prediction 1 holds.** Zero shape-A reds in the window: 44 successful runs plus one failure
+(`33128238570`), whose failing job is `vm-test (test-fetch-proxy-allowlist)` and which carries no
+marker — not shape A. Predicted ≈0.2% attempt-level red; observed 0 of 45.
+
+**Prediction 3 is untestable at N = 3** and is not addressed here. Three markers cannot speak to a
+distribution over nine jobs. A partition would need the two-VM/single-VM node map; the ad-hoc
+extractor tried for this entry returned zero nodes for all nine tests **including the three known
+two-VM ones**, so it was discarded rather than reported — an instrument that returns the same answer
+everywhere carries no information about anywhere.
+
+### The denominator was biased, in the direction it should have been
+
+The sweep sampled **successful runs only**, because that is where the retry lane parks a rescued
+shape A. The pre-stagger census enumerated every non-cancelled run with `filter=all`. That
+asymmetry omits failed runs' emit-capable jobs from the denominator — biasing the post-fix rate
+*upward*, i.e. against the improvement the sweep was looking for.
+
+Closed rather than caveated: the window held exactly one failed run and five cancelled. Cancelled
+stay excluded on this file's existing rule (they cannot emit). The failed run was read directly —
+no marker — so the denominator moved 396 → 405 with the numerator unchanged, and p moved
+0.3215 → 0.3205. One API call, conclusion unmoved. The caveat that can be spent is cheaper than the
+caveat that must be carried.
+
+### Why the run-level view could not have answered this
+
+The retry lane converts shape A from a red into a **silence**. Any drop in *failing runs* measured
+after the lane shipped is produced by the lane and is not evidence about the underlying rate — the
+prediction section's own closing warning, met in production. The marker is the only surviving
+observable, which is why the guarded pattern matters: a bare `grep -c FLAKE-A-RETRY` returns **9**
+on every run, clean ones included, because the runner echoes the workflow's own echo line. Nine
+everywhere reads exactly like a healthy busy retry lane. The guard drops it to the real instances.
+
+### Standing count, not another sweep
+
+Ruled 2026-08-28: report the marker count only when N clears the power threshold above, **or when a
+shape-A red appears**. Either is an event. A ratio recomputed on an underpowered window is not, and
+re-running this sweep next week would produce another halving-shaped number with another p ≈ 0.3.
+
+### CI cannot fall back to TCG by construction
+
+The section below scopes the local reproduction to TCG and notes CI runs under KVM. That contrast is
+stronger than a coincidence of configuration: `vm-tests.yml:198-203` grants `/dev/kvm` by udev rule (the runner ships it `root:kvm 0660`
+with the runner user outside the group), and **`:211-223` asserts KVM is usable and `exit 1`s the
+lane if it is not** — separately for absent and for present-but-unwritable, each naming the silent
+TCG fallback as the hazard it is refusing. So "zero TCG fallbacks
+in CI" is not an observation that happened to come out that way — a TCG fallback cannot reach a test
+result at all. The TCG-vs-KVM separation is therefore the sharpest comparison in this file.
+
 ## FIRST LOCAL REPRODUCTION OF THE SIGNATURE (2026-08-28, DVo)
 
 The signature has been produced outside CI for the first time. **Read the scope limit before the
