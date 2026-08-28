@@ -450,6 +450,99 @@ root cause stays OPEN. A green lane after this ships is not evidence the harness
 evidence a known failure is being absorbed and counted. The day the marker count goes to zero on
 its own is the day there is something to explain.
 
+## FIRST LOCAL REPRODUCTION OF THE SIGNATURE (2026-08-28, DVo)
+
+The signature has been produced outside CI for the first time. **Read the scope limit before the
+result:** what reproduced is the *string and the failing frame*, not, yet, "shape A". The
+distinction is the same one this file already enforces between shapes A and B.
+
+**Method.** `nix build --rebuild .#test-identity-boot` on DVo (6 cores, 8 GB, KVM), under induced
+CPU oversubscription from N busy-loop processes. One dose series then three repeats at the failing
+dose.
+
+| load | runs | signature | note |
+|---|---|---|---|
+| 0 spinners (control) | 1 | — | rc=0, 806s — the control arm, and it must stay here |
+| 6 spinners | 1 | — | rc=0, 508s |
+| 12 spinners | 1 | — | rc=0, 498s |
+| **24 spinners** (loadavg 17–28) | **4** | **2** | rc=1 twice, rc=0 twice |
+
+**What the two failures share with CI.** Both die at
+`test_driver/machine/__init__.py:1075` in `connect()` — the frame this file cites for every one of
+the nineteen — with the byte-identical `RuntimeError: Shell did not start in time`, preceded by the
+driver's repeated `Guest root shell did not produce any data yet` against `backdoor.service`. In
+both, the guest console goes silent at the *same* line, `systemd[1]: Finished Virtual Console
+Setup`, at 65.3s and 65.6s.
+
+**What they do not share, and it is why the claim stays narrow.** The two local failures occupy
+*different positions in the test*: one at `wait_for_unit` on the first statement of the test script
+(initial boot — CI's position), the other at test step 5, after a **real reboot**. So the failure is
+not tied to boot-vs-reboot, but neither is it yet shown to be CI's mechanism: the ledger's quoted CI
+specimen goes silent at 9.2s on `etc-machine-id.mount`, not at 65s on vconsole setup. Same string
+and same frame is *not* same cause — that inference is exactly what the A/B split above exists to
+refuse.
+
+**What this does buy, and it is the thing that was blocked.** "What is NOT established" below says
+separating *(a) the console/backdoor channel is lost while the VM keeps running* from *(b) the VM
+wedges outright* needs a box that can hold a wedged guest open for inspection. There was no wedged
+guest to hold. **Now there is one, on demand, at roughly 50% per attempt at a known dose.** The next
+move is to reproduce with the driver paused rather than cleaning up, and ask the guest directly.
+
+**Two cautions on the numbers.** n is 1 per non-failing arm, so the dose-response is suggestive and
+not a rate; 2-of-4 is four draws, not a measured 50%. And **duration is not usable as a dependent
+variable here** — the unloaded control ran *longer* (806s) than every loaded trial (~490–540s),
+almost certainly because the first `--rebuild` did work the later ones did not. The signature string
+is the dependent variable, which is also what CI keys on.
+
+**Two invalid attempts preceded this, recorded because the failure mode is the reusable part.** The
+first harness returned a clean zero across four trials and the zero was worthless:
+
+- **The treatment was never applied.** Trials at a nominal 4, 2 and 1 CPU via `taskset` ran 483s,
+  480s and 475s — near-identical across a 4x change in the independent variable, which was the tell.
+  `nix build` hands the work to `nix-daemon`, which does not inherit the client's CPU affinity: the
+  QEMU process running the guest sat at `0-5` while the client asked for cpu `0`. The client that
+  was constrained does nothing but talk to a socket.
+- **The control arm was vacuous.** It deliberately omitted `--rebuild` "to populate the store", but
+  the store was already populated, so it returned rc=0 in **9 seconds having booted no guest.**
+
+Hence the loadavg column: the corrected harness logs load at each trial start, so the treatment is
+*observed* rather than assumed. **An experiment that does not measure whether its own independent
+variable moved can only produce a confident zero** — which is this file's control-arm rule pointed
+at the experiment instead of at the test.
+
+## The local reproduction ran under TCG. CI runs under KVM. (2026-08-28, amended)
+
+**This is the most important caveat on everything above, and it was found after the section was
+written.** Every local `nix build` run in the tables above ran the guest under *software emulation*:
+
+    qemu-system-x86_64: Could not access KVM kernel module: Permission denied
+    qemu-system-x86_64: failed to initialize kvm: Permission denied
+    qemu-system-x86_64: falling back to tcg
+
+`/dev/kvm` is `root:kvm 0660`. The invoking user is in the `kvm` group; `nix-daemon`'s *build user*
+is not. So the acceleration silently disappears exactly when the work is handed to the daemon.
+
+**CI does not have this problem, and says so in its own workflow.** `.github/workflows/vm-tests.yml`
+grants `/dev/kvm` with a udev rule, and its comment names this precise trap. A real CI log was
+pulled to check rather than assumed: **zero TCG fallbacks, `kvm-clock` throughout.**
+
+**Therefore the local dose-response above may say nothing about CI's failures.** It remains a
+reproduction of the *signature* — that claim was deliberately written narrow and still stands — but
+"emulated guest misses a 300s window under load" is not obviously the same phenomenon as a failure
+on an accelerated guest.
+
+**What separates them, so far.** Same harness, same load, same sandbox setting, only acceleration
+differing: TCG 5 failures / 8 runs, KVM 0 / 5. Fisher exact two-tailed **p=0.075** — suggestive and
+underpowered, not a result; more KVM runs are in flight. Note the durations, which are the cleaner
+signal: accelerated runs finish in a tight 305-308s, emulated ones sprawl 300-800s, and every
+emulated failure sits at ~303s, i.e. flush against the driver's 300s connect timeout.
+
+**Reusable form: a harness can differ from CI in a way that is invisible in its output and decisive
+for its result.** Nothing in the local logs announced "this run is emulated" until it was grepped
+for; the guest booted, the test ran, and the failures looked exactly like CI's. The check that
+caught it was reading CI's own workflow for what it compensates for — a compensation in the
+pipeline is evidence about a hazard the environment has.
+
 ## What is NOT established
 
 - **Root cause.** Two shapes fit every observation equally well: (a) the console/backdoor channel
