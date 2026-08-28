@@ -43,7 +43,14 @@ fi
 # wrongly collapse two genuine connects that happened to take the same time; only the
 # stream-prefixed line is 1:1 with a connect event. Same class as PR #180, where the runner
 # echoed a marker's source into the job log.
-secs=$(grep -oE '[a-z0-9-]+> *machine: \(connecting took [0-9.]+ seconds\)' "$log" \
+# THE NODE NAME IS NOT `machine`. It is whatever the nixosTest declares - `box` in
+# test-cap-composed-path, `machine` only by convention. Hard-coding it made five of nine GREEN
+# jobs on run 33128842725 report n=0 while their logs plainly carried
+# `vm-test-run-agentos-cap-composed-path> box: (connecting took 18.23 seconds)`. That is the
+# instrument-did-not-run zero for the fourth time, produced by the instrument written to stop it,
+# and no fixture could have caught it because I wrote every fixture saying `machine`. The node is
+# now `[a-z_][a-z0-9_-]*`, still REQUIRED - ARM 10 controls that this did not widen to any line.
+secs=$(grep -oE '[a-z0-9-]+> *[a-z_][a-z0-9_-]*: \(connecting took [0-9.]+ seconds\)' "$log" \
        | grep -oE '[0-9.]+ seconds' | grep -oE '^[0-9.]+' || true)
 
 n=$(printf '%s' "$secs" | grep -c . || true)

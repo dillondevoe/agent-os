@@ -92,4 +92,24 @@ run "$TMP/does-not-exist.log"
 grep -qE '\(connecting took [0-9.]+ seconds\)' "$TMP/green.log" \
   || bad "ARM6: the ARM1 fixture does not carry the driver's real shape — ARM1 is vacuous"
 
+# ARM 9: THE NODE IS NOT ALWAYS NAMED `machine`. Found on the FIRST forward census, not by
+# reasoning: five of nine GREEN jobs on run 33128842725 reported n=0, and the log of one of them
+# carries `vm-test-run-agentos-cap-composed-path> box: (connecting took 18.23 seconds)`. The
+# nixosTest node name is whatever the test declares — `box` here, `machine` only by convention.
+# A regex hard-coding `machine` therefore produced a clean zero on a job that connected fine:
+# the instrument-did-not-run zero, a fourth time, inside the instrument built to avoid it.
+# The fixtures could not have caught this because I wrote every one of them saying `machine`.
+{ printf '2026-08-28T00:10:00Z vm-test-run-agentos-cap-composed-path> box: (connecting took 18.23 seconds)\n'
+  printf '2026-08-28T00:10:01Z vm-test-run-agentos-cap-composed-path> box: some other output\n'; } > "$TMP/box.log"
+run "$TMP/box.log"
+printf '%s' "$out" | grep -q ' n=1' && printf '%s' "$out" | grep -q 'max=18.23' \
+  || { echo "ARM9 FAIL (node named 'box' not counted): $out"; fails=$((fails+1)); }
+
+# ARM 10 CONTROL: widening the node name must not widen to ANY line. A bare timing line with no
+# `<node>:` at all still counts zero, or ARM 9 would pass under a regex that matches everything.
+printf '2026-08-28T00:10:00Z vm-test-run-agentos-x> (connecting took 18.23 seconds)\n' > "$TMP/nonode.log"
+run "$TMP/nonode.log"
+printf '%s' "$out" | grep -q ' n=0' \
+  || { echo "ARM10 FAIL (nodeless line was counted): $out"; fails=$((fails+1)); }
+
 if [ "$fails" -eq 0 ]; then echo "vm-connect-probe: all $arms arms pass"; else echo "$fails FAILING of $arms"; exit 1; fi
