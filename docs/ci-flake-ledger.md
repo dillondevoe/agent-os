@@ -7,6 +7,46 @@ does not start from zero.
 Measured 2026-08-25 by Mirror. Window and method are stated below so the numbers can be
 re-derived, disagreed with, or superseded.
 
+## How to file an entry here — the entry discipline
+
+This section is the other half of this file, and it spent its whole life in an unmerged branch.
+It was written for PR #167 on 2026-08-25 under the title *"reconcile two ledgers that were written
+at the same path"*, and the reconciliation never happened: `main` took the measurement ledger you
+are reading below, the discipline stayed on the branch, and the two documents drifted for three
+days. Carried here on 2026-08-28 with the measurement content untouched.
+
+**Why this file exists.** A flaky job that is re-run green leaves no trace. The failure scrolls out
+of the Actions list, the PR goes green, and the next person to see the same red concludes "probably
+just flaky" from memory rather than from evidence — or, worse, concludes it is a real regression and
+goes looking in the diff. Both readings are guesses, and both are avoidable for the cost of writing
+the observation down BEFORE the re-run lands.
+
+**Rule 1: a re-run does not erase an entry.** Record the failure first, then re-run. An entry is
+removed only when the underlying cause is fixed, and then the fix is named here.
+
+**Rule 2, learned by breaking it on this file's first entry: TRIGGERING A RE-RUN IS NOT OBSERVING
+ONE.** Push to the branch and GitHub cancels the in-flight run — the re-run you were counting on
+dies without a verdict, and the next green you see is on a DIFFERENT tree. Before writing that a job
+was re-run, check `gh run list --json headSha,conclusion` and record the SHA the conclusion belongs
+to. A green on a later commit is worth recording, but it is a weaker observation and must be
+labelled as one, because the reader a month from now cannot tell the two apart from the word
+"re-run".
+
+Rule 2 deserves a mechanical enforcer rather than a habit, and the reason is worth stating: the
+rule as prose was read and broken in the same sitting. A branch rerun and a push to that branch are
+in conflict BY CONSTRUCTION — the sequence *trigger control, do work, push* knows nothing about it,
+so a rule phrased as vigilance loses to an ordering defect every time. The durable form is a
+pre-push check that refuses while a run is in flight on an older SHA of the branch.
+
+**What this file is not.** It is not a place to file real failures for later. A red that is
+reproducible, or that a diff can explain, is a bug and belongs in a fix or an issue — not here. The
+entry criterion is: *the failing job cannot be explained by the change under test.* Note that this
+criterion is a claim about the BASE as well as the diff — a red inherited from the commit the branch
+was cut from is neither a flake nor a bug in the change, and separating those costs one ancestry
+check.
+
+---
+
 ## TWO SHAPES, NOT ONE — read this before filing a failure below
 
 Everything under "The signature" describes **shape A**: the driver cannot reach `backdoor.service`,
