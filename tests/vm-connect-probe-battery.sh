@@ -101,6 +101,16 @@ echo "$out" | grep -q ' n=2' || bad "ARM9: non-'machine' node names were not cou
 run "$TMP/sealed-dual.log"
 echo "$out" | grep -q ' n=1' || bad "ARM10 CONTROL: widening the node name also admitted the summary copy — got: $out"
 
+# ARM 11 / CONTROL for ARM 9, the OTHER direction. ARM 10 controls that the widened node name did
+# not reach PAST the stream prefix; nothing yet controls that it did not swallow the node FIELD
+# itself. A regex that made the `<node>:` part optional would pass ARM 9 (box counted), ARM 10 (the
+# summary copy has no prefix and is still excluded) and every other arm, while counting any
+# prefixed timing line as a connect. #212 widened `machine` -> `[A-Za-z0-9_-]+` and the next
+# widening is the one to fear: the field is REQUIRED, and this is the arm that says so.
+printf '2026-08-28T00:10:00Z vm-test-run-agentos-x> (connecting took 18.23 seconds)\n' > "$TMP/nonode.log"
+run "$TMP/nonode.log"
+echo "$out" | grep -q ' n=0' || bad "ARM11 CONTROL: a line with no <node>: field was counted as a connect — got: $out"
+
 # ARM 5 / CONTROL — a missing log file must be loud, not a quiet n=0. Otherwise ARM 2's n=0
 # loses its meaning: "no connect" and "no log" would print the same thing.
 run "$TMP/does-not-exist.log"
