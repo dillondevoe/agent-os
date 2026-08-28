@@ -510,6 +510,39 @@ Hence the loadavg column: the corrected harness logs load at each trial start, s
 variable moved can only produce a confident zero** — which is this file's control-arm rule pointed
 at the experiment instead of at the test.
 
+## The local reproduction ran under TCG. CI runs under KVM. (2026-08-28, amended)
+
+**This is the most important caveat on everything above, and it was found after the section was
+written.** Every local `nix build` run in the tables above ran the guest under *software emulation*:
+
+    qemu-system-x86_64: Could not access KVM kernel module: Permission denied
+    qemu-system-x86_64: failed to initialize kvm: Permission denied
+    qemu-system-x86_64: falling back to tcg
+
+`/dev/kvm` is `root:kvm 0660`. The invoking user is in the `kvm` group; `nix-daemon`'s *build user*
+is not. So the acceleration silently disappears exactly when the work is handed to the daemon.
+
+**CI does not have this problem, and says so in its own workflow.** `.github/workflows/vm-tests.yml`
+grants `/dev/kvm` with a udev rule, and its comment names this precise trap. A real CI log was
+pulled to check rather than assumed: **zero TCG fallbacks, `kvm-clock` throughout.**
+
+**Therefore the local dose-response above may say nothing about CI's failures.** It remains a
+reproduction of the *signature* — that claim was deliberately written narrow and still stands — but
+"emulated guest misses a 300s window under load" is not obviously the same phenomenon as a failure
+on an accelerated guest.
+
+**What separates them, so far.** Same harness, same load, same sandbox setting, only acceleration
+differing: TCG 5 failures / 8 runs, KVM 0 / 5. Fisher exact two-tailed **p=0.075** — suggestive and
+underpowered, not a result; more KVM runs are in flight. Note the durations, which are the cleaner
+signal: accelerated runs finish in a tight 305-308s, emulated ones sprawl 300-800s, and every
+emulated failure sits at ~303s, i.e. flush against the driver's 300s connect timeout.
+
+**Reusable form: a harness can differ from CI in a way that is invisible in its output and decisive
+for its result.** Nothing in the local logs announced "this run is emulated" until it was grepped
+for; the guest booted, the test ran, and the failures looked exactly like CI's. The check that
+caught it was reading CI's own workflow for what it compensates for — a compensation in the
+pipeline is evidence about a hazard the environment has.
+
 ## What is NOT established
 
 - **Root cause.** Two shapes fit every observation equally well: (a) the console/backdoor channel
