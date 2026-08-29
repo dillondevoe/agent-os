@@ -208,7 +208,8 @@ control-scrubbed object. The broker checks **semantics** against `cap.args` (a
 | **T2** | REQUIRE-CONFIRM | REQUIRE-CONFIRM |
 
 v1 confirms **everything above T0** regardless of provenance (§5: T1-auto-on-trusted is
-deferred until the shadow taint evidence earns it). So taint does not change the *live*
+deferred until the shadow taint evidence earns it; the class is defined in
+`phase2-threat-model.md` §5a). So taint does not change the *live*
 routing in v1 — it is logged (shadow) and it **will** change routing in v2. The broker
 still consults it now so the wiring, the fail-closed path, and the evidence are all real.
 T2 is confirm **regardless of provenance, always** — never auto, ever, even clean.
@@ -412,7 +413,8 @@ realizes with the new `modules/broker.nix`.
   symlink-escape OS guard; DNS-time egress enforcement.
 - **Step 8:** the §10 exfil-deny end-to-end, taint-laundering-across-sessions deny,
   loopback-egress deny, confirm-nonce-replay deny, build-fails-on-invariant-violation.
-- **v2:** T1-auto-on-trusted (once the shadow evidence earns it); peer exposure; disclosure
+- **v2:** T1-auto-on-trusted (defined in `phase2-threat-model.md` §5a, incl. the whole-fix
+  decomposition and pre-write checkpoint clauses, and the N/window promotion threshold); peer exposure; disclosure
   classification.
 
 ---

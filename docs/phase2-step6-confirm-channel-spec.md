@@ -50,6 +50,7 @@ polish.
 - Not the invoke seam (Step 7). The `AGENT_OS_INVOKE_SEAM` stub stays DENY/not-wired.
 - Not a change to tiers, taint, the registry, the arg-schema validators, or the audit chain.
 - Not T1-auto-on-trusted. v1 still confirms **everything above T0**, provenance-independent.
+  (That class is defined in `phase2-threat-model.md` §5a — defining it changed no v1 routing.)
 - Not GAP-1 (net.fetch enum). Until GAP-1, `net.fetch` never reaches confirm (its `method` enum
   arg fails arg-schema); the confirm path is exercised in v1 by `mem.remember` (T1) and
   `message.send` (T2). The client is capability-agnostic, so this is coverage-only.

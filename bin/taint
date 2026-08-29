@@ -5,7 +5,10 @@ Phase 2 · Step 3 (see docs/phase2-threat-model.md §6, §8). This is the anti-l
 mechanism. It answers one question — "is this session's context provenance-tainted by
 untrusted content?" — and, in v1, only COMPUTES and LOGS the taint-gated decision it
 WOULD make. It gates NOTHING yet (shadow): the evidence it accrues is what later earns
-the T1-auto-on-trusted optimization instead of leaping to it.
+the T1-auto-on-trusted optimization instead of leaping to it. That class is defined in
+docs/phase2-threat-model.md §5a, which also fixes the promotion threshold and states that
+the evidence is read by JOINING audit records on rid -- these shadow lines carry no rid and
+are not that join key.
 
 Two load-bearing invariants it enforces (both persisted where the model can't reach):
 

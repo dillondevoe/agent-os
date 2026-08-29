@@ -110,6 +110,9 @@ let
     };
 
     # T1 — reversible local side effects. Confirmed-in-v1 (T1-auto deferred).
+    # T1-auto-on-trusted is defined in docs/phase2-threat-model.md §5a. Note for whoever
+    # implements it: the checkpoint scope is DERIVED from the T1 readWritePaths below --
+    # "the workspace root" alone drops mem.remember's namespace.
     "mem.remember" = mkCap {
       tier = "T1"; impl = "cap-mem-remember";
       summary = "Write a memory entry (origin-stamped; taint rides the storage).";
