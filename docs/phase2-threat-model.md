@@ -145,13 +145,14 @@ Three properties are what make this gateable rather than a taste call:
 entire fix before *any* constituent request runs. One member above T1 → the **whole fix** asks.
 A fix must never be half-applied and then stop at a confirm.
 
-**Clause B — the pre-write checkpoint.** Before the first write of an auto-applied fix, take a
+**Clause B — the pre-write checkpoint.** Before **each** T1 write, take a
 checkpoint whose scope is the **union of the registry's T1 `readWritePaths`** — derived from the
 registry, not restated. (Derivation matters: "the workspace root" alone silently drops
 `mem.remember`'s `/mem/session`.) Content-addressed store, taken pre-write, bound to the audit
 `rid`. **Checkpoint failure = DENY** — no checkpoint, no auto-apply. Restore is **human-only**,
-at two grains (whole fix, or one request). This is a checkpoint, not a backup: it exists to make
-one decision reversible, and it is not a retention mechanism.
+at two grains: the whole checkpoint, or one path within it. This is a checkpoint, not a backup: it exists to make
+one decision reversible, and it is not a retention mechanism — but it is retained at least until the next
+human taint reset.
 
 **What the class admits in v1's registry** — pure `file.write` under the sandboxed workspace plus
 session-namespace `mem.remember`. `net.fetch` and `message.send` are T2 and are **never** in the
