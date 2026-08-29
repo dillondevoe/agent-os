@@ -106,13 +106,71 @@ never ask "…at tier AUTO."
 | Tier | Meaning | v1 capabilities | Rule |
 |---|---|---|---|
 | **T0 AUTO** | read-only, side-effect-free, reversible, local | `mem.recall` (scoped/allowlisted namespace), `capabilities.list`, `file.read` (declared-safe paths) | auto-run **even from untrusted-tainted requests** (can't move bytes off-box) |
-| **T1 CONFIRM** | reversible local side effects | `mem.remember` (origin-stamped per §6), `file.write` (sandboxed scope) | auto **only if fully TRUSTED-provenance**; any taint → confirm. **In v1: confirmed** (T1-auto deferred) |
+| **T1 CONFIRM** | reversible local side effects | `mem.remember` (origin-stamped per §6), `file.write` (sandboxed scope) | auto **only if fully TRUSTED-provenance**; any taint → confirm. **In v1: confirmed** (T1-auto deferred — the class is defined in §5a) |
 | **T2 HUMAN-ALWAYS** | irreversible / outward-facing / privileged | `net.fetch` (egress, INV-2), `message.send` (human/peer) | **always** explicit per-action human confirm, **regardless of provenance** — never auto, ever |
 | **T3 FORBIDDEN** | not a capability at all | modify broker/registry/audit/taint-state/tiers, read credentials, write model weights | **not expressible** as a request; changeable only via operator config (branch→PR→Fable) |
 
 **v1 scope is deliberately small:** confirm everything above T0 (drop the T1-auto-on-trusted
-optimization until the taint tracker earns it); **no peer exposure** (localhost only, inbound peers
+optimization until the taint tracker earns it — §5a defines the class and its exit condition); **no peer exposure** (localhost only, inbound peers
 deferred); **no `spawn scoped compute job`.**
+
+### 5a. `T1-auto-on-trusted` — the deferred class, defined
+
+The table above defers one optimization: letting a T1 request run without a confirm when the
+session's provenance is clean. This section defines that class so the deferral is a *decision*
+with an exit condition, not an open question re-litigated at each of the eight sites that cite
+it. Nothing here changes v1 routing — v1 still confirms everything above T0. This is the
+definition the v2 promotion PR will be gated against.
+*(Gated and ratified 2026-08-29; the class keeps its existing name — there is no second
+vocabulary for this boundary.)*
+
+**The class.** A fix is not a thing the wall can tier; **tiers are a property of capability
+requests**, declared in config and never chosen at runtime. So the class is defined by
+decomposition, not by an estimate of risk:
+
+> A proposed fix auto-APPLIES iff **every** capability request it decomposes into is tier T1 or
+> below, **and** the session is untainted at the moment of decision, **and** the audit write
+> succeeds. Anything else asks. **A fix that does not decompose into registry capabilities at
+> all asks** — an unclassifiable fix is not low-risk, it is unclassified.
+
+Three properties are what make this gateable rather than a taste call:
+
+- **Decidable by the broker**, with no new judgment surface — it already classifies requests
+  against the registry and already consults taint (`phase2-broker-spec.md` §4.5).
+- **Cannot be widened from inside.** Tier is config-only and `tiers.modify` is T3, not
+  expressible. A model cannot argue a fix into the class.
+- **Fails closed on the unknown.** The default outside the class is ask.
+
+**Clause A — decomposition is whole-fix and precedes execution.** The applier decomposes the
+entire fix before *any* constituent request runs. One member above T1 → the **whole fix** asks.
+A fix must never be half-applied and then stop at a confirm.
+
+**Clause B — the pre-write checkpoint.** Before the first write of an auto-applied fix, take a
+checkpoint whose scope is the **union of the registry's T1 `readWritePaths`** — derived from the
+registry, not restated. (Derivation matters: "the workspace root" alone silently drops
+`mem.remember`'s `/mem/session`.) Content-addressed store, taken pre-write, bound to the audit
+`rid`. **Checkpoint failure = DENY** — no checkpoint, no auto-apply. Restore is **human-only**,
+at two grains (whole fix, or one request). This is a checkpoint, not a backup: it exists to make
+one decision reversible, and it is not a retention mechanism.
+
+**What the class admits in v1's registry** — pure `file.write` under the sandboxed workspace plus
+session-namespace `mem.remember`. `net.fetch` and `message.send` are T2 and are **never** in the
+class regardless of provenance. `system.set` does not exist yet, so **every system-setting fix is
+outside this class by construction** and stays outside until it is given a tier.
+
+**Exit condition (what "the shadow evidence earns it" means).** Promotion requires, per
+capability: **N = 30** shadow decisions over **≥ 7 UTC days** with **zero** `telegram-denied`
+outcomes — one such deny resets the count. Fail-closed denies are excluded from the population
+(`confirm-human-timeout`, `confirm-timeout`, not-wired, malformed, session-id-mismatch): they
+measure the plumbing, not the judgment.
+
+**How the evidence is read.** By **joining** existing audit records — `route{T1,TRUSTED}` to the
+same-`rid` `approve`/`deny` — not by adding an emitter. `bin/taint`'s shadow line has no `rid`
+and is not the join key; it remains a logger, not a source of promotion evidence.
+
+**Scope of a promotion.** Per capability, and **widening the set requires a fresh human
+confirm** — a promotion earned by one capability does not generalize to the class. The
+taint-at-boot measurement gates the **first** promotion PR only.
 
 ---
 
@@ -151,7 +209,9 @@ provenance-aware inference wrapper for v1. The strength is in the lifecycle, not
 - **Enforcement point.** A request made while the session is tainted **cannot auto-authorize above
   T0.** In v1 that is every request above T0 anyway, so the taint tracker runs in **shadow mode** —
   it computes and logs the taint-gated decision it *would* make without gating on it — giving
-  evidence to promote T1-auto-on-trusted later instead of leaping to it.
+  evidence to promote T1-auto-on-trusted later instead of leaping to it. The class, the promotion
+  threshold, and how the shadow records are read are in §5a; the reader is a same-`rid` **join**
+  over existing audit records, not a new emitter here.
 
 Untrusted content is delivered to the model in a **structurally fenced DATA channel** (distinct
 MCP content-type / wrapper), never concatenated into the instruction stream. The guarantee is at
