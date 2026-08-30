@@ -1083,6 +1083,65 @@
             '';
 
 
+        # R1 runtime (tier 0, item 3) — THE BOOT PREWARM MUST WARM THE MODEL THE SESSION USES.
+        #
+        # `environment.variables` builds the LOGIN env (/etc/profile). systemd units do NOT
+        # inherit it. So `agos-boot-prewarm` ran agent-brain with OLLAMA_MODEL unset and fell
+        # through to that script's own `qwen3.5:9b` literal — while the session runs
+        # `qwen3.5:9b-agentos` (base + LoRA, a DIFFERENT ollama tag). Two consequences, and the
+        # second is the expensive one:
+        #   1. The prewarm's KV slot belonged to a model the session never asks for, so the
+        #      first real message still paid the full cold prefill. The unit's entire purpose
+        #      was defeated, and it reported success either way — the "3 minutes is too long"
+        #      complaint the unit exists to answer was never actually addressed on this variant.
+        #   2. keep_alive=-1 is set on BOTH paths, so the box ends up holding TWO ~6.5GB 9B
+        #      models resident. On the Dell (21GB usable, memory-bandwidth-bound) that is the
+        #      dual-resident contention Scout ranked as the single biggest latency cause.
+        #
+        # The fix derives the unit's env FROM the session attrset rather than re-spelling the
+        # tag, so the two cannot drift again. This check is the regression guard for that: it
+        # asserts the shipped unit carries an OLLAMA_MODEL and that it EQUALS the session's.
+        #
+        # Because the value is derived, "they are equal" is near-tautological against today's
+        # source — which is exactly why the check carries two PRE-FIX ARMS. `noEnv` replays the
+        # unit as it actually shipped (no environment at all) and `drifted` replays the obvious
+        # future regression (someone hardcodes a literal that later diverges from the session).
+        # Both must be REJECTED by the same predicate. Without them this check would stay green
+        # against the very shape it was written to catch, which is the failure mode this repo
+        # keeps re-earning: an arm that cannot fail is not evidence.
+        prewarm-model-matches-session =
+          let
+            lib  = nixpkgs.lib;
+            cfg  = self.nixosConfigurations.agentos-open.config;
+            # The predicate, written ONCE and applied to the real config and to both pre-fix
+            # arms — so the arms exercise the same rule production is judged by, not a
+            # paraphrase of it (two halves spelling one rule in two languages is how these
+            # guards rot).
+            ok = unitEnv: sessionVars:
+              (unitEnv ? OLLAMA_MODEL)
+              && (sessionVars ? OLLAMA_MODEL)
+              && (unitEnv.OLLAMA_MODEL == sessionVars.OLLAMA_MODEL);
+            sessionVars = cfg.environment.variables;
+            unitEnv     = cfg.systemd.services.agos-boot-prewarm.environment;
+            noEnv       = { };
+            drifted     = { OLLAMA_MODEL = "qwen3.5:9b"; };
+          in
+            assert lib.assertMsg (ok unitEnv sessionVars)
+              ("prewarm-model-matches-session: agos-boot-prewarm does not warm the session's model. "
+               + "unit OLLAMA_MODEL=" + (toString (unitEnv.OLLAMA_MODEL or "<unset>"))
+               + " session OLLAMA_MODEL=" + (toString (sessionVars.OLLAMA_MODEL or "<unset>"))
+               + ". An unset unit env is NOT a harmless default: agent-brain falls back to its own "
+               + "qwen3.5:9b literal, the prewarm warms a tag the session never asks for, and "
+               + "keep_alive=-1 then holds two 9B models resident.");
+            assert lib.assertMsg (! (ok noEnv sessionVars))
+              "prewarm-model-matches-session: PRE-FIX ARM 1 (unit with no environment) was ACCEPTED — the predicate cannot detect the shape it was written for.";
+            assert lib.assertMsg (! (ok drifted { OLLAMA_MODEL = "qwen3.5:9b-agentos"; }))
+              "prewarm-model-matches-session: PRE-FIX ARM 2 (hardcoded, drifted literal) was ACCEPTED — the predicate compares nothing.";
+            nixpkgs.legacyPackages.${system}.runCommand "prewarm-model-matches-session" { } ''
+              echo "agos-boot-prewarm warms ${unitEnv.OLLAMA_MODEL}, the same tag the session runs; two pre-fix arms rejected"
+              touch $out
+            '';
+
         # The engine MANIFEST, read off the BUILT ARTIFACT — not off the comment that claims it.
         #
         # selfimprove-open.nix's header used to say it installs "every `agos_*` module". That was

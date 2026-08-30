@@ -77,6 +77,28 @@ let
       --replace-fail '@GENESIS_SHA256@' '${genesisSha}'
     chmod +x "$out/bin/agent-brain"
   '';
+  # R1 (tier 0) — the SESSION's ollama env, read from the one attrset that defines it.
+  #
+  # `environment.variables` builds the LOGIN environment. A systemd unit does NOT inherit it.
+  # The prewarm unit below therefore ran with OLLAMA_MODEL unset and fell through to
+  # agent-brain.py's own `qwen3.5:9b` literal, while the session runs `qwen3.5:9b-agentos`
+  # (base + LoRA — a different ollama tag). See the unit's comment for the two costs.
+  #
+  # Derived, never re-spelled: any OLLAMA_* the open config sets for the session reaches the
+  # prewarm automatically, so the pair cannot drift. Re-typing the tag here would put the
+  # single rule in two places, which is how it broke the first time.
+  sessionOllamaEnv =
+    lib.filterAttrs (n: _: lib.hasPrefix "OLLAMA_" n) config.environment.variables;
+
+  # A silent fallback is the ENTIRE defect, so an unset session model is a build error rather
+  # than a unit that starts, succeeds, and warms the wrong thing.
+  _prewarmModelAsserted =
+    if sessionOllamaEnv ? OLLAMA_MODEL then true
+    else throw ("genesis-open: environment.variables.OLLAMA_MODEL is unset, so agos-boot-prewarm "
+      + "would warm agent-brain's built-in default instead of the model this system actually runs. "
+      + "That failure is invisible at runtime (the unit still exits 0), which is why it is refused "
+      + "here at build time. Set the session's model tag in the variant's configuration.");
+
 in {
   # The genesis-locked brain on the agent's PATH. Unique fingerprint for the
   # agentos-open-imports guard: `agent-brain` in systemPackages.
@@ -102,6 +124,13 @@ in {
     wantedBy = [ "multi-user.target" ];
     after = [ "ollama.service" "agos-seed-model.service" ];
     requires = [ "ollama.service" ];
+    # THE MODEL THIS WARMS IS THE MODEL THE SESSION RUNS (R1, tier 0). Derived from
+    # environment.variables above — see sessionOllamaEnv. Before this line the unit inherited
+    # nothing, warmed agent-brain's `qwen3.5:9b` fallback, and left the session's
+    # qwen3.5:9b-agentos slot as cold as if the unit had never run — while keep_alive=-1 kept
+    # BOTH ~6.5GB models resident, which on a 21GB memory-bandwidth-bound box is the largest
+    # single cause of the slowness this unit was written to fix.
+    environment = lib.seq _prewarmModelAsserted sessionOllamaEnv;
     serviceConfig = {
       Type = "oneshot";
       RemainAfterExit = true;
