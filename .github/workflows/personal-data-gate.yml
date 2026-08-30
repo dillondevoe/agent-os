@@ -1,0 +1,29 @@
+name: personal-data-gate
+# Layer 2. The pre-push hook (layer 1) lives in .git/hooks, is not version-controlled,
+# and is bypassed by --no-verify or by any clone that never ran install-hooks.sh.
+# This job is the one that cannot be skipped from a developer's machine.
+on:
+  pull_request:
+  push:
+    branches: [main]
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: self-test the gate before trusting it
+        # A gate whose battery has not run this minute is a claim. If the battery
+        # fails, the job fails even when the diff is clean -- a broken instrument
+        # returning "no hits" is the failure mode this whole file exists to prevent.
+        run: bash tests/personal-data-gate-battery.sh
+      - name: scan added lines
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            base="${{ github.event.pull_request.base.sha }}"
+          else
+            base="${{ github.event.before }}"
+          fi
+          case "$base" in ''|0000000000000000000000000000000000000000) base=$(git rev-parse HEAD~1) ;; esac
+          ./tools/personal-data-gate.sh "$base..${{ github.sha }}"
