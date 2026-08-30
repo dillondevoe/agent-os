@@ -353,6 +353,17 @@
         # unprivileged nixbld user, so this holds by construction here; the assertion below
         # makes the dependency explicit rather than lucky.
         #
+        # WHAT THIS ORACLE DOES NOT COVER, stated so a green is not over-read:
+        #  - `focus({workspace})` is ABSENT from the parser's own accepted-key message and yet
+        #    works at runtime (observed on the Dell, 2026-08-30, with a discriminating control:
+        #    the live workspace walked 1->3->5). The parse message is not the contract, so a
+        #    key missing from it is not evidence the key is dead — and conversely, a key it
+        #    accepts is not evidence the dispatcher does anything.
+        #  - `--verify-config` EXECUTES the config's `exec` lines (observed, same session). It
+        #    is a parser AND an interpreter. Startup commands therefore run inside the build
+        #    sandbox, where they will mostly fail; keep them poking units rather than doing
+        #    work, and never assume this check is side-effect-free.
+        #
         # ARMED RED BEFORE IT WAS TRUSTED. Run against the eight broken rules on main it
         # FAILED, naming lines 68-72/77/78/80 — that is the pre-fix arm, and without it a
         # check that verified nothing would have shipped looking identical to this one.

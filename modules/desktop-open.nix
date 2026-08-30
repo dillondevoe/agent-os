@@ -57,10 +57,20 @@ let
     -- The session Dillon actually lands in is this Hyprland/kitty desktop, not bare tty1;
     -- agent-shell.nix's respawn loop (PR #52) only covers the tty1-console path. "The brain
     -- IS the desktop" means THIS session opens as the brain and respawns in place on exit.
-    -- Mirrors the tty1 respawn shape exactly. $mod+RETURN stays plain kitty as the escape
-    -- hatch. --class brain-home is the anchor the ws1 rules below key on — keyed to this
-    -- dedicated class, NOT generic kitty, or every terminal would get yanked to ws1.
-    hl.exec_cmd("kitty --class brain-home -e sh -c 'while :; do agent-brain; sleep 1; done'")
+    -- $mod+RETURN stays plain kitty as the escape hatch. --class brain-home is the anchor the
+    -- ws1 rules below key on — keyed to this dedicated class, NOT generic kitty, or every
+    -- terminal would get yanked to ws1.
+    --
+    -- NOT a bare exec. Under a .conf, `exec-once` was DEFERRED until the compositor was up;
+    -- under a .lua the top level of this file runs AT CONFIG LOAD, so a bare
+    -- hl.exec_cmd("kitty ...") launched before there was a compositor to map a window into
+    -- and no brain-home window existed after boot (observed on the Dell, 2026-08-30).
+    -- The bar had already been through this and survived, for exactly one reason: it is a
+    -- systemd user unit that this line only POKES. Same shape here, and Restart=always is a
+    -- strict gain over exec-once — it covers a kitty crash, which exec-once never did. The
+    -- inner `while` loop is kept as well and is not redundant with it: the loop respawns
+    -- agent-brain IN PLACE (the window survives), the unit respawns the window.
+    hl.exec_cmd("systemctl --user restart brain-home.service")
     -- brain-overlay was removed 2026-08-06 per Dillon
     -- (rabbot-to-page-brain-overlay-decision-single-surface): "no idea why we ever made the
     -- overlay. it's one chat window always." Single surface; ws2 is free for the demo stage.
@@ -358,6 +368,31 @@ in
     description = "Waybar ambient status bar";
     serviceConfig = {
       ExecStart = "${pkgs.waybar}/bin/waybar";
+      Restart = "always";
+      RestartSec = 2;
+    };
+  };
+
+  # "The brain IS the desktop" — the brain-home window, same unit shape as the bar above and
+  # for the same reason. Under the Lua config the compositor's top level runs at CONFIG LOAD,
+  # so the old `exec` form fired before there was anything to map a window into; the bar was
+  # the only startup item that survived the switch, and it survived BECAUSE it was a unit the
+  # config merely pokes. Not WantedBy graphical-session.target (see waybar's note): the Wayland
+  # env is imported into the user manager by the dbus-update-activation-environment line in
+  # hyprland.lua, and the `systemctl --user restart` immediately after it is what starts this.
+  #
+  # Two nested restarts, deliberately, covering two different deaths:
+  #   the inner `while` loop  -> agent-brain exits, respawns IN the same window (window lives)
+  #   Restart=always          -> kitty itself dies, the window comes back
+  systemd.user.services.brain-home = {
+    description = "agent-brain home window (the desktop's primary surface)";
+    serviceConfig = {
+      # Absolute paths, not bare names: the old form ran from hyprland's exec and inherited the
+      # login shell's PATH; a user unit does not. `agent-brain` is built in genesis-open.nix, so
+      # ${"$"}{agent-brain} is not in scope here — /run/current-system/sw/bin is the seam, and it is
+      # a guaranteed one: flake.nix's agentos-open-imports guard asserts genesis-open puts
+      # agent-brain in systemPackages, so this path exists on any system that has this module.
+      ExecStart = "${pkgs.kitty}/bin/kitty --class brain-home -e ${pkgs.bash}/bin/sh -c 'while :; do /run/current-system/sw/bin/agent-brain; sleep 1; done'";
       Restart = "always";
       RestartSec = 2;
     };
