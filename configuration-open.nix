@@ -247,27 +247,90 @@ in {
   networking.interfaces.enp0s31f6.wakeOnLan.enable = true;
 
   # --- the human: FULL power (this variant ONLY) -------------------------------
-  # Real user, real bash login shell (NOT the agent-shell memory-floor REPL), in
-  # wheel with PASSWORDLESS sudo. This is the deliberate opposite of the sovereign
-  # no-agent-root posture — so Dillon (console) and Rabbot (SSH) can just DO things.
+  # Real users, real bash login shells (NOT the agent-shell memory-floor REPL). The
+  # HUMAN account is in wheel with PASSWORDLESS sudo — the deliberate opposite of the
+  # sovereign no-agent-root posture, so Dillon (console) and Rabbot (SSH) can just DO
+  # things. As of C1 (below) that human account is `operator`, and the account the
+  # local model's tool loop runs under is NOT it. The permissiveness this variant
+  # promises was always about the person; it was only ever an accident of packaging
+  # that the model inherited it from sharing the uid.
   users.mutableUsers = true;   # dev box — runtime passwd/user changes persist
+  # C1 (Fable security review, 2026-08-30) — THE LLM TOOL LOOP DOES NOT GET SUDO.
+  #
+  # `agent` is the identity the local model's tool loop runs under: agent-brain.py's
+  # run_command dispatches `bash -c <string produced by the model>`, and the model's
+  # context can contain text fetched from the open web by fetch_web. Before this
+  # change `agent` was in `wheel` under wheelNeedsPassword=false, so that path ended
+  # at uncontested root with nothing in between — no prompt, no allowlist, no broker.
+  # A sentence on a web page was one hop from the whole machine.
+  #
+  # THE SPLIT: `agent` keeps the desktop and the product experience and loses wheel.
+  # `operator` is the human's account and holds wheel + passwordless sudo. This is the
+  # same product line the firewall block above states, applied to privilege instead of
+  # reachability: OPEN IS ABOUT WHAT THE OPERATOR MAY DO, NEVER ABOUT WHAT THE MODEL
+  # MAY DO UNASKED. Dillon at the console and Rabbot over SSH lose nothing.
+  #
+  # STATED CONSEQUENCE, not discovered later: `run_command` can no longer install
+  # packages or change system state. The system prompt still tells the model to try
+  # ("Before installing ANYTHING..."), so it will attempt sudo and get a clean refusal
+  # rather than silent success. That refusal is the correct behaviour and the prompt
+  # should be reworded when the broker lands (Tier 2) — not before, because a model
+  # that never tries is a model whose containment is untested.
+  #
+  # THIS IS THE TIER-0 MINIMUM AND IT IS NOT THE WHOLE FIX. `agent` can still run
+  # arbitrary unprivileged commands, read the user's files, and reach the network.
+  # Full routing of run_command/fetch_web/summon_claude through the confirm/broker
+  # seam is Tier 2 and is where model-driven action actually becomes consented.
   users.users.agent = {
     isNormalUser = true;
-    description = "Agent OS (open/meshed dev variant)";
+    description = "Agent OS (open/meshed dev variant) — LLM tool loop runs here, NOT in wheel";
+    extraGroups = [ "networkmanager" ];
+    shell = pkgs.bash;
+    openssh.authorizedKeys.keys = meshPubKeys;
+  };
+
+  # The human operator. Everything `agent` used to be allowed to do, a person still is.
+  users.users.operator = {
+    isNormalUser = true;
+    description = "Human operator (console + mesh SSH) — wheel, passwordless sudo";
     extraGroups = [ "wheel" "networkmanager" ];
     shell = pkgs.bash;
     openssh.authorizedKeys.keys = meshPubKeys;
   };
+
+  # A control that lives only in a comment is not a control. If a later edit puts the
+  # tool-loop account back in wheel, the BUILD fails rather than the box quietly
+  # regressing to the pre-C1 posture.
+  assertions = [
+    {
+      assertion = !(builtins.elem "wheel" config.users.users.agent.extraGroups);
+      message = ''
+        agentos-open C1: users.users.agent must NOT be in "wheel". The local model's
+        tool loop runs as this account and dispatches `bash -c` on model-authored
+        strings, so wheel + wheelNeedsPassword=false hands root to anything that can
+        get text into the context (fetch_web reads the open internet). Put the human
+        in `operator` instead; that account is unrestricted by design.
+      '';
+    }
+  ];
   # mini's key also lands in root's authorized_keys (Rabbot's ask) — root SSH is
   # KEY-ONLY (prohibit-password), never a password.
   users.users.root.openssh.authorizedKeys.keys = meshPubKeys;
 
   security.sudo.enable = true;
-  security.sudo.wheelNeedsPassword = false;   # passwordless sudo — OPEN variant only
+  # Passwordless sudo for wheel — OPEN variant only. Safe to keep BECAUSE of the C1
+  # split above: wheel now contains `operator` (a person) and not `agent` (the tool
+  # loop). Re-adding `agent` to wheel while this is false is the exact pre-C1 hole,
+  # which is what the assertion above exists to refuse at build time.
+  security.sudo.wheelNeedsPassword = false;
 
   # Console convenience: land a physically-present operator straight in a bash shell
   # (no password) on tty1. SSH is key-only; sudo is passwordless — no account password
   # is needed on either path.
+  # Autologin stays `agent`: the console IS the product, and a physically-present
+  # person should land in the agent experience, not a shell. A human who needs
+  # privilege switches to `operator` (`su - operator`, or another tty). Physical
+  # presence was never the thing being defended against here — the model was.
   services.getty.autologinUser = "agent";
 
   # --- remote access: OpenSSH + Tailscale --------------------------------------
