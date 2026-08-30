@@ -263,7 +263,7 @@ SOUL=load_soul()   # read ONCE at startup, before anything else
 TOOLS=[
  {"type":"function","function":{"name":"open_url","description":"Open a website in the browser (tiles into the desktop). Use when the user wants to SEE or interact with a site — browse, shop, watch, use a web app.","parameters":{"type":"object","properties":{"url":{"type":"string","description":"full https URL"}},"required":["url"]}}},
  {"type":"function","function":{"name":"run_command","description":"Run a shell command on THIS computer and return its output. Use to check, list, inspect, create, or change things on the machine.","parameters":{"type":"object","properties":{"command":{"type":"string"}},"required":["command"]}}},
- {"type":"function","function":{"name":"arrange_windows","description":"Rearrange the desktop workspace. action is one of: 'tidy' (re-tile everything evenly), 'close' (close the focused window), 'fullscreen' (toggle fullscreen on focused window), 'cycle' (focus the next window), 'split' (toggle vertical/horizontal split for the next window).","parameters":{"type":"object","properties":{"action":{"type":"string"}},"required":["action"]}}},
+ {"type":"function","function":{"name":"arrange_windows","description":"Rearrange the desktop workspace. action is one of: 'close' (close the focused window), 'fullscreen' (toggle fullscreen on focused window), 'cycle' (focus the next window), 'split' (toggle vertical/horizontal split for the next window).","parameters":{"type":"object","properties":{"action":{"type":"string"}},"required":["action"]}}},
  {"type":"function","function":{"name":"calendar.agenda","description":"List the user's upcoming REAL calendar events. Use whenever they ask what's on their calendar / schedule / coming up / today / this week.","parameters":{"type":"object","properties":{"days":{"type":"integer","description":"days ahead to show (default 7)"}}}}},
  {"type":"function","function":{"name":"calendar.add","description":"Add a REAL event to the user's calendar. Use when they want to schedule/add/create/remember an appointment or event.","parameters":{"type":"object","properties":{"start":{"type":"string","description":"start time as 'YYYY-MM-DD HH:MM' (24h, local)"},"summary":{"type":"string","description":"the event title"},"end":{"type":"string","description":"optional end time 'YYYY-MM-DD HH:MM'; defaults to +1h"}},"required":["start","summary"]}}},
  {"type":"function","function":{"name":"calendar.now","description":"Get the exact current date/time from the calendar (station timezone).","parameters":{"type":"object","properties":{}}}},
@@ -750,12 +750,41 @@ def tool_progress_label(name,args):
     meta=TOOL_META.get(name,{"emoji":"⚡","verb":f"calling {name}"})
     return meta["emoji"], meta["verb"]+build_tool_preview(name,args)+"…"
 
-HYPR={"tidy":"layoutmsg orientationcycle","close":"killactive","fullscreen":"fullscreen,1",
-      "cycle":"cyclenext","split":"togglesplit"}
+# The arrange_windows enum, mapped to Hyprland 0.56 Lua dispatch expressions (probed against a
+# live compositor on the Dell, 2026-08-30, each negative arm controlled with a bogus name so an
+# absence is a real absence). CLOSED SET, keyed by the tool's own enum: a caller string is only
+# ever used as a dict KEY and is never interpolated into the Lua. That is the whole safety
+# property — under a hyprland.lua config `hyprctl dispatch` EVALUATES its argument as Lua
+# (hl.dispatch(<arg>)), so any interpolation into these values would be an eval sink.
+# 'tidy' is GONE rather than translated: it was `layoutmsg orientationcycle`, and orientationcycle
+# is a MASTER-layout message while this system runs dwindle, so the compositor rejected it
+# (`Unknown dwindle layoutmsg`). That rejection comes from the layout implementation, not the
+# config format, so it was INFERRED — not measured — to have been a no-op under the old .conf as
+# well; measuring it would cost a rebuild of the Dell back to the pre-Lua generation. A
+# dwindle-appropriate replacement is a product change, not a translation, so it is out of scope
+# here (Rabbot ruling, 2026-08-30).
+HYPR={"close":"hl.dsp.window.close()","fullscreen":"hl.dsp.window.fullscreen()",
+      "cycle":"hl.dsp.window.cycle_next()","split":'hl.dsp.layout("togglesplit")'}
 def do_tool(name,args):
     if name=="open_url":
         url=args.get("url","")
-        subprocess.Popen(["hyprctl","dispatch","exec",f"firefox --new-window {url}"],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+        # DIRECT ARGV — this must NEVER be routed back through `hyprctl dispatch`. Under a
+        # hyprland.lua config, hyprctl dispatch EVALUATES its argument as Lua, so a model-supplied
+        # URL interpolated into a dispatch string can close the string literal and run arbitrary
+        # Lua inside the process that owns the display. Popen with a LIST is no shell and no
+        # interpreter: the URL arrives at Firefox as one literal argv element. If you are
+        # "cleaning this up" into a dispatch call to match arrange_windows, you are reopening
+        # that hole (Rabbot ruling, 2026-08-30 — remove the sink, do not escape it).
+        #
+        # SCHEME GATE. argv removes the shell and the Lua eval, but firefox still reads a
+        # leading `-` as a FLAG rather than a URL, and its flags are not inert:
+        # --remote-debugging-port hands anything on localhost full control of the browser,
+        # --screenshot writes an arbitrary file, -P swaps the profile. `url` is model-supplied
+        # and the model reads untrusted pages (fetch_web), so this is reachable by prompt
+        # injection. Allow only the two schemes the tool is documented to take.
+        if not re.match(r"^https?://", url, re.I):
+            return f"refused: open_url takes an http(s) URL, got {url!r}"
+        subprocess.Popen(["firefox","--new-window",url],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
         return f"opened {url} in the browser"
     if name=="run_command":
         try:
@@ -764,8 +793,12 @@ def do_tool(name,args):
         except Exception as e: return f"error: {e}"
     if name=="arrange_windows":
         act=args.get("action","").lower(); disp=HYPR.get(act)
+        # Unknown key: return the error as data and DISPATCH NOTHING. The early return is the
+        # control that keeps `act` off the command line entirely.
         if not disp: return f"unknown window action '{act}'"
-        subprocess.run(["bash","-c",f"hyprctl dispatch {disp}"],capture_output=True,text=True,timeout=6)
+        # argv, not `bash -c`: `disp` is a fixed value from the table above, but routing a
+        # compositor dispatch through a shell adds a second interpreter for no benefit.
+        subprocess.run(["hyprctl","dispatch",disp],capture_output=True,text=True,timeout=6)
         return f"desktop: {act} done"
     if name in ("calendar.now","calendar.agenda","calendar.add","calendar.cals"):
         return _agos(name,args)

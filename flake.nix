@@ -324,6 +324,95 @@
             touch $out
           '';
 
+        # The Hyprland config the OPEN variant actually ships PARSES, checked by the
+        # PINNED COMPOSITOR ITSELF — not by a regex that encodes my belief about the grammar.
+        #
+        # WHY THIS EXISTS. `modules/desktop-open.nix` shipped eight `windowrule` lines that
+        # Hyprland 0.56 rejects (`invalid field type class`). Nothing caught it: the module
+        # parses as Nix, the store file is written, the system builds and switches green, and
+        # the FIRST report is an error spew on the boot screen of the machine a stranger sees.
+        # Every gate we had answered a question about Nix; none answered "does the compositor
+        # accept this?" A config that never reaches a parser is the same shape as a fix that
+        # never reaches the running process.
+        #
+        # THE ORACLE IS THE PIN. `pkgs.hyprland` here is store path
+        # xhmd6b61rnyp4061njm8cgi9d7z115jn-hyprland-0.56.0, byte-identical to the binary on
+        # the Dell — verified 2026-08-30. So this is not "a hyprland", it is THE hyprland,
+        # and its grammar cannot drift from the deployed one without the pin moving.
+        #
+        # THE INPUT IS THE ARTIFACT, NOT A COPY. It reads the store path out of the open
+        # variant's own tmpfiles rule, so the bytes checked here are the bytes symlinked to
+        # ~agent/.config/hypr/hyprland.conf. Re-deriving the text would put reader and writer
+        # in two languages with nothing asserting they agree, which is a scar this lane already
+        # carries; there is no second spelling to drift.
+        #
+        # NON-ROOT IS LOAD-BEARING, not hygiene. `Hyprland --verify-config` REFUSES to run
+        # with superuser privileges ("the privileges check is not omitted") and exits non-zero
+        # — which a naive check would read as "config is broken" for a config that is fine,
+        # or, worse, a `|| true` would launder into green. Nix builds already run as an
+        # unprivileged nixbld user, so this holds by construction here; the assertion below
+        # makes the dependency explicit rather than lucky.
+        #
+        # WHAT THIS ORACLE DOES NOT COVER, stated so a green is not over-read:
+        #  - `focus({workspace})` is ABSENT from the parser's own accepted-key message and yet
+        #    works at runtime (observed on the Dell, 2026-08-30, with a discriminating control:
+        #    the live workspace walked 1->3->5). The parse message is not the contract, so a
+        #    key missing from it is not evidence the key is dead — and conversely, a key it
+        #    accepts is not evidence the dispatcher does anything.
+        #  - `--verify-config` EXECUTES the config's `exec` lines (observed, same session). It
+        #    is a parser AND an interpreter. Startup commands therefore run inside the build
+        #    sandbox, where they will mostly fail; keep them poking units rather than doing
+        #    work, and never assume this check is side-effect-free.
+        #
+        # ARMED RED BEFORE IT WAS TRUSTED. Run against the eight broken rules on main it
+        # FAILED, naming lines 68-72/77/78/80 — that is the pre-fix arm, and without it a
+        # check that verified nothing would have shipped looking identical to this one.
+        hyprland-config-parses =
+          let
+            p = nixpkgs.legacyPackages.${system};
+            conf = self.nixosConfigurations.agentos-open.config.system.build.hyprlandConf;
+          in p.runCommand "hyprland-config-parses" {
+            nativeBuildInputs = [ p.hyprland ];
+          } ''
+            # Hyprland refuses to run as root; a build runs as nixbld, so assert that
+            # rather than assume it. If this ever fires, the check below is meaningless.
+            if [ "$(id -u)" = 0 ]; then
+              echo "hyprland-config-parses: running as root — --verify-config would refuse"
+              echo "and its non-zero exit would be indistinguishable from a broken config."
+              exit 1
+            fi
+            export XDG_RUNTIME_DIR="$(mktemp -d)"
+            export HOME="$(mktemp -d)"
+
+            echo "oracle: $(Hyprland --version 2>&1 | head -1)"
+            echo "config: ${conf}"
+
+            # --verify-config parses and exits; it never opens a display. Capture BOTH
+            # streams: 0.56 prints config errors to stdout and the summary to stderr, so
+            # a check reading only one of them can miss the whole finding.
+            set +e
+            verify="$(Hyprland --verify-config -c ${conf} 2>&1)"
+            rc=$?
+            set -e
+            printf '%s\n' "$verify"
+
+            # rc alone is NOT sufficient and that is the point: 0.56 exits 0 while printing
+            # `invalid field ...` for every rejected line, so a check keyed on the exit code
+            # is green on the exact config that spews errors at boot. Key on the errors.
+            if printf '%s' "$verify" | grep -qiE 'invalid field|error|deprecated'; then
+              echo ""
+              echo "hyprland-config-parses: the PINNED compositor rejects this config."
+              echo "Fix the config — do not relax this grep."
+              exit 1
+            fi
+            if [ "$rc" != 0 ]; then
+              echo "hyprland-config-parses: --verify-config exited $rc"
+              exit 1
+            fi
+            echo "hyprland-config-parses: pinned Hyprland 0.56 accepts the open variant config"
+            touch $out
+          '';
+
         # Phase 2 · Step 1 — evaluating the capability registry FORCES its invariant
         # assertions (mechanism 3 + INV-2 + schema). Any violation throws during eval,
         # so `nix flake check` fails to build this. That failure IS the test — a
@@ -1493,6 +1582,39 @@
         # deps (stdlib only, same as bin/mem itself); invoked via `sys.executable bin/mem`, so
         # no chmod/shebang patching is needed here. Before this check this battery ran in
         # NEITHER gate. A regression fails `nix flake check`.
+        # Item 4 (Hyprland Lua migration) — agent-brain.py's DESKTOP HANDS, red-armed.
+        # Hyprland 0.56's Lua config changes what `hyprctl dispatch` MEANS: under a hyprland.lua
+        # it EVALUATES its argument as Lua (`hl.dispatch(<arg>)`) instead of parsing a hyprlang
+        # command word. `open_url` built its dispatch string from a MODEL-SUPPLIED url, so the
+        # mechanical translation would have put attacker-influenced text inside an expression the
+        # compositor evaluates — arbitrary Lua in the process that owns the display. The ruling
+        # (Rabbot, 2026-08-30) was to REMOVE the sink rather than escape it, on the grounds that an
+        # escaper is wrong once and wrong forever. This battery therefore does not test an escaper:
+        # it asserts the sink is UNREACHABLE — a Lua-escape payload in the url produces ZERO hyprctl
+        # invocations and reaches firefox as one literal argv element — and that arrange_windows
+        # dispatches only fixed table values keyed by its closed enum, with an unknown key
+        # dispatching nothing. That last one is the CONTROL ARM: without it, a do_tool that
+        # dispatched nothing at all would satisfy the no-injection half vacuously. Shown firing, not
+        # merely green — run against the pre-fix open_url it fails four arms (verified 2026-08-30).
+        # pyyaml is in scope for the same reason providers-contract needs it: agent-brain.py imports
+        # providers.py behind an `except Exception`, so a python without it imports a silently
+        # degraded module. A regression fails `nix flake check`.
+        brain-dispatch-contract =
+          let
+            pkgs = nixpkgs.legacyPackages.${system};
+            pyWithYaml = pkgs.python3.withPackages (ps: [ ps.pyyaml ]);
+          in pkgs.runCommand "brain-dispatch-contract-check"
+            { nativeBuildInputs = [ pyWithYaml ]; } ''
+              work="$(mktemp -d)"
+              mkdir -p "$work/modules" "$work/tests"
+              cp ${./modules/agent-brain.py} "$work/modules/agent-brain.py"
+              cp ${./modules/providers.py} "$work/modules/providers.py"
+              cp ${./tests/brain-dispatch-battery.py} "$work/tests/brain-dispatch-battery.py"
+              cd "$work"
+              python3 tests/brain-dispatch-battery.py
+              touch $out
+            '';
+
         mem-contract =
           nixpkgs.legacyPackages.${system}.runCommand "mem-contract-check"
             { nativeBuildInputs = [ nixpkgs.legacyPackages.${system}.python3 ]; } ''
