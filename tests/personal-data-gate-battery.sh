@@ -59,6 +59,26 @@ out=$(printf -- '--- a/x\n+++ b/x\n@@ -1 +0,0 @@\n-relayAddr = "100.71.238.38";\
 if [ $rc -eq 0 ]; then printf 'ok   %-46s (PASS, rc=0)\n' "C9 REMOVING a leak is allowed"; pass=$((pass+1));
 else printf 'FAIL %-46s rc=%s\n%s\n' "C9 REMOVING a leak is allowed" "$rc" "$out"; fail=$((fail+1)); fi
 
+# --- 2026-08-30 widening: armed cases for the patterns added this pass --------
+# B10 is the one that matters: it is the EXACT line Rabbot found at HEAD in
+# docs/log-console-spec.md, and before this pass the gate returned 0 for it in a
+# DIFF as well -- the miss was the pattern set, not the diff/HEAD distinction.
+expect BLOCK "B10 RFC1918 host addr (the HEAD leak)" x 'Measured on the Dell (root@192.168.1.253)'  # gate-allow
+expect BLOCK "B11 10/8 host addr"                    x 'ssh admin@10.4.2.7'  # gate-allow
+expect BLOCK "B12 172.16/12 host addr"               x 'target = 172.20.3.9'  # gate-allow
+expect BLOCK "B13 mDNS hostname"                     x 'rsync to the-air.local:/srv'  # gate-allow
+expect BLOCK "B14 personal mailbox"                  x 'notify someone@gmail.com on failure'  # gate-allow
+expect BLOCK "B15 tailscale auth key"                x 'TS_AUTHKEY=tskey-auth-kQ3vN7bXyz9Lm'  # gate-allow
+expect BLOCK "B16 telegram bot token"                x 'BOT=8412345678:AAHxYzPq3nLm7QrStUvWxYz012345678901'  # gate-allow
+
+# Controls. Without these a denylist that blocked EVERY dotted quad would pass
+# the arms above while making the gate useless -- an armed zero needs its arm.
+expect PASS  "C11 172.15 is NOT private"             x 'peer = 172.15.0.1'
+expect PASS  "C12 172.32 is NOT private"             x 'peer = 172.32.0.1'
+expect PASS  "C13 public addr untouched"             x 'resolver = 8.8.8.8'
+expect PASS  "C14 semver is not an address"          x 'version = "10.4.2"'
+expect PASS  "C15 marked range definition"           x 'allow 10.0.0.0/8  # gate-allow'  # gate-allow
+
 # Null-instrument arm: an empty denylist must ERROR (2), never pass silently (0).
 out=$(: > /tmp/empty-denylist.$$; mkdiff x 'ssh dtd@mini' | PERSONAL_DATA_DENYLIST=/tmp/empty-denylist.$$ "$GATE" --stdin 2>&1); rc=$?  # gate-allow
 rm -f /tmp/empty-denylist.$$

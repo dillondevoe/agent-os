@@ -32,7 +32,21 @@ let
   roundTrip       = 15;                     # headroom for one relay round-trip (§5 ordering constraint)
 
   # Single hard-pinned relay endpoint — addr + port, NO fallback list (Fable ruling Q1, §3.1/§7).
-  relayAddr       = "100.71.238.38";        # mini's Tailscale addr (operator-config placeholder)
+  # OPERATOR-SET. This shipped as a real tailnet address with the word
+  # "placeholder" beside it, which made it look configured while being one
+  # household's actual machine -- a personal-data leak the denylist now catches.
+  #
+  # The default is LOOPBACK, not empty, and that is a correction to my own first
+  # attempt: I reached for `""` to match dillonUserId's fail-closed idiom below,
+  # then read `checks` twelve lines down -- it asserts `e.addr != ""`, so an empty
+  # addr FAILS THE BUILD rather than failing closed. The two fields are not the
+  # same shape: an unprovisioned secret is absence, an unprovisioned ENDPOINT
+  # still has to be one endpoint. 127.0.0.1 is a real, non-empty, single pinned
+  # endpoint with nothing listening on it -> telegram is unreachable, confirm
+  # falls through to getty, the egress allowance stays scoped to the local host,
+  # and the "EXACTLY one pinned endpoint" invariant is untouched. Set it in the
+  # overlay to the operator's own relay.
+  relayAddr       = "127.0.0.1";
   relayPort       = 8443;
 
   # T3 secrets, model-invisible by construction (asserted under a protected-READ path in
@@ -45,7 +59,7 @@ let
     export AGENT_OS_CONFIRM_DIR=${confirmDir}
     export AGENT_OS_CONFIRM_CHANNELS=${channels}
     export AGENT_OS_CONFIRM_HUMAN_WINDOW_S=${toString humanWindow}
-    export AGENT_OS_CONFIRM_RELAY_ADDR=${relayAddr}
+    export AGENT_OS_CONFIRM_RELAY_ADDR="${relayAddr}"
     export AGENT_OS_CONFIRM_RELAY_PORT=${toString relayPort}
     export AGENT_OS_CONFIRM_RELAY_SECRET_FILE=${relaySecretFile}
     export AGENT_OS_CONFIRM_DILLON_USER_ID=${dillonUserId}
