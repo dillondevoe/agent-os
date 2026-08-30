@@ -188,8 +188,16 @@ in {
   # part that matters, which is that it opens 22 on EVERY interface. This box carries a
   # global IPv6 address with a default route via RA and egresses as itself with no NAT,
   # so "every interface" included the public v6 internet. Measured 2026-08-30: sshd
-  # listening on 0.0.0.0:22 and [::]:22, with refused scan packets already in the log.
-  # Key-only auth was the only thing between a v6 scan and the login path.
+  # listening on 0.0.0.0:22 and [::]:22. Key-only auth was the only thing between a v6
+  # scan and the login path.
+  #
+  # What the logs do NOT show, stated because an earlier draft of this comment implied
+  # otherwise: sshd's own connection log has ZERO off-LAN sources. Every auth refusal in
+  # it comes from two RFC1918 hosts on this network. Since sshd was bound to ::/0, any
+  # off-LAN connection would have been recorded -- so its absence is the discriminating
+  # evidence, and it says the exposure was reachable but never observably reached. That
+  # is "no positive evidence of exposure," bounded by journal retention, NOT a proof of
+  # past safety. The reason to close the port is the reachability, not an attack.
   networking.firewall.enable = true;
   networking.firewall.trustedInterfaces = [ "tailscale0" ];
 
