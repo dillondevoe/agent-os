@@ -173,10 +173,56 @@ in {
 
   # OPEN network posture: NO clean-room egress wall (not imported). The default
   # NixOS stateful firewall stays on (normal inbound filtering — not the egress
-  # seal); OpenSSH opens 22 and Tailscale opens its own ports. "Open" here means
-  # no egress restrictions, so the model download and mesh traffic never fight a wall.
+  # seal). "Open" here means no EGRESS restrictions, so the model download and mesh
+  # traffic never fight a wall.
+  #
+  # "OPEN" IS ABOUT WHAT THE OPERATOR MAY DO, NEVER ABOUT WHO MAY REACH THE BOX.
+  # (Dillon, 2026-08-30: "agent os should probably account for that so lean towards
+  # making it more secure.") Full sudo, open egress, no seal — all still true. Reachable
+  # from the open internet — never. A stranger's install has to be safe on a hostile
+  # network out of the box; that is the product bar, not a hardening nicety.
+  #
+  # What this replaces, and why the old line was wrong in a way that read as fine:
+  # `services.openssh.enable` sets `allowedTCPPorts = [ 22 ]` for you, and the previous
+  # comment here recorded that as "OpenSSH opens 22" — accurate, and silent about the
+  # part that matters, which is that it opens 22 on EVERY interface. This box carries a
+  # global IPv6 address with a default route via RA and egresses as itself with no NAT,
+  # so "every interface" included the public v6 internet. Measured 2026-08-30: sshd
+  # listening on 0.0.0.0:22 and [::]:22. Key-only auth was the only thing between a v6
+  # scan and the login path.
+  #
+  # What the logs do NOT show, stated because an earlier draft of this comment implied
+  # otherwise: sshd's own connection log has ZERO off-LAN sources. Every auth refusal in
+  # it comes from two RFC1918 hosts on this network. Since sshd was bound to ::/0, any
+  # off-LAN connection would have been recorded -- so its absence is the discriminating
+  # evidence, and it says the exposure was reachable but never observably reached. That
+  # is "no positive evidence of exposure," bounded by journal retention, NOT a proof of
+  # past safety. The reason to close the port is the reachability, not an attack.
   networking.firewall.enable = true;
   networking.firewall.trustedInterfaces = [ "tailscale0" ];
+
+  # Do NOT let the openssh module open 22 globally; scope it by source below.
+  services.openssh.openFirewall = false;
+
+  # Source-scoped SSH. RFC1918 + CGNAT (tailnet) over v4; link-local + ULA over v6.
+  #
+  # DELIBERATELY ABSENT: this LAN's actual global v6 prefix. Hardcoding it would scope
+  # the rule to one household, which is the opposite of a product default — and it is
+  # personal infrastructure data, so tools/personal-data-gate.sh would refuse the commit.
+  # The gate and the product bar agree here, which is a good sign about both.
+  #
+  # CONSEQUENCE, stated rather than discovered later: SSH from a LAN peer over its
+  # GLOBAL v6 address stops working, because on a RA-configured network that address is
+  # indistinguishable from an internet one at the firewall. v4 LAN and Tailscale both
+  # still work, and tailscale0 is a trusted interface above, so no reachability this
+  # fleet depends on is lost.
+  networking.firewall.extraCommands = ''
+    for net in 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 100.64.0.0/10; do  # CGNAT range definition, not an address  # gate-allow
+      iptables -A nixos-fw -p tcp --dport 22 -s "$net" -j nixos-fw-accept
+    done
+    ip6tables -A nixos-fw -p tcp --dport 22 -s fe80::/10 -j nixos-fw-accept
+    ip6tables -A nixos-fw -p tcp --dport 22 -s fd00::/8 -j nixos-fw-accept
+  '';
 
   # Wake-on-LAN on the wired NIC (Geist's ask in the 2026-08-16 recovery plan).
   #
