@@ -348,7 +348,14 @@ def cmd_verify(argv):
                     return 1
                 try:
                     identity, _bip = _identity()
-                    ok = identity.verify(identity.npub_of(rec["signer"]),
+                    # recorded_npub, NOT npub_of: npub_of DERIVES the pubkey from the private
+                    # key at rest, so the reference point moves with the thing being checked.
+                    # An actor with key-file + log write mints a fresh key, re-signs a wholly
+                    # fabricated log as `signer`, and every signature verifies against a pubkey
+                    # derived from the attacker's own key. The registry npub answers "who is
+                    # this participant?", which does not move. Same fix identity.boot_self_test
+                    # took on 2026-08-27; verify was left on the derived anchor. Arm J.
+                    ok = identity.verify(identity.recorded_npub(rec["signer"]),
                                          record_digest(rec), bytes.fromhex(rec["sig"]))
                 except Exception as e:                   # noqa: BLE001 — fail closed on ANY
                     # Includes: identity layer unreachable, unknown participant, an
