@@ -30,136 +30,137 @@ let
 
   # Reproducible Hyprland config = the Dell live baseline (dwindle tiling, tokyonight gradient
   # borders, blur/rounding/shadows/animations). `$mod`/`$(...)` are literal in Nix '' strings.
-  hyprConf = pkgs.writeText "hyprland.conf" ''
-    monitor = , preferred, auto, 1
-    # Desktop doctrine (rabbot-to-page-P1-desktop-doctrine-spec 2026-08-02, Dillon msgs
-    # 9293/9295): the bar is now a systemd user unit (Restart=always, declared below in Nix)
-    # instead of a fire-and-forget exec-once — survives waybar crashes and config reloads.
-    # First hand the unit the Wayland session env, then start it.
-    exec-once = dbus-update-activation-environment --systemd WAYLAND_DISPLAY XDG_CURRENT_DESKTOP HYPRLAND_INSTANCE_SIGNATURE
-    exec-once = systemctl --user restart waybar.service
-    # Item 5 (same comm as item 4 above): the session Dillon actually lands in is this
-    # Hyprland/kitty desktop, not bare tty1 — agent-shell.nix's respawn loop (PR #52) only
-    # covers the tty1-console path. "The brain IS the desktop" means THIS session should open
-    # as the brain, and a death/exit should respawn it in place. Mirrors the tty1 respawn
-    # shape exactly (while :; do ...; sleep 1; done); warm relaunch ~11s per Rabbot's live
-    # numbers. $mod+RETURN (below) stays bound to plain kitty as the manual-shell escape hatch.
-    # --class brain-home is the anchor the ws1 window rules (below) key on. Keyed to this
-    # dedicated class, NOT generic kitty — otherwise every terminal (incl. the cheatsheet
-    # popup and $mod+RETURN shells) would get yanked to ws1.
-    exec-once = kitty --class brain-home -e sh -c 'while :; do agent-brain; sleep 1; done'
-    # brain-overlay (a second live chat surface pinned to special:brain) was removed
-    # 2026-08-06 per Dillon's call (rabbot-to-page-brain-overlay-decision-single-surface):
-    # "no idea why we ever made the overlay. it's one chat window always." Single surface
-    # only now; workspace 2 is freed for the demo-window "stage" (task #285 next slice).
-    exec-once = hyprctl setcursor Bibata-Modern-Amber 24
-    env = XCURSOR_SIZE,24
-    env = XCURSOR_THEME,Bibata-Modern-Amber
-    general {
-        gaps_in = 5
-        gaps_out = 12
-        border_size = 2
-        col.active_border = rgba(7aa2f7ee) rgba(bb9af7ee) 45deg
-        col.inactive_border = rgba(1f2335aa)
-        layout = dwindle
-    }
-    dwindle {
-        preserve_split = true
-    }
-    decoration {
-        rounding = 10
-        active_opacity = 1.0
-        inactive_opacity = 0.95
-        blur {
-            enabled = true
-            size = 6
-            passes = 3
-            new_optimizations = true
-        }
-        shadow {
-            enabled = true
-            range = 18
-            render_power = 3
-            color = rgba(1a1a1aee)
-        }
-    }
-    animations {
-        enabled = true
-        bezier = ease, 0.25, 0.1, 0.25, 1.0
-        animation = windows, 1, 5, ease, popin 80%
-        animation = fade, 1, 6, ease
-        animation = workspaces, 1, 5, ease, slide
-    }
-    input {
-        kb_layout = us
-        follow_mouse = 1
-    }
-    # Desktop doctrine window rules: ws1 = the brain, always; everything else opens on
-    # ws2+ so the brain never gets buried. Super+1 = "take me home."
-    # maximize (not fullscreen) on the home brain — deliberate: fullscreen would hide the
-    # bar, and "always on" bar is the whole point of the systemd unit above.
-    windowrule = workspace 1, class:^(brain-home)$
-    windowrule = maximize, class:^(brain-home)$
-    windowrule = workspace 2, class:^(firefox)$
-    windowrule = workspace 3, class:^(steam)$
-    # Games (steam_app_* class) own ws5 fullscreen — console feel: launch from Steam →
-    # game owns ws5, Super+1 back to brain, Super+5 back to game. Steam client itself
-    # stays ws3 windowed. `immediate` (tearing) deliberately NOT set — needs its own
-    # eval on this Mesa/iGPU (post-reset polish, per spec addendum; same for gamescope).
-    windowrule = workspace 5, class:^(steam_app_.*)$
-    windowrule = fullscreen, class:^(steam_app_.*)$
-    # Cheatsheet popup stays a normal floating window — never tiled away or yanked.
-    windowrule = float, title:^(cheatsheet)$
+  # Hyprland 0.56 REMOVED the `class:` / `title:` matchers from hyprlang `windowrule`
+  # (verified against the pinned compositor's own parser — every spelling of the old form
+  # is rejected, and `windowrulev2` no longer exists either). Lua is the vendor's only
+  # remaining format for these rules: the package ships `share/hypr/hyprland.lua` and no
+  # `hyprland.conf` at all. There is NO hybrid — `source =` inside a .conf reads the
+  # sourced file as hyprlang regardless of its extension, so the manager is chosen once,
+  # by the top-level config file's suffix. Hence the whole block moves, not just the rules.
+  #
+  # This is a TRANSLATION, not a redesign: every value below is the one that was here
+  # before. The one forced drift is `hl.monitor` requiring a named `output` field where
+  # hyprlang took a bare leading comma. Regex anchors are carried across verbatim —
+  # unanchored "steam" would also match steam_app_*, which would fight the ws5 rule.
+  #
+  # 0.56 resolves ~/.config/hypr/hyprland.lua ahead of hyprland.conf when both exist
+  # (verified), so the old .conf the L+ symlink used to point at is a live rollback.
+  hyprConf = pkgs.writeText "hyprland.lua" ''
+    hl.monitor({ output = "", mode = "preferred", position = "auto", scale = 1 })
 
-    $mod = SUPER
-    bind = $mod, RETURN, exec, kitty
-    bind = $mod, B, exec, firefox
-    bind = $mod, R, exec, wofi --show drun
-    bind = $mod, D, exec, wofi --show drun
-    bind = $mod, Q, killactive
-    bind = $mod, F, fullscreen
-    bind = $mod, V, togglefloating
-    bind = $mod SHIFT, M, exit
-    # Workspace switching — this config had NO workspace binds before the doctrine; the
-    # ws1/ws2+/ws5 rules above are only reachable with these. Super+1 = brain home.
-    bind = $mod, 1, workspace, 1
-    bind = $mod, 2, workspace, 2
-    bind = $mod, 3, workspace, 3
-    bind = $mod, 4, workspace, 4
-    bind = $mod, 5, workspace, 5
-    bind = $mod SHIFT, 1, movetoworkspace, 1
-    bind = $mod SHIFT, 2, movetoworkspace, 2
-    bind = $mod SHIFT, 3, movetoworkspace, 3
-    bind = $mod SHIFT, 4, movetoworkspace, 4
-    bind = $mod SHIFT, 5, movetoworkspace, 5
-    bind = $mod, left, movefocus, l
-    bind = $mod, right, movefocus, r
-    bind = $mod, up, movefocus, u
-    bind = $mod, down, movefocus, d
+    -- Desktop doctrine (rabbot-to-page-P1-desktop-doctrine-spec 2026-08-02, Dillon msgs
+    -- 9293/9295): the bar is a systemd user unit (Restart=always, declared below in Nix)
+    -- instead of a fire-and-forget exec — it survives waybar crashes and config reloads.
+    -- First hand the unit the Wayland session env, then start it.
+    hl.exec_cmd("dbus-update-activation-environment --systemd WAYLAND_DISPLAY XDG_CURRENT_DESKTOP HYPRLAND_INSTANCE_SIGNATURE")
+    hl.exec_cmd("systemctl --user restart waybar.service")
+    -- The session Dillon actually lands in is this Hyprland/kitty desktop, not bare tty1;
+    -- agent-shell.nix's respawn loop (PR #52) only covers the tty1-console path. "The brain
+    -- IS the desktop" means THIS session opens as the brain and respawns in place on exit.
+    -- Mirrors the tty1 respawn shape exactly. $mod+RETURN stays plain kitty as the escape
+    -- hatch. --class brain-home is the anchor the ws1 rules below key on — keyed to this
+    -- dedicated class, NOT generic kitty, or every terminal would get yanked to ws1.
+    hl.exec_cmd("kitty --class brain-home -e sh -c 'while :; do agent-brain; sleep 1; done'")
+    -- brain-overlay was removed 2026-08-06 per Dillon
+    -- (rabbot-to-page-brain-overlay-decision-single-surface): "no idea why we ever made the
+    -- overlay. it's one chat window always." Single surface; ws2 is free for the demo stage.
+    hl.exec_cmd("hyprctl setcursor Bibata-Modern-Amber 24")
 
-    # Window discoverability (rabbot-to-page-P2-window-discoverability-alt-tab-taskbar-
-    # cheatsheet-2026-08-01, Dillon msg 9268: clicked off Firefox, no way back). Alt-Tab is
-    # the reflex everyone reaches for first — this config had none.
-    bind = ALT, TAB, cyclenext
-    bind = ALT, TAB, bringactivetotop
-    bind = ALT SHIFT, TAB, cyclenext, prev
-    bind = ALT SHIFT, TAB, bringactivetotop
-    # Cheatsheet: Super+/ pops a kitty window rendering the static keybind list below.
-    bind = $mod, slash, exec, kitty --title cheatsheet -e less -R ${cheatsheetTxt}
+    hl.env("XCURSOR_SIZE", "24")
+    hl.env("XCURSOR_THEME", "Bibata-Modern-Amber")
 
-    # Laptop function / media keys (XF86 keysyms). Default Hyprland binds none of these, so the
-    # Dell's Fn brightness/volume keys are dead until wired here. bindel = repeat-on-hold (ramp while
-    # held) + works on lockscreen; bindl = locked, single-shot (toggles/transport). Backlight write
-    # perms come from the video group + brightnessctl's udev rule (see systemPackages block below).
-    bindel = ,XF86MonBrightnessUp,exec,brightnessctl set +10%
-    bindel = ,XF86MonBrightnessDown,exec,brightnessctl set 10%-
-    bindel = ,XF86AudioRaiseVolume,exec,wpctl set-volume -l 1.0 @DEFAULT_AUDIO_SINK@ 5%+
-    bindel = ,XF86AudioLowerVolume,exec,wpctl set-volume @DEFAULT_AUDIO_SINK@ 5%-
-    bindl  = ,XF86AudioMute,exec,wpctl set-mute @DEFAULT_AUDIO_SINK@ toggle
-    bindl  = ,XF86AudioMicMute,exec,wpctl set-mute @DEFAULT_AUDIO_SOURCE@ toggle
-    bindl  = ,XF86AudioPlay,exec,playerctl play-pause
-    bindl  = ,XF86AudioNext,exec,playerctl next
-    bindl  = ,XF86AudioPrev,exec,playerctl previous
+    hl.config({
+      ["general.gaps_in"]             = 5,
+      ["general.gaps_out"]            = 12,
+      ["general.border_size"]         = 2,
+      ["general.col.active_border"]   = { colors = { "rgba(7aa2f7ee)", "rgba(bb9af7ee)" }, angle = 45 },
+      ["general.col.inactive_border"] = "rgba(1f2335aa)",
+      ["general.layout"]              = "dwindle",
+      ["dwindle.preserve_split"]      = true,
+      ["decoration.rounding"]               = 10,
+      ["decoration.active_opacity"]         = 1.0,
+      ["decoration.inactive_opacity"]       = 0.95,
+      ["decoration.blur.enabled"]           = true,
+      ["decoration.blur.size"]              = 6,
+      ["decoration.blur.passes"]            = 3,
+      ["decoration.blur.new_optimizations"] = true,
+      ["decoration.shadow.enabled"]         = true,
+      ["decoration.shadow.range"]           = 18,
+      ["decoration.shadow.render_power"]    = 3,
+      ["decoration.shadow.color"]           = "rgba(1a1a1aee)",
+      ["animations.enabled"]  = true,
+      ["input.kb_layout"]     = "us",
+      ["input.follow_mouse"]  = 1,
+    })
+
+    hl.curve("ease", { type = "bezier", points = { {0.25, 0.1}, {0.25, 1.0} } })
+    hl.animation({ leaf = "windows",    enabled = true, speed = 5, bezier = "ease", style = "popin 80%" })
+    hl.animation({ leaf = "fade",       enabled = true, speed = 6, bezier = "ease" })
+    hl.animation({ leaf = "workspaces", enabled = true, speed = 5, bezier = "ease", style = "slide" })
+
+    -- Desktop doctrine window rules: ws1 = the brain, always; everything else opens on
+    -- ws2+ so the brain never gets buried. Super+1 = "take me home."
+    -- maximize (not fullscreen) on the home brain — deliberate: fullscreen would hide the
+    -- bar, and an always-on bar is the whole point of the systemd unit above.
+    hl.window_rule({ name = "brain-home-ws",  match = { class = "^(brain-home)$" },   workspace = "1" })
+    hl.window_rule({ name = "brain-home-max", match = { class = "^(brain-home)$" },   maximize = true })
+    hl.window_rule({ name = "firefox-ws",     match = { class = "^(firefox)$" },      workspace = "2" })
+    hl.window_rule({ name = "steam-ws",       match = { class = "^(steam)$" },        workspace = "3" })
+    -- Games (steam_app_* class) own ws5 fullscreen — console feel: launch from Steam ->
+    -- game owns ws5, Super+1 back to brain, Super+5 back to game. The Steam client itself
+    -- stays ws3 windowed. `immediate` (tearing) deliberately NOT set — needs its own eval
+    -- on this Mesa/iGPU (post-reset polish, per spec addendum; same for gamescope).
+    hl.window_rule({ name = "game-ws",        match = { class = "^(steam_app_.*)$" }, workspace = "5" })
+    hl.window_rule({ name = "game-fs",        match = { class = "^(steam_app_.*)$" }, fullscreen = true })
+    -- Cheatsheet popup stays a normal floating window — never tiled away or yanked.
+    hl.window_rule({ name = "cheatsheet",     match = { title = "^(cheatsheet)$" },   float = true })
+
+    hl.bind("SUPER+RETURN",  hl.dsp.exec_cmd("kitty"))
+    hl.bind("SUPER+B",       hl.dsp.exec_cmd("firefox"))
+    hl.bind("SUPER+R",       hl.dsp.exec_cmd("wofi --show drun"))
+    hl.bind("SUPER+D",       hl.dsp.exec_cmd("wofi --show drun"))
+    hl.bind("SUPER+Q",       hl.dsp.window.close())
+    hl.bind("SUPER+F",       hl.dsp.window.fullscreen())
+    hl.bind("SUPER+V",       hl.dsp.window.float())
+    hl.bind("SUPER+SHIFT+M", hl.dsp.exit())
+
+    -- Workspace switching — the ws1/ws2+/ws5 rules above are only reachable with these.
+    -- Super+1 = brain home.
+    for i = 1, 5 do
+      hl.bind("SUPER+" .. i,       hl.dsp.focus({ workspace = i }))
+      hl.bind("SUPER+SHIFT+" .. i, hl.dsp.window.move({ workspace = i }))
+    end
+
+    hl.bind("SUPER+left",  hl.dsp.focus({ direction = "left" }))
+    hl.bind("SUPER+right", hl.dsp.focus({ direction = "right" }))
+    hl.bind("SUPER+up",    hl.dsp.focus({ direction = "up" }))
+    hl.bind("SUPER+down",  hl.dsp.focus({ direction = "down" }))
+
+    -- Window discoverability (rabbot-to-page-P2-window-discoverability-alt-tab-taskbar-
+    -- cheatsheet-2026-08-01, Dillon msg 9268: clicked off Firefox, no way back). Alt-Tab is
+    -- the reflex everyone reaches for first — this config had none.
+    hl.bind("ALT+TAB",       hl.dsp.window.cycle_next())
+    hl.bind("ALT+TAB",       hl.dsp.window.bring_to_top())
+    hl.bind("ALT+SHIFT+TAB", hl.dsp.window.cycle_next({ prev = true }))
+    hl.bind("ALT+SHIFT+TAB", hl.dsp.window.bring_to_top())
+    -- Cheatsheet: Super+/ pops a kitty window rendering the static keybind list.
+    hl.bind("SUPER+slash",   hl.dsp.exec_cmd("kitty --title cheatsheet -e less -R ${cheatsheetTxt}"))
+
+    -- Laptop function / media keys (XF86 keysyms). Default Hyprland binds none of these, so
+    -- the Dell's Fn brightness/volume keys are dead until wired here. `repeating` = ramp
+    -- while held (was bindel), `locked` = still works on the lockscreen (was bindel/bindl).
+    -- Backlight write perms come from the video group + brightnessctl's udev rule (below).
+    local el = { repeating = true, locked = true }
+    local l  = { locked = true }
+    hl.bind("XF86MonBrightnessUp",   hl.dsp.exec_cmd("brightnessctl set +10%"), el)
+    hl.bind("XF86MonBrightnessDown", hl.dsp.exec_cmd("brightnessctl set 10%-"), el)
+    hl.bind("XF86AudioRaiseVolume",  hl.dsp.exec_cmd("wpctl set-volume -l 1.0 @DEFAULT_AUDIO_SINK@ 5%+"), el)
+    hl.bind("XF86AudioLowerVolume",  hl.dsp.exec_cmd("wpctl set-volume @DEFAULT_AUDIO_SINK@ 5%-"), el)
+    hl.bind("XF86AudioMute",         hl.dsp.exec_cmd("wpctl set-mute @DEFAULT_AUDIO_SINK@ toggle"), l)
+    hl.bind("XF86AudioMicMute",      hl.dsp.exec_cmd("wpctl set-mute @DEFAULT_AUDIO_SOURCE@ toggle"), l)
+    hl.bind("XF86AudioPlay",         hl.dsp.exec_cmd("playerctl play-pause"), l)
+    hl.bind("XF86AudioNext",         hl.dsp.exec_cmd("playerctl next"), l)
+    hl.bind("XF86AudioPrev",         hl.dsp.exec_cmd("playerctl previous"), l)
   '';
 
   # The ambient bar: workspaces | clock | volume · network · battery · tray.
@@ -326,7 +327,7 @@ in
   # Exposed so the `hyprland-config-parses` flake check can feed the EXACT derivation
   # this module ships to the pinned compositor's own parser. It is deliberately not a
   # re-derivation: the check must verify the bytes that get symlinked to
-  # ~agent/.config/hypr/hyprland.conf below, or reader and writer are two spellings of
+  # ~agent/.config/hypr/hyprland.lua below, or reader and writer are two spellings of
   # one rule with nothing asserting they agree.
   system.build.hyprlandConf = hyprConf;
 
@@ -392,7 +393,7 @@ in
     "d /home/${user}/.config/hypr 0755 ${user} users - -"
     "d /home/${user}/.config/waybar 0755 ${user} users - -"
     "d /home/${user}/.config/kitty 0755 ${user} users - -"
-    "L+ /home/${user}/.config/hypr/hyprland.conf - - - - ${hyprConf}"
+    "L+ /home/${user}/.config/hypr/hyprland.lua - - - - ${hyprConf}"
     "L+ /home/${user}/.config/waybar/config.jsonc - - - - ${waybarConf}"
     "L+ /home/${user}/.config/waybar/style.css - - - - ${waybarStyle}"
     "L+ /home/${user}/.config/kitty/kitty.conf - - - - ${kittyConf}"
