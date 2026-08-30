@@ -97,6 +97,19 @@ WIRED_VIA_WORKFLOW = {
     # step and never told the registry, and "wired somewhere I can see" is not "wired where the
     # ledger can see." The claim below is CHECKED against a non-comment line of that workflow.
     "vm-connect-probe-battery.sh": "flake-check.yml",
+    # The personal-data gate's battery (PR #222). Pure bash, no nix, no VM — same lane as the
+    # two above. Wired into its OWN workflow rather than flake-check.yml because the gate is a
+    # publication control: its workflow runs on pull_request AND on push to main, so the battery
+    # is exercised on exactly the events where a leak could land. It has no paths filter, for the
+    # reason stated three entries up.
+    #
+    # This entry exists because the contract check FAILED on the commit that added the battery,
+    # which is the check doing its job and is worth recording rather than quietly fixing: I had
+    # wired the battery into CI and satisfied myself it ran, and "wired somewhere I can see" is
+    # still not "wired where the ledger can see." A gate whose own battery is invisible to the
+    # repo's test registry is one workflow deletion away from being decorative — the same shape
+    # the gate itself guards against, aimed back at me on my first commit.
+    "personal-data-gate-battery.sh": "personal-data-gate.yml",
     # Migrated here on the #163 merge (2026-08-27). This branch had independently grown a
     # WORKFLOW_INVOKED frozenset + _named_in_any_workflow() making the SAME claim — filed 08-23,
     # four days before #184 landed WIRED_VIA_WORKFLOW. Convergence, not conflict. Keeping both
