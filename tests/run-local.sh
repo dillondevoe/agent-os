@@ -30,6 +30,7 @@
 #   file-cap-battery.sh           file.read/file.write capability round-trip + confinement
 #   providers-battery.py          11 checks — modules/providers.py provider-config contract
 #   wiring-battery.py             8 checks — agent-brain <-> providers.py wiring (needs pyyaml)
+#   brain-dispatch-battery.py     32 checks — agent-brain desktop hands: Lua eval sink unreachable
 #   cost-cap-battery.py           28 checks — cost-cap breaker: limits config + turn() trips (needs pyyaml)
 #   transport-battery.py          23 checks — provider transport seam + ollama transport
 #   anthropic-transport-battery.py 34 checks — anthropic SSE transport + translation
@@ -185,6 +186,15 @@ if need "$BIN/agent-loop" agent-loop-dispatch && need "$T/broker-stub.py" agent-
     AGENT_OS_BROKER="$T/broker-stub.py" \
     PYTHONPATH="$ROOT/modules" \
     "$PY" "$T/agent-loop-dispatch-battery.py"
+fi
+
+# brain-dispatch-battery.py — the red arm for agent-brain.py's desktop hands: proves the Lua
+# eval sink is UNREACHABLE from open_url (a Lua-escape payload in the url produces zero hyprctl
+# invocations) and that arrange_windows only ever dispatches fixed table values. Runs from the
+# repo ROOT — it resolves modules/agent-brain.py relative to cwd, same as wiring-battery.py.
+if need "$ROOT/modules/agent-brain.py" brain-dispatch; then
+  run brain-dispatch env PYTHONPATH="$ROOT/modules" \
+    sh -c 'cd "$1" && "$2" tests/brain-dispatch-battery.py' _ "$ROOT" "$PY"
 fi
 
 echo

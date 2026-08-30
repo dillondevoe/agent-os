@@ -1582,6 +1582,39 @@
         # deps (stdlib only, same as bin/mem itself); invoked via `sys.executable bin/mem`, so
         # no chmod/shebang patching is needed here. Before this check this battery ran in
         # NEITHER gate. A regression fails `nix flake check`.
+        # Item 4 (Hyprland Lua migration) — agent-brain.py's DESKTOP HANDS, red-armed.
+        # Hyprland 0.56's Lua config changes what `hyprctl dispatch` MEANS: under a hyprland.lua
+        # it EVALUATES its argument as Lua (`hl.dispatch(<arg>)`) instead of parsing a hyprlang
+        # command word. `open_url` built its dispatch string from a MODEL-SUPPLIED url, so the
+        # mechanical translation would have put attacker-influenced text inside an expression the
+        # compositor evaluates — arbitrary Lua in the process that owns the display. The ruling
+        # (Rabbot, 2026-08-30) was to REMOVE the sink rather than escape it, on the grounds that an
+        # escaper is wrong once and wrong forever. This battery therefore does not test an escaper:
+        # it asserts the sink is UNREACHABLE — a Lua-escape payload in the url produces ZERO hyprctl
+        # invocations and reaches firefox as one literal argv element — and that arrange_windows
+        # dispatches only fixed table values keyed by its closed enum, with an unknown key
+        # dispatching nothing. That last one is the CONTROL ARM: without it, a do_tool that
+        # dispatched nothing at all would satisfy the no-injection half vacuously. Shown firing, not
+        # merely green — run against the pre-fix open_url it fails four arms (verified 2026-08-30).
+        # pyyaml is in scope for the same reason providers-contract needs it: agent-brain.py imports
+        # providers.py behind an `except Exception`, so a python without it imports a silently
+        # degraded module. A regression fails `nix flake check`.
+        brain-dispatch-contract =
+          let
+            pkgs = nixpkgs.legacyPackages.${system};
+            pyWithYaml = pkgs.python3.withPackages (ps: [ ps.pyyaml ]);
+          in pkgs.runCommand "brain-dispatch-contract-check"
+            { nativeBuildInputs = [ pyWithYaml ]; } ''
+              work="$(mktemp -d)"
+              mkdir -p "$work/modules" "$work/tests"
+              cp ${./modules/agent-brain.py} "$work/modules/agent-brain.py"
+              cp ${./modules/providers.py} "$work/modules/providers.py"
+              cp ${./tests/brain-dispatch-battery.py} "$work/tests/brain-dispatch-battery.py"
+              cd "$work"
+              python3 tests/brain-dispatch-battery.py
+              touch $out
+            '';
+
         mem-contract =
           nixpkgs.legacyPackages.${system}.runCommand "mem-contract-check"
             { nativeBuildInputs = [ nixpkgs.legacyPackages.${system}.python3 ]; } ''
