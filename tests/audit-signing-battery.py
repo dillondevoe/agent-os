@@ -14,7 +14,9 @@ deleted to make the signature uncheckable. Every one of those must fail verify, 
 is control-armed (asserted to pass before the tamper, fail after) — a must-fail check that
 was never armed proves nothing about the guard, only about the fixture.
 """
-import json, os, shutil, subprocess, sys, tempfile
+import json, os, secrets, shutil, subprocess, sys, tempfile
+
+SIG_TAG = "AgentOS/audit-record-v1"          # must equal bin/audit's SIG_TAG
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 AUDIT = sys.argv[1] if len(sys.argv) > 1 else os.path.join(REPO, "bin", "audit")
@@ -53,6 +55,13 @@ def run(payload, signer=None, require=None):
         env["AGENT_OS_AUDIT_REQUIRE_SIGNED"] = require
     return subprocess.run([sys.executable, AUDIT, "append"], input=json.dumps(payload),
                           capture_output=True, text=True, env=env)
+
+
+def _record_digest(rec):
+    """bin/audit's record_digest, reproduced over the SAME unsigned projection it signs."""
+    unsigned = {k: v for k, v in rec.items() if k not in ("signer", "sig")}
+    canon = json.dumps(unsigned, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return bip340.tagged_hash(SIG_TAG, canon.encode("utf-8"))
 
 
 def verify(require=None, id_root=None):
@@ -293,6 +302,53 @@ run({"cap": "a"})
 check("I. a pin also demands signatures from genesis (unsigned log rejected)",
       verify(require="broker").returncode != 0)
 check("I. control arm: that same log passes with the pin unset", verify().returncode == 0)
+
+# -- J. KEY SUBSTITUTION: verify must anchor to the REGISTRY, not to the key on disk --
+# `npub_of()` DERIVES the pubkey from the private key currently at rest, so it answers
+# "who is this key?" — a reference point that moves with the thing it is checking. An
+# actor who can write the key file AND the log can therefore mint a fresh key, re-sign a
+# wholly fabricated log as `broker`, and pass verify: every signature checks out against
+# a pubkey derived from the attacker's own key. `recorded_npub()` answers "who is this
+# participant?", which does not move. identity.boot_self_test was anchored to the registry
+# on 2026-08-27 for exactly this reason; bin/audit verify was not.
+reset()
+for c in ("a", "b"):
+    run({"cap": c}, signer="broker")
+check("J. control arm: the honest broker log verifies before any substitution",
+      verify().returncode == 0)
+
+honest_key = open(identity._key_path("broker")).read()
+recorded = identity.recorded_npub("broker")
+with open(identity._key_path("broker"), "w") as f:      # substitute the key at rest
+    f.write(secrets.token_bytes(32).hex())
+check("J. the substituted key derives a DIFFERENT npub than the registry records "
+      "(the fixture actually substitutes something)", identity.npub_of("broker") != recorded)
+
+reset()                                                 # attacker re-signs a whole log as broker
+for c in ("forged-1", "forged-2"):
+    r = run({"cap": c}, signer="broker")
+    check("J. the forged log appends cleanly under the substituted key", r.returncode == 0)
+
+_rec = json.loads(lines()[0])
+check("J. PRE-FIX ARM: the derived anchor ACCEPTS the forgery — this is the defect, "
+      "shown firing rather than described",
+      identity.verify(identity.npub_of(_rec["signer"]), _record_digest(_rec),
+                      bytes.fromhex(_rec["sig"])))
+check("J. ...while the REGISTRY anchor rejects the same record — the two anchors "
+      "disagree, and only one of them is an identity",
+      not identity.verify(recorded, _record_digest(_rec), bytes.fromhex(_rec["sig"])))
+
+out = verify()
+check("J. THE FIX: verify rejects a log signed by a substituted key",
+      out.returncode != 0 and "broker" in out.stderr)
+
+with open(identity._key_path("broker"), "w") as f:      # restore the real key
+    f.write(honest_key)
+reset()
+run({"cap": "honest-again"}, signer="broker")
+check("J. control arm: with the real key restored an honest log verifies again — the "
+      "fix rejects substitution, not signatures",
+      verify().returncode == 0)
 
 if os.environ.get("AUDIT_SIG_KEEP_SCRATCH") != "1" and len(sys.argv) <= 2:
     shutil.rmtree(SCRATCH, ignore_errors=True)
