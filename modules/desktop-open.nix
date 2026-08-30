@@ -323,6 +323,13 @@ in
 {
   # Wayland compositor. programs.hyprland pulls in the hyprland portal + graphics defaults and
   # sets up the session; hardware.graphics is already enabled in configuration-open.nix.
+  # Exposed so the `hyprland-config-parses` flake check can feed the EXACT derivation
+  # this module ships to the pinned compositor's own parser. It is deliberately not a
+  # re-derivation: the check must verify the bytes that get symlinked to
+  # ~agent/.config/hypr/hyprland.conf below, or reader and writer are two spellings of
+  # one rule with nothing asserting they agree.
+  system.build.hyprlandConf = hyprConf;
+
   programs.hyprland.enable = true;
 
   xdg.portal = {
