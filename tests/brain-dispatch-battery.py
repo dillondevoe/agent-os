@@ -88,6 +88,27 @@ if argvs and isinstance(argvs[0], list):
 kwargs = [kw for kind, _, kw in CALLS if kind == "Popen"]
 check("B2 open_url never passes shell=True", all(not kw.get("shell") for kw in kwargs))
 
+# ── G: the SCHEME GATE. argv kills the shell and the Lua eval, but firefox reads a leading
+#      `-` as a FLAG, and its flags are not inert (--remote-debugging-port hands localhost the
+#      browser; --screenshot writes a file; -P swaps the profile). `url` is model-supplied and
+#      the model reads untrusted pages, so this is reachable by prompt injection.
+#      (Found by /security-review on the argv fix itself, 2026-08-30.)
+for bad in ("--remote-debugging-port=9222", "--screenshot=/tmp/x.png", "-P evil",
+            "file:///etc/shadow", "javascript:alert(1)", "", "ftp://example.com/x"):
+    CALLS.clear()
+    r = brain.do_tool("open_url", {"url": bad})
+    check("G " + repr(bad) + " launches NOTHING", CALLS == [], "saw: " + repr(CALLS))
+    check("G " + repr(bad) + " reports the refusal as data",
+          isinstance(r, str) and "refus" in r.lower(), "returned: " + repr(r))
+# and the control arm: an ordinary URL still opens, or the gate above is vacuous
+for good in ("https://example.com/a?b=c", "http://example.com", "HTTPS://Example.COM/x"):
+    CALLS.clear()
+    brain.do_tool("open_url", {"url": good})
+    argv_ok = [a for k, a, _ in CALLS if k == "Popen"]
+    check("G control: " + repr(good) + " DOES launch firefox with the url",
+          len(argv_ok) == 1 and good in argv_ok[0] and "firefox" in argv_ok[0][0],
+          "saw: " + repr(CALLS))
+
 # ── C: the closed enum dispatches the TABLE's value ──
 for act, expected in brain.HYPR.items():
     CALLS.clear()

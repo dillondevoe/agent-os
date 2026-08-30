@@ -775,6 +775,15 @@ def do_tool(name,args):
         # interpreter: the URL arrives at Firefox as one literal argv element. If you are
         # "cleaning this up" into a dispatch call to match arrange_windows, you are reopening
         # that hole (Rabbot ruling, 2026-08-30 — remove the sink, do not escape it).
+        #
+        # SCHEME GATE. argv removes the shell and the Lua eval, but firefox still reads a
+        # leading `-` as a FLAG rather than a URL, and its flags are not inert:
+        # --remote-debugging-port hands anything on localhost full control of the browser,
+        # --screenshot writes an arbitrary file, -P swaps the profile. `url` is model-supplied
+        # and the model reads untrusted pages (fetch_web), so this is reachable by prompt
+        # injection. Allow only the two schemes the tool is documented to take.
+        if not re.match(r"^https?://", url, re.I):
+            return f"refused: open_url takes an http(s) URL, got {url!r}"
         subprocess.Popen(["firefox","--new-window",url],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
         return f"opened {url} in the browser"
     if name=="run_command":
