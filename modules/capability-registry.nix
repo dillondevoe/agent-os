@@ -65,7 +65,7 @@ let
   #    weights, so loopback egress is effectively T3.
   egressDenyList = [
     "127.0.0.0/8" "10.0.0.0/8" "172.16.0.0/12" "192.168.0.0/16"
-    "100.64.0.0/10"   # CGNAT / shared-address space (RFC 6598) — real LAN/router hops
+    "100.64.0.0/10"   # CGNAT / shared-address space (RFC 6598) — real LAN/router hops  # gate-allow
     "169.254.0.0/16" "::1/128" "fc00::/7" "fe80::/10"
   ];
 

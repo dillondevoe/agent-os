@@ -20,7 +20,7 @@ the only signal available to them was ambiguous.
 
 ## 1. The measurement that motivated the spec, and corrected its premise
 
-Measured on the Dell (`root@192.168.1.253`, generation 31 / `4891bb9`, 2026-08-29 ~17:0xZ):
+Measured on the Dell (generation 31 / `4891bb9`, 2026-08-29 ~17:0xZ):
 
 | Fact | Value |
 |---|---|
