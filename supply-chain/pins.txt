@@ -1,0 +1,28 @@
+# Agent OS — pinned remote artifacts.
+#
+# One line per artifact that this repo DOWNLOADS AND THEN EXECUTES:
+#     <name>  <sha256>  <url>
+#
+# WHY. `bin/setup-brain.sh` used to run `curl -fsSL https://claude.ai/install.sh | bash`.
+# That shape has no integrity check of any kind: whatever bytes the socket produces are
+# executed, as the invoking user, on a box being provisioned. A hostile response, a
+# hijacked CDN edge, a captive portal, or a truncated transfer are all indistinguishable
+# from a good install — and the pipe means the FAILURE MODE IS PARTIAL EXECUTION: bash
+# runs the first half of a script whose second half never arrived.
+#
+# The pin turns an unverified fetch into a two-outcome operation: the exact bytes we
+# recorded, or nothing at all. `bin/fetch-verified.sh` is the only reader of this file.
+#
+# WHEN A PIN FAILS. A mismatch is NOT a bug in the checker, and the fix is NOT to update
+# the digest reflexively. Upstream rotates these scripts; a rotation and an attack look
+# identical from here. Diff the new bytes against the recorded ones, read the diff, THEN
+# re-record with `bin/fetch-verified.sh --record <name>` and say in the commit what changed.
+#
+# WHAT THIS DOES NOT COVER, so a green is not over-read: the README's own bootstrap
+# (`curl .../install.sh | sudo bash`) CANNOT be covered from inside this repo — it is
+# trust-on-first-use by construction, because the thing that would verify it is the thing
+# being fetched. Pinning what the installer then pulls narrows the window; it does not
+# close the bootstrap. Closing it needs an out-of-band published digest or a signature,
+# which is a separate item and is not claimed here.
+
+claude-code-install  3a68d3406cf674e17bed1733a4dcf37805e2e47d87417700007d7e1aa766a944  https://claude.ai/install.sh

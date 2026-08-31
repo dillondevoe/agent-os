@@ -1662,6 +1662,52 @@
               touch $out
             '';
 
+        # Nothing this repo DOWNLOADS AND EXECUTES is executed unverified — and the helper
+        # that enforces that is shown REFUSING before its acceptance is trusted.
+        #
+        # WHY THIS EXISTS. `bin/setup-brain.sh` ran `curl -fsSL https://claude.ai/install.sh
+        # | bash` on a box being provisioned. Whatever the socket produced was executed, and
+        # the pipe makes the failure mode PARTIAL EXECUTION — bash runs the first half of a
+        # script whose second half never arrived. There was no point in that pipeline at
+        # which bytes could have been rejected, so there was nothing for a check to check.
+        #
+        # THE ARMS RUN OFFLINE ON PURPOSE. The fixtures are `file://` URLs fetched through
+        # the real curl path, so the seam under test is the shipped one, not a mock — and a
+        # sandbox with no network cannot turn this check into a test of Anthropic's uptime.
+        # The live pin was exercised separately against the real URL before it was recorded
+        # (verified 0 on the true digest, 1 on a corrupted one, no file left behind).
+        #
+        # ARM I IS THE ONE THAT KEEPS THIS HONEST. It asserts the CALL SITE stayed converted.
+        # A verified-fetch helper sitting unused beside a live `curl | bash` is the same
+        # shape as a scanner installed with no timer — and arm I was RED against the
+        # pre-fix `bin/setup-brain.sh` before the conversion landed.
+        #
+        # NOT COVERED, stated so a green is not over-read: the README bootstrap
+        # (`curl .../install.sh | sudo bash`) is trust-on-first-use by construction — the
+        # thing that would verify it is the thing being fetched. Pinning what the installer
+        # then pulls narrows the window; closing it needs an out-of-band digest or a
+        # signature and is NOT claimed by this check.
+        supply-chain-pinning-contract =
+          let p = nixpkgs.legacyPackages.${system};
+          in p.runCommand "supply-chain-pinning-contract-check"
+            { nativeBuildInputs = with p; [ bash coreutils gnugrep gnused gawk curl ]; } ''
+              work="$(mktemp -d)"
+              mkdir -p "$work/bin" "$work/tests" "$work/supply-chain"
+              cp ${./bin/fetch-verified.sh}            "$work/bin/fetch-verified.sh"
+              cp ${./bin/setup-brain.sh}               "$work/bin/setup-brain.sh"
+              cp ${./tests/fetch-verified-battery.sh}  "$work/tests/fetch-verified-battery.sh"
+              cp ${./supply-chain/pins.txt}            "$work/supply-chain/pins.txt"
+              cd "$work"
+              bash tests/fetch-verified-battery.sh bin/fetch-verified.sh "$work"
+
+              # Every pin line must carry a full 64-hex digest and an https URL. A truncated
+              # or placeholder digest would still "match" nothing and read as a live pin.
+              if ! awk '$1 !~ /^#/ && NF { if ($2 !~ /^[0-9a-f]{64}$/ || $3 !~ /^https:/) { print "bad pin line: " $0; bad=1 } } END { exit bad }' supply-chain/pins.txt; then
+                echo "supply-chain: malformed pin in pins.txt"; exit 1
+              fi
+              touch $out
+            '';
+
         brain-context-contract =
           let
             pkgs = nixpkgs.legacyPackages.${system};
