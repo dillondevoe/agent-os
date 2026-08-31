@@ -230,6 +230,76 @@ def _think_budget():
     if v in ("low","medium","high"): return v
     return None
 THINK=_think_budget()
+
+# ── R1 CONTEXT BOUND (tier-0 item 3, Rabbot's runtime-config lane) ────────────
+# The 5440 runs this brain on CPU at ~3 tok/s. Ollama's default context is small
+# enough that a long session silently slides the front of the conversation out of
+# the window, and a large one costs KV memory the box does not have. Both failure
+# modes are INVISIBLE from the prompt: the model simply stops knowing what it was
+# told. So the window is stated here rather than inherited, and the history is
+# trimmed to fit it on OUR side, where the trim can be made structurally safe.
+NUM_CTX = int(os.environ.get("OLLAMA_NUM_CTX", "8192") or 8192)
+# Tokens held back for the reply itself — history is never allowed to fill the
+# whole window, or the model has room to read and none to answer.
+_CTX_RESERVE_TOKENS = 1536
+# ~4 chars/token is an ESTIMATE, and it is named as one: we do not have the
+# tokenizer here, and shipping a second tokenizer to agree with ollama's would be
+# the parallel-surface trap. The estimate is deliberately CONSERVATIVE (real
+# English averages closer to 4.5), so the trim errs toward dropping slightly more
+# history than strictly necessary rather than overflowing the window.
+_CHARS_PER_TOKEN = 4
+HIST_BUDGET_CHARS = max(0, (NUM_CTX - _CTX_RESERVE_TOKENS)) * _CHARS_PER_TOKEN
+
+def _msg_chars(m):
+    # Cost of a message on the wire, tool calls included — a turn that called five
+    # tools carries its arguments into the next request and a content-only measure
+    # would score it as free.
+    n = len(m.get("content") or "")
+    for tc in (m.get("tool_calls") or []):
+        n += len(json.dumps(tc))
+    return n + 8   # role/JSON framing, order-of-magnitude
+
+def trim_history(msgs, budget=None):
+    """Trim `msgs` IN PLACE to fit the context window. Returns the number dropped.
+
+    TWO INVARIANTS, and the second one is the whole reason this is a function and
+    not a slice expression:
+
+    1. msgs[0] (the system message) is NEVER dropped. It is also the byte-identical
+       KV-cache prefix (see main()), so dropping it would be a cache miss on top of
+       a lobotomy.
+
+    2. THE HISTORY IS ONLY EVER CUT AT A `user` MESSAGE. An assistant message
+       carrying `tool_calls` and the `tool` messages answering it are ONE
+       indivisible group on the wire: drop the assistant half and the tool results
+       become orphans referring to a call that is no longer in the transcript.
+       Ollama tolerates it unevenly and the Anthropic transport (_anthropic_-
+       translate_messages) does not tolerate it at all — a tool_result block with
+       no matching tool_use is an API-level 400. A naive "drop the oldest k
+       messages" trimmer produces exactly that, which is why the battery arms the
+       naive version against the same input and asserts it DOES orphan.
+
+    A single user group larger than the whole budget is kept anyway: there is no
+    correct smaller answer, and truncating the user's own words to fit is a worse
+    failure than letting the server window it.
+    """
+    if budget is None: budget = HIST_BUDGET_CHARS
+    if len(msgs) < 2: return 0
+    # Legal cut points, newest first: indices >0 where a user turn begins.
+    cuts = [i for i in range(1, len(msgs)) if msgs[i].get("role") == "user"]
+    if not cuts: return 0
+    head = _msg_chars(msgs[0])
+    # Walk cut points from the NEWEST backwards, keeping the longest suffix that fits.
+    best = cuts[-1]
+    for i in reversed(cuts):
+        if head + sum(_msg_chars(m) for m in msgs[i:]) <= budget:
+            best = i
+        else:
+            break
+    if best <= 1: return 0
+    dropped = best - 1
+    del msgs[1:best]
+    return dropped
 MODEL_3B="qwen2.5:3b-augur"  # front-door (model-3b-open.nix); absent → front-door bypasses to the 9B main brain
 
 # ── THE SOUL (genesis lock, Geist ruling "bind not bytes") ─────────────────────
@@ -380,7 +450,8 @@ def _spin(render, interval=0.35):
 # a pure refactor with an existing oracle (identical rendering, batteries green), and the new
 # provider is then a pure ADDITION that cannot regress the local floor path.
 def _ollama_stream_events(msgs, provider=None):
-    payload={"model":MODEL,"messages":msgs,"tools":TOOLS,"stream":True,"keep_alive":-1}
+    payload={"model":MODEL,"messages":msgs,"tools":TOOLS,"stream":True,"keep_alive":-1,
+             "options":{"num_ctx":NUM_CTX}}
     if THINK is not None: payload["think"]=THINK
     r=urllib.request.Request(OLLAMA,data=json.dumps(payload).encode(),headers={"Content-Type":"application/json"})
     with urllib.request.urlopen(r,timeout=CHAT_TIMEOUT_S) as resp:
@@ -697,7 +768,8 @@ def chat_stream(msgs, route=None):
 
 def chat(msgs):
     # non-streaming fallback, kept for --once callers that want a single return value only
-    body=json.dumps({"model":MODEL,"messages":msgs,"tools":TOOLS,"stream":False,"keep_alive":-1}).encode()
+    body=json.dumps({"model":MODEL,"messages":msgs,"tools":TOOLS,"stream":False,"keep_alive":-1,
+                     "options":{"num_ctx":NUM_CTX}}).encode()
     r=urllib.request.Request(OLLAMA,data=body,headers={"Content-Type":"application/json"})
     return json.load(urllib.request.urlopen(r,timeout=180))["message"]
 
@@ -1109,7 +1181,8 @@ def frontdoor_turn(msgs, consent_source=None):
     stop,t=_spin(lambda i: (sys.stdout.write(f"\r\033[K\033[2mrouting{'.'*(i%3+1)}\033[0m"),sys.stdout.flush()))
     t0=time.time()
     try:
-        body=json.dumps({"model":MODEL_3B,"messages":msgs,"tools":TOOLS,"stream":False,"keep_alive":-1}).encode()
+        body=json.dumps({"model":MODEL_3B,"messages":msgs,"tools":TOOLS,"stream":False,"keep_alive":-1,
+                         "options":{"num_ctx":NUM_CTX}}).encode()
         r=urllib.request.Request(OLLAMA,data=body,headers={"Content-Type":"application/json"})
         with CHAT_LOCK:
             msg=json.load(urllib.request.urlopen(r,timeout=CHAT_TIMEOUT_S))["message"]
@@ -1235,6 +1308,10 @@ def main():
         # the next turn even if this one raises.
         _turn_consent=CONSENT.consume()
         msgs.append(user_turn(u))
+        # Bound the history BEFORE the turn, not after: the request about to go out is
+        # the one that has to fit. Trimming afterwards would let the overflowing turn
+        # ship first and only tidy up for the next one.
+        trim_history(msgs)
         try:
             frontdoor_turn(msgs, _turn_consent)
         except KeyboardInterrupt:

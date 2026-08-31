@@ -197,6 +197,15 @@ if need "$ROOT/modules/agent-brain.py" brain-dispatch; then
     sh -c 'cd "$1" && "$2" tests/brain-dispatch-battery.py' _ "$ROOT" "$PY"
 fi
 
+# brain-context-battery.py — the R1 context bound (tier-0 item 3): options.num_ctx on every
+# ollama payload, and a history trimmer that only ever cuts at a user boundary so a tool
+# result is never orphaned from the assistant tool_call it answers. Arm F runs the naive
+# trimmer on the same fixture and asserts it DOES cut mid-group.
+if need "$ROOT/modules/agent-brain.py" brain-context; then
+  run brain-context env PYTHONPATH="$ROOT/modules" \
+    sh -c 'cd "$1" && "$2" tests/brain-context-battery.py' _ "$ROOT" "$PY"
+fi
+
 echo
 printf 'pass=%d fail=%d skip=%d\n' "$pass" "$fail" "$skip"
 if [ "$fail" -gt 0 ]; then
