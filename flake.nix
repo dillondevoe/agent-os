@@ -1615,6 +1615,39 @@
               touch $out
             '';
 
+        # The R1 CONTEXT BOUND, checked against the shipped module (tier-0 item 3).
+        #
+        # Two halves, both of which are easy to ship inert. `num_ctx` is a JSON key: omit it
+        # and the daemon quietly uses its own default, and nothing anywhere reports that the
+        # window you declared is not the window you got. The history bound is worse — an
+        # unbounded `msgs` list looks IDENTICAL to a bounded one until the session is long
+        # enough to matter, at which point the front of the conversation slides out of the
+        # window and the brain simply stops knowing what it was told. Neither failure has a
+        # symptom a user can name.
+        #
+        # The arm that earns its keep is F: it runs the NAIVE trimmer ("drop the oldest k
+        # messages") over the same fixture and asserts it leaves the transcript cut MID-GROUP
+        # — an assistant's tool_calls separated from the tool results answering it, which the
+        # Anthropic transport rejects outright. Without that arm, the boundary rule in
+        # trim_history() could be passing on an input no trimmer could get wrong.
+        # E is the control arm: an under-budget history must come back UNCHANGED, so a
+        # trimmer that deleted everything cannot satisfy the other arms vacuously.
+        brain-context-contract =
+          let
+            pkgs = nixpkgs.legacyPackages.${system};
+            pyWithYaml = pkgs.python3.withPackages (ps: [ ps.pyyaml ]);
+          in pkgs.runCommand "brain-context-contract-check"
+            { nativeBuildInputs = [ pyWithYaml ]; } ''
+              work="$(mktemp -d)"
+              mkdir -p "$work/modules" "$work/tests"
+              cp ${./modules/agent-brain.py} "$work/modules/agent-brain.py"
+              cp ${./modules/providers.py} "$work/modules/providers.py"
+              cp ${./tests/brain-context-battery.py} "$work/tests/brain-context-battery.py"
+              cd "$work"
+              python3 tests/brain-context-battery.py
+              touch $out
+            '';
+
         mem-contract =
           nixpkgs.legacyPackages.${system}.runCommand "mem-contract-check"
             { nativeBuildInputs = [ nixpkgs.legacyPackages.${system}.python3 ]; } ''
