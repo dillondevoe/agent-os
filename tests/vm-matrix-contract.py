@@ -97,6 +97,13 @@ WIRED_VIA_WORKFLOW = {
     # step and never told the registry, and "wired somewhere I can see" is not "wired where the
     # ledger can see." The claim below is CHECKED against a non-comment line of that workflow.
     "vm-connect-probe-battery.sh": "flake-check.yml",
+    # The installer flake-pin freshness check (PR #234). It CANNOT be a flake.nix test-* package
+    # and that is not a preference: it asserts the pin is an ANCESTOR of main and measures commit
+    # DISTANCE, both of which need git history — and a nix build sandbox has no .git at all. Wired
+    # into flake-check.yml, which fetches origin/main explicitly before running it. It tripped
+    # THIS check on the commit that added it, exactly as the two entries above did; a check about
+    # controls that never run, caught by the control that catches controls that never run.
+    "pin-freshness.sh": "flake-check.yml",
     # The personal-data gate's battery (PR #222). Pure bash, no nix, no VM — same lane as the
     # two above. Wired into its OWN workflow rather than flake-check.yml because the gate is a
     # publication control: its workflow runs on pull_request AND on push to main, so the battery

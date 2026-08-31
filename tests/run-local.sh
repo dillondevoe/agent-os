@@ -205,6 +205,13 @@ if need "$ROOT/modules/agos-user-drift/agos-user-drift.py" user-drift; then
   run user-drift sh -c 'cd "$1" && bash tests/user-drift-battery.sh modules/agos-user-drift/agos-user-drift.py' _ "$ROOT"
 fi
 
+# The installer's flake pin must not rot behind main. Runs here as well as in CI on purpose:
+# a check that exists only in the workflow is one nobody sees until after they have pushed,
+# and this one's whole job is to be noticed BEFORE a stale pin ships.
+if need "$ROOT/tests/pin-freshness.sh" pin-freshness; then
+  run pin-freshness sh -c 'cd "$1" && bash tests/pin-freshness.sh' _ "$ROOT"
+fi
+
 if need "$ROOT/bin/fetch-verified.sh" supply-chain; then
   run supply-chain sh -c 'cd "$1" && bash tests/fetch-verified-battery.sh bin/fetch-verified.sh "$1"' _ "$ROOT"
 fi

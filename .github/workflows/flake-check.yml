@@ -186,6 +186,23 @@ jobs:
       - name: vm-connect probe battery
         run: ./tests/vm-connect-probe-battery.sh
 
+      # The installer's FLAKE_REV must not rot behind main. install.sh pins the flake to a rev
+      # so a fresh install builds a KNOWN system rather than whatever main is that second; the
+      # cost of that trade is a NEW quiet failure — main advances, nobody bumps, and a fresh
+      # install lays down a system that predates every fix since, with nothing erroring anywhere.
+      # Rabbot's ruling 2026-08-31: aging must be LOUD, not visible-if-someone-looks.
+      #
+      # The fetch is explicit rather than relying on the checkout's depth: the default checkout is
+      # SHALLOW, so `origin/main` and `git rev-list` silently resolve to nothing, and a check that
+      # cannot see the mainline would report on a distance it never measured. `--depth=200` bounds
+      # the fetch while still exceeding the 25-commit threshold by a wide margin; if the pin is
+      # ever further back than that, the ancestry test fails rather than passing on a truncated
+      # history — the empty-result law, applied to git.
+      - name: install.sh flake pin is fresh (not rotting behind main)
+        run: |
+          git fetch --depth=200 origin main
+          BASE=FETCH_HEAD ./tests/pin-freshness.sh
+
       # `--option sandbox true` is the whole point: it reproduces the clean-room build
       # (no /usr/bin/env, patchShebangs load-bearing) that a laptop's non-sandbox check hides.
       # `-L` prints full build logs so a battery failure is legible in the run output.
