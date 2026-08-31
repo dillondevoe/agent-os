@@ -84,6 +84,7 @@ in {
     ./modules/selfimprove-open.nix
     ./modules/key-drift-open.nix
     ./modules/user-drift-open.nix
+    ./modules/tailscale-ssh-reassert-open.nix
     ./modules/calculator-open.nix
     ./modules/files-open.nix
     ./modules/email-open.nix

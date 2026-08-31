@@ -1069,6 +1069,10 @@
           "agentos-open-imports: user-drift-open.nix is NOT imported — agos-user-drift missing from systemPackages.";
         assert lib.assertMsg (builtins.hasAttr "agos-user-drift" cfg.systemd.timers)
           "agentos-open-imports: the user/group scanner is installed but NOTHING RUNS IT — the agos-user-drift timer is absent. mutableUsers=true means a console-added wheel member persists across every rebuild; a scanner sitting unrun on disk is the same shape as the hand-edited /etc/group it exists to catch.";
+            assert lib.assertMsg (hasPkg "agos-tailscale-ssh-reassert")
+              "agentos-open-imports: tailscale-ssh-reassert-open.nix is NOT imported — agos-tailscale-ssh-reassert missing from systemPackages.";
+            assert lib.assertMsg (builtins.hasAttr "agos-tailscale-ssh-reassert" cfg.systemd.timers)
+              "agentos-open-imports: the Tailscale SSH re-assert is installed but NOTHING RUNS IT — the agos-tailscale-ssh-reassert timer is absent. This unit exists precisely BECAUSE tailscaled-autoconnect asserts --ssh once at first auth and never again; shipping it without a timer reproduces the one-shot defect it was written to close, and the door it holds open is the mesh's own write path onto this box.";
             assert lib.assertMsg (hasPkg "agos-calc")
               "agentos-open-imports: calculator-open.nix is NOT imported — agos-calc missing from systemPackages.";
             assert lib.assertMsg (hasPkg "agos-files")
