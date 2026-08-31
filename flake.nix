@@ -1061,6 +1061,10 @@
               "agentos-open-imports: selfimprove-open.nix is NOT imported — agos-selfimprove missing from systemPackages. The whole orchestration engine (observe/propose/cycle/surface/lcm/advisor/subagents) then exists ONLY as CI fixtures, green and absent from every machine, which is exactly the state this module was written to end.";
             assert lib.assertMsg (builtins.hasAttr "agos-selfimprove" cfg.systemd.timers)
               "agentos-open-imports: selfimprove-open.nix installs the engine but NOTHING RUNS IT — the agos-selfimprove timer is absent. A package nothing invokes is the same defect one step later.";
+            assert lib.assertMsg (hasPkg "agos-key-drift")
+              "agentos-open-imports: key-drift-open.nix is NOT imported — agos-key-drift missing from systemPackages.";
+            assert lib.assertMsg (builtins.hasAttr "agos-key-drift" cfg.systemd.timers)
+              "agentos-open-imports: key-drift-open.nix installs the scanner but NOTHING RUNS IT — the agos-key-drift timer is absent. An undeclared root key is found by a scan that FIRES, and a package sitting unrun on disk is the same shape as the hand-written authorized_keys it was written to catch.";
             assert lib.assertMsg (hasPkg "agos-calc")
               "agentos-open-imports: calculator-open.nix is NOT imported — agos-calc missing from systemPackages.";
             assert lib.assertMsg (hasPkg "agos-files")
@@ -1632,6 +1636,32 @@
         # trim_history() could be passing on an input no trimmer could get wrong.
         # E is the control arm: an under-budget history must come back UNCHANGED, so a
         # trimmer that deleted everything cannot satisfy the other arms vacuously.
+        # The key-drift SCANNER discriminates. Note what this check is and is not: it
+        # proves the instrument can tell a planted undeclared key from a declared one, it
+        # does NOT say anything about whether any particular box is clean. That second
+        # question is answered by the systemd unit on the running machine and by nothing
+        # here, because an evaluation cannot see a file a person typed at a console.
+        #
+        # Arm A's fixture is the actual key removed from the Dell on 2026-08-31, and it is
+        # the pre-fix arm: without it, a scanner that had been quietly reduced to `exit 0`
+        # would ship looking exactly like this one. Arm B is the control that stops a
+        # scanner returning 1 unconditionally from passing A — and it is deliberately
+        # textually different from the declared line, so it also proves the comparison is
+        # by fingerprint rather than by string. Arm E is the one this lane keeps
+        # relearning: an instrument that cannot read its input must not report clean.
+        key-drift-contract =
+          let p = nixpkgs.legacyPackages.${system};
+          in p.runCommand "key-drift-contract-check"
+            { nativeBuildInputs = with p; [ bash coreutils gnugrep gnused gawk openssh ]; } ''
+              work="$(mktemp -d)"
+              mkdir -p "$work/modules/agos-key-drift" "$work/tests"
+              cp ${./modules/agos-key-drift/agos-key-drift.sh} "$work/modules/agos-key-drift/agos-key-drift.sh"
+              cp ${./tests/key-drift-battery.sh} "$work/tests/key-drift-battery.sh"
+              cd "$work"
+              bash tests/key-drift-battery.sh modules/agos-key-drift/agos-key-drift.sh
+              touch $out
+            '';
+
         brain-context-contract =
           let
             pkgs = nixpkgs.legacyPackages.${system};

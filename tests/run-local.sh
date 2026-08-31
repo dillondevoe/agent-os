@@ -201,6 +201,10 @@ fi
 # ollama payload, and a history trimmer that only ever cuts at a user boundary so a tool
 # result is never orphaned from the assistant tool_call it answers. Arm F runs the naive
 # trimmer on the same fixture and asserts it DOES cut mid-group.
+if need "$ROOT/modules/agos-key-drift/agos-key-drift.sh" key-drift; then
+  run key-drift sh -c 'cd "$1" && bash tests/key-drift-battery.sh modules/agos-key-drift/agos-key-drift.sh' _ "$ROOT"
+fi
+
 if need "$ROOT/modules/agent-brain.py" brain-context; then
   run brain-context env PYTHONPATH="$ROOT/modules" \
     sh -c 'cd "$1" && "$2" tests/brain-context-battery.py' _ "$ROOT" "$PY"

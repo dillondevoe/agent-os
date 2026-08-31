@@ -82,6 +82,7 @@ in {
     ./modules/model-lora-open.nix # seeds qwen3.5:9b-agentos (base + fine-tuned adapter); selected below
     ./modules/genesis-open.nix
     ./modules/selfimprove-open.nix
+    ./modules/key-drift-open.nix
     ./modules/calculator-open.nix
     ./modules/files-open.nix
     ./modules/email-open.nix
