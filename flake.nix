@@ -417,16 +417,20 @@
             # actually called `tailscale set --ssh=true`. The pre-fix binary exits 2.
             printf '%s' '{"RunSSH":false}' > "$AGOS_TEST_PREFS"; : > "$AGOS_TEST_LOG"
             set +e; res=$(run 2>&1); rc=$?; set -e
-            printf 'arm1 rc=%s %s\n' "$rc" "$res"
+            printf 'arm1 REGRESSION-ARM (RunSSH=false MUST heal) rc=%s EXPECT=0 %s\n' "$rc" "$res"
             [ "$rc" = 0 ] || fail "RunSSH=false did not heal (rc=$rc): $res"
             grep -q -- '--ssh=true' "$AGOS_TEST_LOG" \
               || fail "RunSSH=false reported healed without calling set --ssh=true"
 
-            # ARM 2 — control. Already serving: exit 0 and NO set call. Without this, a
+            # ARM 2 — CONTROL. Its row says so in the OUTPUT, not just here: on 2026-08-31 a
+            # digest read this arm's bare `arm2 rc=0` line as a reported defect and broadcast
+            # "deploy claim needed" to six brains before being corrected. A control arm that
+            # only announces itself in a source comment is indistinguishable from a finding to
+            # everything downstream that reads the log. Already serving: exit 0 and NO set call. Without this, a
             # binary that blindly set on every run would pass arm 1.
             printf '%s' '{"RunSSH":true}' > "$AGOS_TEST_PREFS"; : > "$AGOS_TEST_LOG"
             set +e; res=$(run 2>&1); rc=$?; set -e
-            printf 'arm2 rc=%s %s\n' "$rc" "$res"
+            printf 'arm2 CONTROL, not a defect (RunSSH=true MUST stay silent) rc=%s EXPECT=0 %s\n' "$rc" "$res"
             [ "$rc" = 0 ] || fail "RunSSH=true should be a silent pass (rc=$rc)"
             [ ! -s "$AGOS_TEST_LOG" ] || fail "RunSSH=true called set anyway: $(cat "$AGOS_TEST_LOG")"
 
@@ -435,7 +439,7 @@
             # simply deleting the sentinel and calling every non-true value false.
             printf '%s' '{"WantRunning":true}' > "$AGOS_TEST_PREFS"
             set +e; res=$(run 2>&1); rc=$?; set -e
-            printf 'arm3 rc=%s %s\n' "$rc" "$res"
+            printf 'arm3 CONTROL, not a defect (absent field MUST cannot-assess) rc=%s EXPECT=2 %s\n' "$rc" "$res"
             [ "$rc" = 2 ] || fail "absent RunSSH should be CANNOT-ASSESS 2, got $rc"
 
             echo "tailscale-ssh-reassert-heals-off-state: false heals, true is silent, absent cannot-assess"
