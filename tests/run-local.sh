@@ -32,7 +32,7 @@
 #   wiring-battery.py             8 checks — agent-brain <-> providers.py wiring (needs pyyaml)
 #   brain-dispatch-battery.py     32 checks — agent-brain desktop hands: Lua eval sink unreachable
 #   cost-cap-battery.py           28 checks — cost-cap breaker: limits config + turn() trips (needs pyyaml)
-#   transport-battery.py          23 checks — provider transport seam + ollama transport
+#   transport-battery.py          31 checks — provider transport seam + ollama transport
 #   anthropic-transport-battery.py 34 checks — anthropic SSE transport + translation
 #   bip340-battery.py             47 checks — vendored BIP-340 signer vs the OFFICIAL vectors,
 #                                 must-fail half included, control-armed
