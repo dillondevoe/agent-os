@@ -1,5 +1,13 @@
 { config, lib, pkgs, ... }:
 let
+  # ONE spelling of the pref-reading rule, consumed by the healer AND by the flake
+  # check that arms it. The bug this replaced (`.RunSSH // "MISSING"`) survived review
+  # and a green deploy; what it could not have survived is a test feeding it the false
+  # case. Keeping the program here rather than retyping it in the check is the point —
+  # a check that carries its own copy of the expression stops testing the shipped one
+  # the moment they drift, and every scar on this surface is that drift.
+  runSSHJqProgram = ''if has("RunSSH") then (.RunSSH|tostring) else "MISSING" end'';
+
   agos-tailscale-ssh-reassert = pkgs.writeShellApplication {
     name = "agos-tailscale-ssh-reassert";
     runtimeInputs = [ config.services.tailscale.package pkgs.jq ];
@@ -44,7 +52,19 @@ let
         exit 2
       }
 
-      runssh="$(printf '%s' "$prefs" | jq -r '.RunSSH // "MISSING"' 2>/dev/null)"
+      # `has("RunSSH")`, NOT `.RunSSH // "MISSING"`. jq's alternative operator fires on
+      # `false` as well as `null`, so the original spelling mapped RunSSH=false — THE ONE
+      # STATE THIS UNIT EXISTS TO FIX — onto the MISSING sentinel and out through the
+      # CANNOT-ASSESS arm. Proven on the box 2026-08-31: after a hand `tailscale set
+      # --ssh=false`, the timer fired on schedule at 03:49:46 CDT and journalled
+      # "CANNOT-ASSESS — .RunSSH was 'MISSING'", exit 2, unit `failed`, pref still false.
+      # The healer was reachable only in the branch where there was nothing to heal.
+      #
+      # The sentinel was for an ABSENT field, and absence is what it could no longer
+      # detect: `false` and "not there" arrived at the same string, so the code could not
+      # tell "the pref is off" from "I cannot read the pref". Same class as the
+      # wrong-vantage non-probe — a discriminator that collapses in the failure state.
+      runssh="$(printf '%s' "$prefs" | jq -r ${lib.escapeShellArg runSSHJqProgram} 2>/dev/null)"
 
       case "$runssh" in
         true)
@@ -77,6 +97,10 @@ let
     '';
   };
 in {
+  # Exposed so `flake.nix`'s check can run the EXACT shipped binary against a stub
+  # `tailscale`, rather than a re-derived copy of its logic.
+  system.build.agosTailscaleSshReassert = agos-tailscale-ssh-reassert;
+
   environment.systemPackages = [ agos-tailscale-ssh-reassert ];
 
   systemd.services.agos-tailscale-ssh-reassert = {
