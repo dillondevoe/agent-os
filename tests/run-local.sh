@@ -201,6 +201,10 @@ fi
 # ollama payload, and a history trimmer that only ever cuts at a user boundary so a tool
 # result is never orphaned from the assistant tool_call it answers. Arm F runs the naive
 # trimmer on the same fixture and asserts it DOES cut mid-group.
+if need "$ROOT/modules/agos-user-drift/agos-user-drift.py" user-drift; then
+  run user-drift sh -c 'cd "$1" && bash tests/user-drift-battery.sh modules/agos-user-drift/agos-user-drift.py' _ "$ROOT"
+fi
+
 if need "$ROOT/bin/fetch-verified.sh" supply-chain; then
   run supply-chain sh -c 'cd "$1" && bash tests/fetch-verified-battery.sh bin/fetch-verified.sh "$1"' _ "$ROOT"
 fi
