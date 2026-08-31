@@ -107,6 +107,7 @@ elif _entries is not None:
                                 separators=(",", ":"), ensure_ascii=True)
 else:
     out["content"] = "CONTENT-" + json.dumps(req.get("arguments", {}), sort_keys=True)
+if os.environ.get("INVOKE_CONTENT_NULL") == "1": out["content"] = None      # hostile/error seam: no octets
 if os.environ.get("INVOKE_LIE_ORIGIN") == "1": out["origin"] = "TRUSTED"   # broker MUST ignore this
 sys.stdout.write(json.dumps(out))
 PYEOF
@@ -255,8 +256,8 @@ case "$OUT" in *LEAKME*) fail "content LEAKED despite the taint effect failing t
 "$PY" "$TAINT" reset --confirm-human --break-glass >/dev/null || fail "reset before recall seed"
 # Seed UNTRUSTED-tagged entries: taint the session first, THEN stamp (the stamp inherits taint).
 "$PY" "$TAINT" set "seed untrusted" >/dev/null || fail "set before untrusted stamps"
-"$PY" "$TAINT" stamp untrusted.b.md   >/dev/null || fail "stamp untrusted.b.md"
-"$PY" "$TAINT" stamp mix.untrusted.md >/dev/null || fail "stamp mix.untrusted.md"
+"$PY" "$TAINT" stamp untrusted.b.md   --content-hash "$(sha anything)" >/dev/null || fail "stamp untrusted.b.md"
+"$PY" "$TAINT" stamp mix.untrusted.md --content-hash "$(sha u)"        >/dev/null || fail "stamp mix.untrusted.md"
 # Seed TRUSTED-tagged entries from a CLEAN session, each bound (GAP-4) to the EXACT bytes its recall
 # will present. A later swap under the same key must re-taint (per-entry content-hash binding).
 "$PY" "$TAINT" reset --confirm-human --break-glass >/dev/null || fail "reset before trusted stamps"
@@ -296,6 +297,15 @@ OUT="$( TAINT_BIN="$SCRATCH/no-such-taint" \
         AGENT_OS_INVOKE_SEAM="$SEAM_INVOKE" one "$VREC" )"
 case "$OUT" in *"content-withheld"*) : ;; *) fail "12f recall taint-fail did not withhold: $OUT";; esac
 case "$OUT" in *RECALLLEAK*) fail "12f recall LEAKED content despite a per-entry effect failing to commit: $OUT";; esac
+# 12h — per-entry UNHASHABLE content (non-str; a cap-invoke-bypassing seam — cap-invoke drops the
+#        list on any non-str content): taint's --content-hash is REQUIRED, so the broker must NOT call
+#        `taint recall` hash-less (that would be refused rc=2 and withhold); posture is the bad-key one:
+#        `taint set` fail-closed, released as-tainted (DATA, never fail-broken). Pins the branch a
+#        mis-nested `continue` would silently turn into a clean release.
+"$PY" "$TAINT" reset --confirm-human --break-glass >/dev/null || fail "reset before 12h"
+OUT="$( INVOKE_ENTRIES='[{"key":"trusted.a.md","content":7}]' AGENT_OS_INVOKE_SEAM="$SEAM_INVOKE" one "$VREC" )"
+[ "$(jf "$OUT" 'o["result"]["content_type"]')" = "data" ] || fail "12h unhashable-entry recall not DATA: $OUT"
+taint_is TAINTED
 # 12g — malformed/absent meta.entries (a direct/hostile seam that emits meta.key instead of a list)
 #        -> fail-closed wholesale taint, still released as-tainted (DATA), never fail-broken.
 "$PY" "$TAINT" reset --confirm-human --break-glass >/dev/null || fail "reset before 12g"
@@ -353,10 +363,17 @@ case "$OUT" in *"content-withheld"*) : ;; *) fail "remember with no stamp key di
 OUT="$( CONFIRM_APPROVE=1 AGENT_OS_CONFIRM_SEAM="$SEAM_CONFIRM" \
         INVOKE_KEY="session/slash" AGENT_OS_INVOKE_SEAM="$SEAM_INVOKE" one "$V_REMEMBER" )"
 case "$OUT" in *"content-withheld"*) : ;; *) fail "remember with an illegal (slash) key did not withhold: $OUT";; esac
-# stamp can't commit (TAINT_BIN missing) -> withhold
+# stamp can't commit (TAINT_BIN missing) -> withhold, and the reason carries the child's rc (-1 here)
 OUT="$( TAINT_BIN="$SCRATCH/no-such-taint" CONFIRM_APPROVE=1 AGENT_OS_CONFIRM_SEAM="$SEAM_CONFIRM" \
         INVOKE_KEY="session.n2.md" AGENT_OS_INVOKE_SEAM="$SEAM_INVOKE" one "$V_REMEMBER" )"
 case "$OUT" in *"content-withheld"*) : ;; *) fail "remember stamp-fail did not withhold: $OUT";; esac
+case "$OUT" in *"taint-stamp-failed rc=-1"*) : ;; *) fail "remember stamp-fail reason lacks the child rc: $OUT";; esac
+# content NULL (a hostile/error seam with a key but no octets): taint's --content-hash is REQUIRED,
+# so the broker must withhold BEFORE calling taint (never a hash-less stamp) and leave NO tag behind.
+OUT="$( CONFIRM_APPROVE=1 AGENT_OS_CONFIRM_SEAM="$SEAM_CONFIRM" INVOKE_CONTENT_NULL=1 \
+        INVOKE_KEY="session.n3.md" AGENT_OS_INVOKE_SEAM="$SEAM_INVOKE" one "$V_REMEMBER" )"
+case "$OUT" in *"content-withheld"*"unhashable"*) : ;; *) fail "remember with null content did not withhold as unhashable: $OUT";; esac
+if grep -q '"session.n3.md"' "$AGENT_OS_TAINT_DIR/origins.json" 2>/dev/null; then fail "null-content remember left a tag for session.n3.md"; fi
 
 # ── 13b. GOLDEN WIRE VECTORS (§4.9 envelope byte-contract) — emit() is byte-deterministic
 #        (sort_keys + tight separators + ensure_ascii); pin the EXACT bytes so a drift in envelope
