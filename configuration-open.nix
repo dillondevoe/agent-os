@@ -382,6 +382,21 @@ in {
     # 815-tok prefix) on EVERY call after an idle gap; resident → first token 314ms.
     # ~160× on perceived latency, free, zero quality change — THE "it's slow" fix.
     environmentVariables.OLLAMA_KEEP_ALIVE = "-1";
+    # DECLARED, not assumed. This value was carried for weeks as a *decision* — "hold
+    # MAX_LOADED_MODELS at 1 pending the merge/keep call" — and was never once set on the
+    # box. `systemctl show ollama -p Environment` on the Dell listed only KEEP_ALIVE, so
+    # ollama ran on its own CPU default of 3. A control that is budgeted against but absent
+    # is worse than a known-absent one: every argument downstream of it was reasoning about
+    # a limit that was not in force (Rabbot, 2026-08-31: "I budgeted against a control that
+    # was an intention").
+    #
+    # 2, not 1 and not the default 3. The box deliberately runs BOTH brains co-resident
+    # (the 3B router + the 9B agentos brain, ~9 GB together against 23.9 GB available) —
+    # that is the KEEP ruling, so 1 would evict one of them on every alternation and hand
+    # back the ~51s cold reload KEEP_ALIVE exists to prevent. 3 leaves room for a third
+    # model to be pulled in by accident and quietly change the memory picture. 2 is the
+    # number the design actually uses, stated where a reader can see it.
+    environmentVariables.OLLAMA_MAX_LOADED_MODELS = "2";
   };
   environment.variables = {
     OLLAMA_HOST  = "http://127.0.0.1:11434";
