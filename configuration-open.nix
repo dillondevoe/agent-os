@@ -407,6 +407,39 @@ in {
     # qwen2.5:7b-instruct, was #66 drift: model-open.nix stopped seeding that tag when the
     # 9B became the default brain, so this env pointed at a model the image no longer ships.)
     OLLAMA_MODEL = "qwen3.5:9b-agentos";
+
+    # R1 tier-0, the last knob of item 3 — and it is NOT the latency tuning the plan
+    # filed it as. MEASURED ON THE DELL 2026-08-31, same prompt, seed 42, num_ctx 8192,
+    # three arms because two cannot separate a knob from noise on a ~3 tok/s CPU box:
+    #
+    #   arm 1  think unset (SHIPPED DEFAULT)  457422 ms  eval_count=2048  thinking=7809 chars  CONTENT: ""
+    #   arm 2  think=false                     13550 ms  eval_count=61    thinking=0 chars     CONTENT: a real answer
+    #   arm 3  think unset, REPEAT (control)  437634 ms  eval_count=2048  thinking=7690 chars  CONTENT: ""
+    #
+    # The headline is not "34x faster". It is the CONTENT column. `num_predict` is 2048
+    # (model-lora-open.nix:97) and it bounds THINKING AND ANSWER TOGETHER, so the model
+    # spent the entire budget reasoning, hit the ceiling mid-thought, and returned an
+    # EMPTY message — twice, seven and a half minutes each. The box a stranger sits down
+    # at was answering ordinary questions with nothing at all, slowly. The control arm is
+    # what makes that a property of the configuration rather than one unlucky sample.
+    #
+    # Note how this hid. Every prior measurement on this surface was a STOPWATCH, and a
+    # stopwatch reports "slow" for a run that produced no answer exactly as it reports
+    # "slow" for a run that produced a good one. Capturing `message.content` alongside the
+    # duration is the whole reason this was found, and the reason the quality arm is not
+    # optional: latency alone cannot tell a slow brain from a mute one.
+    #
+    # `off`, spelled as one of the tokens _think_budget() actually parses
+    # (agent-brain.py:223 — off/false/0/no). A value outside that set returns None, which
+    # means "omit the key, keep the model's default" — i.e. a typo here does not fail, it
+    # silently ships thinking back ON. flake.nix's `think-off-is-declared-and-parseable`
+    # check asserts the value against the parser rather than trusting this spelling.
+    #
+    # This reaches agos-boot-prewarm automatically via genesis-open.nix's sessionOllamaEnv
+    # filter, so the prewarm and the session cannot disagree about it — the same derivation
+    # that fixed the OLLAMA_MODEL drift. The rollback is `OLLAMA_THINK=on` in the session,
+    # no rebuild, if a task ever wants the reasoning back.
+    OLLAMA_THINK = "off";
   };
 
   # --- toolbox: a normal, usable box -------------------------------------------

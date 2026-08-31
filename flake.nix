@@ -324,6 +324,84 @@
             touch $out
           '';
 
+        # `OLLAMA_THINK=off` is DECLARED, and the value the open variant declares is one the
+        # brain's OWN parser turns into "no thinking" — checked by running that parser, not by
+        # re-listing the tokens it accepts.
+        #
+        # WHY THIS IS NOT A STYLE CHECK. `_think_budget()` (agent-brain.py:223) returns None for
+        # anything outside off/false/0/no|on/true/1/yes|low/medium/high, and None means "omit the
+        # key, keep the model's default". So a typo — `OLLAMA_THINK = "disabled"`, `"OFF "`,
+        # `"none"` — does not fail, does not warn, and silently ships thinking back ON. The
+        # failure state of this setting is INDISTINGUISHABLE from never having set it, which is
+        # the same shape as the sentinel that collided with a real value (PR #237) and the control
+        # that was budgeted against but never set (MAX_LOADED_MODELS). Third instance on this
+        # surface in one week, so it gets a gate rather than a comment.
+        #
+        # WHAT IS AT STAKE, measured on the Dell 2026-08-31: with thinking on, the 9B spends the
+        # whole 2048-token `num_predict` budget reasoning and returns an EMPTY answer after ~7.5
+        # minutes (twice, with a control arm). This value is not a speed tuning; it is what makes
+        # the brain answer at all. A silent revert to the default is a mute box.
+        #
+        # BOTH HALVES ARE READ FROM THE SHIPPED CONFIG, neither retyped: the value comes out of
+        # the open variant's own `environment.variables`, and the parser is the same
+        # `agent-brain.py` that genesis-open.nix copies to `bin/agent-brain`. A check carrying its
+        # own copy of either one stops testing the shipped thing the moment they drift.
+        think-off-is-declared-and-parseable =
+          let
+            p = nixpkgs.legacyPackages.${system};
+            vars = self.nixosConfigurations.agentos-open.config.environment.variables;
+            declared = vars.OLLAMA_THINK or (throw
+              ("think-off-is-declared-and-parseable: environment.variables.OLLAMA_THINK is unset. "
+               + "With thinking on, this model burns the entire num_predict budget reasoning and "
+               + "returns an empty message (measured on the Dell 2026-08-31). Declare it."));
+          in p.runCommand "think-off-is-declared-and-parseable" {
+            nativeBuildInputs = [ p.python3 ];
+          } ''
+            cat > check.py <<'PYEOF'
+            import importlib.util, os, sys
+            def think(value):
+                # Load the SHIPPED brain with a given OLLAMA_THINK and read the constant it
+                # computed. Module-level, so no call convention is being guessed at here.
+                if value is None: os.environ.pop("OLLAMA_THINK", None)
+                else: os.environ["OLLAMA_THINK"] = value
+                spec = importlib.util.spec_from_file_location("ab", sys.argv[1])
+                m = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(m)
+                return m.THINK
+
+            declared = sys.argv[2]
+
+            # THE ARM THAT MATTERS: the value this system ships must parse to False.
+            got = think(declared)
+            print("declared=%r -> THINK=%r (want False)" % (declared, got))
+            if got is not False:
+                raise SystemExit(
+                    "OLLAMA_THINK=%r does not parse to 'no thinking' (got %r). Anything the parser "
+                    "does not recognise becomes None, which keeps the model's default ON."
+                    % (declared, got))
+
+            # CONTROL, and it says so in the OUTPUT, not only here: without it a parser that
+            # returned False for EVERYTHING would pass the arm above and this check would be
+            # vacuous. A typo must be visibly distinguishable from the real value.
+            bogus = think("disabled")
+            print("CONTROL, not a defect: declared=%r -> THINK=%r (want None) "
+                  "-- proves a typo is NOT silently treated as off" % ("disabled", bogus))
+            if bogus is not None:
+                raise SystemExit("control arm failed: an unrecognised value parsed to %r, so this "
+                                 "check cannot tell a good value from a typo" % (bogus,))
+
+            # CONTROL: unset is also None. This is the state the check exists to keep us out of.
+            missing = think(None)
+            print("CONTROL, not a defect: unset -> THINK=%r (want None)" % (missing,))
+            if missing is not None:
+                raise SystemExit("control arm failed: unset parsed to %r" % (missing,))
+            PYEOF
+            sed -i 's/^            //' check.py
+            python3 check.py ${./modules/agent-brain.py} ${declared}
+            echo "think-off-is-declared-and-parseable: shipped value parses to no-thinking; typo and unset do not"
+            touch $out
+          '';
+
         # The Hyprland config the OPEN variant actually ships PARSES, checked by the
         # PINNED COMPOSITOR ITSELF — not by a regex that encodes my belief about the grammar.
         #
