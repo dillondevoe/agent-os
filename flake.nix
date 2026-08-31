@@ -1065,6 +1065,10 @@
               "agentos-open-imports: key-drift-open.nix is NOT imported — agos-key-drift missing from systemPackages.";
             assert lib.assertMsg (builtins.hasAttr "agos-key-drift" cfg.systemd.timers)
               "agentos-open-imports: key-drift-open.nix installs the scanner but NOTHING RUNS IT — the agos-key-drift timer is absent. An undeclared root key is found by a scan that FIRES, and a package sitting unrun on disk is the same shape as the hand-written authorized_keys it was written to catch.";
+        assert lib.assertMsg (hasPkg "agos-user-drift")
+          "agentos-open-imports: user-drift-open.nix is NOT imported — agos-user-drift missing from systemPackages.";
+        assert lib.assertMsg (builtins.hasAttr "agos-user-drift" cfg.systemd.timers)
+          "agentos-open-imports: the user/group scanner is installed but NOTHING RUNS IT — the agos-user-drift timer is absent. mutableUsers=true means a console-added wheel member persists across every rebuild; a scanner sitting unrun on disk is the same shape as the hand-edited /etc/group it exists to catch.";
             assert lib.assertMsg (hasPkg "agos-calc")
               "agentos-open-imports: calculator-open.nix is NOT imported — agos-calc missing from systemPackages.";
             assert lib.assertMsg (hasPkg "agos-files")
@@ -1705,6 +1709,46 @@
               if ! awk '$1 !~ /^#/ && NF { if ($2 !~ /^[0-9a-f]{64}$/ || $3 !~ /^https:/) { print "bad pin line: " $0; bad=1 } } END { exit bad }' supply-chain/pins.txt; then
                 echo "supply-chain: malformed pin in pins.txt"; exit 1
               fi
+              touch $out
+            '';
+
+        # Declared state is the whole of WHO CAN LOG IN and WHO IS PRIVILEGED — the half
+        # agos-key-drift does not cover.
+        #
+        # WHY THIS EXISTS. The open variant sets `users.mutableUsers = true` on purpose (dev
+        # box; runtime passwd changes are meant to persist). That is declared, not drift — but
+        # it means /etc/passwd and /etc/group are hand-editable and survive every rebuild, so a
+        # console-added user or a name appended to `wheel` is invisible to this flake, to the
+        # module, and to the key scanner. Same class as the undeclared root key removed
+        # 2026-08-31, one file over.
+        #
+        # ARM D IS WHY THE SCANNER IS WORTH SHIPPING. The obvious check reads /etc/group's
+        # member lists — and a box where someone set a user's PRIMARY GID to wheel's gid reads
+        # perfectly clean under it, because that user never appears in a member list at all.
+        # Arm D performs exactly that edit and asserts the scan fails. Arm I is its control: a
+        # user whose primary group IS its declared group must stay silent, so a scanner that
+        # flagged every gid match cannot pass D.
+        #
+        # THE FIXTURES ARE THE DELL, read off the box 2026-08-31 — agent (uid 1000, primary
+        # group `users`), operator (the sole declared member of `wheel`), root, sshd nologin.
+        # Arm B is that box clean and runs FIRST, so a scanner that flags everything cannot
+        # pass the drift arms. Every other arm is that box with one hand edit.
+        #
+        # NOT COVERED, stated so a green is not over-read: the tailscale-ssh user mapping is a
+        # SEPARATE surface (Tailscale SSH authenticates against tailnet ACLs and never consults
+        # /etc/passwd for authorization) and is deliberately not folded in here. And a flake
+        # check cannot see a file someone typed at a console — the battery proves the scanner,
+        # the systemd timer on the box is what actually looks.
+        user-drift-contract =
+          let p = nixpkgs.legacyPackages.${system};
+          in p.runCommand "user-drift-contract-check"
+            { nativeBuildInputs = with p; [ bash coreutils gnused gnugrep python3 ]; } ''
+              work="$(mktemp -d)"
+              mkdir -p "$work/modules/agos-user-drift" "$work/tests"
+              cp ${./modules/agos-user-drift/agos-user-drift.py} "$work/modules/agos-user-drift/agos-user-drift.py"
+              cp ${./tests/user-drift-battery.sh} "$work/tests/user-drift-battery.sh"
+              cd "$work"
+              bash tests/user-drift-battery.sh modules/agos-user-drift/agos-user-drift.py
               touch $out
             '';
 
