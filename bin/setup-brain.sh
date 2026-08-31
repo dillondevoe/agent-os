@@ -83,8 +83,21 @@ if [ "$DO_CLOUD" = 1 ]; then
     command -v curl >/dev/null 2>&1 || die "curl not found — cannot fetch the Claude Code installer."
     say "installing Claude Code (cloud brain) into \$HOME/.local/bin ..."
     # The native installer targets $HOME (writable) — not the immutable /usr the ollama
-    # daemon-installer needs — so unlike ollama, the cloud CLI *can* be curl-installed here.
-    curl -fsSL https://claude.ai/install.sh | bash || die "Claude Code install failed."
+    # daemon-installer needs — so unlike ollama, the cloud CLI *can* be fetched and run here.
+    #
+    # It is NOT piped into a shell. `curl ... | bash` executes whatever the socket produced,
+    # including a truncated transfer — bash runs the first half of a script whose second half
+    # never arrived — and there is no point at which the bytes could have been rejected.
+    # fetch-verified.sh checks them against supply-chain/pins.txt FIRST and writes nothing on
+    # a mismatch, so this call has two outcomes: the pinned installer, or a hard stop.
+    #
+    # A mismatch here is not automatically an attack; upstream rotates the script. It is also
+    # not automatically a rotation. Read the diff before re-recording the pin — see pins.txt.
+    HERE="$(cd "$(dirname "$0")" && pwd)"
+    INST="$(mktemp)"; trap 'rm -f "$INST"' EXIT
+    "$HERE/fetch-verified.sh" claude-code-install "$INST" \
+      || die "Claude Code installer failed verification (see above) — refusing to run it."
+    bash "$INST" || die "Claude Code install failed."
     if command -v claude >/dev/null 2>&1; then
       say "Claude Code installed — run 'claude' once to log in (interactive)."
     else
