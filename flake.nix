@@ -367,6 +367,81 @@
         # ARMED RED BEFORE IT WAS TRUSTED. Run against the eight broken rules on main it
         # FAILED, naming lines 68-72/77/78/80 — that is the pre-fix arm, and without it a
         # check that verified nothing would have shipped looking identical to this one.
+        # The Tailscale SSH re-assert HEALS THE OFF STATE — armed against the exact
+        # input that defeated it in production, running the SHIPPED binary.
+        #
+        # WHY THIS EXISTS. The unit went out with `jq -r '.RunSSH // "MISSING"'`. jq's
+        # alternative operator fires on `false` as well as `null`, so `RunSSH=false` —
+        # the ONE state the healer exists to correct — came back as the MISSING sentinel
+        # and left through the CANNOT-ASSESS arm. Measured on the Dell 2026-08-31: after
+        # a hand `tailscale set --ssh=false`, the timer fired on its own at 03:49:46 CDT
+        # and journalled "CANNOT-ASSESS — .RunSSH was 'MISSING'", exit 2, unit `failed`,
+        # pref still false. Every earlier run was green because the pref was true — the
+        # healer was reachable ONLY in the branch where there was nothing to heal, and a
+        # deploy, a review and a passing unit all agreed with it.
+        #
+        # THE ARM IS THE FALSE CASE. A check that only fed it `true` would pass against
+        # the broken binary and the fixed one alike. The false arm is the whole check;
+        # the other two exist so a binary that answered HEAL to everything cannot pass.
+        #
+        # IT RUNS THE SHIPPED DERIVATION, not a copy of the logic. `system.build.
+        # agosTailscaleSshReassert` is the same store path the module puts in
+        # systemPackages, driven against a stub `tailscale` earlier on PATH. Re-deriving
+        # the jq program here would put the check and the unit in two spellings with
+        # nothing asserting they agree — the drift this surface keeps scarring on.
+        tailscale-ssh-reassert-heals-off-state =
+          let
+            p = nixpkgs.legacyPackages.${system};
+            # A stand-in `tailscale` that reports whatever prefs the arm asks for and
+            # records any `set` call. It is injected as `services.tailscale.package`,
+            # the very attribute the module already reads — NOT prepended to PATH:
+            # writeShellApplication exports its runtimeInputs AHEAD of $PATH, so a PATH
+            # stub is silently outranked by the real binary. (Observed here: arm 1 came
+            # back "Failed to connect to local Tailscale daemon" from the genuine CLI.)
+            stubTailscale = p.writeShellScriptBin "tailscale" ''
+              if [ "$1" = "debug" ]; then cat "$AGOS_TEST_PREFS"; exit 0; fi
+              if [ "$1" = "set" ]; then echo "SET $*" >> "$AGOS_TEST_LOG"; exit 0; fi
+              exit 9
+            '';
+            bin = (self.nixosConfigurations.agentos-open.extendModules {
+              modules = [ { services.tailscale.package = p.lib.mkForce stubTailscale; } ];
+            }).config.system.build.agosTailscaleSshReassert;
+          in p.runCommand "tailscale-ssh-reassert-heals-off-state" { } ''
+            export AGOS_TEST_PREFS=$(mktemp) AGOS_TEST_LOG=$(mktemp)
+            # NOT `out=$(run)`: `$out` is the derivation's own output path and shadowing
+            # it makes the final `touch $out` write to the captured message instead.
+            run() { ${bin}/bin/agos-tailscale-ssh-reassert; }
+            fail() { echo "tailscale-ssh-reassert: $1"; exit 1; }
+
+            # ARM 1 — THE REGRESSION ARM. RunSSH=false must heal (exit 0) and must have
+            # actually called `tailscale set --ssh=true`. The pre-fix binary exits 2.
+            printf '%s' '{"RunSSH":false}' > "$AGOS_TEST_PREFS"; : > "$AGOS_TEST_LOG"
+            set +e; res=$(run 2>&1); rc=$?; set -e
+            printf 'arm1 rc=%s %s\n' "$rc" "$res"
+            [ "$rc" = 0 ] || fail "RunSSH=false did not heal (rc=$rc): $res"
+            grep -q -- '--ssh=true' "$AGOS_TEST_LOG" \
+              || fail "RunSSH=false reported healed without calling set --ssh=true"
+
+            # ARM 2 — control. Already serving: exit 0 and NO set call. Without this, a
+            # binary that blindly set on every run would pass arm 1.
+            printf '%s' '{"RunSSH":true}' > "$AGOS_TEST_PREFS"; : > "$AGOS_TEST_LOG"
+            set +e; res=$(run 2>&1); rc=$?; set -e
+            printf 'arm2 rc=%s %s\n' "$rc" "$res"
+            [ "$rc" = 0 ] || fail "RunSSH=true should be a silent pass (rc=$rc)"
+            [ ! -s "$AGOS_TEST_LOG" ] || fail "RunSSH=true called set anyway: $(cat "$AGOS_TEST_LOG")"
+
+            # ARM 3 — control. A genuinely ABSENT field is CANNOT-ASSESS (2), which is
+            # what the sentinel was always for. This is what distinguishes the fix from
+            # simply deleting the sentinel and calling every non-true value false.
+            printf '%s' '{"WantRunning":true}' > "$AGOS_TEST_PREFS"
+            set +e; res=$(run 2>&1); rc=$?; set -e
+            printf 'arm3 rc=%s %s\n' "$rc" "$res"
+            [ "$rc" = 2 ] || fail "absent RunSSH should be CANNOT-ASSESS 2, got $rc"
+
+            echo "tailscale-ssh-reassert-heals-off-state: false heals, true is silent, absent cannot-assess"
+            touch $out
+          '';
+
         hyprland-config-parses =
           let
             p = nixpkgs.legacyPackages.${system};
