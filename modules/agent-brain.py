@@ -764,6 +764,30 @@ def chat_stream(msgs, route=None):
     # this before appending — armed by the consent battery, because an internal key leaking into
     # a provider payload is the kind of thing that fails only on the metered side. The same
     # popped value feeds the cost-cap breaker's cumulative output-token count.
+    # A TURN THAT PRODUCED NOTHING SAYS SO. Until 2026-08-31 an empty answer with no tool
+    # calls printed the timing line and nothing else, so the box looked like it had replied
+    # with silence. That is not hypothetical: with thinking on, this model spent its entire
+    # `num_predict` budget (2048) reasoning, hit the ceiling mid-thought and returned an
+    # EMPTY message — 457s, twice, measured on the Dell. `OLLAMA_THINK=off` (configuration-
+    # open.nix) fixes THAT cause, but the class survives the cause: any future ceiling, stop
+    # sequence, or transport hiccup can still land here, and the operator's only signal was
+    # a prompt coming back.
+    #
+    # The generalisation from that hunt, which is why this is worth a branch: a stopwatch
+    # reports "slow" for a run that produced no answer EXACTLY as for one that produced a
+    # good answer, so the mute state hides inside the merely-slow one indefinitely. This is
+    # the renderer refusing to let those two look alike.
+    #
+    # eval_count is named rather than described because it is the discriminator: a mute turn
+    # with a LARGE count burned its budget (thinking, or a runaway that never emitted), while
+    # one with ~0 means the model returned immediately and the problem is upstream. Those want
+    # opposite fixes, so the number is the message.
+    if not content and not tool_calls:
+        sys.stderr.write(
+            f"\033[33m[no answer — the model returned an empty message after {eval_count or 0} "
+            f"output tokens. A large count means the reply budget went to reasoning "
+            f"(check OLLAMA_THINK, it should be 'off'); a near-zero count means it stopped "
+            f"immediately and the cause is upstream of the model.]\033[0m\n")
     return {"role":"assistant","content":content,"tool_calls":tool_calls,"_usage":eval_count or None}
 
 def chat(msgs):
