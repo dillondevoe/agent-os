@@ -104,6 +104,46 @@ ESCALATE_STATUS = _escalate_status()
 # one that fails to start.
 _ESCALATE_UNAVAILABLE = set()   # escalate providers rate-limited/unreachable THIS session
 
+
+def _preflight_escalate_secret():
+    """Mark an escalate provider UNAVAILABLE at startup when its secret cannot be resolved.
+
+    Without this, a missing key is discovered in the WRONG PLACE. _route_for_turn resolves
+    happily (it inspects roles and availability, never the secret), returns role=escalate with
+    `degraded: None`, and the RuntimeError does not surface until _resolve_secret runs inside
+    _anthropic_stream_events — which is a GENERATOR, so it does not even raise when called, only
+    when first consumed, from inside the transport. chat_stream_safe's degrade handler catches
+    (TimeoutError, URLError, ConnectionError) and RuntimeError is none of those, so it escapes
+    the turn loop: the brain dies and brain-home's `while :;` restarts it, taking the session
+    with it. Measured on the Dell 2026-09-01 before this existed, which is why it exists.
+
+    The contract this restores is the one the rest of the escalate path already holds: an
+    escalate provider we cannot use is UNAVAILABLE, and an unavailable escalate degrades to the
+    local floor with a VISIBLE reason — never a crash, and never a spill to another metered
+    provider. Resolution failure is a config fact, knowable at startup; discovering it mid-turn
+    was only ever an accident of where the lookup happened to live.
+
+    Reads the secret to prove it RESOLVES and throws the value away — the key is never retained,
+    logged, or included in the reason string.
+    """
+    roles = (_PROVIDERS or {}).get("roles") or {}
+    wanted = roles.get("escalate")
+    if not wanted:
+        return None
+    cfg = (_PROVIDERS or {}).get("providers", {}).get(wanted, {})
+    ref = cfg.get("api_key_ref")
+    if not ref:
+        _ESCALATE_UNAVAILABLE.add(wanted)
+        return f"escalate provider {wanted!r} has no api_key_ref"
+    try:
+        _resolve_secret(ref)
+    except Exception as e:
+        # The message names the REF (a path or an env var name), never the secret: the ref is
+        # exactly the remedy the operator needs and is not itself sensitive.
+        _ESCALATE_UNAVAILABLE.add(wanted)
+        return f"escalate key unresolved ({e}) — escalate inert, answering on the local floor"
+    return None
+
 class _EscalateConsent:
     def __init__(self, raw=None):
         v = (raw if raw is not None else os.environ.get("AGENT_OS_ESCALATE_CONSENT", "")).strip().lower()
@@ -573,6 +613,18 @@ def _resolve_secret(ref):
         f"unsupported api_key_ref scheme {scheme!r} — the sealed image ships no secret-manager "
         f"CLI, so use env://VAR or file://PATH (a systemd LoadCredential= or EnvironmentFile= "
         f"is the intended delivery path for {ref!r})")
+
+# Run the escalate-secret preflight HERE, not at the definition above: it calls
+# _resolve_secret, which is only defined at this point in the module. Recompute
+# ESCALATE_STATUS afterwards — it was computed near the top, before this could run, so
+# without this line the status surface reports "escalate: configured" on a box with no
+# key, which is the same class of lie the ceiling work spent a day removing: a status
+# field that is not the authority. _escalate_status() re-resolves through
+# _ESCALATE_UNAVAILABLE, so the preflight's verdict is what it now reports.
+_ESCALATE_PREFLIGHT_REASON = _preflight_escalate_secret()
+if _ESCALATE_PREFLIGHT_REASON:
+    ESCALATE_STATUS = _escalate_status()
+    ESCALATE_STATUS["reason"] = _ESCALATE_PREFLIGHT_REASON
 
 def _anthropic_translate_tools(tools):
     # Ollama: {"type":"function","function":{name, description, parameters}}
