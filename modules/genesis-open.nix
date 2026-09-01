@@ -90,7 +90,33 @@ let
        + "an EMPTY message. Set it in the variant's configuration."));
 
   agent-brain = pkgs.runCommand "agent-brain" { } ''
-    mkdir -p "$out/bin"
+    mkdir -p "$out/bin" "$out/modules"
+
+    # The modules agent-brain.py IMPORTS, installed beside it. Their absence is the defect
+    # this block exists to close: the brain shipped `import spend_ceiling` (#243) and
+    # `import providers` while the derivation copied exactly one file, so the gate code was
+    # on the box and the module it needs was not. Both imports are wrapped in try/except by
+    # design, so a missing module is SILENT — for providers it degrades, and for a CONFIGURED
+    # spend ceiling it fail-closes to UNAVAILABLE, i.e. the budget cannot be armed at all.
+    # Neither failure logs at build time and neither is visible until the day a credential
+    # lands, which is exactly when a budget has to work.
+    #
+    # One copy, in $out/modules, symlinked into $out/bin. The brain resolves a bare import
+    # from its own directory (sys.path[0]); bin/agent-os-budget resolves
+    # dirname(dirname(__file__))/modules. Both land on the same file, so the two cannot drift.
+    cp ${./spend_ceiling.py} "$out/modules/spend_ceiling.py"
+    cp ${./providers.py}     "$out/modules/providers.py"
+    ln -s ../modules/spend_ceiling.py "$out/bin/spend_ceiling.py"
+    ln -s ../modules/providers.py     "$out/bin/providers.py"
+
+    # The counter CLI the ceiling's own error text tells the operator to run
+    # ("run `agent-os-budget init`"). Advice that names an absent command is not advice.
+    cp ${../bin/agent-os-budget} "$out/bin/agent-os-budget"
+    chmod +w "$out/bin/agent-os-budget"
+    substituteInPlace "$out/bin/agent-os-budget" \
+      --replace-fail '#!/usr/bin/env python3' '#!${brainPython}/bin/python3'
+    chmod +x "$out/bin/agent-os-budget"
+
     cp ${./agent-brain.py} "$out/bin/agent-brain"
     chmod +w "$out/bin/agent-brain"
     substituteInPlace "$out/bin/agent-brain" \
