@@ -435,6 +435,105 @@
             touch $out
           '';
 
+        # Every module the shipped brain IMPORTS resolves FROM THE SHIPPED CLOSURE.
+        #
+        # WHY THIS EXISTS. #243 merged 11/11 green and shipped broken. `spend-ceiling-contract`
+        # above copies modules/spend_ceiling.py into a work tree it builds itself and runs the
+        # battery there — so it verified the Python and could not observe the package. The
+        # derivation copied exactly one file, agent-brain.py. The gate code reached the Dell;
+        # the module it imports did not. `import spend_ceiling` is wrapped in try/except by
+        # design, so nothing logged: with no ceiling configured the stage is inert, and with one
+        # configured it fail-closes to "spend ceiling UNAVAILABLE" — meaning the budget cannot
+        # be armed AT ALL, discovered on the day a credential lands. Same vantage error as the
+        # firewall outage: an instrument that cannot see the state it exists to detect.
+        #
+        # So this check imports from the artifact and ASSERTS THE RESOLVED PATH IS INSIDE IT.
+        # Without that assertion the check passes off the checker's own cwd or a PYTHONPATH
+        # leak — it would confirm the module exists somewhere, which was never in doubt.
+        brain-imports-resolve-in-the-shipped-closure =
+          let
+            p = nixpkgs.legacyPackages.${system};
+            brain = self.nixosConfigurations.agentos-open.config.system.build.agentBrain;
+          in p.runCommand "brain-imports-resolve-in-the-shipped-closure" {
+            nativeBuildInputs = [ p.python3 ];
+          } ''
+            cat > check.py <<'PYEOF'
+            import os, re, subprocess, sys
+
+            bindir  = sys.argv[1]
+            store   = os.path.dirname(bindir)         # the $out of the agent-brain derivation
+            repomod = sys.argv[2]                     # the REPO's modules/ dir, in the store
+            src     = open(os.path.join(bindir, "agent-brain")).read()
+
+            # Read the imports OUT OF THE SHIPPED SCRIPT rather than listing them here. A
+            # hand-kept list is a second place to update, and forgetting to extend it yields a
+            # silently narrower check that still prints green — the failure this file is about.
+            #
+            # BOTH import forms, because the two that were missing used one each: `import
+            # spend_ceiling as _spend` and `from providers import load_providers as ...`. The
+            # first draft of this check matched only the former and would have shipped the
+            # providers half of the same bug.
+            named = set(re.findall(r"^\s*import (\w+)(?: as \w+)?\s*$", src, re.M))
+            named |= set(re.findall(r"^\s*from (\w+) import ", src, re.M))
+
+            # Keep only FIRST-PARTY modules. The repo's modules/ dir is the authority on what is
+            # ours — asking the package would be circular, since a module missing from the
+            # package is precisely the defect. stdlib names drop out here; without this the
+            # in-closure assertion below would fire on `os` and the check would be unusable.
+            ours   = {f[:-3] for f in os.listdir(repomod) if f.endswith(".py")}
+            wanted = sorted(named & ours)
+            if not wanted:
+                raise SystemExit("the shipped brain imports no first-party module — this check "
+                                 "has lost its subject and would pass vacuously.")
+            print("first-party imports declared by the shipped brain: %s" % (wanted,))
+
+            # THE ARTIFACT'S OWN INTERPRETER, read out of its shebang — not this check's python3.
+            # They are different: the brain ships `brainPython`, which carries pyyaml, and
+            # providers.py imports yaml at module scope. Probing with the checker's bare python3
+            # reported a ModuleNotFoundError that the running brain does not have, i.e. it would
+            # have failed the build over a condition that exists only inside the check. A gate
+            # is only worth its vantage, and the vantage here is the shipped shebang.
+            interp = src.splitlines()[0].lstrip("#!").strip()
+            if not interp.startswith("/nix/store/"):
+                raise SystemExit("the shipped brain's shebang is %r — not a pinned store "
+                                 "interpreter, so this check cannot reproduce its import "
+                                 "environment." % (interp,))
+            print("probing with the artifact's own interpreter: %s" % (interp,))
+
+            # sys.path[0] is the SCRIPT'S directory for a real invocation, so reproduce exactly
+            # that and nothing else. An inherited PYTHONPATH would be the leak this guards.
+            env = dict(os.environ); env.pop("PYTHONPATH", None)
+            probe = ("import importlib,sys,json;"
+                     "print(json.dumps({m: getattr(importlib.import_module(m),'__file__',None)"
+                     " for m in %r}))" % (wanted,))
+            out = subprocess.run([interp, "-c", probe], cwd=bindir, env=env,
+                                 capture_output=True, text=True)
+            if out.returncode != 0:
+                raise SystemExit("a module the shipped brain imports is NOT in the closure:\n"
+                                 + out.stderr.strip())
+            import json
+            for mod, path in sorted(json.loads(out.stdout).items()):
+                inside = bool(path) and os.path.realpath(path).startswith(os.path.realpath(store))
+                print("  %-16s -> %s  in_closure=%s" % (mod, path, inside))
+                if not inside:
+                    raise SystemExit(
+                        "%s resolved to %r, which is OUTSIDE the shipped closure %s. The check "
+                        "would have passed on a package that does not contain it." % (mod, path, store))
+
+            # The CLI the ceiling's own error text instructs the operator to run. Advice naming
+            # an absent command is how "fail-closed" becomes "permanently disabled".
+            cli = os.path.join(bindir, "agent-os-budget")
+            if not os.access(cli, os.X_OK):
+                raise SystemExit("bin/agent-os-budget is not in the closure, but spend_ceiling.py "
+                                 "tells the operator to run it by name when the counter is missing.")
+            print("  agent-os-budget  -> %s  executable=True" % (cli,))
+            PYEOF
+            sed -i 's/^            //' check.py
+            python3 check.py ${brain}/bin ${./modules}
+            echo "brain-imports-resolve-in-the-shipped-closure: every module the brain imports is IN the package, not merely in the repo"
+            touch $out
+          '';
+
         # The Hyprland config the OPEN variant actually ships PARSES, checked by the
         # PINNED COMPOSITOR ITSELF — not by a regex that encodes my belief about the grammar.
         #
