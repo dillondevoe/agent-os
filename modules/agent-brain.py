@@ -83,7 +83,12 @@ def _escalate_status():
     roles = _PROVIDERS.get("roles", {})
     if "escalate" not in roles:
         return {"configured": False, "provider": None, "reason": "no escalate role in providers.yaml"}
-    name, cfg, degraded = _providers_resolve(_PROVIDERS, "escalate")
+    # Resolve through _ESCALATE_UNAVAILABLE, not around it. Without the argument this
+    # answers from config alone and reports "available" for a provider the startup
+    # preflight or an in-session 429 has already marked unusable — the status surface
+    # then contradicts the router standing next to it.
+    name, cfg, degraded = _providers_resolve(_PROVIDERS, "escalate",
+                                             unavailable=frozenset(_ESCALATE_UNAVAILABLE))
     return {"configured": not degraded, "provider": name, "reason": None if not degraded else "escalate unavailable, degraded to floor"}
 
 ESCALATE_STATUS = _escalate_status()
@@ -619,11 +624,17 @@ def _resolve_secret(ref):
 # ESCALATE_STATUS afterwards — it was computed near the top, before this could run, so
 # without this line the status surface reports "escalate: configured" on a box with no
 # key, which is the same class of lie the ceiling work spent a day removing: a status
-# field that is not the authority. _escalate_status() re-resolves through
-# _ESCALATE_UNAVAILABLE, so the preflight's verdict is what it now reports.
+# field that is not the authority. (_escalate_status() did NOT consult
+# _ESCALATE_UNAVAILABLE until the fix above — I asserted that it did before checking, in
+# the fix about status fields that lie. It does now.)
 _ESCALATE_PREFLIGHT_REASON = _preflight_escalate_secret()
 if _ESCALATE_PREFLIGHT_REASON:
+    # Both fields, deliberately. escalate_status_line() branches on `configured` and only
+    # reads `reason` in the not-configured arm, so setting `reason` alone left the surface
+    # printing "cloud-claude available" on a box with no key. Caught by the control arm,
+    # not by review: the routing assertion passed while the line beside it still lied.
     ESCALATE_STATUS = _escalate_status()
+    ESCALATE_STATUS["configured"] = False
     ESCALATE_STATUS["reason"] = _ESCALATE_PREFLIGHT_REASON
 
 def _anthropic_translate_tools(tools):
