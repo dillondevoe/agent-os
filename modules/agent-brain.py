@@ -219,12 +219,35 @@ def _log_turn_provenance(route=None, tokens=None):
     except Exception:
         pass
 
+# Substituted at build by genesis-open.nix from environment.variables.OLLAMA_THINK — the
+# SAME attrset the login env is built from, so there is one spelling and it cannot drift.
+# Left as the literal placeholder in a bare dev checkout, which _think_budget() detects.
+_THINK_BUILD_DEFAULT = "@THINK_DEFAULT@"
+
 def _think_budget():
     # OLLAMA_THINK: think-budget control for thinking models on the ~3 tok/s CPU box
     # (spec 2026-08-05 item b). off/false/0 → no thinking (fastest replies);
     # low/medium/high → per-level budget where the model supports it; on/true/1 → full.
-    # Unset → omit the key, keep the model's default.
+    # Unset → fall back to the BUILD-TIME default; if that is absent too, omit the key.
+    #
+    # WHY A BUILD-TIME DEFAULT AND NOT JUST THE ENV (2026-08-31, Dillon's photo of the TUI
+    # still thinking for 81s with OLLAMA_THINK=off already deployed). `environment.variables`
+    # builds the LOGIN environment. The TUI is launched by `systemd --user` (brain-home.service,
+    # commit baac2a3) which does not source /etc/set-environment, so the shipped value reached
+    # the login shell I probed and NOT the process that reads it. Baking it into the script
+    # makes it hold in EVERY launch context — systemd user unit, login shell, cron, a bare
+    # exec — because there is no inheritance step left to lose it.
+    #
+    # The env still WINS when set, deliberately: `OLLAMA_THINK=on` in the session stays the
+    # zero-rebuild rollback. This is a default, not a seam pin — unlike broker/confirm/taint,
+    # where an inherited value is an attack surface and the wrapper must be authoritative.
     v=os.environ.get("OLLAMA_THINK","").strip().lower()
+    if not v:
+        d=_THINK_BUILD_DEFAULT.strip().lower()
+        # An unsubstituted placeholder is NOT a value. Without this test it would fall to the
+        # `return None` below, i.e. "keep the model default" — the exact silent-ON outcome this
+        # whole change exists to remove, and indistinguishable from a correct build.
+        v = "" if d.startswith("@") else d
     if v in ("off","false","0","no"): return False
     if v in ("on","true","1","yes"): return True
     if v in ("low","medium","high"): return v

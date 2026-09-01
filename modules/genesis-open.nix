@@ -67,6 +67,28 @@ let
   # — the wiring would never actually activate on this build, just warn to stderr.
   brainPython = pkgs.python3.withPackages (ps: [ ps.prompt-toolkit ps.pyyaml ]);
 
+  # The think budget, BAKED IN rather than inherited (2026-08-31). Same derivation discipline
+  # as sessionOllamaEnv below: read from environment.variables, never re-typed, so the login
+  # env and the script's default cannot say different things.
+  #
+  # This exists because inheritance FAILED. OLLAMA_THINK=off shipped in environment.variables
+  # and never reached the TUI: brain-home.service is a `systemd --user` unit and systemd does
+  # not source /etc/set-environment, so the box kept thinking for 81s a turn with the fix
+  # deployed and every declaration-level check green. Note the launch context that broke it was
+  # introduced by THIS lane, in baac2a3, which moved the TUI off hyprland's exec-once — the
+  # comment fifteen lines below already said a systemd unit does not inherit this attrset, and
+  # it was applied to the prewarm unit only.
+  #
+  # A missing value is a build error, not a default: silently omitting the substitution would
+  # restore the model's own thinking-ON behaviour, which is invisible at runtime except as a
+  # slow box, and "slow" is exactly how this defect hid for a day.
+  thinkDefault =
+    config.environment.variables.OLLAMA_THINK or (throw
+      ("genesis-open: environment.variables.OLLAMA_THINK is unset, so agent-brain would be "
+       + "built with no baked think budget and would fall back to the model's default (thinking "
+       + "ON). On this CPU box that burns the entire num_predict budget on reasoning and returns "
+       + "an EMPTY message. Set it in the variant's configuration."));
+
   agent-brain = pkgs.runCommand "agent-brain" { } ''
     mkdir -p "$out/bin"
     cp ${./agent-brain.py} "$out/bin/agent-brain"
@@ -74,7 +96,8 @@ let
     substituteInPlace "$out/bin/agent-brain" \
       --replace-fail '#!/usr/bin/env python3' '#!${brainPython}/bin/python3' \
       --replace-fail '@GENESIS_PATH@'   '${genesis}/GENESIS.md' \
-      --replace-fail '@GENESIS_SHA256@' '${genesisSha}'
+      --replace-fail '@GENESIS_SHA256@' '${genesisSha}' \
+      --replace-fail '@THINK_DEFAULT@'  '${thinkDefault}'
     chmod +x "$out/bin/agent-brain"
   '';
   # R1 (tier 0) — the SESSION's ollama env, read from the one attrset that defines it.
@@ -103,6 +126,13 @@ in {
   # The genesis-locked brain on the agent's PATH. Unique fingerprint for the
   # agentos-open-imports guard: `agent-brain` in systemPackages.
   environment.systemPackages = [ agent-brain ];
+
+  # Exposed so a flake check can test the BUILT artifact — the script with @THINK_DEFAULT@
+  # actually substituted — rather than the source, or the declaration. The gate this replaces
+  # read environment.variables and the parser separately and pronounced them consistent; both
+  # halves were green while the running brain had neither. Same reason the hyprland check reads
+  # system.build.hyprlandConf instead of re-deriving the text.
+  system.build.agentBrain = agent-brain;
 
   # DEV-ALIGNMENT copy (NOT the security path — see header). Read-only store symlink at a
   # stable human path, byte-identical to the baked soul.
