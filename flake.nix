@@ -370,6 +370,7 @@
           } ''
             cat > check.py <<'PYEOF'
             import importlib.util, os, sys
+            from importlib.machinery import SourceFileLoader
 
             def think(value):
                 """Load the BUILT brain under a given OLLAMA_THINK and read the constant it
@@ -377,9 +378,15 @@
                 os.environ.pop("OLLAMA_THINK", None)
                 if value is not None:
                     os.environ["OLLAMA_THINK"] = value
-                spec = importlib.util.spec_from_file_location("ab", sys.argv[1])
+                # An EXPLICIT loader, because the shipped artifact is `bin/agent-brain` with no
+                # .py suffix: spec_from_file_location infers the loader from the EXTENSION and
+                # returns None for this path, which is how the first run of this check died.
+                # Naming the loader is also the point -- the file under test is the installed
+                # one, not a .py copy that would have imported by luck.
+                loader = SourceFileLoader("ab", sys.argv[1])
+                spec = importlib.util.spec_from_loader("ab", loader)
                 m = importlib.util.module_from_spec(spec)
-                spec.loader.exec_module(m)
+                loader.exec_module(m)
                 return m
 
             # THE ARM THAT MATTERS, and the one the old check could not express: NO env.
