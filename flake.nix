@@ -1949,6 +1949,29 @@
               touch $out
             '';
 
+        # The two CUMULATIVE spend ceilings (Rabbot's GO 2026-08-31, built before any
+        # credential exists — the bleed scar's ordering). `max_output_tokens_per_turn`
+        # already in the brain is a RATE LIMITER: it bounds one turn and forgets, so a
+        # respawn loop pays it forever and trips nothing. This gate holds the ceilings that
+        # accumulate, and — the half that matters — that a TYPO does not silently disable
+        # them. A disabled ceiling and a working one are indistinguishable until the bill
+        # arrives, so arm G walks "off"/"none"/"0"/"-1"/"true"/"1e6" and requires each to
+        # refuse rather than pass as a cap. Two controls keep the rest honest: J (no ceiling
+        # configured → inert, so the other arms are not passing off a stage that refuses
+        # unconditionally) and K (a ceiling configured with the module ABSENT still refuses).
+        spend-ceiling-contract =
+          nixpkgs.legacyPackages.${system}.runCommand "spend-ceiling-contract-check"
+            { nativeBuildInputs = [ nixpkgs.legacyPackages.${system}.python3 ]; } ''
+              work="$(mktemp -d)"
+              mkdir -p "$work/modules" "$work/tests"
+              cp ${./modules/agent-brain.py} "$work/modules/agent-brain.py"
+              cp ${./modules/spend_ceiling.py} "$work/modules/spend_ceiling.py"
+              cp ${./tests/spend-ceiling-battery.py} "$work/tests/spend-ceiling-battery.py"
+              cd "$work"
+              python3 tests/spend-ceiling-battery.py
+              touch $out
+            '';
+
         mem-contract =
           nixpkgs.legacyPackages.${system}.runCommand "mem-contract-check"
             { nativeBuildInputs = [ nixpkgs.legacyPackages.${system}.python3 ]; } ''

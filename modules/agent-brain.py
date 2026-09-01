@@ -34,6 +34,16 @@ except Exception:
     _load_providers = _providers_resolve = None
     class _ProviderConfigError(Exception): pass
 
+# The two CUMULATIVE spend ceilings (Rabbot's GO, 2026-08-31). Imported the same optional
+# way as providers, with one asymmetry that matters: if the module is MISSING while a
+# ceiling is CONFIGURED, that is not a degrade to "no ceiling" — it is a safety stage that
+# cannot run, and _spend_gate() below turns it into a refusal. An absent guard must never
+# read as an absent need for one.
+try:
+    import spend_ceiling as _spend
+except Exception:
+    _spend = None
+
 _PROVIDERS_PATH = os.environ.get("AGENT_OS_PROVIDERS", "/etc/agent-os/providers.yaml")
 _PROVIDERS = None
 if os.path.exists(_PROVIDERS_PATH):
@@ -122,6 +132,26 @@ def _floor_route(degraded=None):
     return {"role": "floor", "provider": ACTIVE_PROVIDER, "model": MODEL,
             "kind": ACTIVE_PROVIDER_KIND, "consent_source": None, "degraded": degraded}
 
+def _spend_gate():
+    """(True, None) if a metered turn may run, else (False, reason). Never raises.
+
+    Fail-CLOSED in both directions the contract names: a ceiling that is configured but
+    cannot be evaluated refuses, and a spend_ceiling module that is missing while a ceiling
+    is configured refuses. The only path that returns True without consulting a counter is
+    the one where NO ceiling is configured at all."""
+    configured = any(os.environ.get(k, "").strip() for k in
+                     ("AGENT_OS_SPEND_DAY_TOKENS", "AGENT_OS_SPEND_CUMULATIVE_TOKENS"))
+    if not configured:
+        return True, None
+    if _spend is None:
+        return False, "spend ceiling UNAVAILABLE — a ceiling is configured but spend_ceiling.py could not be imported"
+    try:
+        return _spend.check()
+    except Exception as e:
+        # check() is written not to raise; this is the belt to that suspenders. An
+        # unexpected exception here is still a safety stage that did not run.
+        return False, f"spend ceiling UNAVAILABLE — {e}"
+
 def _route_for_turn(consent_source=None):
     """Resolve which provider answers this turn. No consent → floor, unconditionally.
 
@@ -140,6 +170,12 @@ def _route_for_turn(consent_source=None):
     if name != wanted:
         return _floor_route(f"escalate provider {wanted!r} unavailable — degraded to the local "
                             f"floor (never to another metered provider)")
+    ok, why = _spend_gate()
+    if not ok:
+        # NEVER-SPILL when the ceiling trips: the local floor, not a cheaper metered
+        # provider. A budget that reroutes to something else that costs money has not
+        # stopped spending, it has renamed it.
+        return _floor_route(why + " — answering on the local floor")
     return {"role": "escalate", "provider": name, "model": cfg.get("model", MODEL),
             "kind": cfg.get("kind", "claude"), "consent_source": consent_source, "degraded": None}
 
@@ -1139,6 +1175,18 @@ def turn(msgs, consent_source=None):
         # from a transport that reported nothing counts as 0 spend — it cannot trip the
         # ceiling, and the provenance line above already records the unknown as null).
         spent+=usage or 0; hops+=1
+        # Record METERED spend against the cumulative ceilings, per hop rather than per
+        # turn — a turn that never returns (the respawn-loop shape the ceiling exists for)
+        # would otherwise contribute nothing to the counter it is supposed to be filling.
+        # Floor turns are free and deliberately not counted; see spend_ceiling.py's UNIT.
+        if route.get("role") == "escalate" and usage and _spend is not None:
+            try:
+                _spend.record(int(usage))
+            except Exception as e:
+                # Unrecorded spend is unbounded spend: say so loudly and stop the turn
+                # rather than continue paying into a counter that is not counting.
+                print(f"\n\033[1;31m⛔ spend ceiling could not record this hop ({e}) — halting the turn\033[0m")
+                return
         msgs.append(msg)
         calls,clean=extract_tools(msg)
         if not calls:

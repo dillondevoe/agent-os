@@ -1,0 +1,52 @@
+#!/usr/bin/env python3
+"""agent-os-budget — read the spend counters, or create one.
+
+`init` exists because spend_ceiling.py treats a MISSING counter as UNAVAILABLE rather than
+as zero spent. Deleting the counter is exactly how someone would reset a budget they were
+not supposed to reset, and the file cannot tell "never existed" from "just deleted" — so
+creating it is a deliberate operator act with a name, not something a respawn loop does by
+accident.
+
+  agent-os-budget status   what the ceilings are and what has been spent
+  agent-os-budget init     create a zeroed counter (refuses to clobber an existing one)
+  agent-os-budget reset    zero an EXISTING counter — the deliberate reset
+"""
+import os, sys
+
+sys.path.insert(0, os.environ.get("AGENT_OS_MODULES", "/etc/agent-os/modules"))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "modules"))
+import spend_ceiling as sc
+
+
+def main(argv):
+    cmd = (argv[1] if len(argv) > 1 else "status").strip()
+    path = sc.counter_path()
+    if cmd == "init":
+        if os.path.exists(path):
+            print(f"refusing: {path} already exists — use `reset` to zero it deliberately")
+            return 1
+        sc.init_counter(path); print(f"created {path} (both counters at zero)"); return 0
+    if cmd == "reset":
+        if not os.path.exists(path):
+            print(f"refusing: {path} does not exist — use `init`"); return 1
+        sc.init_counter(path); print(f"reset {path} — day AND cumulative counters zeroed"); return 0
+    if cmd == "status":
+        try:
+            day, cum = sc.limits()
+        except sc.Unavailable as e:
+            print(f"ceilings: MISCONFIGURED — {e}"); return 1
+        print(f"counter:    {path}")
+        print(f"ceilings:   day={day if day else 'unset'}  cumulative={cum if cum else 'unset'} (output tokens)")
+        try:
+            st = sc._read(path)
+            print(f"spent:      day={st['day_spent']}  cumulative={st['cumulative_spent']}")
+        except sc.Unavailable as e:
+            print(f"spent:      UNAVAILABLE — {e}")
+        ok, why = sc.check()
+        print(f"escalate:   {'allowed' if ok else 'REFUSED — ' + why}")
+        return 0
+    print(__doc__); return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))
