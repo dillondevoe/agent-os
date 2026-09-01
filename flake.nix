@@ -346,59 +346,92 @@
         # the open variant's own `environment.variables`, and the parser is the same
         # `agent-brain.py` that genesis-open.nix copies to `bin/agent-brain`. A check carrying its
         # own copy of either one stops testing the shipped thing the moment they drift.
-        think-off-is-declared-and-parseable =
+        # THINKING IS OFF IN THE BRAIN THE SYSTEM SHIPS, WITH NO ENVIRONMENT AT ALL.
+        #
+        # This REPLACES `think-off-is-declared-and-parseable`, which was green throughout the
+        # failure it existed to prevent. That check read OLLAMA_THINK out of
+        # `environment.variables` and fed it to the parser in `agent-brain.py`, and both halves
+        # were correct — but `environment.variables` builds the LOGIN environment, and the TUI
+        # is started by `systemd --user` (brain-home.service, baac2a3), which never sources it.
+        # So the declaration was right, the parser was right, and the running brain still had
+        # OLLAMA_THINK unset and thought for 81 seconds a turn. Dillon photographed it.
+        #
+        # THE FIX TO THE CHECK IS THE VANTAGE, NOT THE ASSERTION. It now execs the BUILT
+        # artifact (system.build.agentBrain — the script with @THINK_DEFAULT@ substituted) with
+        # OLLAMA_THINK **deleted from the environment**, because that is precisely the condition
+        # a systemd user unit presents. Passing the value in was the whole defect: a check that
+        # supplies the input it is verifying arrives can only ever confirm its own argument.
+        think-off-reaches-the-brain-with-no-env =
           let
             p = nixpkgs.legacyPackages.${system};
-            vars = self.nixosConfigurations.agentos-open.config.environment.variables;
-            declared = vars.OLLAMA_THINK or (throw
-              ("think-off-is-declared-and-parseable: environment.variables.OLLAMA_THINK is unset. "
-               + "With thinking on, this model burns the entire num_predict budget reasoning and "
-               + "returns an empty message (measured on the Dell 2026-08-31). Declare it."));
-          in p.runCommand "think-off-is-declared-and-parseable" {
+            brain = self.nixosConfigurations.agentos-open.config.system.build.agentBrain;
+          in p.runCommand "think-off-reaches-the-brain-with-no-env" {
             nativeBuildInputs = [ p.python3 ];
           } ''
             cat > check.py <<'PYEOF'
             import importlib.util, os, sys
+            from importlib.machinery import SourceFileLoader
+
             def think(value):
-                # Load the SHIPPED brain with a given OLLAMA_THINK and read the constant it
-                # computed. Module-level, so no call convention is being guessed at here.
-                if value is None: os.environ.pop("OLLAMA_THINK", None)
-                else: os.environ["OLLAMA_THINK"] = value
-                spec = importlib.util.spec_from_file_location("ab", sys.argv[1])
+                """Load the BUILT brain under a given OLLAMA_THINK and read the constant it
+                computed. `value is None` means the variable is ABSENT, not empty."""
+                os.environ.pop("OLLAMA_THINK", None)
+                if value is not None:
+                    os.environ["OLLAMA_THINK"] = value
+                # An EXPLICIT loader, because the shipped artifact is `bin/agent-brain` with no
+                # .py suffix: spec_from_file_location infers the loader from the EXTENSION and
+                # returns None for this path, which is how the first run of this check died.
+                # Naming the loader is also the point -- the file under test is the installed
+                # one, not a .py copy that would have imported by luck.
+                loader = SourceFileLoader("ab", sys.argv[1])
+                spec = importlib.util.spec_from_loader("ab", loader)
                 m = importlib.util.module_from_spec(spec)
-                spec.loader.exec_module(m)
-                return m.THINK
+                loader.exec_module(m)
+                return m
 
-            declared = sys.argv[2]
-
-            # THE ARM THAT MATTERS: the value this system ships must parse to False.
-            got = think(declared)
-            print("declared=%r -> THINK=%r (want False)" % (declared, got))
-            if got is not False:
+            # THE ARM THAT MATTERS, and the one the old check could not express: NO env.
+            m = think(None)
+            print("no OLLAMA_THINK in env -> THINK=%r (want False), baked default=%r"
+                  % (m.THINK, m._THINK_BUILD_DEFAULT))
+            if m.THINK is not False:
                 raise SystemExit(
-                    "OLLAMA_THINK=%r does not parse to 'no thinking' (got %r). Anything the parser "
-                    "does not recognise becomes None, which keeps the model's default ON."
-                    % (declared, got))
+                    "the brain this system ships thinks by default when launched with no "
+                    "OLLAMA_THINK (THINK=%r). That is how systemd --user starts it, so this is "
+                    "the live TUI's condition, not a corner case." % (m.THINK,))
 
-            # CONTROL, and it says so in the OUTPUT, not only here: without it a parser that
-            # returned False for EVERYTHING would pass the arm above and this check would be
-            # vacuous. A typo must be visibly distinguishable from the real value.
-            bogus = think("disabled")
-            print("CONTROL, not a defect: declared=%r -> THINK=%r (want None) "
-                  "-- proves a typo is NOT silently treated as off" % ("disabled", bogus))
-            if bogus is not None:
-                raise SystemExit("control arm failed: an unrecognised value parsed to %r, so this "
-                                 "check cannot tell a good value from a typo" % (bogus,))
+            # The substitution actually HAPPENED. Without this the check passes on a build where
+            # @THINK_DEFAULT@ was never replaced but some other path produced False -- and a
+            # placeholder that reaches runtime is a defect even when the answer is right today.
+            if m._THINK_BUILD_DEFAULT.startswith("@"):
+                raise SystemExit("@THINK_DEFAULT@ was never substituted: the shipped script "
+                                 "carries the literal placeholder, so the value is accidental.")
 
-            # CONTROL: unset is also None. This is the state the check exists to keep us out of.
-            missing = think(None)
-            print("CONTROL, not a defect: unset -> THINK=%r (want None)" % (missing,))
-            if missing is not None:
-                raise SystemExit("control arm failed: unset parsed to %r" % (missing,))
+            # CONTROL, named in the OUTPUT so a reader is not asked to take the source's word:
+            # without it, a brain hard-wired to False would pass every arm above and the
+            # rollback documented in configuration-open.nix would be fiction.
+            on = think("on")
+            print("CONTROL, not a defect: OLLAMA_THINK=on -> THINK=%r (want True) "
+                  "-- proves the env still overrides, i.e. the zero-rebuild rollback is real"
+                  % (on.THINK,))
+            if on.THINK is not True:
+                raise SystemExit("control arm failed: the env no longer overrides the baked "
+                                 "default (got %r), so there is no rollback without a rebuild"
+                                 % (on.THINK,))
+
+            # CONTROL: a typo must still be distinguishable from the shipped value. It now falls
+            # back to the BAKED default rather than to the model's, which is a strictly safer
+            # failure -- assert that, rather than the old None.
+            typo = think("disabled")
+            print("CONTROL, not a defect: OLLAMA_THINK=disabled -> THINK=%r (want False via the "
+                  "baked default) -- an unrecognised value no longer silently restores thinking"
+                  % (typo.THINK,))
+            if typo.THINK is not False:
+                raise SystemExit("control arm failed: an unrecognised value parsed to %r"
+                                 % (typo.THINK,))
             PYEOF
             sed -i 's/^            //' check.py
-            python3 check.py ${./modules/agent-brain.py} ${declared}
-            echo "think-off-is-declared-and-parseable: shipped value parses to no-thinking; typo and unset do not"
+            python3 check.py ${brain}/bin/agent-brain
+            echo "think-off-reaches-the-brain-with-no-env: the shipped brain does not think when launched with an empty environment"
             touch $out
           '';
 

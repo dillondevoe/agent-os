@@ -219,16 +219,48 @@ def _log_turn_provenance(route=None, tokens=None):
     except Exception:
         pass
 
+# Substituted at build by genesis-open.nix from environment.variables.OLLAMA_THINK — the
+# SAME attrset the login env is built from, so there is one spelling and it cannot drift.
+# Left as the literal placeholder in a bare dev checkout, which _think_budget() detects.
+_THINK_BUILD_DEFAULT = "@THINK_DEFAULT@"
+
 def _think_budget():
     # OLLAMA_THINK: think-budget control for thinking models on the ~3 tok/s CPU box
     # (spec 2026-08-05 item b). off/false/0 → no thinking (fastest replies);
     # low/medium/high → per-level budget where the model supports it; on/true/1 → full.
-    # Unset → omit the key, keep the model's default.
-    v=os.environ.get("OLLAMA_THINK","").strip().lower()
-    if v in ("off","false","0","no"): return False
-    if v in ("on","true","1","yes"): return True
-    if v in ("low","medium","high"): return v
-    return None
+    # Unset or UNRECOGNISED → fall back to the BUILD-TIME default; if that is absent too, omit.
+    #
+    # WHY A BUILD-TIME DEFAULT AND NOT JUST THE ENV (2026-08-31, Dillon's photo of the TUI
+    # still thinking for 81s with OLLAMA_THINK=off already deployed). `environment.variables`
+    # builds the LOGIN environment. The TUI is launched by `systemd --user` (brain-home.service,
+    # commit baac2a3) which does not source /etc/set-environment, so the shipped value reached
+    # the login shell I probed and NOT the process that reads it. Baking it into the script
+    # makes it hold in EVERY launch context — systemd user unit, login shell, cron, a bare
+    # exec — because there is no inheritance step left to lose it.
+    #
+    # The env still WINS when set, deliberately: `OLLAMA_THINK=on` in the session stays the
+    # zero-rebuild rollback. This is a default, not a seam pin — unlike broker/confirm/taint,
+    # where an inherited value is an attack surface and the wrapper must be authoritative.
+    #
+    # AN UNRECOGNISED VALUE FALLS BACK TO THE BAKED DEFAULT, it does not return None. Returning
+    # None omits the key and restores the MODEL's default, i.e. thinking ON — so before this,
+    # `OLLAMA_THINK=disbaled` in a session was indistinguishable from never setting it and
+    # silently undid the whole fix. A typo must degrade to the shipped value, never past it.
+    def parse(v):
+        v = (v or "").strip().lower()
+        if v in ("off","false","0","no"):    return False
+        if v in ("on","true","1","yes"):     return True
+        if v in ("low","medium","high"):     return v
+        return None                          # unrecognised OR empty — not a value
+
+    got = parse(os.environ.get("OLLAMA_THINK"))
+    if got is not None:
+        return got
+    # An unsubstituted placeholder is NOT a value either: without this test a bare dev checkout
+    # would parse "@think_default@" to None and land on the model's default, which is the exact
+    # silent-ON outcome this change exists to remove and is invisible in a correct-looking build.
+    d = _THINK_BUILD_DEFAULT.strip().lower()
+    return None if d.startswith("@") else parse(d)
 THINK=_think_budget()
 
 # ── R1 CONTEXT BOUND (tier-0 item 3, Rabbot's runtime-config lane) ────────────
