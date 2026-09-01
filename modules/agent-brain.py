@@ -797,6 +797,50 @@ def chat(msgs):
     r=urllib.request.Request(OLLAMA,data=body,headers={"Content-Type":"application/json"})
     return json.load(urllib.request.urlopen(r,timeout=180))["message"]
 
+# XML/Hermes tool-call form, emitted as CONTENT when the Modelfile template does not
+# marshal structured `tool_calls`. Observed live on qwen3.5:9b (Dillon's photo of the Dell
+# TUI, 2026-08-31 06:44 CDT), shaped:
+#
+#     <tool_call><function=run_command><parameter=command>uptime</parameter></function></tool_call>
+#
+# WHY THIS IS A CORRECTNESS BUG AND NOT A COSMETIC ONE. The JSON fallback below does not
+# match this shape, so the block fell through as prose — and the brain then NARRATED a
+# system status it had never run. A tool call that renders as text is a CLAIM: the model
+# asked to act, nothing acted, and the next turn spoke as though it had. Parsing it is what
+# makes the answer honest, not what makes it pretty.
+#
+# SCOPE, STATED SO THE NEXT READER DOES NOT OVERTRUST IT: this parses the observed form and
+# the bare `<function=…>` block (a `<tool_call>` wrapper truncated by a token limit is
+# exactly the dangerous prose case, so it must not be the thing that decides). Parameter
+# values are RAW TEXT, never json.loads'd — `<parameter=command>` carries a shell string,
+# and a command containing `{` is not a JSON object. A shape neither branch recognises is
+# still left in `clean`, where _TOOLCALL_TOKEN_RE (the front-door kick) can still see it.
+_XML_TOOLCALL_BLOCK_RE = re.compile(r"<tool_call>\s*(.*?)\s*</tool_call>", re.S)
+_XML_FUNCTION_RE       = re.compile(r"<function\s*=\s*([A-Za-z_][\w.]*)\s*>(.*?)</function>", re.S)
+_XML_PARAMETER_RE      = re.compile(r"<parameter\s*=\s*([A-Za-z_][\w.]*)\s*>(.*?)</parameter>", re.S)
+
+def _extract_xml_tools(c):
+    """Pull XML-form calls out of content. Returns (calls, content_with_blocks_removed).
+
+    A `<function=…>` found inside a `<tool_call>` wrapper and one found bare are treated
+    the same; only the span removed from `clean` differs, so a partial emission cannot
+    leave half a call rendering as prose."""
+    out=[]; clean=c; spans=[]
+    for blk in _XML_TOOLCALL_BLOCK_RE.finditer(c):
+        inner=blk.group(1); found=False
+        for fn in _XML_FUNCTION_RE.finditer(inner):
+            out.append((fn.group(1), {k: v for k, v in _XML_PARAMETER_RE.findall(fn.group(2))})); found=True
+        # An empty or unrecognised <tool_call> wrapper is NOT swallowed — leaving it in
+        # `clean` is what keeps the front-door kick able to see that the model tried.
+        if found: spans.append(blk.span())
+    if not out:
+        for fn in _XML_FUNCTION_RE.finditer(c):
+            out.append((fn.group(1), {k: v for k, v in _XML_PARAMETER_RE.findall(fn.group(2))}))
+            spans.append(fn.span())
+    for a,b in reversed(spans):
+        clean = clean[:a] + clean[b:]
+    return out, clean
+
 def extract_tools(msg):
     tcs=msg.get("tool_calls") or []
     calls=[(t["function"]["name"], t["function"].get("arguments") if isinstance(t["function"].get("arguments"),dict) else json.loads(t["function"].get("arguments") or "{}")) for t in tcs]
@@ -807,6 +851,8 @@ def extract_tools(msg):
     for m in re.finditer(r"\{[^{}]*\"name\"\s*:\s*\"(\w+)\"[^{}]*\"arguments\"\s*:\s*(\{[^{}]*\})[^{}]*\}", c):
         try: out.append((m.group(1), json.loads(m.group(2)))); clean=clean.replace(m.group(0),"")
         except: pass
+    if not out:
+        out, clean = _extract_xml_tools(c)
     clean=re.sub(r"\bbrtc\b","",clean).strip()
     return out, clean
 

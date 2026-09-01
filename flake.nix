@@ -1929,6 +1929,26 @@
               touch $out
             '';
 
+        # A tool call that renders as prose is a CLAIM — the model asked to act, nothing
+        # acted, and the next turn narrated a result it never produced. Observed live on
+        # qwen3.5:9b (Dillon's Dell TUI photo, 2026-08-31): an XML/Hermes `<tool_call>` block
+        # that extract_tools()'s JSON-shaped fallback did not match. This gate holds the XML
+        # branch AND the two controls that keep it honest — structured `tool_calls` still win,
+        # and the older JSON fallback is not displaced — plus a PRE-FIX arm that runs the old
+        # JSON-only regex on the live input and requires it to find NOTHING. Without that arm
+        # the battery could be passing on an input the old code already handled.
+        xml-toolcall-contract =
+          nixpkgs.legacyPackages.${system}.runCommand "xml-toolcall-contract-check"
+            { nativeBuildInputs = [ nixpkgs.legacyPackages.${system}.python3 ]; } ''
+              work="$(mktemp -d)"
+              mkdir -p "$work/modules" "$work/tests"
+              cp ${./modules/agent-brain.py} "$work/modules/agent-brain.py"
+              cp ${./tests/xml-toolcall-battery.py} "$work/tests/xml-toolcall-battery.py"
+              cd "$work"
+              python3 tests/xml-toolcall-battery.py
+              touch $out
+            '';
+
         mem-contract =
           nixpkgs.legacyPackages.${system}.runCommand "mem-contract-check"
             { nativeBuildInputs = [ nixpkgs.legacyPackages.${system}.python3 ]; } ''
