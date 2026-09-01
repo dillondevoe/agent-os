@@ -430,15 +430,31 @@ in {
     # optional: latency alone cannot tell a slow brain from a mute one.
     #
     # `off`, spelled as one of the tokens _think_budget() actually parses
-    # (agent-brain.py:223 — off/false/0/no). A value outside that set returns None, which
-    # means "omit the key, keep the model's default" — i.e. a typo here does not fail, it
-    # silently ships thinking back ON. flake.nix's `think-off-is-declared-and-parseable`
-    # check asserts the value against the parser rather than trusting this spelling.
+    # (agent-brain.py — off/false/0/no).
     #
-    # This reaches agos-boot-prewarm automatically via genesis-open.nix's sessionOllamaEnv
-    # filter, so the prewarm and the session cannot disagree about it — the same derivation
-    # that fixed the OLLAMA_MODEL drift. The rollback is `OLLAMA_THINK=on` in the session,
-    # no rebuild, if a task ever wants the reasoning back.
+    # THIS ATTRSET IS NOT WHAT REACHES THE BRAIN, and believing it was cost a day.
+    # `environment.variables` builds the LOGIN environment. The TUI is started by
+    # `systemd --user` (brain-home.service, baac2a3), which never sources
+    # /etc/set-environment — so this value shipped, the login shell reported it, and the
+    # running brain had OLLAMA_THINK unset and thought for 81s a turn. What actually
+    # carries it is genesis-open.nix, which BAKES this string into the agent-brain script
+    # at build time, reading it from HERE so there is one spelling. This declaration is
+    # therefore the source of truth for the baked default, and only incidentally the login
+    # env. Do not add a launch path that expects to inherit it.
+    #
+    # It also reaches agos-boot-prewarm via genesis-open.nix's sessionOllamaEnv filter, so
+    # the prewarm and the session cannot disagree — the derivation that fixed the
+    # OLLAMA_MODEL drift.
+    #
+    # flake.nix's `think-off-reaches-the-brain-with-no-env` is the gate, and its vantage is
+    # the point: it execs the BUILT script with OLLAMA_THINK deleted from the environment,
+    # which is the condition a systemd user unit presents. Its predecessor read this
+    # attrset and the parser separately and was green throughout the failure.
+    #
+    # The rollback is `OLLAMA_THINK=on` in the session, no rebuild — the env still wins when
+    # it is set to something the parser recognises. A value it does NOT recognise now falls
+    # back to this baked default rather than to the model's, so a typo degrades to `off`
+    # instead of silently restoring thinking.
     OLLAMA_THINK = "off";
   };
 
