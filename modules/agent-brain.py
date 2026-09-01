@@ -71,6 +71,13 @@ def _floor_model():
 
 MODEL, ACTIVE_PROVIDER, ACTIVE_PROVIDER_KIND = _floor_model()
 
+# Declared HERE, above _escalate_status, and not down with the consent block where it used to
+# live: _escalate_status() is CALLED at module level a few lines below, and it now resolves
+# through this set. Defined later, that call raises NameError at import and the brain
+# crash-loops under brain-home's `while :;` — which is exactly what it did on the Dell at
+# 18:53Z on 2026-09-01, live, until this line moved.
+_ESCALATE_UNAVAILABLE = set()   # escalate providers rate-limited/unreachable THIS session
+
 def _escalate_status():
     # Config-only escalate-role RESOLUTION, distinct from and much smaller than the
     # deferred Anthropic shim (task 287, 2026-08-13 assessment): this answers "is a
@@ -107,7 +114,6 @@ ESCALATE_STATUS = _escalate_status()
 # `always` is NOT offered in this phase and is refused loudly rather than silently
 # downgraded — a config that thinks it armed spending forever, and didn't, is worse than
 # one that fails to start.
-_ESCALATE_UNAVAILABLE = set()   # escalate providers rate-limited/unreachable THIS session
 
 
 def _preflight_escalate_secret():
