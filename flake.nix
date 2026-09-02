@@ -1864,12 +1864,19 @@
             cp ${./tests/providers-battery.py} "$work/tests/providers-battery.py"
             cp ${./tests/wiring-battery.py} "$work/tests/wiring-battery.py"
             cp ${./tests/cost-cap-battery.py} "$work/tests/cost-cap-battery.py"
+            cp ${./tests/summon-consent-battery.py} "$work/tests/summon-consent-battery.py"
             cd "$work"
             PYTHONPATH=modules python3 tests/providers-battery.py
             python3 tests/wiring-battery.py
             # cost-cap breaker (HARNESS-MAP guardrail 3): limits validation, yaml>env>default
             # precedence, token-trip refusal + transcript stubs, loud hop exhaustion.
             python3 tests/cost-cap-battery.py
+            # summon_claude consent gate (Rabbot door (i), 2026-09-02): the tool spawns the
+            # operator's Claude CLI, and until this gate the only thing between a model-emitted
+            # call and that subprocess was prompt text. Arms drive `ok_to_summon` — the same
+            # function the deployed path calls — plus `_summon_claude` itself with the CLI
+            # stubbed, so there is no fixture-only route (#256's lesson).
+            python3 tests/summon-consent-battery.py
             touch $out
           '';
 
