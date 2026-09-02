@@ -18,6 +18,10 @@ PLANT="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMz5kb9/Xa8wvyZPFhO5Hf/1Y6G63JzClyIx3
 setup() {
   W="$(mktemp -d)"
   mkdir -p "$W/etc/ssh/authorized_keys.d" "$W/root/.ssh" "$W/home/agent/.ssh"
+  # The scanner enumerates accounts from passwd, not from a /home/* glob, so the fixture
+  # must carry one. Every arm below therefore drives the SAME enumeration code that runs
+  # on the box — a fixture that exercised a fallback path would test the wrong scanner.
+  printf 'root:x:0:0::/root:/bin/sh\nagent:x:1000:1000::/home/agent:/bin/sh\nsvc:x:900:900::/var/lib/svc:/bin/sh\n' > "$W/etc/passwd"
   printf '%s\n%s\n' "$DECL" "$MIR" > "$W/etc/ssh/authorized_keys.d/root"
   printf '%s\n%s\n' "$DECL" "$MIR" > "$W/etc/ssh/authorized_keys.d/agent"
 }
@@ -61,5 +65,47 @@ setup; printf '%s\n' "$PLANT" > "$W/home/agent/.ssh/authorized_keys"
 check "G planted key under /home/agent -> DRIFT" "$(run)" 1
 grep -q 'UNDECLARED agent' "$W/out" || { echo "FAIL G: agent not named"; fail=$((fail+1)); }
 
-echo "--- $pass passed, $fail failed ---"
+# H — PRE-FIX ARM, and it is the incident key again. `svc` has a home outside /root and
+# /home/*, which is the shape of 48 of the Dell's 51 declared accounts (measured
+# 2026-09-02; `ollama` -> /var/lib/ollama is a writable one). The glob-based scanner this
+# replaces returned 0 here: the planted key was INVISIBLE and the box read "clean".
+# Verified firing against the pre-fix script before the fix was written.
+setup; mkdir -p "$W/var/lib/svc/.ssh"; printf '%s\n' "$PLANT" > "$W/var/lib/svc/.ssh/authorized_keys"
+check "H planted key in a home outside /home -> DRIFT" "$(run)" 1
+grep -q 'UNDECLARED svc' "$W/out" || { echo "FAIL H: svc not named"; fail=$((fail+1)); }
+
+# I — CONTROL ARM for H. Without it, a scanner that flagged every out-of-glob home would
+# pass H while being useless.
+setup; mkdir -p "$W/var/lib/svc/.ssh"; printf '%s\n' "$DECL" > "$W/etc/ssh/authorized_keys.d/svc"
+printf '%s\n' "$DECL" > "$W/var/lib/svc/.ssh/authorized_keys"
+check "I declared key in a home outside /home -> clean" "$(run)" 0
+
+# J — the scan must not report "clean" when it does not know WHICH accounts to scan.
+# Without passwd the enumeration returns nothing, and a silent empty enumeration is
+# indistinguishable from a clean box — which is the whole finding.
+setup; rm -f "$W/etc/passwd"; printf '%s\n' "$PLANT" > "$W/root/.ssh/authorized_keys"
+check "J no passwd -> CANNOT-ASSESS, not clean" "$(run)" 2
+
+# K — THE POPULATION IS IN THE VERDICT. Two clean runs that examined different amounts
+# must not be byte-identical. This is the arm that would have caught the finding above
+# by reading the report alone.
+setup; run >/dev/null; empty_line="$(grep '^RESULT' "$W/out")"
+setup; printf 'restrict,pty %s c\n' "$(echo "$MIR" | cut -d' ' -f1-2)" > "$W/root/.ssh/authorized_keys"
+run >/dev/null; one_line="$(grep '^RESULT' "$W/out")"
+if [ "$empty_line" != "$one_line" ] && case "$empty_line" in *"examined 0 mutable"*) true;; *) false;; esac \
+   && case "$one_line" in *"examined 1 mutable"*) true;; *) false;; esac; then
+  echo "PASS K clean verdicts carry their population and differ"; pass=$((pass+1))
+else
+  echo "FAIL K population absent or identical — empty=[$empty_line] one=[$one_line]"; fail=$((fail+1))
+fi
+
+# A verdict that does not depend on how many arms ran cannot notice any going missing.
+WANT_ARMS=11
+ran=$((pass+fail))
+if [ "$ran" != "$WANT_ARMS" ]; then
+  echo "FAIL arm count: $ran arms ran, expected $WANT_ARMS -- an arm was added or silently lost"
+  fail=$((fail+1))
+fi
+
+echo "--- $pass passed, $fail failed ($ran arms) ---"
 [ "$fail" = 0 ]
