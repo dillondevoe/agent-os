@@ -46,6 +46,19 @@ except Exception:
 
 _PROVIDERS_PATH = os.environ.get("AGENT_OS_PROVIDERS", "/etc/agent-os/providers.yaml")
 _PROVIDERS = None
+# THREE states, not two. `os.path.exists()` alone answers False for a DANGLING SYMLINK, and
+# /etc/agent-os/providers.yaml is a symlink into the nix store on every open build — so a
+# GC'd or half-switched target used to read as "no config at all" and degrade silently to the
+# legacy OLLAMA_MODEL path, taking the spend-gated escalate role with it and saying nothing.
+# Absence is LEGITIMATE on sealed (which imports no escalate module and is meant to run
+# floor-only), so absence must stay quiet; a BROKEN link is a deployment fault and must be as
+# loud as a malformed config. Visible starvation beats invisible absence.
+_dangling = (not os.path.exists(_PROVIDERS_PATH)) and os.path.islink(_PROVIDERS_PATH)
+if _dangling:
+    sys.stderr.write(
+        f"\n\033[1;31m⛔ provider config path is a broken symlink: {_PROVIDERS_PATH} "
+        f"— that is a broken deployment, not an absent config. I am not starting.\033[0m\n")
+    sys.exit(1)
 if os.path.exists(_PROVIDERS_PATH):
     if _load_providers is None:
         sys.stderr.write("\n\033[2m⚠ provider config present but providers.py unavailable — falling back to OLLAMA_MODEL\033[0m\n")

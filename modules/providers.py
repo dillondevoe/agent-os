@@ -30,8 +30,20 @@ class ProviderConfigError(ValueError):
 
 
 def load_providers(path):
-    with open(path, encoding="utf-8") as f:
-        raw = yaml.safe_load(f) or {}
+    # The read and the parse get SEPARATE except clauses on purpose. A single `except` around
+    # both collapses ABSENT/UNREADABLE into MALFORMED (or worse, into "no config"), and a
+    # collapse in that direction is what lets a broken deployment read as an intentional one.
+    # An unreadable file used to raise PermissionError straight out of here, past the caller's
+    # `except ProviderConfigError`, and crash agent-brain at import — reproduced 2026-09-02.
+    try:
+        with open(path, encoding="utf-8") as f:
+            text = f.read()
+    except OSError as e:
+        raise ProviderConfigError(f"{path}: cannot read config: {e.strerror}") from None
+    try:
+        raw = yaml.safe_load(text) or {}
+    except yaml.YAMLError as e:
+        raise ProviderConfigError(f"{path}: not valid YAML: {e}") from None
     providers = raw.get("providers") or {}
     if not providers:
         raise ProviderConfigError(f"{path}: no 'providers' block")
