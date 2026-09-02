@@ -38,7 +38,10 @@ mk() {
   done
 }
 run() {  # run() [VAR=val ...] -> stdout of agent-shell, brain marker included
-  env -i HOME="$SB/home" PATH="$SB/bin:/usr/bin:/bin" TERM=dumb AGENT_OS_NOANIM=1 \
+  # Inherit the caller's PATH rather than hardcoding /usr/bin:/bin — under a nix build
+  # sandbox those do not exist, and a run() that cannot find `bash` would fail every arm
+  # for a reason that has nothing to do with brain precedence.
+  env -i HOME="$SB/home" PATH="$SB/bin:$PATH" TERM=dumb AGENT_OS_NOANIM=1 \
       "$@" bash "$SHELL_BIN" </dev/null 2>&1
 }
 arm() {  # arm <name> <expected-marker|NONE> <output>
