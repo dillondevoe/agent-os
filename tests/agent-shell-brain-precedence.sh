@@ -36,11 +36,27 @@ mk() {
       noexec)  printf '#!/nonexistent/loader\n' > "$SB/bin/$name"; chmod +x "$SB/bin/$name" ;;
     esac
   done
+  # A CURATED tool PATH with no `systemctl` in it, so the first-boot network branch is
+  # unreachable in every arm on every machine. Without this the pinned arms below are
+  # satisfiable through that branch on any box that has systemctl and a route to
+  # registry.ollama.ai — which is exactly how they passed here and failed in CI on
+  # 2026-09-02. Shadowing systemctl with a non-executable file does NOT work: a PATH search
+  # skips a non-executable entry and keeps looking, so `command -v` still finds /usr/bin's.
+  # The dir must be BUILT, not assumed: hardcoding /usr/bin:/bin fails every arm under a nix
+  # sandbox for a reason unrelated to brain precedence, which is a red that reads like a
+  # caught defect.
+  mkdir -p "$SB/tools"
+  for _t in bash sh env grep sed cat find wc tr timeout mktemp dirname mkdir chmod tail printf head sort; do
+    _w="$(command -v "$_t" 2>/dev/null)" && ln -sf "$_w" "$SB/tools/$_t"
+  done
+  [ -x "$SB/tools/bash" ] || { echo "CANNOT-ASSESS: could not build a tool PATH (no bash)"; exit 2; }
+  if PATH="$SB/tools" command -v systemctl >/dev/null 2>&1; then
+    echo "CANNOT-ASSESS: systemctl reachable from the curated PATH — the first-boot branch is live"; exit 2
+  fi
 }
 run() {  # run() [VAR=val ...] -> stdout of agent-shell, plus a __RC= completion token
-  # Inherit the caller's PATH rather than hardcoding /usr/bin:/bin — under a nix build
-  # sandbox those do not exist, and a run() that cannot find `bash` would fail every arm
-  # for a reason that has nothing to do with brain precedence.
+  # PATH is the stub brains plus the curated tool dir mk() built — see the note there for
+  # why it is built rather than inherited or hardcoded.
   #
   # The trailing __RC= token is SUBSTRATE for the deny arms below. A "this marker is
   # absent" assertion passes on empty output — so it passes hardest when the script
@@ -48,7 +64,7 @@ run() {  # run() [VAR=val ...] -> stdout of agent-shell, plus a __RC= completion
   # terminated, and 124 (timeout) is rejected, so absence means "it decided otherwise",
   # not "there was nothing to read".
   local out rc
-  out="$(timeout 120 env -i HOME="$SB/home" PATH="$SB/bin:$PATH" TERM=dumb AGENT_OS_NOANIM=1 \
+  out="$(timeout 120 env -i HOME="$SB/home" PATH="$SB/bin:$SB/tools" TERM=dumb AGENT_OS_NOANIM=1 \
       "$@" bash "$SHELL_BIN" </dev/null 2>&1)"; rc=$?
   printf '%s\n__RC=%s\n' "$out" "$rc"
 }
@@ -102,25 +118,27 @@ arm "auto/claude-alone-is-not-chosen"   "!BRAIN=claude"    "$(run)"
 mk claude:ok agent-loop:ok
 arm "pinned/claude-runnable-wins"       "BRAIN=claude"     "$(run BRAIN=claude)"
 
-# (iii) BRAIN=claude + probe fails -> the dead exec must NOT happen.
+# (iii) BRAIN=claude + probe fails -> the LOCAL chain, in the precedence block.
 #
-# These two arms assert NON-EXECUTION, not a landing spot, and that correction came from
-# CI failing them on 2026-09-02 while they passed 6/6 on the authoring machine. They used
-# to expect the run to land on the local chain — which it does HERE only because this box
-# is online: a pinned brain that fails its probe leaves $BRAIN committed to nothing and
-# drops toward the memory floor, and the local chain is re-reached solely by the first-boot
-# recovery path, which is gated on `command -v systemctl` AND a live tcp/443 probe to
-# registry.ollama.ai. A nix build sandbox has neither, so it lands on the floor instead.
-# The arms were reading an ambient network as if it were brain precedence — the same defect
-# these tests exist to close, one layer out. What agent-shell actually guarantees, in every
-# environment, is that it never execs a brain that failed its probe. That is also the whole
-# of the security property. Assert that.
+# These two arms are the ones CI failed on 2026-09-02 while they passed 6/6 on the authoring
+# machine, and both the failure and the fix are worth keeping written down. They expect a
+# landing spot — "falls to the local chain". At the time the script only reached the local
+# chain under `[ -z "$BRAIN" ]`, so a PINNED brain that failed its probe re-reached it solely
+# through the first-boot recovery branch, gated on `command -v systemctl` AND a live tcp/443
+# probe to registry.ollama.ai. This box has both; a nix build sandbox has neither. The arms
+# were measuring an ambient network and reporting it as brain precedence — the same defect
+# these tests exist to close, one layer out.
+#
+# The answer was not to weaken the arms to non-execution: that is satisfied by the login
+# shell simply DYING on the failed exec, which is the crash-loop itself. It was to move the
+# local chain to be the fallthrough for an empty commit (Geist's gate on #258), so the arms
+# now hold in the sandbox for the reason they claim, and hold on a sealed box too.
 mk claude:noexec agent-loop:ok
-arm "pinned/claude-unrunnable-is-not-exec"   "!BRAIN=claude"     "$(run BRAIN=claude)"
+arm "pinned/claude-unrunnable-falls"    "BRAIN=agent-loop"   "$(run BRAIN=claude)"
 
-# A pinned local brain that fails --check is likewise never exec'd (pre-existing law, kept armed).
+# A pinned local brain that fails --check still falls through (pre-existing law, kept armed).
 mk agent-loop:nocheck brain-ollama:ok
-arm "pinned/local-failing-check-is-not-exec" "!BRAIN=agent-loop" "$(run BRAIN=agent-loop)"
+arm "pinned/local-failing-check-falls"  "BRAIN=brain-ollama" "$(run BRAIN=agent-loop)"
 
 echo "--- ran $RAN arms: $PASS passed, $FAIL failed"
 [ "$RAN" -eq 6 ] || { echo "CANNOT-ASSESS: expected 6 arms, ran $RAN"; exit 2; }

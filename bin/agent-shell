@@ -82,26 +82,24 @@ printf "${DIM}config at /etc/nixos — ask me to change a setting and I rewrite 
 SELF_DIR="$(cd "$(dirname "$0")" && pwd)"
 resolve_brain() { command -v "$1" 2>/dev/null || { [ -x "$SELF_DIR/$1" ] && echo "$SELF_DIR/$1"; }; }
 
-BRAIN="${BRAIN:-}"
-if [ -z "$BRAIN" ]; then
-  # Local precedence (Geist v0.2 §1): the tool-calling loop is the preferred local
-  # brain — probe agent-loop FIRST, then fall to the plain brain-ollama chat floor.
-  # Both share the same --check contract, so a box with a pulled model lands on
-  # agent-loop; if agent-loop is unresolvable, brain-ollama still catches; if neither
-  # talks, the memory REPL does.
-  #
-  # Cloud `claude` is deliberately NOT in this chain: mere presence on PATH must never
-  # make the login shell the cloud. See the precedence comment above.
-  _al="$(resolve_brain agent-loop)" || true          # set -e: a missing brain must fall through to the REPL, not kill login
-  if [ -n "$_al" ] && "$_al" --check; then
-    BRAIN="$_al"                                    # local tool-calling loop: offline + reachable
-  else
-    _ob="$(resolve_brain brain-ollama)" || true
-    if [ -n "$_ob" ] && "$_ob" --check; then
-      BRAIN="$_ob"                                  # plain Ollama chat floor: offline + reachable
-    fi
-  fi
-fi
+# Local precedence (Geist v0.2 §1): the tool-calling loop is the preferred local brain —
+# probe agent-loop FIRST, then fall to the plain brain-ollama chat floor. Both share the
+# same --check contract, so a box with a pulled model lands on agent-loop; if agent-loop is
+# unresolvable, brain-ollama still catches; if neither talks, the memory REPL does.
+#
+# Cloud `claude` is deliberately NOT in this chain: mere presence on PATH must never make
+# the login shell the cloud. See the precedence comment above.
+#
+# ONE definition, used by both the selection below and the first-boot poll further down —
+# they were separate copies of this chain until 2026-09-02, and two copies of a precedence
+# rule is one copy of it plus a place for it to drift.
+# Echoes the path of a READY local brain, or nothing.
+_pick_brain() {
+  local _b
+  _b="$(resolve_brain agent-loop)"   || true; [ -n "$_b" ] && "$_b" --check >/dev/null 2>&1 && { printf '%s' "$_b"; return 0; }
+  _b="$(resolve_brain brain-ollama)" || true; [ -n "$_b" ] && "$_b" --check >/dev/null 2>&1 && { printf '%s' "$_b"; return 0; }
+  return 1
+}
 
 # Commit to the chosen brain — but a local brain (agent-loop or brain-ollama) must pass
 # its own --check even when it was PINNED via $BRAIN (not only when auto-probed above). A
@@ -112,6 +110,7 @@ fi
 # ELF exec'd from the login shell is the same crash-loop by another route. The already-probed
 # auto local brain commits straight through; a failed probe falls to the memory REPL below.
 _commit=""
+BRAIN="${BRAIN:-}"
 if [ -n "$BRAIN" ] && _bp="$(resolve_brain "$BRAIN")" && [ -n "$_bp" ]; then
   case "$BRAIN" in
     *brain-ollama|*agent-loop) if "$_bp" --check   >/dev/null 2>&1; then _commit="$_bp"; fi ;;
@@ -119,6 +118,15 @@ if [ -n "$BRAIN" ] && _bp="$(resolve_brain "$BRAIN")" && [ -n "$_bp" ]; then
     *)                         _commit="$_bp" ;;
   esac
 fi
+# Nothing committed yet — EITHER no $BRAIN was set at all, OR a pinned brain failed its
+# probe. Both take the SAME local chain, and they take it HERE (Geist, 2026-09-02, gate on
+# PR #258). Until now the local chain ran only under `[ -z "$BRAIN" ]`, so a pinned brain
+# that failed its probe skipped it entirely and could only re-reach a local brain through
+# the first-boot recovery branch below — which is gated on `command -v systemctl` AND a
+# live tcp/443 probe to registry.ollama.ai. On a sealed box with a pulled model and, say,
+# an unrunnable pinned `claude`, that meant landing on the memory floor with a perfectly
+# good brain sitting on disk. Not a crash-loop, so never loud; just wrong.
+[ -n "$_commit" ] || _commit="$(_pick_brain || true)"
 if [ -n "$_commit" ]; then
   cd "$HOME"
   exec "$_commit"      # the brain IS the shell: boot straight into the agent
@@ -162,15 +170,8 @@ else
     # The only ways out are exec (process replaced) or falling through to the floor (also +e).
     set +e
     _STATUS=/run/agent-os/pull-status
-    # A ready LOCAL brain by the SAME precedence as the main path (agent-loop preferred over
-    # brain-ollama), each gated on its own --check so we never exec a brain that cannot talk.
-    # Echoes a path, or nothing.
-    _pick_brain() {
-      local _b
-      _b="$(resolve_brain agent-loop)";   [ -n "$_b" ] && "$_b" --check >/dev/null 2>&1 && { printf '%s' "$_b"; return 0; }
-      _b="$(resolve_brain brain-ollama)"; [ -n "$_b" ] && "$_b" --check >/dev/null 2>&1 && { printf '%s' "$_b"; return 0; }
-      return 1
-    }
+    # _pick_brain is defined once, up in the precedence block — same chain, same --check
+    # gating, so this poll can never drift from the selection it is waiting to reach.
     _ready="$(_pick_brain)"
     if [ -z "$_ready" ]; then
       printf "\n${DIM}Online — installing the local brain (~4.7GB, first boot only). It boots on its own when ready.${RST}\n"
