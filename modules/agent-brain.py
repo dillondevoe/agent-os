@@ -187,6 +187,77 @@ class _EscalateConsent:
         return "session" if self.session else None
 
 CONSENT = _EscalateConsent()
+
+# ── summon_claude consent, IN CODE (Rabbot door (i), 2026-09-02) ──────────────────────
+# THE HOLE THIS CLOSES. `summon_claude` spawns the operator's Claude CLI as a subprocess:
+# their account, their permissions, no broker, no uid split. Until now the ONLY thing
+# between a model-emitted tool call and that subprocess was prompt text — the tool
+# description saying "call ONLY after the user has explicitly said yes", and one line in
+# SYS_BASE. The structural guard that exists (the 3B front door cannot reach do_tool at
+# all — kick wall, PR #64) protects a different path; on the 9B side the gate was prose.
+#
+# A CONTROL THAT LIVES ONLY IN PROSE IS NOT A CONTROL. This tree has paid for that lesson
+# in the debounce marker, in `gh pr merge --auto`, and in a lint that documented a scope it
+# did not have. Consent asserted by the model is the model deciding it has consent.
+#
+# So the grant is armed ONLY from the REPL input path, by the operator typing `:summon` —
+# the same shape as `:escalate`, and reachable by nothing the model emits. It is one-shot
+# and it expires, because a grant that outlives the exchange that motivated it is a
+# standing permission nobody remembers giving.
+#
+# DELIBERATELY ONE FUNCTION. `ok_to_summon()` is the whole gate, so door (ii) — routing
+# run_command + summon_claude + fetch_web through the broker as one uid-split slice — can
+# take ownership of it without unpicking anything. (i) does not preclude (ii).
+_SUMMON_GRANT_TTL_S = 300  # ~ a few turns at this box's cadence; a stale yes is not a yes
+
+class _SummonConsent:
+    def __init__(self, ttl=_SUMMON_GRANT_TTL_S):
+        self._at = None
+        self._ttl = ttl
+    def arm(self):
+        """Called ONLY from the operator's own input line. Never from a tool, a model
+        response, or anything parsed out of model output."""
+        self._at = time.time()
+    def check_and_consume(self, now=None):
+        """(True, None) if a summon may proceed, else (False, reason). Single-use: a
+        successful check disarms the grant, so one `:summon` buys exactly one summon."""
+        now = time.time() if now is None else now
+        if self._at is None:
+            return False, "no operator consent — summon_claude is cloud and uses the user's account"
+        age = now - self._at
+        if age > self._ttl:
+            self._at = None
+            return False, f"consent expired ({int(age)}s > {self._ttl}s) — ask again"
+        self._at = None
+        return True, None
+    def armed(self, now=None):
+        now = time.time() if now is None else now
+        return self._at is not None and (now - self._at) <= self._ttl
+
+SUMMON_CONSENT = _SummonConsent()
+
+def ok_to_summon(consent=None, now=None):
+    """THE gate. The deployed path and the battery both call this — no fixture-only route.
+
+    (#256's lesson: an arm that exercises a different code path than the box runs is an arm
+    that proves nothing about the box.)"""
+    return (consent or SUMMON_CONSENT).check_and_consume(now=now)
+
+def _log_summon_attempt(allowed, reason=None):
+    """A refused summon is LOUD. A legitimate summon blocked by this gate must show up as a
+    defect in the record, not as a silence someone has to notice the absence of."""
+    try:
+        os.makedirs(os.path.dirname(_TURN_LOG_PATH), exist_ok=True)
+        with open(_TURN_LOG_PATH, "a") as f:
+            f.write(json.dumps({
+                "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                "event": "summon_claude",
+                "allowed": bool(allowed),
+                "reason": reason,
+            }) + "\n")
+    except Exception:
+        pass
+
 if CONSENT.rejected_always:
     sys.stderr.write("\n\033[1;31m⛔ AGENT_OS_ESCALATE_CONSENT=always is not offered in this phase "
                      "(Geist ruling 2026-08-22) — use `session`, or grant per turn with `:escalate`.\033[0m\n")
@@ -477,7 +548,7 @@ TOOLS=[
  {"type":"function","function":{"name":"media_info","description":"Probe an image/video/audio file (type, format, duration, dimensions, streams). Use to inspect a media file.","parameters":{"type":"object","properties":{"path":{"type":"string","description":"path to the media file"}},"required":["path"]}}},
  {"type":"function","function":{"name":"notes","description":"The user's notes. action 'list' shows all notes newest-first; 'read' returns one note's body (needs slug).","parameters":{"type":"object","properties":{"action":{"type":"string","description":"list | read"},"slug":{"type":"string","description":"for 'read': the note slug"}}}}},
  {"type":"function","function":{"name":"fetch_web","description":"Fetch a public web page and return its readable text (nav/boilerplate stripped). Use to READ what a page says (the inference half of browsing); use open_url instead to show the user a site.","parameters":{"type":"object","properties":{"url":{"type":"string","description":"full http(s) URL"}},"required":["url"]}}},
- {"type":"function","function":{"name":"summon_claude","description":"Bring in cloud Claude for a task beyond the local brain. CLOUD, uses the user's account — call ONLY after the user has explicitly said yes to a summon offer this turn. Never auto-fire.","parameters":{"type":"object","properties":{"task":{"type":"string","description":"what Claude should do, stated completely"},"context_summary":{"type":"string","description":"compact summary of the last ~6 turns relevant to the task — never the whole history, never secrets"}},"required":["task","context_summary"]}}},
+ {"type":"function","function":{"name":"summon_claude","description":"Bring in cloud Claude for a task beyond the local brain. CLOUD, uses the user's account. Consent is enforced in code, not here: the call is REFUSED unless the operator typed `:summon` at the prompt. Offer a summon and tell them to type `:summon <msg>`; a yes in conversation does not arm it. Never auto-fire.","parameters":{"type":"object","properties":{"task":{"type":"string","description":"what Claude should do, stated completely"},"context_summary":{"type":"string","description":"compact summary of the last ~6 turns relevant to the task — never the whole history, never secrets"}},"required":["task","context_summary"]}}},
 ]
 
 def live_context():
@@ -525,7 +596,8 @@ SYS_BASE=("You are Agent OS's local brain — sovereign, private, on-machine, no
      "changes happen in the OS repo — say so instead of editing. "
      "SUMMON: when a task is beyond you (deep code work, long documents, hard reasoning), OFFER: "
      "\"this one's beyond me — want me to bring in Claude? [cloud, uses your account]\" and call "
-     "summon_claude only after an explicit yes. The offer must name that it's cloud.")
+     "summon_claude only after an explicit yes, which the operator gives by typing `:summon` — "
+     "a conversational yes does not arm it and the call will be refused. The offer must name that it's cloud.")
 
 def sysmsg():
     # SOUL first, unspoofably (Geist item 3): identity leads, then operational addendum.
@@ -1122,6 +1194,15 @@ def _summon_claude(task,context_summary):
     # has said yes. Reachable only through do_tool, which the 3B front-door structurally
     # cannot fire (kick wall, PR #64) — cloud stays a summon on the 9B side, never an OS
     # dependency. Brief = task + compacted context + one machine line, never full history.
+    # THE GATE. Before the task check, so a consent-less call is refused on the ground it
+    # is actually refused on, and cannot be probed for validity by sending an empty task.
+    allowed, why = ok_to_summon()
+    if not allowed:
+        _log_summon_attempt(False, why)
+        return ("summon refused: " + why + ". The operator grants it by typing `:summon` at the "
+                "prompt — saying yes in conversation is not enough, because this path spends "
+                "their cloud account.")
+    _log_summon_attempt(True, None)
     if not task: return "summon error: no task given"
     brief=(f"Task from Agent OS's local brain (relay your answer to the user through it):\n{task}\n\n"
            f"Conversation context:\n{context_summary}\n\n"
@@ -1522,6 +1603,18 @@ def main():
             if 1<=n<=len(EXPAND_BUFFERS): print(EXPAND_BUFFERS[n-1])
             else: print(f"  \033[2m(no such buffer — have 1..{len(EXPAND_BUFFERS)})\033[0m")
             continue
+        # ── `:summon` — the consent act for summon_claude (Rabbot door (i), 2026-09-02) ──
+        # Typing it IS the consent, and typing it is the ONLY way to arm it. Bare `:summon`
+        # reports status rather than arming, so a half-typed command cannot grant anything.
+        if u.split()[0]==":summon":
+            rest=u[len(":summon"):].strip()
+            if not rest:
+                st=("armed" if SUMMON_CONSENT.armed() else "not armed")
+                print(f"  \033[2msummon_claude consent: {st} "
+                      f"(one-shot, expires {_SUMMON_GRANT_TTL_S}s after `:summon <msg>`)\033[0m")
+                continue
+            SUMMON_CONSENT.arm()
+            u=rest
         # ── `:escalate` — the per-turn consent act (task 323, Geist ruling 2026-08-22) ──
         # Typing it IS the consent; there is no other path from this prompt to the metered
         # provider. Bare `:escalate` reports status rather than arming anything, so a
