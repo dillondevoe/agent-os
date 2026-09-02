@@ -1956,6 +1956,12 @@
           in pkgs.runCommand "tests-no-self-swallowing-arms" { nativeBuildInputs = [ pkgs.python3 ]; } ''
             work="$(mktemp -d)"; mkdir -p "$work/tests"
             cp -r ${./tests}/*.py "$work/tests/"
+            # The .sh copy is not cosmetic. The lint grew a shell half on 2026-09-02, and this
+            # line is the SET it is handed: with only *.py copied the shell arms scan zero files
+            # and the check is green while covering nothing -- the same "sound check, wrong set"
+            # defect the lint exists to catch, one level up, in its own sandbox. The verdict now
+            # prints both counts so a zero here is visible in the build log rather than implied.
+            cp -r ${./tests}/*.sh "$work/tests/"
             cp ${./tests/no-self-swallowing-arms.py} "$work/lint.py"
             python3 "$work/lint.py" "$work/tests"
             touch $out

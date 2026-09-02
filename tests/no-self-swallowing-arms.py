@@ -19,10 +19,34 @@ the whole suite, and because the pattern is invisible in a passing run by constr
 reasoning as the checks that assert on the shipped artifact rather than a copy: the failure
 mode here is silence, so the control has to be something other than a green test run.
 
+THE SHELL HALF, added 2026-09-02 after #251. This lint scanned 44 `.py` batteries and none of
+the 21 `.sh` ones, and I said so in two comms before fixing it -- which is the same "a good
+check asked of the wrong set" shape as #252 and #253, sitting in my own check.
+
+The shell defect it covers is ONE class, the one there is EVIDENCE for, because #251 found it
+live in `tests/agent-loop-battery.sh`:
+
+    hasnt() { grep -qF -- "$2" "$1" && fail "$3"; return 0; }
+
+On a missing or empty file grep fails, `&& fail` never fires, and the arm passes. "The bad
+string is not in the output" is vacuously true of a run that produced NO output. Its neighbour
+`has()` -- same shape with `||` -- is fail-SAFE for free on the same inputs, so the pair reads
+symmetric while failing in opposite directions.
+
+SCOPE, stated so a green is not over-read: this flags negative-assertion HELPERS (a shell
+function whose body greps and fails on a MATCH, with no substrate test). It deliberately does
+NOT flag inline negative assertions -- #252's arm I is one, and it is correct, because it
+carries its own `[ -f ]` guard. Helpers are where the fail-open generalises across every call
+site, which was #251's actual lesson: the guarantee lived in call-site ordering rather than in
+the helper. Four other shell hazard classes were hand-audited clean the same day (fail-in-
+subshell, silently-skipped guarded arms, self-disarm, unlisted batteries) and are NOT covered
+here; that audit is in the comms, not in this file.
+
 Exit 1 lists every site. `--selftest` runs the control arms.
 """
 import ast
 import pathlib
+import re
 import sys
 
 SWALLOWING = {"Exception", "BaseException"}
@@ -40,6 +64,33 @@ def _sentinel_raises(node):
         if isinstance(n, ast.Assert) and isinstance(n.test, ast.Constant) and not n.test.value:
             return True
     return False
+
+
+# A shell function definition, one-line or braced across lines.
+_SH_FUNC = re.compile(r'^\s*([A-Za-z_][A-Za-z0-9_]*)\s*\(\)\s*\{(.*?)\}\s*$',
+                      re.MULTILINE | re.DOTALL)
+# grep ... && <something that records a failure>
+_NEG_ASSERT = re.compile(r'\bgrep\b[^\n;]*&&\s*(fail|bad|die|err)\b')
+# any test that establishes the file exists / is non-empty before asserting about it
+_SUBSTRATE = re.compile(r'\[\s*-[sfe]\s')
+
+
+def scan_shell(text, label):
+    """[(line, name)] for negative-assertion helpers with no substrate requirement.
+
+    The failure mode is fail-OPEN: grep fails on a missing/empty file, `&& fail` never fires,
+    the arm passes. Reported per HELPER, because a helper's guarantee is spent at every call
+    site at once.
+    """
+    out = []
+    for m in _SH_FUNC.finditer(text):
+        name, body = m.group(1), m.group(2)
+        if not _NEG_ASSERT.search(body):
+            continue
+        if _SUBSTRATE.search(body):
+            continue
+        out.append((text[:m.start()].count("\n") + 1, name))
+    return out
 
 
 def scan_source(text, label):
@@ -96,6 +147,41 @@ def unrelated():
 '''
 
 
+# The REAL pre-fix helper from tests/agent-loop-battery.sh, and the REAL fix. Not an invented
+# shape: a fixture written to match the detector proves only that I can write two things alike.
+SH_BAD_FIXTURE = '''
+has()   { grep -qF -- "$2" "$1" || fail "$3"; }
+hasnt() { grep -qF -- "$2" "$1" && fail "$3"; return 0; }
+'''
+SH_GOOD_FIXTURE = '''
+has()   { grep -qF -- "$2" "$1" || fail "$3"; }
+hasnt() {
+  [ -s "$1" ] || fail "$3 (substrate absent or empty: $1)"
+  grep -qF -- "$2" "$1" && fail "$3"
+  return 0
+}
+'''
+
+
+def shell_selftest():
+    ok = True
+    bad = scan_shell(SH_BAD_FIXTURE, "<sh-bad>")
+    # CONTROL: the real pre-fix hasnt MUST be caught, or the shell half is decorative.
+    if [n for _, n in bad] == ["hasnt"]:
+        print("  ok   SH CONTROL: the pre-fix hasnt() IS detected, and has() is not")
+    else:
+        print("  FAIL SH CONTROL: expected exactly ['hasnt'], got %r" % (bad,))
+        ok = False
+    good = scan_shell(SH_GOOD_FIXTURE, "<sh-good>")
+    # PERMITTING: the shipped fix must NOT be flagged, or the lint reds the tree it just fixed.
+    if not good:
+        print("  ok   SH PERMITTING: the substrate-guarded hasnt() is NOT flagged")
+    else:
+        print("  FAIL SH PERMITTING: the fixed helper was flagged %r" % (good,))
+        ok = False
+    return ok
+
+
 def selftest():
     ok = True
     bad = scan_source(BAD_FIXTURE, "<bad>")
@@ -115,7 +201,7 @@ def selftest():
     else:
         print("  FAIL PERMITTING: clean source was flagged %r" % (good,))
         ok = False
-    return ok
+    return shell_selftest() and ok
 
 
 def main():
@@ -139,15 +225,32 @@ def main():
         for line, caught in scan_source(p.read_text(encoding="utf-8"), str(p)):
             findings.append((p, line, caught))
 
-    print("\nscanned %d test files under %s" % (scanned, root))
-    if not findings:
+    sh_findings = []
+    sh_scanned = 0
+    for p in sorted(root.glob("*.sh")):
+        sh_scanned += 1
+        for line, name in scan_shell(p.read_text(encoding="utf-8"), str(p)):
+            sh_findings.append((p, line, name))
+
+    # BOTH counts, always. "scanned 44 test files" was true and read as full coverage while
+    # the shell half was zero -- the number has to name what it did not look at.
+    print("\nscanned %d .py and %d .sh test files under %s" % (scanned, sh_scanned, root))
+    for p, line, name in sh_findings:
+        print("  FAIL %s:%d — %s() asserts an ABSENCE with no substrate requirement; grep "
+              "fails on a missing or empty file, so `&& fail` never fires and the arm passes "
+              "vacuously. Require `[ -s \"$file\" ]` first." % (p, line, name))
+    if not findings and not sh_findings:
         print("no self-swallowing arms found")
         sys.exit(0)
     for p, line, caught in findings:
         print("  FAIL %s:%d — a try/except %s wraps a body that raises its own failure "
               "signal; the handler will report the failure as a pass" % (p, line, caught))
-    print("\n%d site(s). Use `else:` for the accepted case, and name WHICH rejection in the "
-          "handler." % len(findings))
+    if findings:
+        print("\n%d python site(s). Use `else:` for the accepted case, and name WHICH rejection "
+              "in the handler." % len(findings))
+    if sh_findings:
+        print("\n%d shell site(s). Require the substrate before asserting an absence."
+              % len(sh_findings))
     sys.exit(1)
 
 
