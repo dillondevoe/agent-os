@@ -1873,6 +1873,35 @@
             touch $out
           '';
 
+        # 2026-09-02 — the providers.yaml the DELL ACTUALLY BOOTS WITH, parsed by the real
+        # loader. Until this check existed, nothing in this tree ever read that file: every
+        # battery above authors its own fixture, so `modules/escalate-secret-open.nix` could
+        # ship a typo'd api_key_ref, a key path inside the world-readable /nix/store, or a
+        # floor provider with no model, and `nix flake check` would stay green all the way to
+        # a box whose brain cannot read its own config. Same shape as 0620404 — "CI was green
+        # on a package that cannot arm a budget".
+        #
+        # The bytes come from the EVALUATED configuration's environment.etc entry, NOT from a
+        # copy of the module kept in step by hand; a check that reads a duplicate is only ever
+        # testing the duplicate. The battery also carries seven NEGATIVE arms (N1-N6) that feed
+        # deliberately broken configs through the same predicates and require rejection, plus
+        # N0 as the permitting arm for that harness — without N0, a predicate that failed
+        # EVERYTHING would make every negative arm pass for the wrong reason.
+        shipped-providers =
+          let
+            pkgs = nixpkgs.legacyPackages.${system};
+            pyWithYaml = pkgs.python3.withPackages (ps: [ ps.pyyaml ]);
+            shipped = self.nixosConfigurations.agentos-open.config.environment.etc."agent-os/providers.yaml".source;
+          in pkgs.runCommand "shipped-providers-check" { nativeBuildInputs = [ pyWithYaml ]; } ''
+            work="$(mktemp -d)"
+            mkdir -p "$work/modules" "$work/tests"
+            cp ${./modules/providers.py} "$work/modules/providers.py"
+            cp ${./tests/shipped-providers-battery.py} "$work/tests/shipped-providers-battery.py"
+            cd "$work"
+            PYTHONPATH=modules SHIPPED_PROVIDERS=${shipped} python3 tests/shipped-providers-battery.py
+            touch $out
+          '';
+
         # WP-A2 (task 287) — bin/mem's CONTRACT BATTERY: the memory-as-filesystem layer every
         # other Agent OS layer is built on (remember / recall / tree / cap). `mem-cap` above
         # covers only the A2 mem.* capability IMPLS (cap-mem-remember / cap-mem-recall); this
