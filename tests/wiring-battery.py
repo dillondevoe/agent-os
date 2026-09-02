@@ -161,5 +161,60 @@ try:
 except Exception as e:
     check("floor-without-model load", False); print("    " + repr(e))
 
+
+# ── ABSENT vs BROKEN (2026-09-02) ────────────────────────────────────────────────────────
+# `os.path.exists()` answers False for a DANGLING SYMLINK, and /etc/agent-os/providers.yaml is
+# a store symlink on every open build. So a GC'd or half-switched target used to read as "no
+# config at all": the brain degraded silently to legacy OLLAMA_MODEL and the spend-gated
+# escalate role vanished without a word. Separately, an UNREADABLE file raised PermissionError
+# straight past `except ProviderConfigError` and crash-looped the brain at import with no
+# reason printed. Absence is legitimate (sealed imports no escalate module and runs floor-only),
+# so absence must stay quiet — but broken must be as loud as malformed.
+import contextlib, io, stat, tempfile
+
+_d = tempfile.mkdtemp()
+
+# PERMITTING ARM — without it, a brain that refused to start on EVERYTHING would pass the two
+# negative arms below for entirely the wrong reason.
+try:
+    b = load_brain()
+    check("ABSENT config still starts quietly on the legacy path (sealed runs floor-only)",
+          b.ACTIVE_PROVIDER == "env-default")
+except SystemExit:
+    check("ABSENT config still starts quietly on the legacy path (sealed runs floor-only)", False)
+
+_dang = os.path.join(_d, "dangling.yaml")
+os.symlink(os.path.join(_d, "gone.yaml"), _dang)
+_err = io.StringIO()
+try:
+    with contextlib.redirect_stderr(_err):
+        load_brain(providers_yaml=_dang)
+    check("a DANGLING config symlink refuses to start (not a silent legacy fallback)", False)
+except SystemExit as e:
+    check("a DANGLING config symlink refuses to start (not a silent legacy fallback)", e.code == 1)
+    check("the dangling-symlink refusal says WHY, naming the path",
+          "broken symlink" in _err.getvalue() and _dang in _err.getvalue())
+
+_unread = os.path.join(_d, "unreadable.yaml")
+open(_unread, "w").write("providers:\n  a: {kind: ollama, cost_tier: floor, model: m}\nroles: {floor: a}\n")
+os.chmod(_unread, 0)
+if os.access(_unread, os.R_OK):
+    # Running as a user that bypasses the mode bits (root in a container). Say so out loud —
+    # a silently-skipped arm is indistinguishable from a passing one, which is the whole
+    # failure mode this battery exists to prevent.
+    print("  SKIP unreadable-config arm: this user bypasses mode 0000 (uid=%d)" % os.getuid())
+else:
+    _err = io.StringIO()
+    try:
+        with contextlib.redirect_stderr(_err):
+            load_brain(providers_yaml=_unread)
+        check("an UNREADABLE config refuses cleanly (no PermissionError traceback)", False)
+    except SystemExit as e:
+        check("an UNREADABLE config refuses cleanly (no PermissionError traceback)", e.code == 1)
+        check("the unreadable refusal is a provider config error, not a raw OSError",
+              "cannot read config" in _err.getvalue())
+    except PermissionError:
+        check("an UNREADABLE config refuses cleanly (no PermissionError traceback)", False)
+
 print("wiring-battery: " + ("ALL PASS" if EX == 0 else "FAILURES"))
 sys.exit(EX)
