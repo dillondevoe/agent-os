@@ -1902,6 +1902,42 @@
             touch $out
           '';
 
+        # 2026-09-02 — the SEALED variants must carry NO cloud provider config. Today this holds
+        # by construction: modules/escalate-secret-open.nix lives only in `openModules`, so
+        # `agentos-sealed` never gets an /etc/agent-os/providers.yaml. But "true by construction"
+        # is true until someone moves one line, and nothing asserted it. A sealed image that
+        # shipped a cloud `api_key_ref` would have only the nftables wall behind it — a
+        # config-level breach of the seal that every existing egress check would still pass.
+        #
+        # THE CONTROL ARM IS INSIDE THE CHECK, and it has to be: the passing condition here is an
+        # ABSENT attribute, which is exactly the state where an assertion goes vacuous without
+        # anyone noticing. So the third value below re-evaluates the sealed config with the
+        # escalate module deliberately grafted on via extendModules, and the check FAILS unless
+        # the predicate SEES it there. Absence only means something once presence has been shown
+        # to be detectable.
+        sealed-no-cloud-provider =
+          let
+            pkgs = nixpkgs.legacyPackages.${system};
+            hasProviders = c: c.config.environment.etc ? "agent-os/providers.yaml";
+            sealed   = hasProviders self.nixosConfigurations.agentos-sealed;
+            sealedS5 = hasProviders self.nixosConfigurations.agentos-sealed-s5;
+            grafted  = hasProviders (self.nixosConfigurations.agentos-sealed.extendModules {
+              modules = [ ./modules/escalate-secret-open.nix ];
+            });
+            b = x: if x then "true" else "false";
+          in pkgs.runCommand "sealed-no-cloud-provider-check" { } ''
+            fail=0
+            echo "  agentos-sealed    ships agent-os/providers.yaml: ${b sealed}   (want false)"
+            echo "  agentos-sealed-s5 ships agent-os/providers.yaml: ${b sealedS5} (want false)"
+            echo "  CONTROL: sealed + escalate module grafted on:     ${b grafted}  (want true)"
+            [ "${b sealed}"   = "false" ] || { echo "  FAIL sealed carries a cloud provider config"; fail=1; }
+            [ "${b sealedS5}" = "false" ] || { echo "  FAIL sealed-s5 carries a cloud provider config"; fail=1; }
+            [ "${b grafted}"  = "true"  ] || { echo "  FAIL control arm: the predicate cannot SEE a providers.yaml even when one is grafted on — the two arms above are vacuous"; fail=1; }
+            [ "$fail" = "0" ] || exit 1
+            echo "  ALL PASS"
+            touch $out
+          '';
+
         # WP-A2 (task 287) — bin/mem's CONTRACT BATTERY: the memory-as-filesystem layer every
         # other Agent OS layer is built on (remember / recall / tree / cap). `mem-cap` above
         # covers only the A2 mem.* capability IMPLS (cap-mem-remember / cap-mem-recall); this
