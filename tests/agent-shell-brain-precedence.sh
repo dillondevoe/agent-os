@@ -37,25 +37,50 @@ mk() {
     esac
   done
 }
-run() {  # run() [VAR=val ...] -> stdout of agent-shell, brain marker included
+run() {  # run() [VAR=val ...] -> stdout of agent-shell, plus a __RC= completion token
   # Inherit the caller's PATH rather than hardcoding /usr/bin:/bin — under a nix build
   # sandbox those do not exist, and a run() that cannot find `bash` would fail every arm
   # for a reason that has nothing to do with brain precedence.
-  env -i HOME="$SB/home" PATH="$SB/bin:$PATH" TERM=dumb AGENT_OS_NOANIM=1 \
-      "$@" bash "$SHELL_BIN" </dev/null 2>&1
+  #
+  # The trailing __RC= token is SUBSTRATE for the deny arms below. A "this marker is
+  # absent" assertion passes on empty output — so it passes hardest when the script
+  # crashed, hung, or never ran at all. __RC= is emitted only if the run actually
+  # terminated, and 124 (timeout) is rejected, so absence means "it decided otherwise",
+  # not "there was nothing to read".
+  local out rc
+  out="$(timeout 120 env -i HOME="$SB/home" PATH="$SB/bin:$PATH" TERM=dumb AGENT_OS_NOANIM=1 \
+      "$@" bash "$SHELL_BIN" </dev/null 2>&1)"; rc=$?
+  printf '%s\n__RC=%s\n' "$out" "$rc"
 }
-arm() {  # arm <name> <expected-marker|NONE> <output>
+arm() {  # arm <name> <marker|!marker> <output>   — "!X" asserts X was NOT exec'd
   RAN=$((RAN+1))
   local name="$1" want="$2" out="$3"
-  if [ "$want" = NONE ]; then
-    if printf '%s' "$out" | grep -q 'BRAIN=claude'; then
-      echo "FAIL $name — cloud brain was selected"; FAIL=$((FAIL+1)); return
-    fi
-  else
-    if ! printf '%s' "$out" | grep -q "$want"; then
-      echo "FAIL $name — expected $want"; FAIL=$((FAIL+1)); return
-    fi
+  # Substrate first, for BOTH forms: a run that did not terminate proves nothing, and a
+  # deny arm would read its silence as a pass.
+  if ! printf '%s' "$out" | grep -q '__RC='; then
+    echo "FAIL $name — no completion token: agent-shell did not terminate"; FAIL=$((FAIL+1)); return
   fi
+  if printf '%s' "$out" | grep -q '__RC=124'; then
+    echo "FAIL $name — agent-shell timed out"; FAIL=$((FAIL+1)); return
+  fi
+  # 126/127 is a FAILED EXEC — the login shell died trying to launch a brain that cannot
+  # run, which IS the getty crash-loop this suite exists to close. Without this the deny
+  # arms pass on the pre-fix script: it exec'd the unrunnable stub, the shell died before
+  # printing anything, and "the marker is absent" scored that as a refusal. Verified: the
+  # pre-fix agent-shell takes exactly this route on the two pinned arms.
+  if printf '%s' "$out" | grep -qE '__RC=(126|127)'; then
+    echo "FAIL $name — agent-shell died on a failed exec (rc 126/127): the crash-loop"; FAIL=$((FAIL+1)); return
+  fi
+  case "$want" in
+    !*)
+      if printf '%s' "$out" | grep -q "${want#!}"; then
+        echo "FAIL $name — ${want#!} was exec'd and must not have been"; FAIL=$((FAIL+1)); return
+      fi ;;
+    *)
+      if ! printf '%s' "$out" | grep -q "$want"; then
+        echo "FAIL $name — expected $want"; FAIL=$((FAIL+1)); return
+      fi ;;
+  esac
   echo "PASS $name"; PASS=$((PASS+1))
 }
 
@@ -70,20 +95,32 @@ arm "auto/claude-unrunnable-local-wins" "BRAIN=agent-loop" "$(run)"
 # claude the ONLY brain on PATH, $BRAIN unset -> must NOT be selected; falls to the REPL.
 # Without this the arm above passes for the wrong reason (agent-loop simply ranked higher).
 mk claude:ok
-arm "auto/claude-alone-is-not-chosen"   "NONE"             "$(run)"
+arm "auto/claude-alone-is-not-chosen"   "!BRAIN=claude"    "$(run)"
 
 # (iv) BRAIN=claude + probe passes -> claude. The control arm: without it a script that
 # refused the cloud brain unconditionally would pass every other arm here.
 mk claude:ok agent-loop:ok
 arm "pinned/claude-runnable-wins"       "BRAIN=claude"     "$(run BRAIN=claude)"
 
-# (iii) BRAIN=claude + probe fails -> local chain, never the dead exec.
+# (iii) BRAIN=claude + probe fails -> the dead exec must NOT happen.
+#
+# These two arms assert NON-EXECUTION, not a landing spot, and that correction came from
+# CI failing them on 2026-09-02 while they passed 6/6 on the authoring machine. They used
+# to expect the run to land on the local chain — which it does HERE only because this box
+# is online: a pinned brain that fails its probe leaves $BRAIN committed to nothing and
+# drops toward the memory floor, and the local chain is re-reached solely by the first-boot
+# recovery path, which is gated on `command -v systemctl` AND a live tcp/443 probe to
+# registry.ollama.ai. A nix build sandbox has neither, so it lands on the floor instead.
+# The arms were reading an ambient network as if it were brain precedence — the same defect
+# these tests exist to close, one layer out. What agent-shell actually guarantees, in every
+# environment, is that it never execs a brain that failed its probe. That is also the whole
+# of the security property. Assert that.
 mk claude:noexec agent-loop:ok
-arm "pinned/claude-unrunnable-falls"    "BRAIN=agent-loop" "$(run BRAIN=claude)"
+arm "pinned/claude-unrunnable-is-not-exec"   "!BRAIN=claude"     "$(run BRAIN=claude)"
 
-# A pinned local brain that fails --check still falls through (pre-existing law, kept armed).
+# A pinned local brain that fails --check is likewise never exec'd (pre-existing law, kept armed).
 mk agent-loop:nocheck brain-ollama:ok
-arm "pinned/local-failing-check-falls"  "BRAIN=brain-ollama" "$(run BRAIN=agent-loop)"
+arm "pinned/local-failing-check-is-not-exec" "!BRAIN=agent-loop" "$(run BRAIN=agent-loop)"
 
 echo "--- ran $RAN arms: $PASS passed, $FAIL failed"
 [ "$RAN" -eq 6 ] || { echo "CANNOT-ASSESS: expected 6 arms, ran $RAN"; exit 2; }
