@@ -62,10 +62,19 @@ YAML = textwrap.dedent("""
       escalate: cloud-claude
 """)
 
-def load_brain(consent="", providers_yaml=None, turn_log=None):
+def load_brain(consent="", providers_yaml=None, turn_log=None, key=True):
     os.environ["AGENT_OS_PROVIDERS"] = providers_yaml or "/nonexistent/providers.yaml"
     os.environ["AGENT_OS_ESCALATE_CONSENT"] = consent
     os.environ["OLLAMA_MODEL"] = "qwen3.5:9b"
+    # The startup preflight (2026-09-01) RESOLVES the escalate provider's api_key_ref at import
+    # and marks the provider UNAVAILABLE when it cannot. The fixture above refs
+    # env://ANTHROPIC_API_KEY, which is unset in CI, so every arm below silently became a FLOOR
+    # arm: eight checks failed and the subject of this battery — consent routing — stopped being
+    # exercised at all. `key=` makes the secret's presence an explicit fixture input rather than
+    # an accident of the environment, and arm L below tests BOTH settings of it.
+    for var in ("ANTHROPIC_API_KEY", "OTHER_KEY"):
+        if key: os.environ[var] = "sk-fixture-not-a-real-key"
+        else:   os.environ.pop(var, None)
     if turn_log: os.environ["AGENT_OS_TURN_LOG"] = turn_log
     spec = importlib.util.spec_from_file_location("agent_brain_consent_test", MOD)
     mod = importlib.util.module_from_spec(spec)
@@ -270,6 +279,34 @@ check("K: escalate 429 still degrades to the floor in the shared handler",
       _calls == ["escalate", "floor"], repr(_calls))
 check("K: and the message is tagged with the SERVED route, not the asked one",
       (m or {}).get("_route", {}).get("role") == "floor", repr((m or {}).get("_route")))
+
+# ── L. startup secret preflight (2026-09-01) ──────────────────────────────────────────────
+# The arm that was missing when the preflight shipped, and whose absence let it silently turn
+# this whole battery into a floor-only battery. It is deliberately TWO-SIDED: the key-present
+# arm is the permitting one, without which a preflight that marked EVERYTHING unavailable would
+# look correct here.
+bl_ok = load_brain(consent="session", providers_yaml=cfg, key=True)
+check("L: key present → escalate provider is NOT marked unavailable",
+      "cloud-claude" not in bl_ok._ESCALATE_UNAVAILABLE, repr(bl_ok._ESCALATE_UNAVAILABLE))
+check("L: key present → escalate route still dispatches on the cloud provider",
+      bl_ok._route_for_turn("turn")["role"] == "escalate", repr(bl_ok._route_for_turn("turn")))
+check("L: key present → status surface reports configured",
+      bl_ok.ESCALATE_STATUS.get("configured") is True, repr(bl_ok.ESCALATE_STATUS))
+
+bl_no = load_brain(consent="session", providers_yaml=cfg, key=False)
+check("L: key absent → escalate provider marked unavailable at startup",
+      "cloud-claude" in bl_no._ESCALATE_UNAVAILABLE, repr(bl_no._ESCALATE_UNAVAILABLE))
+check("L: key absent → the turn is served by the FLOOR, never the cloud",
+      bl_no._route_for_turn("turn")["role"] == "floor", repr(bl_no._route_for_turn("turn")))
+check("L: key absent → status says NOT configured, so the surface agrees with the router",
+      bl_no.ESCALATE_STATUS.get("configured") is False, repr(bl_no.ESCALATE_STATUS))
+check("L: key absent → never spills to the OTHER metered provider",
+      bl_no._route_for_turn("turn").get("provider") != "other-metered",
+      repr(bl_no._route_for_turn("turn")))
+# The reason must name the REF and never the value — a status string is a log surface.
+_reason = (bl_no.ESCALATE_STATUS.get("reason") or "")
+check("L: key absent → reason names the ref, not the secret",
+      "ANTHROPIC_API_KEY" in _reason and "sk-fixture" not in _reason, repr(_reason))
 
 print("  " + ("ALL PASS" if EX == 0 else "FAILURES"))
 sys.exit(EX)
