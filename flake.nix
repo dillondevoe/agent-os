@@ -836,6 +836,30 @@
               touch $out
             '';
 
+        # The login shell's brain-precedence arms. agent-shell is the login program:
+        # its failure mode is a box that will not boot, and until 2026-09-02 it was the
+        # only component in the tree with no arm on it. Proves the cloud brain is never
+        # auto-selected (installing Claude Code must not silently invert "nothing leaves
+        # the machine") and that NO brain is exec'd without a passing probe (a `claude`
+        # present on PATH but unrunnable — the NixOS dynamic-ELF case — must fall to the
+        # local chain, not crash-loop getty's autologin). It drives the REAL script in a
+        # sandboxed HOME with stub brains, because the defect lives in agent-shell's own
+        # selection branch. A regression here fails `nix flake check`.
+        agent-shell-brain-precedence =
+          nixpkgs.legacyPackages.${system}.runCommand "agent-shell-brain-precedence-check"
+            {
+              nativeBuildInputs = with nixpkgs.legacyPackages.${system}; [ bash coreutils gnugrep ];
+            } ''
+              work="$(mktemp -d)"
+              mkdir -p "$work/bin" "$work/tests"
+              cp ${./bin/agent-shell} "$work/bin/agent-shell"
+              cp ${./tests/agent-shell-brain-precedence.sh} "$work/tests/agent-shell-brain-precedence.sh"
+              chmod +x "$work/bin/agent-shell" "$work/tests/agent-shell-brain-precedence.sh"
+              cd "$work"
+              bash tests/agent-shell-brain-precedence.sh
+              touch $out
+            '';
+
         # Phase 2 · Step 2 — the audit-log primitive's property battery. Proves
         # append-only NDJSON, SHA-256 chain tamper/truncation evidence, no-log->no-execute
         # fail-closed, hostile-newline single-line safety, and reserved-field forgery
