@@ -1938,6 +1938,29 @@
             touch $out
           '';
 
+        # 2026-09-02 — a LINT for test arms that swallow their own failure signal.
+        #
+        # providers-battery arm J was written as: call the function inside a `try`, `raise
+        # AssertionError` if it did NOT reject, and treat `except Exception` as the pass.
+        # AssertionError is an Exception, so the handler caught the arm's own failure signal
+        # and reported it as the rejection under test. The arm printed PASS *precisely when*
+        # the module silently degraded — a complete inversion, in the arm whose whole job was
+        # to catch that degrade. Reproduced by stubbing load_providers to return {}.
+        #
+        # A battery cannot catch this: the failure mode IS a green run, so there is no run to
+        # observe. Hence a structural scan, with its own control + permitting arms inline (a
+        # detector that finds nothing reports a clean tree, which is indistinguishable from
+        # health). Verified against the pre-fix tree: the lint names providers-battery.py:277.
+        tests-no-self-swallowing-arms =
+          let pkgs = nixpkgs.legacyPackages.${system};
+          in pkgs.runCommand "tests-no-self-swallowing-arms" { nativeBuildInputs = [ pkgs.python3 ]; } ''
+            work="$(mktemp -d)"; mkdir -p "$work/tests"
+            cp -r ${./tests}/*.py "$work/tests/"
+            cp ${./tests/no-self-swallowing-arms.py} "$work/lint.py"
+            python3 "$work/lint.py" "$work/tests"
+            touch $out
+          '';
+
         # 2026-09-02 — the escalate key PREFLIGHT has six branches and until now exactly ONE of
         # them had ever executed. The box's steady state is "no key placed", so every green
         # `Result=success` I have ever read off `agos-escalate-key-preflight` came from the

@@ -76,20 +76,39 @@ check("E", not ok and "UNAVAILABLE" in (why or ""), "corrupt counter is UNAVAILA
 ro = os.path.join(TMP, "ro", "c.json")
 os.makedirs(os.path.dirname(ro)); 
 import shutil; shutil.copy(counter(day=0), ro); os.chmod(os.path.dirname(ro), 0o500)
+# record() raises Unavailable for SEVEN distinct reasons (bad ceiling value, missing counter,
+# unreadable, bad schema, bad field, unwritable, bad token count). Asserting only that
+# Unavailable was raised lets any of the other six stand in for the one under test — the arm
+# goes green while the unwritable branch is unreachable. So match the message, not the class.
+why = None
 try:
-    sc.record(10, env(day=1000), ro); raised = False
-except sc.Unavailable: raised = True
-except Exception: raised = False
+    sc.record(10, env(day=1000), ro)
+except sc.Unavailable as e: why = str(e)
+except Exception as e: why = "WRONG-TYPE %s: %s" % (type(e).__name__, e)
 finally: os.chmod(os.path.dirname(ro), 0o700)
-check("F", raised, "unwritable counter makes record() raise, got raised=%r" % (raised,))
+check("F", why is not None and "is not writable" in why,
+      "unwritable counter must raise Unavailable NAMING the write failure, got %r" % (why,))
+# F0 — the permitting arm for F. Without it, a record() that raised "is not writable" at
+# every opportunity would pass F while being wholly broken.
+wr = counter(day=0)
+try:
+    sc.record(10, env(day=1000), wr); f0 = None
+except Exception as e: f0 = "%s: %s" % (type(e).__name__, e)
+check("F0", f0 is None, "a WRITABLE counter must accept record(), got %r" % (f0,))
 
 print("G — typo/sentinel ceilings never silently disable")
 for v in ["off", "none", "0", "-1", "true", "1e6", "1000 "]:
     e = {"AGENT_OS_SPEND_DAY_TOKENS": v}
     ok, why = sc.check(e, counter(day=10**9))
-    # Either it refuses (parsed as a cap, and 1e9 spent is over it) or it refuses as
-    # UNAVAILABLE. What it must NEVER do is return allowed.
-    check("G", not ok, "ceiling %r does not silently disable: allowed=%r why=%r" % (v, ok, why))
+    # Refusing is necessary but not sufficient: a refusal for an unrelated reason would let
+    # this arm pass on a module that never parsed the ceiling at all. Two admissible
+    # rejections, and the arm names which one it got rather than accepting any failure.
+    reason = ("over-ceiling" if "1000" in (why or "") or "ceiling" in (why or "").lower()
+              else "unavailable" if "UNAVAILABLE" in (why or "") or "positive integer" in (why or "")
+              else "UNCLASSIFIED")
+    check("G", (not ok) and reason != "UNCLASSIFIED",
+          "ceiling %r must be refused as over-ceiling or as UNAVAILABLE, got allowed=%r reason=%s why=%r"
+          % (v, ok, reason, why))
 
 print("H — rollover resets the day, never the cumulative")
 old = time.time() - (sc.DAY_SECONDS + 60)

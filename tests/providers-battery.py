@@ -274,13 +274,23 @@ def test_invalid_yaml_fails_loud():
     try:
         with open(path, "w") as f:
             f.write("providers:\n  - broken\n    : yaml\n")
+        # DO NOT reinstate `raise AssertionError(...)` inside a try whose handler is
+        # `except Exception`. AssertionError IS an Exception, so the handler swallowed the
+        # arm's own failure signal and reported it as the rejection under test: this arm
+        # printed PASS *precisely when* load_providers silently degraded. Reproduced
+        # 2026-09-02 by stubbing load_providers to return {} — arm J passed, naming
+        # 'AssertionError' as the exception that proved the module was loud.
+        #
+        # `else:` cannot be reached by an exception, so the failure signal has nowhere to hide.
+        # And the handler names WHICH rejection: any exception at all would let an unrelated
+        # error (a typo in the fixture path, an import failure) stand in for the parse refusal.
         try:
             P.load_providers(path)
-            raise AssertionError("broken yaml should raise, not silently degrade")
-        except Exception as e:
-            # Any exception is acceptable here — the point is it does NOT silently return
-            # an empty config. ProviderConfigError or yaml error both count.
-            check(True, "broken yaml raised %r (loud, not silent)" % type(e).__name__)
+        except P.ProviderConfigError as e:
+            check("not valid YAML" in str(e),
+                  "broken yaml must be refused AS a parse error, got: %s" % e)
+        else:
+            check(False, "broken yaml was ACCEPTED — silent degrade, the exact thing this arm exists to catch")
     finally:
         _cleanup(path)
     print("J. present-but-invalid yaml fails loud (not silent degrade) — PASS")
