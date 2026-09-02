@@ -88,6 +88,7 @@ in {
     ./modules/calculator-open.nix
     ./modules/files-open.nix
     ./modules/email-open.nix
+    ./modules/escalate-secret-open.nix
     ./modules/mail-secret-open.nix
     ./modules/mail-proton-bridge-open.nix
     ./modules/notes-open.nix
