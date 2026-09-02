@@ -15,6 +15,21 @@
 #   tools/personal-data-gate.sh --staged         scan the index (pre-commit)
 #   tools/personal-data-gate.sh --stdin          scan a diff on stdin (the battery)
 #
+# --tree, added 2026-09-02. The diff scope above is right for the STEADY state and wrong for
+# one question: what is already IN HEAD. Those lines were never an "added line" under this gate's
+# watch, so no amount of diff scanning will ever surface them -- the sweep that found them was a
+# one-off, and a one-off finds a leak once and never notices the next one.
+#
+# It could not have been the default on day one: the tree held 44 hits and a gate that fails on
+# every run gets switched off. It can be enforced NOW because the sweep cleaned the real ones,
+# and what remains is a bounded, listed set.
+#
+# THE BASELINE IS THE POINT. tools/personal-data-tree-baseline.txt names, per FILE and per
+# PATTERN, the hits that are accepted and why. Scoping by pattern rather than by file is what
+# keeps it a gate: a synthetic RFC1918 gateway address in a VM test is accepted, and a key appearing
+# in that same file tomorrow is NOT. A file-level allowlist would have retired the file from
+# scrutiny entirely, which is how allowlists quietly become the vulnerability.
+#
 # EXIT: 0 clean, 1 hit (with file:line and the pattern), 2 usage/internal error.
 #
 # ALLOWLIST: a line ending in the marker below is exempt. It exists because this
@@ -24,6 +39,20 @@
 set -u
 
 MARK='gate-allow'
+
+# THE EXEMPT CONFIG FILES, in ONE place. Both the diff path and the tree path must skip these,
+# and when this rule was spelled twice -- a `case` in one half, a `grep -v` in the other -- I
+# fixed one and shipped the other still blocking. Two spellings of one rule is how halves drift;
+# both callers now ask this function.
+is_exempt_path() {
+  case "$1" in
+    tools/personal-data-denylist.txt|tools/personal-data-tree-baseline.txt) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+TREE_HITS=$(mktemp)
+trap 'rm -f "$TREE_HITS"' EXIT
 HERE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 LIST="${PERSONAL_DATA_DENYLIST:-$HERE/personal-data-denylist.txt}"
 
@@ -34,10 +63,65 @@ LIST="${PERSONAL_DATA_DENYLIST:-$HERE/personal-data-denylist.txt}"
 pats=$(grep -v '^[[:space:]]*#' "$LIST" | grep -v '^[[:space:]]*$') || true
 [ -n "$pats" ] || { echo "gate: denylist has no patterns -- refusing to run" >&2; exit 2; }
 
+# ---- --tree: scan tracked files at HEAD against the baseline --------------------------------
+if [ "${1:-}" = "--tree" ]; then
+  BASE="${PERSONAL_DATA_TREE_BASELINE:-$HERE/personal-data-tree-baseline.txt}"
+  [ -r "$BASE" ] || { echo "gate: cannot read tree baseline: $BASE" >&2; exit 2; }
+
+  # Both config files are exempt BY PATH, for the same reason: each must CONTAIN the patterns
+  # it governs in order to express them, so scanning them means the gate blocks on itself. The
+  # denylist earned this exemption already; the baseline inherits it and the same stated
+  # tradeoff -- a leak smuggled into either is invisible here. Both are short files of nothing
+  # but regexes and paths, where a literal address is conspicuous on review, and GitHub push
+  # protection still sees it. Widen this to no other path.
+  files=$(git ls-files) || exit 2
+  # Same null-instrument refusal as the denylist: a sweep over zero files exits 0 while
+  # proving nothing, and that is indistinguishable from a clean tree.
+  nfiles=$(printf '%s\n' "$files" | grep -c .)
+  [ "$nfiles" -gt 0 ] || { echo "gate: --tree matched no tracked files -- refusing to run" >&2; exit 2; }
+
+  thits=0
+  while IFS= read -r p; do
+    # One grep per pattern over the whole tree: same ERE engine and same -i as the diff path,
+    # because two spellings of one rule is how the halves drift apart.
+    printf '%s\n' "$files" \
+      | while IFS= read -r cand; do is_exempt_path "$cand" || printf '%s\n' "$cand"; done \
+      | tr '\n' '\0' \
+      | xargs -0 grep -EinH -- "$p" 2>/dev/null \
+      | while IFS= read -r hit; do
+          hf=${hit%%:*}
+          rest=${hit#*:}; hl=${rest%%:*}
+          body=${rest#*:}
+          case "$body" in *"$MARK") continue ;; esac
+          # baseline entries are "<path>\t<pattern>"; accept only an exact pair
+          if grep -Fqx -- "$hf	$p" "$BASE"; then continue; fi
+          printf 'BLOCKED(tree) %s:%s\n  pattern: %s\n' "$hf" "$hl" "$p" >&2
+          echo x >> "$TREE_HITS"
+        done
+  done <<EOF
+$pats
+EOF
+
+  # NOT `grep -c . || echo 0`: grep -c prints 0 AND exits 1 on an empty file, so the ||
+  # branch fires too and the count becomes the two-line string "0\n0" -- which is not "0",
+  # so the clean case takes the failure path. Cost me a run; wc -l has no such opinion.
+  thits=$(wc -l < "$TREE_HITS" | tr -d ' ')
+  echo "gate --tree: scanned $nfiles tracked files against $(printf '%s\n' "$pats" | grep -c .) patterns; $thits unbaselined hit(s)"
+  [ "$thits" = 0 ] && exit 0
+  cat >&2 <<'MSG'
+
+gate --tree: HEAD contains personal data that is not in the baseline.
+Either remove it, or -- if it is genuinely acceptable (a synthetic test address,
+documentation of the rule itself) -- add the exact "<path><TAB><pattern>" pair to
+tools/personal-data-tree-baseline.txt with a comment saying why.
+MSG
+  exit 1
+fi
+
 case "${1:-}" in
   --staged) diff=$(git diff --cached -U0) ;;
   --stdin)  diff=$(cat) ;;
-  "" )      echo "usage: $0 <base>..<head> | --staged | --stdin" >&2; exit 2 ;;
+  "" )      echo "usage: $0 <base>..<head> | --staged | --stdin | --tree" >&2; exit 2 ;;
   *)        diff=$(git diff -U0 "$1") || exit 2 ;;
 esac
 
@@ -67,7 +151,7 @@ while IFS= read -r ln; do
   # line is a regex, so a literal address in it is conspicuous on review -- and
   # GitHub push protection (layer 2) still sees it. Widen this exemption to no
   # other path.
-  case "$file" in tools/personal-data-denylist.txt) lineno=$((lineno+1)); continue ;; esac
+  if is_exempt_path "$file"; then lineno=$((lineno+1)); continue; fi
 
   while IFS= read -r p; do
     if printf '%s\n' "$body" | grep -Eiq -- "$p"; then

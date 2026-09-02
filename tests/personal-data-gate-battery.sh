@@ -85,6 +85,61 @@ rm -f /tmp/empty-denylist.$$
 if [ $rc -eq 2 ]; then printf 'ok   %-46s (ERROR, rc=2)\n' "C10 empty denylist refuses to run"; pass=$((pass+1));
 else printf 'FAIL %-46s want rc=2 got %s\n' "C10 empty denylist refuses to run" "$rc"; fail=$((fail+1)); fi
 
+
+# ---- --tree arms -----------------------------------------------------------------------------
+# These run in a THROWAWAY git repo, never against the real tree. A battery that plants a leak in
+# its own checkout and restores it afterwards is one early `exit` away from leaving the working
+# copy dirty, and in CI that is a confusing red on an unrelated job.
+tarm() { # tarm <name> <want-rc> <setup-body>
+  name=$1; want=$2; body=$3
+  d=$(mktemp -d); ( cd "$d" && git init -q . && mkdir -p tools
+    printf 'tskey-auth-[A-Za-z0-9-]{6,}\n192\\.168\\.[0-9]{1,3}\\.[0-9]{1,3}\n' > tools/dl.txt
+    : > tools/bl.txt
+    eval "$body"
+    git add -A && git -c user.email=b@x -c user.name=b commit -qm t ) >/dev/null 2>&1
+  ( cd "$d" && PERSONAL_DATA_DENYLIST="$d/tools/dl.txt" PERSONAL_DATA_TREE_BASELINE="$d/tools/bl.txt" \
+      "$GATE" --tree ) >/dev/null 2>&1
+  rc=$?
+  rm -rf "$d"
+  if [ "$rc" = "$want" ]; then printf 'ok   %-46s (rc=%s)\n' "$name" "$rc"; pass=$((pass+1));
+  else printf 'FAIL %-46s want rc=%s got %s\n' "$name" "$want" "$rc"; fail=$((fail+1)); fi
+}
+
+# CONTROL: a leak sitting in HEAD -- the case the DIFF gate cannot see by construction, and the
+# only reason --tree exists. Without this arm every arm below passes on a detector that finds
+# nothing.
+tarm "T1 --tree catches a leak already in HEAD" 1 'echo "K=tskey-auth-aBcDeFgHiJ" > f.txt'  # gate-allow
+# PERMITTING: a clean tree must pass, or --tree is unusable and gets switched off within a week.
+tarm "T2 --tree passes a clean tree"            0 'echo "nothing to see" > f.txt'  # gate-allow
+# The baseline works...
+tarm "T3 --tree honours a baselined pair"       0 'echo "peer=192.168.1.1" > f.txt; printf "f.txt\t192\\\\.168\\\\.[0-9]{1,3}\\\\.[0-9]{1,3}\n" > tools/bl.txt'  # gate-allow
+# ...and is SCOPED. This is the arm that keeps the baseline from becoming the vulnerability: the
+# file is baselined for one pattern, and a DIFFERENT class in it must still block.
+tarm "T4 baselined file, different class: BLOCK" 1 'printf "peer=192.168.1.1\nK=tskey-auth-aBcDeFgHiJ\n" > f.txt; printf "f.txt\t192\\\\.168\\\\.[0-9]{1,3}\\\\.[0-9]{1,3}\n" > tools/bl.txt'  # gate-allow
+# Null-instrument arm for the tree path, matching C10 on the diff path.
+tarm "T5 --tree with empty denylist refuses"    2 'echo x > f.txt; : > tools/dl.txt'  # gate-allow
+
+# BOTH-HALVES arm. The exempt-path rule was once spelled twice -- a `case` on the diff side, a
+# `grep -v` on the tree side -- and when the baseline file was added to one, the other kept
+# blocking on it. This asserts the two halves agree, which is the property, rather than asserting
+# either half in isolation.
+for exempt in tools/personal-data-denylist.txt tools/personal-data-tree-baseline.txt; do
+  out=$(mkdiff "$exempt" 'K=tskey-auth-aBcDeFgHiJ' | "$GATE" --stdin 2>&1); rc=$?  # gate-allow
+  if [ $rc -eq 0 ]; then printf 'ok   %-46s (PASS, rc=0)\n' "X-$exempt exempt on the DIFF half"; pass=$((pass+1));
+  else printf 'FAIL %-46s want rc=0 got %s\n' "X-$exempt exempt on the DIFF half" "$rc"; fail=$((fail+1)); fi
+done
+
+# ---- arm count -------------------------------------------------------------------------------
+# #252's general form, applied here: a verdict that does not depend on HOW MANY arms ran cannot
+# notice any of them going missing. An arm deleted in a refactor leaves a byte-identical PASS.
+WANT_ARMS=38
+ran=$((pass+fail))
+if [ "$ran" != "$WANT_ARMS" ]; then
+  echo "FAIL arm count: $ran arms ran, expected $WANT_ARMS -- an arm was added or silently lost"
+  echo "     (if you deliberately added or removed one, update WANT_ARMS in this file)"
+  fail=$((fail+1))
+fi
+
 echo
-echo "battery: $pass passed, $fail failed"
+echo "battery: $pass passed, $fail failed ($ran arms)"
 [ "$fail" -eq 0 ]

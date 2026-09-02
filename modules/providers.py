@@ -7,7 +7,7 @@
 # to the legacy OLLAMA_MODEL env default when providers.yaml is absent; a present-but-
 # invalid yaml fails loud rather than silently degrading. The cloud `escalate` role is
 # not wired yet — that remains a follow-up slice.
-# Spec: jarvis-sync/spec-agentos-phase-1.5-pluggable-brain-portable-identity-2026-08-06.md §1.
+# Spec: spec-agentos-phase-1.5-pluggable-brain-portable-identity-2026-08-06.md §1 (out of tree).
 #
 # Hard rule from the spec (2026-08-06 fleet overnight-bleed scar, promoted to an
 # OS design rule): each provider is its own metered bucket. A rate-limited/
