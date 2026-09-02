@@ -1938,6 +1938,50 @@
             touch $out
           '';
 
+        # 2026-09-02 — the escalate key PREFLIGHT has six branches and until now exactly ONE of
+        # them had ever executed. The box's steady state is "no key placed", so every green
+        # `Result=success` I have ever read off `agos-escalate-key-preflight` came from the
+        # absent branch returning 0. The mode / owner / empty / trailing-newline rejections —
+        # the entire reason the unit exists — were unexecuted code guarding a secret.
+        #
+        # It was untestable BY CONSTRUCTION: the key path was baked in, so no fixture could
+        # reach it. So the script now takes two env overrides, used only here, and arms S1/S2
+        # against the risk that introduces: S1 asserts the SHIPPED unit sets neither, and S2 is
+        # the control arm for S1 — it grafts a unit that DOES set one and fails unless the
+        # detector sees it. An absence assertion is vacuous until presence is shown detectable.
+        #
+        # C1 inside the battery is the other control arm: every functional arm passes the owner
+        # override, so without C1 the override could simply be disabling the owner check and all
+        # five would still be green. C1 drops the override and requires the check to fire.
+        #
+        # The binary under test is the unit's own ExecStart, read out of the evaluated config —
+        # not a rebuild of the script here. Same rule as shipped-providers: test the artifact
+        # that ships, never a copy kept in step by hand.
+        escalate-preflight =
+          let
+            pkgs = nixpkgs.legacyPackages.${system};
+            open = self.nixosConfigurations.agentos-open;
+            unitOf = c: c.config.systemd.services.agos-escalate-key-preflight;
+            execStart = (unitOf open).serviceConfig.ExecStart;
+            hasOverride = c:
+              let e = (unitOf c).environment or { };
+              in (e ? AGOS_ESCALATE_KEY) || (e ? AGOS_ESCALATE_KEY_OWNER);
+            shippedOverrides = hasOverride open;
+            detectorArmed = hasOverride (open.extendModules {
+              modules = [{
+                systemd.services.agos-escalate-key-preflight.environment.AGOS_ESCALATE_KEY =
+                  "/tmp/grafted-override";
+              }];
+            });
+            b = x: if x then "1" else "0";
+          in pkgs.runCommand "escalate-preflight-check" { } ''
+            PREFLIGHT=${execStart} \
+            SHIPPED_OVERRIDES=${b shippedOverrides} \
+            DETECTOR_ARMED=${b detectorArmed} \
+            bash ${./tests/escalate-preflight-battery.sh}
+            touch $out
+          '';
+
         # WP-A2 (task 287) — bin/mem's CONTRACT BATTERY: the memory-as-filesystem layer every
         # other Agent OS layer is built on (remember / recall / tree / cap). `mem-cap` above
         # covers only the A2 mem.* capability IMPLS (cap-mem-remember / cap-mem-recall); this
