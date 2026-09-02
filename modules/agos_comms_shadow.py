@@ -33,6 +33,21 @@ import re
 
 import agos_events as E
 
+# ---- default paths -----------------------------------------------------------------------------
+# These were the AUTHOR's own mesh-bus paths, hardcoded as fallbacks. That is
+# operator infrastructure naming in a public repo -- the exact class tools/personal-data-denylist.txt
+# names under "operator home paths (the mesh bus)" -- and it was invisible to the gate, which reads
+# ADDED LINES IN A DIFF and so cannot see what already sits in HEAD.
+#
+# Every one of them was ALREADY overridable by an env var, so the leak lived purely in the fallback:
+# the deployment that mattered never used these strings, and nothing would ever have failed to
+# reveal them. Neutral XDG-ish defaults below; the env vars are unchanged and remain the supported
+# way to point this at a real bus.
+_DEFAULT_STATE_DIR   = os.path.expanduser("~/.local/state/agent-os")
+_DEFAULT_COMMS_DIR   = os.path.join(_DEFAULT_STATE_DIR, "brain-comms")
+_DEFAULT_EVENTS_ROOT = os.path.join(_DEFAULT_STATE_DIR, "events-root")
+
+
 # The only brains whose watchers glob `*-to-all-*` (mesh_model known_hazards.broadcast_gap):
 # scout/phoenix/geist/saga are NOT reached by a broadcast — they must be addressed explicitly.
 BROADCAST_BRAINS = ("augur", "page", "rabbot")
@@ -42,7 +57,7 @@ BROADCAST_BRAINS = ("augur", "page", "rabbot")
 # an orphan must route to nobody, not everybody.
 NOBODY = "_nobody"
 
-_MESH_MODEL_DEFAULT = "~/jarvis-sync/saga/mesh/mesh_model.json"
+_MESH_MODEL_DEFAULT = os.path.join(_DEFAULT_STATE_DIR, "mesh_model.json")
 
 
 def load_model(path=None):
@@ -282,7 +297,7 @@ def _watcher_fired(state_dir, brain):
     return set(pb.keys()) if isinstance(pb, dict) else set(pb)
 
 
-def diff_report(comms_dir, root, model, state_dir="~/jarvis-sync/state"):
+def diff_report(comms_dir, root, model, state_dir=_DEFAULT_STATE_DIR):
     """The before/after metrics. Two comparisons:
       A. PORT PARITY (over the live corpus): for every comm, does route_from_to(parse_addressees) ==
          file_route(globs)?  Divergences = routing-logic bugs. Target 0.
@@ -346,13 +361,13 @@ def diff_report(comms_dir, root, model, state_dir="~/jarvis-sync/state"):
 # ---- CLI --------------------------------------------------------------------
 def _default_root():
     return os.path.expanduser(os.environ.get(
-        "AGOS_EVENTS_DIR", "~/jarvis-sync/dvo-orchestration-shadow/events-root"))
+        "AGOS_EVENTS_DIR", _DEFAULT_EVENTS_ROOT))
 
 
 def main(argv=None):
     import sys
     argv = argv if argv is not None else sys.argv[1:]
-    comms_dir = os.environ.get("AGOS_COMMS_DIR", "~/jarvis-sync/brain-comms")
+    comms_dir = os.environ.get("AGOS_COMMS_DIR", _DEFAULT_COMMS_DIR)
     root = _default_root()
     model = load_model(os.environ.get("AGOS_MESH_MODEL"))
     cmd = argv[0] if argv else "scan"
