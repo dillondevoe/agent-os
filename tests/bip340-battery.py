@@ -92,14 +92,23 @@ check("C. signing exercised on every keyed vector", signed >= 5)
 check("C. must-fail vectors are actually present (forgery coverage)", must_fail >= 8)
 
 # -- D. malformed input raises, rather than silently answering --
-def raises(fn):
-    try: fn(); return False
-    except Exception: return True
-check("D. 31-byte pubkey raises", raises(lambda: bip340.schnorr_verify(b"", b"\x00"*31, b"\x00"*64)))
-check("D. 63-byte signature raises", raises(lambda: bip340.schnorr_verify(b"", b"\x00"*32, b"\x00"*63)))
-check("D. zero secret key raises", raises(lambda: bip340.pubkey_gen(bytes(32))))
+def raises(fn, want):
+    """True only if fn() raised an error whose message contains `want`.
+
+    A bare `except Exception: return True` accepts ANY failure — a typo in the call, a
+    NameError, an unrelated TypeError — as evidence that the length guard under test fired.
+    The arm then stays green through a module whose guard was deleted."""
+    try: fn()
+    except Exception as e:
+        if want.lower() in str(e).lower(): return True
+        print("      (raised, but not the guard under test: %s: %s)" % (type(e).__name__, e))
+        return False
+    return False
+check("D. 31-byte pubkey raises", raises(lambda: bip340.schnorr_verify(b"", b"\x00"*31, b"\x00"*64), "32"))
+check("D. 63-byte signature raises", raises(lambda: bip340.schnorr_verify(b"", b"\x00"*32, b"\x00"*63), "64"))
+check("D. zero secret key raises", raises(lambda: bip340.pubkey_gen(bytes(32)), "range"))
 check("D. short aux_rand raises",
-      raises(lambda: bip340.schnorr_sign(b"", bytes.fromhex("01"*32), b"\x00"*31)))
+      raises(lambda: bip340.schnorr_sign(b"", bytes.fromhex("01"*32), b"\x00"*31), "32"))
 
 # -- I. control arm: prove the must-fail vectors can catch a broken verifier --
 # A detector that has never fired is a claim. Swap in the classic broken implementation — one
