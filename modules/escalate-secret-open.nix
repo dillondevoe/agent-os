@@ -53,7 +53,13 @@ let
     name = "agos-escalate-key-preflight";
     runtimeInputs = with pkgs; [ coreutils ];
     text = ''
-      key="${keyFile}"
+      # The path and the expected owner are overridable ONLY so the battery can exercise this
+      # script against fixture files; production sets neither, and a structural arm in
+      # `nix flake check` asserts the shipped systemd unit does not set them (same shape as the
+      # sealed-no-cloud-provider control arm). Without the overrides the script is untestable by
+      # construction, which is exactly why five of its six branches had never run.
+      key="''${AGOS_ESCALATE_KEY:-${keyFile}}"
+      want_owner="''${AGOS_ESCALATE_KEY_OWNER:-agent}"
       if [ ! -e "$key" ]; then
         echo "agos-escalate-key-preflight: no key at $key — escalate inert, brain answers on the floor (expected until Dillon places one)."
         exit 0
@@ -64,8 +70,8 @@ let
         exit 1
       fi
       owner=$(stat -c '%U' "$key")
-      if [ "$owner" != "agent" ]; then
-        echo "agos-escalate-key-preflight: FAIL — $key is owned by $owner, must be agent (the brain runs as agent and a 0400 file it does not own is unreadable to it)." >&2
+      if [ "$owner" != "$want_owner" ]; then
+        echo "agos-escalate-key-preflight: FAIL — $key is owned by $owner, must be $want_owner (the brain runs as agent and a 0400 file it does not own is unreadable to it)." >&2
         exit 1
       fi
       if [ ! -s "$key" ]; then
