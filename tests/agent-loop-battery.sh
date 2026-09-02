@@ -31,7 +31,41 @@ PASS=0
 fail() { echo "agent-loop-battery: FAIL -- $1" >&2; exit 1; }
 pass() { PASS=$((PASS + 1)); }
 has()   { grep -qF -- "$2" "$1" || fail "$3"; }
-hasnt() { grep -qF -- "$2" "$1" && fail "$3"; return 0; }
+# hasnt REQUIRES the substrate before asserting an absence. Without the -s guard, a missing or
+# empty file makes grep fail, `&& fail` never fires, and the arm passes — "the bad string is not
+# in the output" is vacuously true of a run that produced no output at all. The mirror-image
+# helper `has` is fail-SAFE for free (missing file -> grep fails -> fail fires), which is exactly
+# why the asymmetry is easy to miss when reading the two lines together.
+#
+# NOT a live defect when this was written: all three call sites happen to sit beside a `has` or a
+# trace-count arm on the same file, so the substrate is established by a NEIGHBOUR. That makes the
+# guarantee a property of call-site ordering rather than of the helper — a fourth hasnt added
+# without such a neighbour would be silently vacuous and nothing would object. Control-armed
+# below, so the helper now carries its own guarantee.
+hasnt() {
+  [ -s "$1" ] || fail "$3 (substrate absent or empty: $1 — an absence assertion against no output is vacuous)"
+  grep -qF -- "$2" "$1" && fail "$3"
+  return 0
+}
+
+# ── control arm for the helpers themselves. A battery whose harness can only ever say "ok" is
+# not measuring anything; these run before any property so a broken helper is named as such
+# rather than surfacing later as a mysteriously green suite.
+_selfcheck() {
+  mkdir -p "$WORK"
+  local missing="$WORK/.nosuch" empty="$WORK/.empty" full="$WORK/.full"
+  : > "$empty"; printf 'needle\n' > "$full"
+  ( hasnt "$missing" needle "x" ) >/dev/null 2>&1 && fail "harness: hasnt PASSED on a missing file"
+  ( hasnt "$empty"   needle "x" ) >/dev/null 2>&1 && fail "harness: hasnt PASSED on an empty file"
+  ( hasnt "$full"    needle "x" ) >/dev/null 2>&1 && fail "harness: hasnt PASSED on a file that CONTAINS the needle"
+  # permitting arm: without it, a hasnt that failed unconditionally would satisfy all three above
+  ( hasnt "$full" absent-string "x" ) >/dev/null 2>&1 || fail "harness: hasnt REJECTED a genuine absence"
+  ( has "$full" needle "x" ) >/dev/null 2>&1 || fail "harness: has REJECTED a present string"
+  ( has "$missing" needle "x" ) >/dev/null 2>&1 && fail "harness: has PASSED on a missing file"
+  echo "agent-loop-battery: harness self-check ok (hasnt requires substrate; has fails closed)"
+  return 0
+}
+_selfcheck
 
 # ── wall wiring: the loop resolves mcp+broker from these env pins (never from the model).
 # Point mcp at the REAL front door and broker at the deterministic stub. One config serves
