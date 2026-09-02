@@ -13,12 +13,27 @@
 # mirror-image failure — a helper that refused EVERYTHING would pass arm A.
 set -uo pipefail
 
-FV="${1:?usage: fetch-verified-battery.sh <fetch-verified.sh> [repo-root]}"
-ROOT="${2:-}"
+# ROOT is REQUIRED, and that is a change. It used to default to empty, which made arm I --
+# the ONLY arm that checks the shipped `bin/setup-brain.sh` does not pipe a fetch into a shell --
+# evaporate in silence: the whole block is wrapped in `[ -n "$ROOT" ] && [ -f ... ]`, so an unset
+# ROOT or a dropped `cp` line in flake.nix removes two arms and the battery still prints the
+# byte-identical verdict `PASS`. Demonstrated before this change: with ROOT the run ends
+# "ok I setup-brain.sh has no live curl|bash"; without it that line is simply not there, and
+# nothing counts the difference. An existence guard is legitimate for "not applicable here" and
+# illegitimate for "the file we are asserting about should always exist" -- this one was the
+# second wearing the clothes of the first.
+FV="${1:?usage: fetch-verified-battery.sh <fetch-verified.sh> <repo-root>}"
+ROOT="${2:?usage: fetch-verified-battery.sh <fetch-verified.sh> <repo-root> (repo-root is required: it is what arms arm I)}"
 W="$(mktemp -d)"; trap 'rm -rf "$W"' EXIT
 fail=0
-ok()  { echo "  ok   $1"; }
-bad() { echo "  FAIL $1"; fail=1; }
+ran=0
+ok()  { echo "  ok   $1"; ran=$((ran+1)); }
+bad() { echo "  FAIL $1"; fail=1; ran=$((ran+1)); }
+
+# The count below is the general form of the same fix. Arm I is the instance I found; a verdict
+# that does not depend on HOW MANY arms ran cannot notice ANY of them going missing. Two sibling
+# batteries already print "all N arms pass"; this one printed a bare PASS.
+WANT_ARMS=13
 
 GOOD="$W/upstream.sh"; printf '#!/bin/sh\necho hello\n' > "$GOOD"
 GOODSHA="$(sha256sum "$GOOD" | awk '{print $1}')"
@@ -69,7 +84,10 @@ grep -q CHANGED "$W/rec.err" && ok "G --record flags the change" || bad "G --rec
 
 # I — the CALL SITE stayed converted. A verified-fetch helper sitting unused beside a
 # live `curl | bash` is the same shape as a scanner installed with no timer.
-if [ -n "$ROOT" ] && [ -f "$ROOT/bin/setup-brain.sh" ]; then
+# The substrate is asserted, not assumed: a missing setup-brain.sh is a FAILURE of this battery,
+# not a reason to quietly not run its arms.
+[ -f "$ROOT/bin/setup-brain.sh" ] || bad "I substrate absent: $ROOT/bin/setup-brain.sh (arm I cannot run -- this is a failure, not a skip)"
+if [ -f "$ROOT/bin/setup-brain.sh" ]; then
   if grep -nE 'curl[^|]*\|[[:space:]]*(sudo )?(ba)?sh' "$ROOT/bin/setup-brain.sh" | grep -vE '^[0-9]+:[[:space:]]*#'; then
     bad "I setup-brain.sh still pipes a fetch into a shell"
   else
@@ -79,5 +97,12 @@ if [ -n "$ROOT" ] && [ -f "$ROOT/bin/setup-brain.sh" ]; then
     || bad "I setup-brain.sh does not call fetch-verified"
 fi
 
-[ "$fail" = 0 ] && { echo "fetch-verified battery: PASS"; exit 0; }
+# An arm that stops running is a silent loss of coverage, so the count is part of the verdict.
+if [ "$ran" != "$WANT_ARMS" ]; then
+  echo "  FAIL arm count: $ran arms ran, expected $WANT_ARMS -- an arm was added or silently lost"
+  echo "       (if you deliberately added or removed one, update WANT_ARMS in this file)"
+  fail=1
+fi
+
+[ "$fail" = 0 ] && { echo "fetch-verified battery: PASS ($ran arms)"; exit 0; }
 echo "fetch-verified battery: FAIL"; exit 1
