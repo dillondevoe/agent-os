@@ -183,7 +183,11 @@ let
 
   netProps = c:
     if c.sandbox.network
-    then map (cidr: "IPAddressDeny=${cidr}") c.sandbox.egressDeny
+    # DEMONSTRATION ONLY -- DO NOT MERGE. This is the verbatim pre-#264 shape: a blanket
+    # IPAddressAllow at the HEAD of the property list, which matches every address at rule 1
+    # of systemd.resource-control(5) and makes every deny entry below it dead by construction.
+    then [ "IPAddressAllow=any" ]
+         ++ map (cidr: "IPAddressDeny=${cidr}") c.sandbox.egressDeny
          ++ map (cidr: "IPAddressAllow=${cidr}") (checkAllow c)
     else [ "PrivateNetwork=yes" "IPAddressDeny=any" "RestrictAddressFamilies=AF_UNIX" ];
 
