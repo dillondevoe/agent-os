@@ -98,29 +98,46 @@ pkgs.testers.runNixOSTest {
     target.wait_for_unit("probe-listener.service")
     target.wait_for_open_port(${toString targetPort})
 
-    # The target's address on the shared VLAN, read from the node rather than hard-coded — a
-    # hard-coded VLAN address would silently become a DIFFERENT node's address if the node order
-    # ever changed, and the battery would then probe the wrong box while still reporting cleanly.
-    addr = target.succeed(
-        "ip -4 -o addr show scope global | awk '{print $4}' | cut -d/ -f1 | head -1"
-    ).strip()
-    print(f"target address on the test VLAN: {addr}")
+    # Select the target address BY THE PROPERTY 8b needs, not by position or interface name.
+    # The first cut took `head -1` of the target's scope-global addresses and got QEMU's user-net
+    # address -- which every node in a nixosTest carries identically, so the "remote" address was
+    # box itself and the ping succeeded in 0.03s against loopback. An interface name would have been the same
+    # mistake wearing a different spelling, and a hard-coded literal a third. So: take the target's
+    # global addresses, subtract box's own, and require the remainder to be exactly one. An address
+    # shared by both nodes cannot be chosen by construction, which is the only guarantee worth
+    # having here -- the whole point of two nodes is that the route is not `lo`.
+    def globals4(node):
+        return set(
+            node.succeed(
+                "ip -4 -o addr show scope global | awk '{print $4}' | cut -d/ -f1"
+            ).split()
+        )
+
+    own = set(box.succeed("ip -4 -o addr show | awk '{print $4}' | cut -d/ -f1").split())
+    candidates = sorted(globals4(target) - own)
+    assert len(candidates) == 1, (
+        f"expected exactly one target address that box does not also hold, got {candidates} "
+        f"(target globals {sorted(globals4(target))}, box own {sorted(own)}). Zero means the nodes "
+        "share all addressing and 8b would be a loopback probe again; more than one means the "
+        "harness cannot say which route it measured."
+    )
+    addr = candidates[0]
+    print(f"target address on the test VLAN: {addr} (box own: {sorted(own)})")
+
+    # 8b's meaning also depends on the chosen address lying inside a CIDR the shipping policy
+    # denies -- otherwise a denial proves nothing about the deny list. Asserted rather than assumed,
+    # because the selector above is deliberately free to return whatever the topology gives it.
+    import ipaddress
+
+    assert ipaddress.ip_address(addr) in ipaddress.ip_network("192.168.0.0/16"), (  # gate-allow
+        f"target address {addr} is not inside the denied CIDR the 8b leg is probing; a connection "
+        "result against it would say nothing about the deny list"
+    )
 
     # PRECONDITION, asserted from `box` and not assumed: the address must be genuinely reachable
     # from the node under test BEFORE any deny list is involved. If this fails the run is a broken
     # harness, and saying so here keeps it from later masquerading as an 8a control failure.
     box.succeed(f"ping -c1 -W5 {addr} >/dev/null")
-
-    # And it must NOT be one of box's own addresses, which is the entire property the single-node
-    # harness could not obtain. Asserted explicitly: if a future networking change ever collapsed
-    # the two nodes onto shared addressing, 8b would quietly go back to being a loopback probe and
-    # this test would keep reporting the same green while measuring nothing.
-    own = box.succeed("ip -4 -o addr show | awk '{print $4}' | cut -d/ -f1").split()
-    assert addr not in own, (
-        f"target address {addr} is also one of box's own addresses {own} — the 8b route would be "
-        "loopback and this two-node harness would be measuring exactly what the one-node harness "
-        "already could not settle"
-    )
 
     out = box.succeed(
         f"AGENT_OS_BATTERY_REMOTE_DENIED_ADDR={addr} "
