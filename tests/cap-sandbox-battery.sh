@@ -314,9 +314,12 @@ echo "cap-sandbox 7 OK  (network=false cap has NO stack under its real derived p
 # ── 8. the network=TRUE half: does IPAddressDeny actually STOP packets? ───────────────────────
 # Leg 7 proves a cap declared network=false has no stack. That is the easy direction. This is the
 # direction the T2 egress slice rests on — a cap that IS allowed a stack, confined to "public
-# internet only" by IPAddressAllow=any plus a per-CIDR IPAddressDeny list (modules/cap-sandbox.nix
-# `netProps`, derived from the registry's egressDenyList). Nothing had ever observed a packet being
-# dropped by that list.
+# internet only" by a per-CIDR IPAddressDeny list and NO IPAddressAllow (modules/cap-sandbox.nix
+# `netProps`, derived from the registry's egressDenyList). This comment used to say the rendering
+# led with `IPAddressAllow=any`, which it did -- and that is precisely why nothing had ever observed
+# a packet being dropped by the list: an Allow of `any` matches at rule 1 of
+# systemd.resource-control(5), so the deny entries at rule 2 were unreachable. The list was dead for
+# as long as no arm probed it. It is probed now, in both renderings (8c and 8c-prefix).
 #
 # WHY THIS GATES THE SHIP. modules/cap-invoke-pkg.nix `offenders` refuses to put any
 # sandbox.network=true impl in capBinDir. IPAddressDeny is a cgroup-v2 BPF filter, and on a host
@@ -455,11 +458,25 @@ if not props:
 net = [p for p in props
        if p.split("=")[0] in ("PrivateNetwork", "IPAddressAllow", "IPAddressDeny",
                               "RestrictAddressFamilies")]
-if "IPAddressAllow=any" not in net:
-    sys.stderr.write("no IPAddressAllow=any — not a network=true cap\n"); sys.exit(1)
 if any(p.startswith("PrivateNetwork=yes") for p in net):
     sys.stderr.write("PrivateNetwork=yes present — 8b would block for the wrong reason\n"); sys.exit(1)
 denies = [ipaddress.ip_network(p.split("=", 1)[1]) for p in net if p.startswith("IPAddressDeny=")]
+if not denies:
+    sys.stderr.write("no IPAddressDeny at all — not a confined network=true cap\n"); sys.exit(1)
+# THE ASSERTION THIS CHECK USED TO GET BACKWARDS. It formerly REQUIRED `IPAddressAllow=any`, so
+# it asserted the very defect that made the deny list dead: `any` matches at rule 1 of
+# systemd.resource-control(5) and rule 2 never runs. A covering Allow of ANY width does that for
+# the addresses it covers, so the property to hold is that NO Allow entry contains either target.
+allows = [ipaddress.ip_network(p.split("=", 1)[1])
+          for p in net if p.startswith("IPAddressAllow=") and p != "IPAddressAllow=any"]
+if any(p == "IPAddressAllow=any" for p in net):
+    sys.stderr.write("IPAddressAllow=any present — rule 1 matches every address and the "
+                     "egressDeny list is dead by construction (PR #263)\n"); sys.exit(1)
+for probe in (target, ipaddress.ip_address("127.0.0.1")):
+    covering = [a for a in allows if probe in a]
+    if covering:
+        sys.stderr.write("IPAddressAllow %s covers %s, so its deny entry can never be reached\n"
+                         % ([str(a) for a in covering], probe)); sys.exit(1)
 if not any(target in d for d in denies):
     sys.stderr.write("policy does not deny %s, the 8b target\n" % target); sys.exit(1)
 if not any(ipaddress.ip_address("127.0.0.1") in d for d in denies):
@@ -553,6 +570,52 @@ if [ "$NETRC" = 0 ]; then
   fi
 else
   echo "cap-sandbox 8b OK (network=true: control arm with a stack reached $NETADDR; the SAME probe under the derived IPAddressDeny list RAN and was refused — the only delta is the deny entries)"
+fi
+
+# 8c-show. WHAT THE KERNEL ACTUALLY GOT, for the properties 8c is about to run under. 8m dumps this
+# for its OWN transient unit; nothing ever dumped it for the DERIVED policy, which is why the #263
+# run could not separate "not rendered" from "applied and overridden" without reading the manual.
+# The line below is the receipt: on the pre-fix rendering it shows `IPAddressAllow=any`, on the
+# fixed one it shows no Allow at all. Both are printed, so the log attributes the change.
+SHOW8C="agentos-8c-show-$$"
+"$SYSTEMD_RUN" --quiet --unit="$SHOW8C" $NETPROPS sleep 3 >/dev/null 2>&1 || true
+echo "cap-sandbox 8c-show: derived-unit applied properties -> $(systemctl show -p IPAddressAllow -p IPAddressDeny "$SHOW8C.service" 2>&1 | tr '\n' ' ')"
+# The same unit's SLICE. A parent slice carrying its own IPAddressDeny would make 8b/8c refuse for
+# a reason that has nothing to do with netProps -- systemd applies the filters of every cgroup on
+# the path, so an ancestor deny is indistinguishable in the probe's result from the unit's own.
+# Asserted rather than assumed: it is the ambient condition that would make the fix look like it
+# worked. Read BEFORE the stop, while the unit still has a slice.
+SLICE8C="$(systemctl show -p Slice --value "$SHOW8C.service" 2>/dev/null)"
+echo "cap-sandbox 8c-show: parent slice ${SLICE8C:-unknown} -> $(systemctl show -p IPAddressAllow -p IPAddressDeny "${SLICE8C:-system.slice}" 2>&1 | tr '\n' ' ')"
+case "$(systemctl show -p IPAddressDeny --value "${SLICE8C:-system.slice}" 2>/dev/null)" in
+  "") : ;;
+  *) netcleanup; fail "8c-show: the parent slice ${SLICE8C:-system.slice} carries its own IPAddressDeny. Every arm below would then be measuring the ancestor's filter, not the capability's derived policy, and a refusal could not be credited to netProps at all. Clear the slice-level property or run the battery in a slice without one." ;;
+esac
+systemctl stop "$SHOW8C.service" >/dev/null 2>&1 || true
+
+# 8c-prefix. PRE-FIX CONTROL ARM, so 8c's green is ATTRIBUTABLE to the rendering change and not to
+# an ambient difference in the runner, the listener, or the kernel. It re-creates the OLD rendering
+# by hand -- the same derived deny list, with `IPAddressAllow=any` put back in front of it -- and
+# REQUIRES that it still reaches loopback. If this arm ever starts refusing, the fix below cannot
+# be credited: something else is doing the work and 8c would be green for a reason nobody chose.
+#
+# Measured on DVo (WSL2, systemd system scope) before this PR was pushed, three arms against one
+# loopback listener: no filter -> REACHED (the instrument works, so a refusal below means something);
+# IPAddressDeny=127.0.0.0/8 alone -> REFUSED (TimeoutError, i.e. a drop, not a reset); the SAME deny
+# with IPAddressAllow=any in front of it -> REACHED. The rule-order defect therefore reproduces on a
+# second kernel and systemd than CI's, and the fix confines on that same one. This arm is the CI-side
+# re-run of the third of those three.
+NETOUT="$("$SYSTEMD_RUN" --quiet --pipe --wait --collect --property=IPAddressAllow=any $NETPROPS \
+            "$PY" -c "$(probe_src 127.0.0.1 "$LOPORT")" 2>&1)"; NETRC=$?
+case "$NETOUT" in
+  *PROBE-RAN*) : ;;
+  *) netcleanup; fail "8c-prefix: the pre-fix control probe never executed, so this arm measured nothing (rc=$NETRC, out=$NETOUT)" ;;
+esac
+if [ "$NETRC" = 0 ]; then
+  echo "cap-sandbox 8c-prefix OK (pre-fix control: re-adding IPAddressAllow=any in front of the SAME deny list still reaches 127.0.0.1 -- the rule-1 shadowing is reproduced here, so 8c's verdict below is attributable to removing it)"
+else
+  netcleanup
+  fail "8c-prefix: the PRE-FIX rendering (IPAddressAllow=any ahead of the derived denies) was REFUSED on this host. That is the defect #263 measured failing to reproduce, so whatever makes 8c pass below is NOT the netProps change -- do not credit the fix. Suspect a parent slice carrying IPAddressDeny (check systemctl show -p IPAddressDeny on the slice), a different systemd rule order, or a changed listener."
 fi
 
 # 8c. LOOPBACK, denied deliberately by the registry (the in-guest model on 127.0.0.1:11434). Its own
