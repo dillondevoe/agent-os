@@ -216,7 +216,12 @@ let
   policy = lib.mapAttrs (_name: c: propsFor c) reg;
 
 in {
-  inherit policy propsFor baseProps;
+  # `netProps` is exported for ONE reason: so the flake-check can drive `checkAllow` directly with
+  # a synthetic capability. Registry invariant (5b) forbids a non-empty `egressAllow` in-tree, so
+  # nothing that SHIPS can ever reach the throw — which made it a guard whose firing had never been
+  # observed. That is the class of control this repo keeps filing against, so it gets a negative
+  # control of its own rather than an exemption.
+  inherit policy propsFor baseProps netProps;
 
   # The materialized policy, as the dispatcher consumes it. cap-invoke looks a capability up by
   # name and refuses to run an impl whose name is ABSENT (fail-closed): a cap that reaches the

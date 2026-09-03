@@ -426,7 +426,14 @@ $NETINFO
 EOF
 [ -n "$NETADDR" ] && [ -n "$NETOWN" ] || fail "8: target selector did not emit '<addr> <hostown>' (got: $NETINFO)"
 case "$NETOWN" in yes|no) : ;; *) fail "8: hostown must be yes or no, got $NETOWN" ;; esac
-[ "$NETOWN" = no ] || echo "cap-sandbox 8: NOTE — $NETADDR is one of THIS HOST's own addresses, so the 8b/8c route is loopback and those arms can only report NOT-DEMONSTRATED (set AGENT_OS_BATTERY_REMOTE_DENIED_ADDR from a two-node harness to make them decisive)"
+# This note USED to say the 8b/8c arms "can only report NOT-DEMONSTRATED" on a single node. That
+# was true only while the deny list was dead: with `IPAddressAllow=any` removed, a host-own address
+# in 10/8 is a DENIED entry like any other, and CI job 100708028354 has 8b and 8c both reporting OK
+# on exactly this single-node route. The downgrade path still exists for a target that is NOT in the
+# derived deny list, which is a different condition -- so the note now describes the route without
+# predicting the verdict. A note that forecasts an outcome goes stale the moment the outcome changes,
+# and it stays readable while doing it.
+[ "$NETOWN" = no ] || echo "cap-sandbox 8: NOTE — $NETADDR is one of THIS HOST's own addresses, so the 8b/8c route is loopback. Those arms are decisive anyway when the address falls inside the derived deny list (10/8 here); they downgrade to NOT-DEMONSTRATED only if it does not (set AGENT_OS_BATTERY_REMOTE_DENIED_ADDR from a two-node harness for an off-host target)"
 
 NETDIR="$(mktemp -d)"
 NETPID=""
@@ -559,11 +566,27 @@ esac
 NOTDEMO=0
 if [ "$NETRC" = 0 ]; then
   if [ "$NETOWN" = yes ]; then
-    # NOT a finding, and NOT a pass. The target is host-own, so the connection routed over `lo`,
-    # and leg 8m -- not a sentence about the manual -- is what says whether the filter covers that
-    # route on this host. Reported loudly, suite continues, exit code unaffected.
-    NOTDEMO=1
-    echo "cap-sandbox 8b NOT-DEMONSTRATED: the probe reached $NETADDR under the derived IPAddressDeny list, but that address is one of THIS HOST's own, so the route is loopback (see leg 8m for whether the filter covers that route here). This arm CANNOT pass on a single node — it is not evidence the filter is inert, and it is not evidence the filter works. Settle it with a two-node nixosTest (AGENT_OS_BATTERY_REMOTE_DENIED_ADDR). Until then the shipping gate in modules/cap-invoke-pkg.nix STAYS: do NOT lift \`offenders\`."
+    # RE-KEYED ON $MECH, exactly as 8c is, and the previous text here was WRONG in a way that only
+    # became visible once the fix landed. It said this arm "CANNOT pass on a single node" and sent
+    # the reader to a two-node harness. That was a consequence of the DEFECT, not a property of
+    # single-node testing: while netProps led with `IPAddressAllow=any`, rule 1 of
+    # systemd.resource-control(5) matched every address, so a host-own 10/8 target was
+    # unreachable-by-deny for precisely the same reason every other target was. The route was never
+    # what made this undecidable -- the dead deny list was. With the shadowing gone, a host-own
+    # address inside the derived list is an ordinary denied entry, and leg 8m already establishes
+    # whether the mechanism reaches loopback on THIS host. So the mechanism decides, not the route.
+    if [ "$MECH" = works ]; then
+      netcleanup
+      fail "8b: the probe REACHED $NETADDR under the derived IPAddressDeny list, and leg 8m established that IP filtering DOES reach loopback traffic on this host (MECH=works). The route being host-own therefore excuses nothing -- this is a real finding: the derived list is not covering an address it names. The shipping gate in modules/cap-invoke-pkg.nix STAYS and slice 1 switches to the netns+proxy shape."
+    elif [ "$MECH" = inert ]; then
+      # The one state that is genuinely undecidable, and it is now narrow: the mechanism itself does
+      # not filter loopback here, so reaching a host-own target says nothing about the derived list.
+      NOTDEMO=1
+      echo "cap-sandbox 8b NOT-DEMONSTRATED: the probe reached $NETADDR under the derived IPAddressDeny list, but that address is host-own so the route is loopback, and leg 8m measured the filtering mechanism as INERT on this route (MECH=inert). Neither reading is available: not evidence the derived list is broken, not evidence it works. Settle it with an off-host target (AGENT_OS_BATTERY_REMOTE_DENIED_ADDR) or on a host where 8m reports works. Until then the shipping gate in modules/cap-invoke-pkg.nix STAYS: do NOT lift \`offenders\`."
+    else
+      netcleanup
+      fail "8b: the probe reached $NETADDR under the derived deny list over a host-own route, but leg 8m did not run (MECH=$MECH), so nothing here can say whether the filter covers loopback on this host. Refusing to classify -- this is the state in which a fabricated loopback-exemption sentence was previously supplied as the answer."
+    fi
   else
     netcleanup
     fail "8b: IPAddressDeny did NOT stop a connection to $NETADDR, an address the policy denies, over a route that is NOT this host's own. That is a real finding, not a route artifact: the kernel layer is inert here. The shipping gate in modules/cap-invoke-pkg.nix STAYS and slice 1 switches to the netns+proxy shape."
@@ -710,5 +733,5 @@ echo "cap-sandbox 9 OK (cap-net-fetch denies $MAPPED_URL AT THE ADDRESS CHECK; w
 if [ "$NOTDEMO" = 1 ]; then
   echo "cap-sandbox: 12 arms ran, 10 HOLD — legs 8b and 8c are NOT-DEMONSTRATED on this single node (host-own target, loopback route). The suite is GREEN on what it can measure and SILENT on what it cannot; it is NOT a clearance to lift \`offenders\`."
 else
-  echo "cap-sandbox: ALL PROPERTIES HOLD (12 arms: legs 0-7, 8m, 8b, 8c, 9; leg 0 negative control, 7a/8a/8m-control positive controls, 9-control pre-fix arm)"
+  echo "cap-sandbox: ALL PROPERTIES HOLD (12 arms: legs 0-7, 8m, 8b, 8c, 9; leg 0 negative control, 7a/8a/8m-control positive controls, 8c-prefix + 9-control pre-fix arms, 8c-show property dump)"
 fi

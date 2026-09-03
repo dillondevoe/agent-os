@@ -1111,6 +1111,41 @@
                + "[${lib.concatStringsSep " | " (map (r: lib.concatStringsSep "," r) leaked)}]. "
                + "That argument is bound read-only into EVERY cap namespace, so an unguarded value "
                + "hands back what TemporaryFileSystem=/:ro took away.");
+          assert
+            # checkAllow NEGATIVE CONTROL. A blanket `IPAddressAllow` matches every address at rule 1
+            # of systemd.resource-control(5), which makes the whole egressDeny list dead by
+            # construction -- the defect measured in PR #263 and fixed in #264. `checkAllow` throws
+            # on one. But registry invariant (5b) forbids a non-empty `egressAllow` in-tree, so NO
+            # shipping capability can reach that throw: without this arm the guard is a control whose
+            # firing has never once been observed, which is precisely the class this repo keeps
+            # filing against other people's tests. Driven here through the exported `netProps` seam.
+            let
+              np = (import ./modules/cap-sandbox.nix { inherit lib; }).netProps;
+              # The deny entry is TEST-NET-2 and the specific-allow control TEST-NET-3 (RFC 5737
+              # documentation ranges) rather than an RFC1918 literal: `checkAllow` inspects only
+              # egressAllow, so the deny value is inert here, and the personal-data gate is right to
+              # refuse a 10/8 literal in a public repo. Removed rather than allowlist-exempted --
+              # an exemption would retire this line from scrutiny for every future pattern too.
+              evals = allow:
+                (builtins.tryEval (builtins.deepSeq
+                  (np { sandbox = { network = true; egressDeny = [ "198.51.100.0/24" ]; egressAllow = allow; }; })
+                  true)).success;
+              blanket = [ [ "any" ] [ "0.0.0.0/0" ] [ "::/0" ]
+                          # mixed: a specific CIDR must NOT launder a blanket entry beside it
+                          [ "203.0.113.4/32" "any" ] ];
+              admitted = lib.filter evals blanket;
+              # POSITIVE CONTROL, and it is the half that stops this arm passing vacuously: a guard
+              # that threw on EVERYTHING would satisfy the check above while breaking every legitimate
+              # operator exception. A specific CIDR must still evaluate, and an empty list must too.
+              specificOk = evals [ "203.0.113.4/32" ];
+              emptyOk = evals [ ];
+            in lib.assertMsg (admitted == [ ] && specificOk && emptyOk)
+              ("cap-sandbox: checkAllow negative control failed. Blanket egressAllow values that were "
+               + "ADMITTED (each one reinstates the dead-deny-list defect of #263): "
+               + "[${lib.concatStringsSep " | " (map (a: lib.concatStringsSep "," a) admitted)}]. "
+               + "Specific-CIDR control evaluated: ${lib.boolToString specificOk}; "
+               + "empty-list control evaluated: ${lib.boolToString emptyOk} "
+               + "(both must be true -- a guard that refuses everything is not a guard).");
           nixpkgs.legacyPackages.${system}.runCommand "cap-sandbox-check" { } ''
             test -s ${nixpkgs.legacyPackages.${system}.writeText "policy.json" sb.policyJson}
             touch $out
