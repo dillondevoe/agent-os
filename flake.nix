@@ -836,6 +836,30 @@
               touch $out
             '';
 
+        # The login shell's brain-precedence arms. agent-shell is the login program:
+        # its failure mode is a box that will not boot, and until 2026-09-02 it was the
+        # only component in the tree with no arm on it. Proves the cloud brain is never
+        # auto-selected (installing Claude Code must not silently invert "nothing leaves
+        # the machine") and that NO brain is exec'd without a passing probe (a `claude`
+        # present on PATH but unrunnable — the NixOS dynamic-ELF case — must fall to the
+        # local chain, not crash-loop getty's autologin). It drives the REAL script in a
+        # sandboxed HOME with stub brains, because the defect lives in agent-shell's own
+        # selection branch. A regression here fails `nix flake check`.
+        agent-shell-brain-precedence =
+          nixpkgs.legacyPackages.${system}.runCommand "agent-shell-brain-precedence-check"
+            {
+              nativeBuildInputs = with nixpkgs.legacyPackages.${system}; [ bash coreutils gnugrep ];
+            } ''
+              work="$(mktemp -d)"
+              mkdir -p "$work/bin" "$work/tests"
+              cp ${./bin/agent-shell} "$work/bin/agent-shell"
+              cp ${./tests/agent-shell-brain-precedence.sh} "$work/tests/agent-shell-brain-precedence.sh"
+              chmod +x "$work/bin/agent-shell" "$work/tests/agent-shell-brain-precedence.sh"
+              cd "$work"
+              bash tests/agent-shell-brain-precedence.sh
+              touch $out
+            '';
+
         # Phase 2 · Step 2 — the audit-log primitive's property battery. Proves
         # append-only NDJSON, SHA-256 chain tamper/truncation evidence, no-log->no-execute
         # fail-closed, hostile-newline single-line safety, and reserved-field forgery
@@ -1087,6 +1111,81 @@
                + "[${lib.concatStringsSep " | " (map (r: lib.concatStringsSep "," r) leaked)}]. "
                + "That argument is bound read-only into EVERY cap namespace, so an unguarded value "
                + "hands back what TemporaryFileSystem=/:ro took away.");
+          assert
+            # checkAllow NEGATIVE CONTROL, and read the scope line carefully because two revisions
+            # of this comment got it wrong in the same direction. `checkAllow` inspects
+            # `c.sandbox.egressAllow` -- the OPERATOR-DECLARATION path, the one registry invariant
+            # (5b) deliberately leaves open by forbidding a non-empty egressAllow in-tree. It is the
+            # same MECHANISM as PR #263 (a blanket Allow matches every address at rule 1 of
+            # systemd.resource-control(5), so the egressDeny list is dead by construction), but it is
+            # NOT the #263 INSTANCE: that one was hard-coded in `netProps` itself and never passes
+            # through this filter at all. Demonstrated, not reasoned -- PR #266 reintroduced the
+            # verbatim #263 shape and this control stayed GREEN (job 100733793522). The hard-coded
+            # shape is caught by `hardcodedBlanket` below (eval) and by the battery's arm-8
+            # precondition (VM, job 100733794512). Two guards, two defects, and the sentence that
+            # used to sit here claimed one covered both. Driven through the exported `netProps` seam.
+            let
+              np = (import ./modules/cap-sandbox.nix { inherit lib; }).netProps;
+              # The deny entry is TEST-NET-2 and the specific-allow control TEST-NET-3 (RFC 5737
+              # documentation ranges) rather than an RFC1918 literal: `checkAllow` inspects only
+              # egressAllow, so the deny value is inert here, and the personal-data gate is right to
+              # refuse a 10/8 literal in a public repo. Removed rather than allowlist-exempted --
+              # an exemption would retire this line from scrutiny for every future pattern too.
+              evals = allow:
+                (builtins.tryEval (builtins.deepSeq
+                  (np { sandbox = { network = true; egressDeny = [ "198.51.100.0/24" ]; egressAllow = allow; }; })
+                  true)).success;
+              blanket = [ [ "any" ] [ "0.0.0.0/0" ] [ "::/0" ]
+                          # mixed: a specific CIDR must NOT launder a blanket entry beside it
+                          [ "203.0.113.4/32" "any" ] ];
+              admitted = lib.filter evals blanket;
+              # POSITIVE CONTROL, and it is the half that stops this arm passing vacuously: a guard
+              # that threw on EVERYTHING would satisfy the check above while breaking every legitimate
+              # operator exception. A specific CIDR must still evaluate, and an empty list must too.
+              specificOk = evals [ "203.0.113.4/32" ];
+              emptyOk = evals [ ];
+            in lib.assertMsg (admitted == [ ] && specificOk && emptyOk)
+              ("cap-sandbox: checkAllow negative control failed. Blanket egressAllow values that were "
+               + "ADMITTED (each one reinstates the dead-deny-list defect of #263): "
+               + "[${lib.concatStringsSep " | " (map (a: lib.concatStringsSep "," a) admitted)}]. "
+               + "Specific-CIDR control evaluated: ${lib.boolToString specificOk}; "
+               + "empty-list control evaluated: ${lib.boolToString emptyOk} "
+               + "(both must be true -- a guard that refuses everything is not a guard).");
+          assert
+            # hardcodedBlanket EVAL CONTROL. This is the arm the checkAllow control above cannot be:
+            # checkAllow filters `egressAllow`, so a blanket written directly into `netProps` --
+            # which is EXACTLY what PR #263 was -- walks straight past it. PR #266 proved that
+            # empirically: the verbatim #263 diff left the checkAllow control green and was caught
+            # only in the VM lane, by the battery's arm-8 precondition (job 100733794512), ~6 minutes
+            # into a run instead of at eval.
+            #
+            # The property, and it is deliberately not "no `any`": for a capability declaring NO
+            # exception at all, netProps must render ZERO `IPAddressAllow=` entries of ANY value.
+            # With `egressAllow = []` there is no legitimate source for an Allow entry, so any Allow
+            # that appears is hard-coded in this module by construction -- which catches a narrowed
+            # re-introduction (`IPAddressAllow=0.0.0.0/0`, or some future specific literal) that a
+            # string match on "any" would wave through.
+            let
+              np = (import ./modules/cap-sandbox.nix { inherit lib; }).netProps;
+              render = allow: np {
+                sandbox = { network = true; egressDeny = [ "198.51.100.0/24" ]; egressAllow = allow; };
+              };
+              allowsOf = props: lib.filter (lib.hasPrefix "IPAddressAllow=") props;
+              hardcoded = allowsOf (render [ ]);
+              # POSITIVE CONTROL, same role as specificOk above and for the same reason: an arm that
+              # asserted "no Allow entries ever" would be satisfied by a netProps that had stopped
+              # rendering operator exceptions entirely -- silently deleting the feature while going
+              # green. A declared exception must still render, exactly once and unchanged.
+              declaredRenders = allowsOf (render [ "203.0.113.4/32" ]) == [ "IPAddressAllow=203.0.113.4/32" ];
+            in lib.assertMsg (hardcoded == [ ] && declaredRenders)
+              ("cap-sandbox: hardcodedBlanket control failed. netProps rendered "
+               + "[${lib.concatStringsSep " | " hardcoded}] for a capability whose egressAllow is "
+               + "EMPTY -- every one of those is hard-coded in modules/cap-sandbox.nix, and any "
+               + "Allow entry makes the egressDeny list dead for the range it covers (rule 1 of "
+               + "systemd.resource-control(5)); this is the PR #263 defect itself, not the "
+               + "declaration path checkAllow guards. Declared-exception control rendered "
+               + "correctly: ${lib.boolToString declaredRenders} (must be true -- a netProps that "
+               + "dropped operator exceptions altogether would pass the first half).");
           nixpkgs.legacyPackages.${system}.runCommand "cap-sandbox-check" { } ''
             test -s ${nixpkgs.legacyPackages.${system}.writeText "policy.json" sb.policyJson}
             touch $out

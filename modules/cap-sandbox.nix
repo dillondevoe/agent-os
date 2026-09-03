@@ -152,9 +152,48 @@ let
   # declared network-capable gets no stack at all, so an exfil attempt cannot even resolve.
   # network=true is NOT shipped yet (cap-invoke-pkg's build gate refuses it); the deny-list
   # translation is written here so the T2 slice starts from the registry, not from scratch.
+  #
+  # DENY-ONLY, and the omission of `IPAddressAllow=any` is the whole point. This rendering
+  # previously LED with it, which made the entire deny list dead by construction. From
+  # systemd.resource-control(5), verbatim: "Access is granted when the checked IP address
+  # matches an entry in IPAddressAllow=. Otherwise, access is denied when it matches
+  # IPAddressDeny=. Otherwise, access is granted." `any` matches every address at rule 1, so
+  # rule 2 — the registry's egressDenyList, the executable form of INV-2 — never ran. Measured,
+  # not reasoned: battery leg 8c reached 127.0.0.1 under a policy that named 127.0.0.0/8, in the
+  # same VM where leg 8m refused that exact probe under IPAddressDeny=any (PR #263, CI job
+  # 100655923315). Nothing was dropped and no kernel support was missing; the rule order did it.
+  #
+  # With no Allow entry, rule 1 never fires, denied CIDRs stop at rule 2, and everything else is
+  # granted at rule 3 — which is the "public internet only" shape the T2 slice actually wants.
+  # An operator exception (`sandbox.egressAllow`, config-only to change) renders as a SPECIFIC
+  # Allow CIDR: it wins at rule 1 for that range alone, and can never be `any`.
+  # An operator exception that spelled itself `any` (or the CIDRs `any` expands to) would
+  # reinstate the dead-deny-list bug exactly, from config instead of from this file. The comment
+  # above is not load-bearing on its own: this refuses to evaluate. Registry invariant (5b)
+  # already forbids a non-empty egressAllow in-tree, so this covers the operator-config path
+  # that invariant deliberately leaves open -- AND ONLY THAT PATH. `checkAllow` reads
+  # `c.sandbox.egressAllow`; a blanket written directly into `netProps` below never reaches it.
+  # That is not a hypothetical distinction: it is precisely what PR #263 was, and PR #266
+  # reintroduced the verbatim shape and left this guard green (job 100733793522). The hard-coded
+  # shape is caught at eval by the `hardcodedBlanket` control in flake.nix and in the VM by the
+  # battery's arm-8 precondition.
+  blanketAllow = [ "any" "0.0.0.0/0" "::/0" ];
+  checkAllow = c:
+    let bad = lib.filter (cidr: lib.elem cidr blanketAllow) c.sandbox.egressAllow; in
+    if bad == [ ] then c.sandbox.egressAllow
+    else throw ("cap-sandbox: capability egressAllow contains a blanket entry ${toString bad}. "
+                + "A blanket IPAddressAllow matches every address at rule 1 of "
+                + "systemd.resource-control(5), which makes the egressDeny list dead by "
+                + "construction — the same MECHANISM as PR #263, arriving from operator "
+                + "config instead of from this file. The #263 INSTANCE was hard-coded in netProps "
+                + "and does not pass through this filter at all; that shape is caught by the "
+                + "hardcodedBlanket eval control in flake.nix and by the battery arm-8 "
+                + "precondition. Name specific CIDRs.");
+
   netProps = c:
     if c.sandbox.network
-    then [ "IPAddressAllow=any" ] ++ map (cidr: "IPAddressDeny=${cidr}") c.sandbox.egressDeny
+    then map (cidr: "IPAddressDeny=${cidr}") c.sandbox.egressDeny
+         ++ map (cidr: "IPAddressAllow=${cidr}") (checkAllow c)
     else [ "PrivateNetwork=yes" "IPAddressDeny=any" "RestrictAddressFamilies=AF_UNIX" ];
 
   # ── Filesystem confinement, derived ────────────────────────────────────────────────────
@@ -186,7 +225,12 @@ let
   policy = lib.mapAttrs (_name: c: propsFor c) reg;
 
 in {
-  inherit policy propsFor baseProps;
+  # `netProps` is exported for ONE reason: so the flake-check can drive `checkAllow` directly with
+  # a synthetic capability. Registry invariant (5b) forbids a non-empty `egressAllow` in-tree, so
+  # nothing that SHIPS can ever reach the throw — which made it a guard whose firing had never been
+  # observed. That is the class of control this repo keeps filing against, so it gets a negative
+  # control of its own rather than an exemption.
+  inherit policy propsFor baseProps netProps;
 
   # The materialized policy, as the dispatcher consumes it. cap-invoke looks a capability up by
   # name and refuses to run an impl whose name is ABSENT (fail-closed): a cap that reaches the

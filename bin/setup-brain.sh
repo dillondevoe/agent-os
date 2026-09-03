@@ -13,6 +13,10 @@ setup-brain.sh — provision the Agent OS brain(s).
   bin/setup-brain.sh --model TAG     pull a specific ollama model tag
   bin/setup-brain.sh --cloud         ALSO install the cloud brain (Claude Code)
   bin/setup-brain.sh --cloud-only    install only the cloud brain (skip the model pull)
+                                     OPEN PROFILE ONLY: the sealed profile drops the
+                                     installer's fetch by design, and installing the
+                                     cloud brain does NOT make it the login brain —
+                                     that takes an explicit BRAIN=claude.
   bin/setup-brain.sh -h | --help     this help
 
 Env:
@@ -108,10 +112,15 @@ fi
 
 # --- how the shell will choose on next login ----------------------------------------
 say "done. On next login agent-shell picks a brain by precedence:"
-printf '   1. $BRAIN                 (explicit override, if set)\n'
-printf '   2. cloud `claude`         (if installed + logged in)\n'
-printf '   3. local `brain-ollama`   floor -> %s @ %s\n' "$MODEL" "$OLLAMA_HOST"
+printf '   1. $BRAIN                 (explicit override, if set; probed before use)\n'
+printf '   2. local `agent-loop`     tool-calling loop -> %s @ %s\n' "$MODEL" "$OLLAMA_HOST"
+printf '   3. local `brain-ollama`   chat floor\n'
 printf '   4. mem REPL               (always works, zero deps)\n'
+printf '\n'
+printf '   The cloud brain is NEVER auto-selected, installed or not. Having `claude` on\n'
+printf '   PATH does not send anything off this machine; it only makes the local brain\n'
+printf '   able to call out when YOU say yes. To hand the login shell to the cloud, set\n'
+printf '   BRAIN=claude deliberately.\n'
 if [ "$DO_LOCAL" = 1 ] && [ "$DO_CLOUD" = 0 ]; then
   say "sovereign: no cloud brain installed — this box talks with NO internet on '${MODEL}'."
 fi
