@@ -1112,13 +1112,18 @@
                + "That argument is bound read-only into EVERY cap namespace, so an unguarded value "
                + "hands back what TemporaryFileSystem=/:ro took away.");
           assert
-            # checkAllow NEGATIVE CONTROL. A blanket `IPAddressAllow` matches every address at rule 1
-            # of systemd.resource-control(5), which makes the whole egressDeny list dead by
-            # construction -- the defect measured in PR #263 and fixed in #264. `checkAllow` throws
-            # on one. But registry invariant (5b) forbids a non-empty `egressAllow` in-tree, so NO
-            # shipping capability can reach that throw: without this arm the guard is a control whose
-            # firing has never once been observed, which is precisely the class this repo keeps
-            # filing against other people's tests. Driven here through the exported `netProps` seam.
+            # checkAllow NEGATIVE CONTROL, and read the scope line carefully because two revisions
+            # of this comment got it wrong in the same direction. `checkAllow` inspects
+            # `c.sandbox.egressAllow` -- the OPERATOR-DECLARATION path, the one registry invariant
+            # (5b) deliberately leaves open by forbidding a non-empty egressAllow in-tree. It is the
+            # same MECHANISM as PR #263 (a blanket Allow matches every address at rule 1 of
+            # systemd.resource-control(5), so the egressDeny list is dead by construction), but it is
+            # NOT the #263 INSTANCE: that one was hard-coded in `netProps` itself and never passes
+            # through this filter at all. Demonstrated, not reasoned -- PR #266 reintroduced the
+            # verbatim #263 shape and this control stayed GREEN (job 100733793522). The hard-coded
+            # shape is caught by `hardcodedBlanket` below (eval) and by the battery's arm-8
+            # precondition (VM, job 100733794512). Two guards, two defects, and the sentence that
+            # used to sit here claimed one covered both. Driven through the exported `netProps` seam.
             let
               np = (import ./modules/cap-sandbox.nix { inherit lib; }).netProps;
               # The deny entry is TEST-NET-2 and the specific-allow control TEST-NET-3 (RFC 5737
@@ -1146,6 +1151,41 @@
                + "Specific-CIDR control evaluated: ${lib.boolToString specificOk}; "
                + "empty-list control evaluated: ${lib.boolToString emptyOk} "
                + "(both must be true -- a guard that refuses everything is not a guard).");
+          assert
+            # hardcodedBlanket EVAL CONTROL. This is the arm the checkAllow control above cannot be:
+            # checkAllow filters `egressAllow`, so a blanket written directly into `netProps` --
+            # which is EXACTLY what PR #263 was -- walks straight past it. PR #266 proved that
+            # empirically: the verbatim #263 diff left the checkAllow control green and was caught
+            # only in the VM lane, by the battery's arm-8 precondition (job 100733794512), ~6 minutes
+            # into a run instead of at eval.
+            #
+            # The property, and it is deliberately not "no `any`": for a capability declaring NO
+            # exception at all, netProps must render ZERO `IPAddressAllow=` entries of ANY value.
+            # With `egressAllow = []` there is no legitimate source for an Allow entry, so any Allow
+            # that appears is hard-coded in this module by construction -- which catches a narrowed
+            # re-introduction (`IPAddressAllow=0.0.0.0/0`, or some future specific literal) that a
+            # string match on "any" would wave through.
+            let
+              np = (import ./modules/cap-sandbox.nix { inherit lib; }).netProps;
+              render = allow: np {
+                sandbox = { network = true; egressDeny = [ "198.51.100.0/24" ]; egressAllow = allow; };
+              };
+              allowsOf = props: lib.filter (lib.hasPrefix "IPAddressAllow=") props;
+              hardcoded = allowsOf (render [ ]);
+              # POSITIVE CONTROL, same role as specificOk above and for the same reason: an arm that
+              # asserted "no Allow entries ever" would be satisfied by a netProps that had stopped
+              # rendering operator exceptions entirely -- silently deleting the feature while going
+              # green. A declared exception must still render, exactly once and unchanged.
+              declaredRenders = allowsOf (render [ "203.0.113.4/32" ]) == [ "IPAddressAllow=203.0.113.4/32" ];
+            in lib.assertMsg (hardcoded == [ ] && declaredRenders)
+              ("cap-sandbox: hardcodedBlanket control failed. netProps rendered "
+               + "[${lib.concatStringsSep " | " hardcoded}] for a capability whose egressAllow is "
+               + "EMPTY -- every one of those is hard-coded in modules/cap-sandbox.nix, and any "
+               + "Allow entry makes the egressDeny list dead for the range it covers (rule 1 of "
+               + "systemd.resource-control(5)); this is the PR #263 defect itself, not the "
+               + "declaration path checkAllow guards. Declared-exception control rendered "
+               + "correctly: ${lib.boolToString declaredRenders} (must be true -- a netProps that "
+               + "dropped operator exceptions altogether would pass the first half).");
           nixpkgs.legacyPackages.${system}.runCommand "cap-sandbox-check" { } ''
             test -s ${nixpkgs.legacyPackages.${system}.writeText "policy.json" sb.policyJson}
             touch $out
