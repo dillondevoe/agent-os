@@ -16,7 +16,7 @@
 # so a through-the-seam call ALWAYS uses the hardcoded production roots — pointing this battery at
 # scratch roots would test a path production never takes.
 #
-# Nine arms (legs 0-8), in the order that makes the result meaningful:
+# Ten arms (legs 0-7, 8b, 8c), in the order that makes the result meaningful:
 #   0. NEGATIVE CONTROL — with the sandbox NOT configured, the escaping read SUCCEEDS and returns
 #      the canary. Without this leg, legs 1-2 could pass for the wrong reason (e.g. the impl simply
 #      erroring). This is the fail-OPEN state Geist's RULING 1 describes, demonstrated, not asserted.
@@ -41,9 +41,11 @@
 #   6. No transient units leak after the run.
 #   7. NETWORK, the network=false direction: a cap with no declared stack cannot open a socket
 #      under its own derived properties (control arm connects first).
-#   8. NETWORK, the network=true direction: IPAddressDeny actually drops packets to a denied CIDR.
-#      This is the one the T2 egress slice rests on, and its control arm differs from the confined
-#      arm by the deny entries ALONE. It gates lifting `offenders` in modules/cap-invoke-pkg.nix.
+#   8. NETWORK, the network=true direction: does IPAddressDeny actually drop packets? TWO targets,
+#      because one could not tell "the mechanism is inert" from "this target is exempt" apart:
+#      8b a NON-LOOPBACK denied address (does the kernel layer work at all?) and 8c loopback,
+#      which the registry denies on purpose. 8a's control differs from 8b by the deny entries
+#      ALONE. This gates lifting `offenders` in modules/cap-invoke-pkg.nix.
 set -u
 
 INVOKE="${1:?path to bin/cap-invoke required}"
@@ -286,55 +288,91 @@ esac
 netcleanup
 echo "cap-sandbox 7 OK  (network=false cap has NO stack under its real derived properties — control arm connected, confined arm RAN and was refused)"
 
-# ── 8. the network=TRUE half: IPAddressDeny actually STOPS packets ────────────────────────────
-# Leg 7 proves a cap declared network=false has no stack. That is the easy direction: PrivateNetwork
-# either exists or it does not. This is the direction the T2 egress slice actually rests on — a cap
-# that IS allowed a stack, confined to "public internet only" by IPAddressAllow=any plus a
-# per-CIDR IPAddressDeny list (modules/cap-sandbox.nix `netProps`, derived from the registry's
-# egressDenyList). Nothing had ever observed a packet being dropped by that list.
+# ── 8. the network=TRUE half: does IPAddressDeny actually STOP packets? ───────────────────────
+# Leg 7 proves a cap declared network=false has no stack. That is the easy direction. This is the
+# direction the T2 egress slice rests on — a cap that IS allowed a stack, confined to "public
+# internet only" by IPAddressAllow=any plus a per-CIDR IPAddressDeny list (modules/cap-sandbox.nix
+# `netProps`, derived from the registry's egressDenyList). Nothing had ever observed a packet being
+# dropped by that list.
 #
 # WHY THIS GATES THE SHIP. modules/cap-invoke-pkg.nix `offenders` refuses to put any
-# sandbox.network=true impl in capBinDir. That gate is correct and it is not paperwork: IPAddressDeny
-# is a cgroup-v2 BPF filter, and on a host without that support systemd logs a WARNING and the
-# property SILENTLY DOES NOT APPLY. The unit still starts. The property still appears in the
-# materialized policy. `systemctl show` still lists it. That is a fail-OPEN whose every visible
-# artifact is identical to the enforcing case — the same class as ProtectSystem=strict cancelled by
-# composition, which this module has already been bitten by once. The fs gate was only lifted after
-# legs 0-4 demonstrated the kernel stopping a real escape; the net gate is entitled to the same
-# standard, and this leg is that evidence.
+# sandbox.network=true impl in capBinDir. IPAddressDeny is a cgroup-v2 BPF filter, and on a host
+# without that support systemd logs a WARNING and the property SILENTLY DOES NOT APPLY. The unit
+# starts, `systemctl show` lists it, the materialized policy is unchanged. That fail-OPEN has
+# artifacts identical to the enforcing case, so it must be OBSERVED, not assumed.
 #
-# THE CONTROL PAIR IS TIGHTER THAN LEG 7'S, on purpose. Leg 7's two arms differ by the WHOLE net
-# property set, so a pass is attributable to PrivateNetwork or to RestrictAddressFamilies or to
-# both. Here, 8a runs under `IPAddressAllow=any` alone and 8b under `IPAddressAllow=any` PLUS the
-# derived denies. The ONLY delta is the deny entries, so a block in 8b is attributable to nothing
-# else. Both arms have a network stack; both must print the marker.
+# MEASURED CORRECTION, and it is why this leg has two targets. The first version probed 127.0.0.1
+# and 8b FAILED in the VM: the connection went through under the derived deny list. The tempting
+# reading — "this kernel has no BPF, the deny list is inert" — is contradicted by leg 7's own
+# systemd output in the SAME run, which reported per-unit "incoming IP traffic / outgoing IP
+# traffic" byte counts. That accounting is the same cgroup BPF machinery. So BPF is present, and
+# loopback specifically was not filtered. A single target could not tell those apart.
+#
+# The distinction is not a detail, because the registry denies loopback ON PURPOSE
+# (capability-registry.nix: "a confirmed fetch to 127.0.0.1:11434 could drive the in-guest model /
+# pull weights"). Two targets, two different claims, both load-bearing:
+#
+#   8b  a NON-LOOPBACK denied address — does the kernel layer work AT ALL?
+#   8c  the loopback denied address   — is the registry's stated loopback threat covered by the
+#                                       kernel layer, or ONLY by cap-net-fetch's resolve-check?
+#
+# 8a differs from 8b by the deny entries ALONE — a tighter pair than leg 7's, whose arms differ by
+# the whole property set. Every arm asserts the PROBE-RAN marker, per leg 7's scar where a probe
+# that never executed read as a probe that was refused.
+
+# A NON-LOOPBACK IPv4 on this host that is itself inside a denied CIDR. Hard-fail rather than skip
+# if there is none: a silently-absent arm is what makes a battery look like coverage.
+NETADDR="$("$PY" - <<'PY8A'
+import ipaddress, socket, sys
+DENY = [ipaddress.ip_network(c) for c in
+        ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "100.64.0.0/10", "169.254.0.0/16")]  # gate-allow
+cands = []
+try:
+    for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
+        cands.append(info[4][0])
+except OSError:
+    pass
+for probe in ("10.0.2.2", "1.1.1.1"):  # qemu user-net gw, then a public addr  # gate-allow
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.connect((probe, 9)); cands.append(s.getsockname()[0])
+    except OSError:
+        pass
+    finally:
+        s.close()
+for a in cands:
+    ip = ipaddress.ip_address(a)
+    if not ip.is_loopback and any(ip in n for n in DENY):
+        sys.stdout.write(a); sys.exit(0)
+sys.stderr.write("no non-loopback IPv4 inside a denied CIDR (candidates: %r)\n" % cands)
+sys.exit(1)
+PY8A
+)" || fail "8: no non-loopback denied address to probe — this leg cannot run here, and a skipped arm must not read as a pass"
+
 NETDIR="$(mktemp -d)"
-NETPORT=""
 NETPID=""
-"$PY" - <<'PYEOF' > "$NETDIR/netport" 2>/dev/null &
+"$PY" - "$NETADDR" <<'PY8B' > "$NETDIR/ports" 2>/dev/null &
 import socket, sys, time
-s = socket.socket(); s.bind(("127.0.0.1", 0)); s.listen(8)
-sys.stdout.write(str(s.getsockname()[1])); sys.stdout.flush()
-time.sleep(60)
-PYEOF
+a = socket.socket(); a.bind((sys.argv[1], 0)); a.listen(8)
+b = socket.socket(); b.bind(("127.0.0.1", 0)); b.listen(8)
+sys.stdout.write("%d %d" % (a.getsockname()[1], b.getsockname()[1])); sys.stdout.flush()
+time.sleep(120)
+PY8B
 NETPID=$!
 netcleanup() { kill "$NETPID" 2>/dev/null || true; rm -rf "$NETDIR"; }
+NETPORT=""; LOPORT=""
 for _ in $(seq 1 50); do
-  NETPORT="$(cat "$NETDIR/netport" 2>/dev/null || true)"
-  [ -n "$NETPORT" ] && break
+  read -r NETPORT LOPORT < "$NETDIR/ports" 2>/dev/null || true
+  [ -n "$NETPORT" ] && [ -n "$LOPORT" ] && break
   sleep 0.1
 done
-[ -n "$NETPORT" ] || { netcleanup; fail "8: probe listener never published a port — harness broken, not a finding"; }
+[ -n "$NETPORT" ] && [ -n "$LOPORT" ] || { netcleanup; fail "8: probe listeners never published ports — harness broken, not a finding"; }
 
-# net.fetch's derived network properties, from the materialized policy. Three things are hard
-# failures rather than skips, because each would make 8b pass while proving nothing:
-#   * the cap absent from the policy         -> no properties, 8b == 8a
-#   * no IPAddressAllow=any                  -> not the network=true shape at all
-#   * no IPAddressDeny covering 127.0.0.0/8  -> the probe's target is not on the deny list, so a
-#                                               block would have to come from somewhere else
-NETPROPS="$("$PY" - "$POLICY" <<'PYEOF'
-import json, sys
-pol = json.load(open(sys.argv[1]))
+# net.fetch's derived network properties. Five hard failures rather than skips, because each would
+# let 8b pass while proving nothing.
+NETPROPS="$("$PY" - "$POLICY" "$NETADDR" <<'PY8C'
+import ipaddress, json, sys
+pol = json.load(open(sys.argv[1])); target = ipaddress.ip_address(sys.argv[2])
 props = pol.get("net.fetch")
 if not props:
     sys.stderr.write("net.fetch absent from the materialized policy\n"); sys.exit(1)
@@ -342,47 +380,54 @@ net = [p for p in props
        if p.split("=")[0] in ("PrivateNetwork", "IPAddressAllow", "IPAddressDeny",
                               "RestrictAddressFamilies")]
 if "IPAddressAllow=any" not in net:
-    sys.stderr.write("net.fetch policy has no IPAddressAllow=any — not a network=true cap\n")
-    sys.exit(1)
-if "IPAddressDeny=127.0.0.0/8" not in net:
-    sys.stderr.write("net.fetch policy does not deny 127.0.0.0/8, which is this leg's target\n")
-    sys.exit(1)
+    sys.stderr.write("no IPAddressAllow=any — not a network=true cap\n"); sys.exit(1)
 if any(p.startswith("PrivateNetwork=yes") for p in net):
-    sys.stderr.write("net.fetch policy carries PrivateNetwork=yes — 8b would block for the "
-                     "wrong reason and this leg would prove nothing about the deny list\n")
-    sys.exit(1)
+    sys.stderr.write("PrivateNetwork=yes present — 8b would block for the wrong reason\n"); sys.exit(1)
+denies = [ipaddress.ip_network(p.split("=", 1)[1]) for p in net if p.startswith("IPAddressDeny=")]
+if not any(target in d for d in denies):
+    sys.stderr.write("policy does not deny %s, the 8b target\n" % target); sys.exit(1)
+if not any(ipaddress.ip_address("127.0.0.1") in d for d in denies):
+    sys.stderr.write("policy does not deny 127.0.0.1, the 8c target\n"); sys.exit(1)
 sys.stdout.write(" ".join("--property=" + p for p in net))
-PYEOF
+PY8C
 )" || { netcleanup; fail "8: could not derive network properties for net.fetch from $POLICY"; }
 
-NETPROBE_SRC="import socket,sys
-print('PROBE-RAN', flush=True)
-try:
-    socket.create_connection(('127.0.0.1', $NETPORT), timeout=3).close()
-except Exception:
-    sys.exit(7)"
+probe_src() { printf "import socket,sys\nprint('PROBE-RAN', flush=True)\ntry:\n    socket.create_connection(('%s', %s), timeout=3).close()\nexcept Exception:\n    sys.exit(7)\n" "$1" "$2"; }
 
-# 8a. CONTROL ARM FIRST: a transient unit WITH a network stack and NO denies. Must run and connect.
-# If this fails, the confined arm's refusal would be attributable to systemd-run, to the unit
-# environment, or to the listener — anything but the deny list.
+# 8a. CONTROL ARM FIRST: a unit WITH a stack and NO denies. Must run and connect, or 8b's refusal
+# would be attributable to systemd-run, the unit env, or the listener.
 NETOUT="$("$SYSTEMD_RUN" --quiet --pipe --wait --collect --property=IPAddressAllow=any \
-            "$PY" -c "$NETPROBE_SRC" 2>&1)"; NETRC=$?
+            "$PY" -c "$(probe_src "$NETADDR" "$NETPORT")" 2>&1)"; NETRC=$?
 case "$NETOUT" in *PROBE-RAN*) : ;; *) netcleanup; fail "8a: control probe never ran ($NETOUT)" ;; esac
-[ "$NETRC" = 0 ] || { netcleanup; fail "8a: a transient unit with IPAddressAllow=any and no denies could NOT reach 127.0.0.1:$NETPORT (rc=$NETRC) — 8b would prove nothing"; }
+[ "$NETRC" = 0 ] || { netcleanup; fail "8a: a unit with IPAddressAllow=any and no denies could NOT reach $NETADDR:$NETPORT (rc=$NETRC) — 8b would prove nothing"; }
 
-# 8b. Same probe, same runner, plus the derived denies and nothing else.
-NETOUT="$("$SYSTEMD_RUN" --quiet --pipe --wait --collect $NETPROPS "$PY" -c "$NETPROBE_SRC" 2>&1)"; NETRC=$?
+# 8b. Same probe, same runner, same target, plus the derived denies and nothing else.
+NETOUT="$("$SYSTEMD_RUN" --quiet --pipe --wait --collect $NETPROPS \
+            "$PY" -c "$(probe_src "$NETADDR" "$NETPORT")" 2>&1)"; NETRC=$?
 case "$NETOUT" in
   *PROBE-RAN*) : ;;
-  *) netcleanup; fail "8b: probe never executed under net.fetch's derived network properties, so this leg proved NOTHING about the deny list (rc=$NETRC, out=$NETOUT)" ;;
+  *) netcleanup; fail "8b: probe never executed under the derived properties, so this leg proved NOTHING (rc=$NETRC, out=$NETOUT)" ;;
 esac
-[ "$NETRC" != 0 ] || { netcleanup; fail "8b: IPAddressDeny did NOT stop a connection to a denied CIDR — the deny list is present in the policy but NOT ENFORCED by this kernel (no cgroup-v2 BPF?). This is the fail-OPEN the shipping gate in modules/cap-invoke-pkg.nix exists to prevent: do NOT lift it on this host."; }
+[ "$NETRC" != 0 ] || { netcleanup; fail "8b: IPAddressDeny did NOT stop a connection to $NETADDR, a NON-LOOPBACK address the policy denies. The kernel layer is inert on this host. This is the fail-OPEN modules/cap-invoke-pkg.nix's shipping gate exists to prevent: do NOT lift it here."; }
+echo "cap-sandbox 8b OK (network=true: control arm with a stack reached $NETADDR; the SAME probe under the derived IPAddressDeny list RAN and was refused — the only delta is the deny entries)"
+
+# 8c. LOOPBACK, denied deliberately by the registry (the in-guest model on 127.0.0.1:11434). Its own
+# arm because it is a DIFFERENT claim from 8b: 8b says the mechanism works, 8c says whether it
+# reaches this target.
+NETOUT="$("$SYSTEMD_RUN" --quiet --pipe --wait --collect $NETPROPS \
+            "$PY" -c "$(probe_src 127.0.0.1 "$LOPORT")" 2>&1)"; NETRC=$?
+case "$NETOUT" in
+  *PROBE-RAN*) : ;;
+  *) netcleanup; fail "8c: loopback probe never executed, so this arm measured nothing (rc=$NETRC, out=$NETOUT)" ;;
+esac
 netcleanup
-echo "cap-sandbox 8 OK  (network=true cap: control arm WITH a stack and no denies connected; the SAME probe under the derived IPAddressDeny list RAN and was refused — the only delta between the arms is the deny entries)"
+if [ "$NETRC" != 0 ]; then
+  echo "cap-sandbox 8c OK (loopback is ALSO filtered — the registry's 127.0.0.1:11434 threat is covered by the kernel layer, not only by cap-net-fetch's resolve-check)"
+else
+  fail "8c: IPAddressDeny did NOT stop a connection to 127.0.0.1 even though 8b shows the mechanism WORKS on a non-loopback denied address. Loopback is exempt from cgroup IP filtering on this host. That is a real gap, not a harness bug: capability-registry.nix denies loopback ON PURPOSE (a fetch to 127.0.0.1:11434 could drive the in-guest model), so here that threat rests ONLY on cap-net-fetch's own resolve-then-check — one userspace layer, defeatable by DNS rebinding. Rule on this before lifting the shipping gate."
+fi
 
 # NOT COVERED HERE, stated so it is not mistaken for coverage: that PUBLIC egress still SUCCEEDS
 # under net.fetch's properties (i.e. the deny list did not degenerate into deny-everything). That
-# needs a reachable off-box endpoint, which would make this battery non-hermetic and flaky on a
-# sealed host. The registry-side half of the claim — IPAddressAllow=any is present, and the deny
-# list is exactly the private/loopback/link-local ranges — is asserted above and in checks.cap-sandbox.
-echo "cap-sandbox: ALL PROPERTIES HOLD (9 arms run: legs 0-8; leg 0 negative control, 7a/8a positive controls)"
+# needs a reachable off-box endpoint and would make this battery non-hermetic on a sealed host.
+echo "cap-sandbox: ALL PROPERTIES HOLD (10 arms: legs 0-7, 8b, 8c; leg 0 negative control, 7a/8a positive controls)"
