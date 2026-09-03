@@ -177,7 +177,7 @@ let
   # reintroduced the verbatim shape and left this guard green (job 100733793522). The hard-coded
   # shape is caught at eval by the `hardcodedBlanket` control in flake.nix and in the VM by the
   # battery's arm-8 precondition.
-  blanketAllow = [ "any" "0.0.0.0/0" "::/0" ];
+  blanketAllow = [ "0.0.0.0/0" "::/0" ];  # DEMO B -- DO NOT MERGE: "any" dropped so checkAllow admits it
   checkAllow = c:
     let bad = lib.filter (cidr: lib.elem cidr blanketAllow) c.sandbox.egressAllow; in
     if bad == [ ] then c.sandbox.egressAllow
