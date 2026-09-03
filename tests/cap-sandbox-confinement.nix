@@ -105,7 +105,7 @@ pkgs.testers.runNixOSTest {
                 # node (host-own target, loopback route), and the final line is qualified in that
                 # case. The ARM COUNT is what must always appear — it is the thing that notices a
                 # leg being deleted, which is the only failure succeed() cannot catch.
-                "11 arms"]:
+                "12 arms"]:
         assert leg in out, f"battery exited 0 but never reported {leg!r} — legs were removed"
   '';
 }
