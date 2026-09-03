@@ -95,6 +95,34 @@ if [ "${1:-}" = "--selftest" ]; then
   cz="$(TZ=UTC date -u -d '2026-09-03T02:00:00-05:00' +%Y-%m-%dT%H:%M:%SZ)"
   if [ "$cz" \> "2026-09-03T05:00:00Z" ]; then echo "  ok   TZ1 normalised compare counts it ($cz)"
   else echo "  FAIL TZ1: $cz did not sort after 05:00Z"; fail=1; fi
+  # ORD arms: the ordering defect is CONTROL FLOW, not parsing, so these run the whole script against a
+  # stub `gh` on PATH. The unit arms above could not have caught it -- classify_checks was always
+  # correct; it was simply never called. An arm has to exercise the layer the defect lives in.
+  echo "ORD arms: outcome must survive a PR whose currency cannot be computed"
+  ord_run() {  # $1 = check rows gh should emit; echoes the script's stdout
+    d="$(mktemp -d)"
+    { echo '#!/bin/sh'
+      echo 'case "$1 $2" in'
+      echo '  "pr list") echo 999 ;;'
+      echo '  "pr checks") printf %b "$STUB_ROWS" ;;'
+      echo '  "pr view") echo deadbeef ;;'
+      echo '  "run view") echo 2026-09-03T00:00:00Z ;;'
+      echo 'esac'; } > "$d/gh"
+    chmod +x "$d/gh"
+    STUB_ROWS="$1" PATH="$d:$PATH" bash "$0" 2>&1
+    rm -rf "$d"
+  }
+  o="$(ord_run 'codecov/patch\tfail\t3s\thttps://codecov.io/x\n')"
+  case "$o" in *"FAIL: codecov/patch"*) echo "  ok   ORD1 a failing EXTERNAL status is still named" ;;
+    *) echo "  FAIL ORD1: outcome suppressed by the no-run path; got [$o]"; fail=1 ;; esac
+  case "$o" in *"currency : unknown"*) echo "  ok   ORD2 currency degrades instead of eating the row" ;;
+    *) echo "  FAIL ORD2: no degraded currency line; got [$o]"; fail=1 ;; esac
+  # ORD3 is the control arm. Without it, a script that printed "currency : unknown" unconditionally --
+  # i.e. one that had lost currency entirely -- would satisfy ORD1 and ORD2 both.
+  o3="$(ord_run 'gate\tpass\t3s\thttps://github.com/o/r/actions/runs/1/job/2\n')"
+  case "$o3" in *"currency : unknown"*) echo "  FAIL ORD3 CONTROL: a real Actions run still read as unknown"; fail=1 ;;
+    *"criteria commit"*) echo "  ok   ORD3 CONTROL: a real run still gets a real currency count" ;;
+    *) echo "  FAIL ORD3 CONTROL: no currency line at all; got [$o3]"; fail=1 ;; esac
   [ "$fail" = 0 ] && echo "ALL GREEN" || echo "SELFTEST FAILED"
   exit "$fail"
 fi
@@ -114,12 +142,17 @@ for pr in $prs; do
   when="$(for r in $(gh pr checks "$pr" 2>/dev/null | grep -oE 'runs/[0-9]+' | cut -d/ -f2 | sort -u); do
             gh run view "$r" --json createdAt -q .createdAt 2>/dev/null; done | sort | head -1)"
   run="$when"
-  if [ -z "$run" ]; then
-    echo "PR $pr: NO RUN FOUND — no green to weigh. Not 'clean'."
-    rc=1; continue
-  fi
-  # OUTCOME first, deliberately: the axis this report does not measure goes at the front so it
-  # cannot be crowded out by the one it does.
+  # OUTCOME IS COMPUTED BEFORE THE NO-RUN BRANCH, AND THAT ORDERING IS THE POINT (Augur, 2026-09-03).
+  # It used to sit below a `rc=1; continue` that fired whenever `when` was empty -- so on any PR where
+  # currency could not be computed, the outcome column was never printed AT ALL, including when it would
+  # have read `FAIL: codecov/patch`. `when` comes from the same `gh pr checks` output, and it is empty
+  # for a whole real class: PRs whose checks are EXTERNAL statuses (Codecov, Dependabot, any non-Actions
+  # check), whose URLs do not match `runs/[0-9]+`. A failing check on such a PR was reported only as
+  # "NO RUN FOUND". That is this file's founding sin at the control-flow level rather than the parser
+  # level: the axis the report DOES measure was crowding out the axis its own header says goes first.
+  # It also made `"NO ROWS"*` in the case below unreachable by any input -- the branches did not
+  # disagree, one ate the other. Currency now degrades to `unknown` on its own line instead of taking
+  # the row with it.
   outcome="$(gh pr checks "$pr" 2>/dev/null | classify_checks)"
   # rc counts "could not determine the outcome" as an outcome failure, not as a pass. Augur's finding:
   # rc used to mean only "no FAIL string was produced", which is satisfied equally by twelve greens and
@@ -128,6 +161,14 @@ for pr in $prs; do
   # unrecognised state must not be absorbed into green; rc was the last place it still was.
   # INCOMPLETE stays 0 deliberately: "still running" really is context, not a verdict.
   case "$outcome" in FAIL*|"NO ROWS"*|UNKNOWN*) rc=1 ;; esac
+
+  if [ -z "$run" ]; then
+    echo "PR $pr"
+    echo "    outcome  : $outcome"
+    echo "    currency : unknown — no Actions run found for this PR's checks"
+    echo "               (external-status-only PR, or gh returned nothing; the outcome line above still holds)"
+    rc=1; continue
+  fi
 
   mb="$(git merge-base "$BASE" "$head" 2>/dev/null)"
   dist="$(git rev-list --count "${mb}..${BASE}" 2>/dev/null || echo '?')"
