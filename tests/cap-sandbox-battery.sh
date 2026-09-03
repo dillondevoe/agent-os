@@ -426,7 +426,14 @@ $NETINFO
 EOF
 [ -n "$NETADDR" ] && [ -n "$NETOWN" ] || fail "8: target selector did not emit '<addr> <hostown>' (got: $NETINFO)"
 case "$NETOWN" in yes|no) : ;; *) fail "8: hostown must be yes or no, got $NETOWN" ;; esac
-[ "$NETOWN" = no ] || echo "cap-sandbox 8: NOTE — $NETADDR is one of THIS HOST's own addresses, so the 8b/8c route is loopback and those arms can only report NOT-DEMONSTRATED (set AGENT_OS_BATTERY_REMOTE_DENIED_ADDR from a two-node harness to make them decisive)"
+# This note USED to say the 8b/8c arms "can only report NOT-DEMONSTRATED" on a single node. That
+# was true only while the deny list was dead: with `IPAddressAllow=any` removed, a host-own address
+# in 10/8 is a DENIED entry like any other, and CI job 100708028354 has 8b and 8c both reporting OK
+# on exactly this single-node route. The downgrade path still exists for a target that is NOT in the
+# derived deny list, which is a different condition -- so the note now describes the route without
+# predicting the verdict. A note that forecasts an outcome goes stale the moment the outcome changes,
+# and it stays readable while doing it.
+[ "$NETOWN" = no ] || echo "cap-sandbox 8: NOTE — $NETADDR is one of THIS HOST's own addresses, so the 8b/8c route is loopback. Those arms are decisive anyway when the address falls inside the derived deny list (10/8 here); they downgrade to NOT-DEMONSTRATED only if it does not (set AGENT_OS_BATTERY_REMOTE_DENIED_ADDR from a two-node harness for an off-host target)"
 
 NETDIR="$(mktemp -d)"
 NETPID=""
@@ -710,5 +717,5 @@ echo "cap-sandbox 9 OK (cap-net-fetch denies $MAPPED_URL AT THE ADDRESS CHECK; w
 if [ "$NOTDEMO" = 1 ]; then
   echo "cap-sandbox: 12 arms ran, 10 HOLD — legs 8b and 8c are NOT-DEMONSTRATED on this single node (host-own target, loopback route). The suite is GREEN on what it can measure and SILENT on what it cannot; it is NOT a clearance to lift \`offenders\`."
 else
-  echo "cap-sandbox: ALL PROPERTIES HOLD (12 arms: legs 0-7, 8m, 8b, 8c, 9; leg 0 negative control, 7a/8a/8m-control positive controls, 9-control pre-fix arm)"
+  echo "cap-sandbox: ALL PROPERTIES HOLD (12 arms: legs 0-7, 8m, 8b, 8c, 9; leg 0 negative control, 7a/8a/8m-control positive controls, 8c-prefix + 9-control pre-fix arms, 8c-show property dump)"
 fi
