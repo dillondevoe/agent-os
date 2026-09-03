@@ -101,21 +101,29 @@ pkgs.testers.runNixOSTest {
     for leg in ["cap-sandbox 0 OK", "cap-sandbox 1 OK", "cap-sandbox 2 OK", "cap-sandbox 3 OK",
                 "cap-sandbox 4 OK", "cap-sandbox 5 OK", "cap-sandbox 6 OK",
                 "cap-sandbox 7 OK", "cap-sandbox 9 OK",
-                # 8b, 8c and 8c-prefix ARE enumerated now, and the comment that used to sit here
-                # said they could not be — "8b/8c legitimately report NOT-DEMONSTRATED on a single
-                # node (host-own target, loopback route)". That was true only while the deny list
-                # was dead by construction: `IPAddressAllow=any` led netProps, matched every address
-                # at rule 1 of systemd.resource-control(5), and made a host-own target unreachable-
-                # by-deny for the same reason every target was. With the shadowing removed they are
-                # decisive on one node (PR #264, job 100708028354), and a non-OK on either is now a
-                # hard `fail` that exits non-zero anyway — so listing them encodes no answer the
-                # battery does not already enforce. It only stops them being SILENTLY DELETED, which
-                # is this guard's whole job and the one failure succeed() cannot catch.
+                # 8b and 8c are enumerated by ARM PREFIX, not by "OK", and the difference is the
+                # whole correctness of this guard. Two revisions of this block were wrong in the
+                # same direction. The first said they could not be listed at all -- "8b/8c
+                # legitimately report NOT-DEMONSTRATED on a single node" -- which was true only
+                # while the deny list was dead by construction (`IPAddressAllow=any` led netProps
+                # and matched every address at rule 1 of systemd.resource-control(5), so a host-own
+                # target was unreachable-by-deny exactly like every other target). The second, mine,
+                # over-corrected to "cap-sandbox 8b OK" on the reasoning that "a non-OK on either is
+                # now a hard `fail` that exits non-zero anyway". That sentence is FALSE, and the
+                # battery says so at l.584 and l.662: on `MECH=inert` both arms set NOTDEMO=1, print
+                # NOT-DEMONSTRATED, and the suite exits 0. Requiring the OK string would therefore
+                # turn this deletion guard RED on an environmental state -- a host where IP filtering
+                # does not reach loopback -- with a "legs were removed" message naming the wrong
+                # fault. That is exactly the answer-encoding 8m is deliberately excluded for, and I
+                # ratified it while holding the counter-argument.
                 #
-                # 8m is deliberately NOT listed: it may legitimately print MEASURED INERT on a host
-                # where IP filtering does not reach loopback, and requiring "8m OK" would encode an
-                # answer about the environment rather than protect an arm.
-                "cap-sandbox 8b OK", "cap-sandbox 8c OK", "cap-sandbox 8c-prefix OK",
+                # The prefixes with the trailing space are printed by EVERY non-deleted outcome of
+                # each arm and by nothing else, so they detect deletion without asserting a verdict.
+                # 8c-prefix keeps its "OK" because it has no NOT-DEMONSTRATED branch.
+                #
+                # 8m stays unlisted for the original reason, unchanged: MEASURED INERT is a
+                # legitimate result and requiring anything of it encodes a claim about the host.
+                "cap-sandbox 8b ", "cap-sandbox 8c ", "cap-sandbox 8c-prefix OK",
                 # The ARM COUNT must always appear for the same reason.
                 "12 arms"]:
         assert leg in out, f"battery exited 0 but never reported {leg!r} — legs were removed"
