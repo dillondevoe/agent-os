@@ -19,7 +19,11 @@
 #   1. THIS impl resolves the URL's host and refuses if ANY resolved address falls inside the
 #      deny-list below. That list MIRRORS `egressDenyList` in modules/capability-registry.nix.
 #   2. The kernel, via the transient unit cap-invoke derives from that same registry declaration
-#      (modules/cap-sandbox.nix `netProps`: IPAddressAllow=any + IPAddressDeny=<cidr> per entry).
+#      (modules/cap-sandbox.nix `netProps`: IPAddressDeny=<cidr> per entry, and DELIBERATELY no
+#      IPAddressAllow. This line used to read "IPAddressAllow=any + IPAddressDeny=<cidr>", which
+#      described the code accurately and the BEHAVIOUR not at all: `any` matches at rule 1 of
+#      systemd.resource-control(5), so layer 2 was inert and this impl's resolve-check was the
+#      only layer standing. Battery legs 8c/8c-prefix now measure that, in both renderings.)
 #
 # Neither layer is redundant, and the ORDER of their weaknesses is why:
 #
