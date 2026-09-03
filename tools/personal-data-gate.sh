@@ -144,16 +144,22 @@ file=""
 lineno=0
 # SUBSTRATE COUNTERS. A gate whose PASS does not depend on having scanned anything cannot
 # notice that it scanned nothing -- so the count is part of the verdict, not a debug aid.
-# `added` is what was actually examined against the denylist; `headers` is how many file
-# headers the parser recognised, which is what separates "a diff with no additions"
-# (legitimate: a deletions-only change) from "this input is not a unified diff at all".
+# `added` is what was actually examined against the denylist. `structure` is how many diff
+# markers the parser recognised at all, which is what separates "a diff with no additions"
+# (legitimate) from "this input is not a unified diff". `headers` counts `+++ b/` specifically
+# and is only for the human-readable file count -- it must NOT gate the refusal, because git
+# emits no `+++ b/` for a whole-file deletion (`+++ /dev/null`), a pure rename, a binary change
+# or a mode-only change. Keying the refusal on it made those ranges exit 2.
 added=0
 headers=0
+structure=0
 
 while IFS= read -r ln; do
   case "$ln" in
-    '+++ b/'*) file=${ln#+++ b/}; headers=$((headers+1)); continue ;;
-    '--- '*|'+++ '*) continue ;;
+    'diff --git '*) structure=$((structure+1)); continue ;;
+    '+++ b/'*) file=${ln#+++ b/}; headers=$((headers+1)); structure=$((structure+1)); continue ;;
+    '+++ '*) structure=$((structure+1)); continue ;;
+    '--- '*) continue ;;
     '@@'*)
       # @@ -a,b +c,d @@ -- take c as the next added line number
       h=${ln#*+}; h=${h%% *}; lineno=${h%%,*}
@@ -196,13 +202,13 @@ EOF
 # "clean" on that is the fail-open this fix exists to close. Note what is deliberately NOT an
 # error: a well-formed diff with headers but no added lines is a real deletions-only change and
 # passes, so this refusal cannot be satisfied by the absence of findings alone.
-if [ -n "$diff" ] && [ "$headers" = 0 ]; then
-  echo "gate: input was non-empty but contained no '+++ b/' file headers -- this does not look" >&2
-  echo "gate: like a unified diff, and a scan of zero files is not a clean result." >&2
+if [ -n "$diff" ] && [ "$structure" = 0 ]; then
+  echo "gate: input was non-empty but contained no diff structure at all -- no 'diff --git' and" >&2
+  echo "gate: no '+++' target line. A scan of zero files is not a clean result." >&2
   exit 2
 fi
 
-echo "gate: scanned $added added line(s) across $headers file(s) against $(printf '%s\n' "$pats" | grep -c .) patterns; $hits hit(s)"
+echo "gate: scanned $added added line(s) across $headers file(s) ($structure diff marker(s)) against $(printf '%s\n' "$pats" | grep -c .) patterns; $hits hit(s)"
 
 if [ "$hits" -gt 0 ]; then
   cat >&2 <<'MSG'

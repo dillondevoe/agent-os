@@ -146,7 +146,7 @@ gitarm() { # gitarm <name> <want-rc> <gate-path> ; runs $3 inside a scratch repo
   d=$(mktemp -d)
   ( cd "$d" && git init -q . && mkdir -p tools
     printf 'tskey-auth-[A-Za-z0-9-]{6,}\n' > tools/dl.txt
-    echo seed > seed.txt && git add -A && git -c user.email=b@x -c user.name=b commit -qm t
+    echo seed > seed.txt && git add -A && git -c user.email=b@x -c user.name=b -c commit.gpgsign=false commit -qm t
     printf -- '--- a/f\n+++ b/f\n@@ -0,0 +1 @@\n+K=tskey-auth-aBcDeFgHiJ\n' > payload.diff ) >/dev/null 2>&1  # gate-allow
   ( cd "$d" && PERSONAL_DATA_DENYLIST="$d/tools/dl.txt" "$g" payload.diff ) >/dev/null 2>&1
   rc=$?
@@ -198,10 +198,64 @@ out=$("$GATE" --bogus 2>&1); rc=$?
 if [ $rc -eq 2 ]; then printf 'ok   %-46s (rc=2)\n' "A4 unknown option refuses"; pass=$((pass+1));
 else printf 'FAIL %-46s want rc=2 got %s\n' "A4 unknown option refuses" "$rc"; fail=$((fail+1)); fi
 
+# rangearm <name> <want-rc> <shell that mutates the tree> -- builds a scratch repo, applies the
+# mutation, commits it, and runs the gate on the REAL RANGE HEAD~1..HEAD.
+#
+# WHY REAL RANGES AND NOT CRAFTED STDIN. Geist's hold on the first cut of this fix landed exactly
+# here: I had asserted "a deletions-only diff still passes" using a hand-written diff that carried
+# a `+++ b/f` header, so it exercised the shape that already worked. The shapes that BROKE --
+# whole-file deletion (`+++ /dev/null`), pure rename, binary, mode-only -- are precisely the ones
+# git generates and I cannot reliably hand-type. The arm has to make git emit the diff, or it is
+# testing my model of git rather than git.
+#
+# AND THE COMMIT MUST BE ASSERTED. `gitarm` above swallows a failed scratch commit: on a host with
+# SSH commit signing configured, the commits never land and the arm still passes, because a
+# file-as-revision fails with or without a HEAD. These arms are not so lucky -- no HEAD~1 means no
+# range at all -- so `commit.gpgsign=false` is forced and the presence of HEAD~1 is checked before
+# the rc is believed. A setup failure must not be able to look like a verdict.
+rangearm() {
+  name=$1; want=$2; mutate=$3
+  d=$(mktemp -d)
+  gc="git -c user.email=b@x -c user.name=b -c commit.gpgsign=false"
+  (
+    cd "$d" && git init -q . && mkdir -p tools
+    printf 'tskey-auth-[A-Za-z0-9-]{6,}\n' > tools/dl.txt
+    echo seed > keep.txt
+    echo doomed > doomed.txt
+    printf 'old\n' > renamed-from.txt
+    printf '\000\001\002binary-before\n' > blob.bin
+    echo '#!/bin/sh' > script.sh
+    git add -A && $gc commit -qm base
+    eval "$mutate"
+    git add -A && $gc commit -qm mutation
+  ) >/dev/null 2>&1
+  if ! ( cd "$d" && git rev-parse --verify -q HEAD~1 ) >/dev/null 2>&1; then
+    printf 'FAIL %-46s setup: no HEAD~1 -- scratch commits did not land\n' "$name"
+    fail=$((fail+1)); rm -rf "$d"; return
+  fi
+  ( cd "$d" && PERSONAL_DATA_DENYLIST="$d/tools/dl.txt" "$GATE" HEAD~1..HEAD ) >/dev/null 2>&1
+  rc=$?
+  rm -rf "$d"
+  if [ "$rc" = "$want" ]; then printf 'ok   %-46s (rc=%s)\n' "$name" "$rc"; pass=$((pass+1));
+  else printf 'FAIL %-46s want rc=%s got %s\n' "$name" "$want" "$rc"; fail=$((fail+1)); fi
+}
+
+# The four shapes git emits with no `+++ b/` header. Each was rc=2 before this fix; each is a
+# range a real cleanup or refactor push actually produces, which is why the old predicate would
+# have failed the pre-commit hook and reddened CI on ordinary work.
+rangearm "range: whole-file deletion only passes"      0 'git rm -q doomed.txt'
+rangearm "range: pure rename only passes"              0 'git mv renamed-from.txt renamed-to.txt'
+rangearm "range: binary change only passes"            0 'printf "\000\001\002binary-after-x\n" > blob.bin'
+rangearm "range: mode-only change passes"              0 'chmod +x script.sh'
+
+# THE CONTROL ON ALL FOUR. Without it, a gate that had been broken into passing every range would
+# score four green arms. This range deletes a file AND adds a live-shaped key: it must still BLOCK.
+rangearm "range: deletion + leak still BLOCKs"         1 'git rm -q doomed.txt; printf "K=tskey-auth-aBcDeFgHiJ\n" > leak.txt'  # gate-allow
+
 # ---- arm count -------------------------------------------------------------------------------
 # #252's general form, applied here: a verdict that does not depend on HOW MANY arms ran cannot
 # notice any of them going missing. An arm deleted in a refactor leaves a byte-identical PASS.
-WANT_ARMS=46
+WANT_ARMS=51
 ran=$((pass+fail))
 if [ "$ran" != "$WANT_ARMS" ]; then
   echo "FAIL arm count: $ran arms ran, expected $WANT_ARMS -- an arm was added or silently lost"
