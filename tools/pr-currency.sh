@@ -30,12 +30,74 @@
 #   "pass/fail"       answers OUTCOME
 #
 # None of the first three answers the fourth. All four are printed.
+#
+# AND THE OUTCOME COLUMN GOT IT WRONG ON ITS FIRST DAY, which is why it now has a control arm.
+# v1 read the state with awk's DEFAULT field separator. `gh pr checks` emits TAB-separated rows, and
+# every matrix job name contains a space -- "vm-test (test-identity-boot)" -- so default splitting put
+# `(test-identity-boot)` in $2 and the state in $3. The fail test never matched ANY vm-test row: nine
+# of twelve on #232, and the vm-test matrix is the most load-bearing gate in the repo. A real failure
+# there would have printed `pass`. v1 also treated every non-`fail` state as a pass, so `pending`,
+# `cancelled`, `timed_out` and `skipped` all read green -- "has not run yet" rendered identically to
+# "ran and passed", which is the same shape as the merely-weaker green this file was written about.
+# Both were found by Augur reading the file, not by running it, because nothing ran the parser against
+# a row it could fail on. Hence --selftest below: a detector that finds nothing is indistinguishable
+# from a broken detector, and this one WAS the broken kind while reporting clean.
 set -uo pipefail
 
 # Paths whose change alters what CI ASKS, rather than what it builds. A commit touching these
 # devalues every outstanding green without moving any visible number.
 CRITERIA_RE='^(\.github/workflows/|flake\.nix$|tests/|tools/)'
 BASE="${BASE:-origin/main}"
+
+# Reads `gh pr checks` rows on stdin, prints ONE outcome verdict. THREE states, not two.
+#
+# FS='\t' is load-bearing, not style: matrix job names contain spaces, so default splitting puts the
+# state in a field that shifts per row. And the default is UNKNOWN -- a row whose state this function
+# does not recognise must not be absorbed into `pass`, because an unrecognised state and a green one
+# are exactly the pair this file exists to keep apart.
+classify_checks() {
+  awk -F'\t' '
+    NF < 2 { next }
+    { rows++; st=$2
+      if (st=="fail" || st=="failure" || st=="timed_out" || st=="cancelled" || st=="startup_failure" || st=="action_required") { bad = bad " " $1 }
+      else if (st=="pending" || st=="queued" || st=="in_progress" || st=="waiting" || st=="expected") { inc = inc " " $1 }
+      else if (st=="pass" || st=="success" || st=="skipping" || st=="skipped" || st=="neutral") { ok++ }
+      else { unk = unk " " $1 "=" st }
+    }
+    END {
+      if (rows == 0)      { print "NO ROWS -- gh returned nothing; this is not a green"; exit }
+      if (bad != "")      { print "FAIL:" bad; exit }
+      if (unk != "")      { print "UNKNOWN state:" unk; exit }
+      if (inc != "")      { print "INCOMPLETE (still running):" inc; exit }
+      print "pass (" ok " checks)"
+    }'
+}
+
+# The control arm. v1 shipped a parser that could not report a failure on 75% of this repo\'s rows and
+# reported clean the whole time; nothing here exercised it against a row it should have caught. These
+# fixtures are tab-separated on purpose -- SP1 is the exact shape that defeated v1.
+if [ "${1:-}" = "--selftest" ]; then
+  fail=0
+  arm() { got="$(printf '%b' "$2" | classify_checks)"
+          case "$got" in $3) echo "  ok   $1" ;; *) echo "  FAIL $1: got [$got] want [$3]"; fail=1 ;; esac; }
+  echo "pr-currency selftest"
+  arm "SP1 space-in-name FAIL is seen (v1 could not)" 'vm-test (test-identity-boot)\tfail\t7m\turl\n' 'FAIL:*'
+  arm "SP2 space-in-name pass is not misread"         'vm-test (test-identity-boot)\tpass\t7m\turl\n' 'pass*'
+  arm "P1  pending is NOT a pass"                     'gate\tpending\t0s\turl\n'                      'INCOMPLETE*'
+  arm "P2  fail outranks pending"                     'a\tpending\t0s\tu\nb\tfail\t1s\tu\n'        'FAIL:*'
+  arm "P3  cancelled is not a pass"                   'gate\tcancelled\t0s\turl\n'                    'FAIL:*'
+  arm "P4  an unrecognised state is UNKNOWN"          'gate\tbanana\t0s\turl\n'                       'UNKNOWN*'
+  arm "P5  empty input is not a pass"                 ''                                                'NO ROWS*'
+  arm "C1  CONTROL: all-green really does say pass"   'a\tpass\t1s\tu\nb\tpass\t1s\tu\n'          'pass*'
+  # C1 is why the seven arms above mean anything: without it a classifier that answered FAIL to
+  # everything would pass all of them.
+  echo "TZ arm: a commit at 02:00-05:00 vs a run at 05:00Z"
+  cz="$(TZ=UTC date -u -d '2026-09-03T02:00:00-05:00' +%Y-%m-%dT%H:%M:%SZ)"
+  if [ "$cz" \> "2026-09-03T05:00:00Z" ]; then echo "  ok   TZ1 normalised compare counts it ($cz)"
+  else echo "  FAIL TZ1: $cz did not sort after 05:00Z"; fail=1; fi
+  [ "$fail" = 0 ] && echo "ALL GREEN" || echo "SELFTEST FAILED"
+  exit "$fail"
+fi
 
 command -v gh >/dev/null 2>&1 || { echo "CANNOT-ASSESS: gh not on PATH; currency needs run metadata."; exit 2; }
 
@@ -45,16 +107,21 @@ if [ -z "$prs" ]; then echo "no open PRs"; exit 0; fi
 rc=0
 for pr in $prs; do
   head="$(gh pr view "$pr" --json headRefOid -q .headRefOid 2>/dev/null)"
-  run="$(gh pr checks "$pr" 2>/dev/null | grep -oE 'runs/[0-9]+' | head -1 | cut -d/ -f2)"
+  # OLDEST run of the set, not an arbitrary one. A PR's checks span several workflow runs; `head -1`
+  # took whichever gh listed first. Today they share a timestamp (one push triggers all three), so it
+  # cannot be wrong yet -- it breaks the first time someone re-runs one workflow alone, after which a
+  # fresh sibling masks the stale gates. Currency is a property of the STALEST run, so take the min.
+  when="$(for r in $(gh pr checks "$pr" 2>/dev/null | grep -oE 'runs/[0-9]+' | cut -d/ -f2 | sort -u); do
+            gh run view "$r" --json createdAt -q .createdAt 2>/dev/null; done | sort | head -1)"
+  run="$when"
   if [ -z "$run" ]; then
     echo "PR $pr: NO RUN FOUND — no green to weigh. Not 'clean'."
     rc=1; continue
   fi
-  when="$(gh run view "$run" --json createdAt -q .createdAt 2>/dev/null)"
   # OUTCOME first, deliberately: the axis this report does not measure goes at the front so it
   # cannot be crowded out by the one it does.
-  fails="$(gh pr checks "$pr" 2>/dev/null | awk '$2=="fail"{print $1}' | tr '\n' ' ')"
-  outcome="pass"; [ -n "$fails" ] && { outcome="FAIL: $fails"; rc=1; }
+  outcome="$(gh pr checks "$pr" 2>/dev/null | classify_checks)"
+  case "$outcome" in FAIL*) rc=1 ;; esac
 
   mb="$(git merge-base "$BASE" "$head" 2>/dev/null)"
   dist="$(git rev-list --count "${mb}..${BASE}" 2>/dev/null || echo '?')"
@@ -62,7 +129,12 @@ for pr in $prs; do
   n=0; which=""
   for c in $(git rev-list "${mb}..${BASE}" 2>/dev/null); do
     git show --name-only --format='' "$c" 2>/dev/null | grep -qE "$CRITERIA_RE" || continue
-    [ "$(git log -1 --format=%cI "$c")" \> "$when" ] && { n=$((n+1)); which="$which $(git log -1 --format=%h "$c")"; }
+    # BOTH SIDES MUST BE Z. `[ a \> b ]` is a STRING compare, and the two clocks disagree by default:
+    # git prints the committer's own offset (-05:00 throughout this repo) while gh prints UTC. A commit
+    # made 00:00-05:00 local then sorts BEFORE a run in that window and is silently dropped -- an
+    # UNDER-report, i.e. it makes a stale PR look current, the wrong direction for this tool to fail.
+    cz="$(TZ=UTC git log -1 --format=%cd --date=format-local:%Y-%m-%dT%H:%M:%SZ "$c" 2>/dev/null)"
+    [ "$cz" \> "$when" ] && { n=$((n+1)); which="$which $(git log -1 --format=%h "$c")"; }
   done
 
   echo "PR $pr"
