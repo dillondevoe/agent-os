@@ -118,20 +118,41 @@ MSG
   exit 1
 fi
 
+# THE TRAILING `--` IS LOAD-BEARING. Without it, `git diff -U0 "$1"` accepts an argument that is
+# not a revision at all and reads it as a PATHSPEC: hand this gate a path to a diff FILE -- the
+# plausible mistake, and the one I actually made -- and git returns the diff of that path in the
+# working tree, which is empty. Zero added lines are then scanned and the gate reports CLEAN,
+# exit 0. It failed OPEN on the mistake most likely to be made by someone trying to use it
+# correctly, and it did so in silence: `nonsense-not-a-range` and `totally/bogus.diff` both gave
+# rc=2, but an EXISTING file path gave rc=0. The `--` makes git resolve the argument as a
+# revision or fail (rc=128), so the only paths out of here are a real range or exit 2.
 case "${1:-}" in
-  --staged) diff=$(git diff --cached -U0) ;;
+  --staged) diff=$(git diff --cached -U0) || exit 2 ;;
   --stdin)  diff=$(cat) ;;
   "" )      echo "usage: $0 <base>..<head> | --staged | --stdin | --tree" >&2; exit 2 ;;
-  *)        diff=$(git diff -U0 "$1") || exit 2 ;;
+  --*)      echo "gate: unknown option '$1'" >&2
+            echo "usage: $0 <base>..<head> | --staged | --stdin | --tree" >&2; exit 2 ;;
+  *)        diff=$(git diff -U0 "$1" -- 2>/dev/null) || {
+              echo "gate: '$1' is not a revision range this repo can resolve." >&2
+              echo "gate: if you meant a diff FILE, feed it on stdin: $0 --stdin < '$1'" >&2
+              exit 2
+            } ;;
 esac
 
 hits=0
 file=""
 lineno=0
+# SUBSTRATE COUNTERS. A gate whose PASS does not depend on having scanned anything cannot
+# notice that it scanned nothing -- so the count is part of the verdict, not a debug aid.
+# `added` is what was actually examined against the denylist; `headers` is how many file
+# headers the parser recognised, which is what separates "a diff with no additions"
+# (legitimate: a deletions-only change) from "this input is not a unified diff at all".
+added=0
+headers=0
 
 while IFS= read -r ln; do
   case "$ln" in
-    '+++ b/'*) file=${ln#+++ b/}; continue ;;
+    '+++ b/'*) file=${ln#+++ b/}; headers=$((headers+1)); continue ;;
     '--- '*|'+++ '*) continue ;;
     '@@'*)
       # @@ -a,b +c,d @@ -- take c as the next added line number
@@ -142,6 +163,7 @@ while IFS= read -r ln; do
   esac
 
   body=${ln#+}
+  added=$((added+1))
   case "$body" in *"$MARK") lineno=$((lineno+1)); continue ;; esac
 
   # The denylist is BY DEFINITION a file of these patterns; it cannot carry an
@@ -167,6 +189,20 @@ EOF
 done <<EOF
 $diff
 EOF
+
+# THE NULL-INSTRUMENT REFUSAL, same rule the denylist and --tree already carry, now applied to
+# the diff path -- which was the one place it was missing. Non-empty input that yields ZERO
+# recognised file headers means the parser did not understand what it was handed; reporting
+# "clean" on that is the fail-open this fix exists to close. Note what is deliberately NOT an
+# error: a well-formed diff with headers but no added lines is a real deletions-only change and
+# passes, so this refusal cannot be satisfied by the absence of findings alone.
+if [ -n "$diff" ] && [ "$headers" = 0 ]; then
+  echo "gate: input was non-empty but contained no '+++ b/' file headers -- this does not look" >&2
+  echo "gate: like a unified diff, and a scan of zero files is not a clean result." >&2
+  exit 2
+fi
+
+echo "gate: scanned $added added line(s) across $headers file(s) against $(printf '%s\n' "$pats" | grep -c .) patterns; $hits hit(s)"
 
 if [ "$hits" -gt 0 ]; then
   cat >&2 <<'MSG'
