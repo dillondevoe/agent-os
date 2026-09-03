@@ -90,7 +90,8 @@ pkgs.testers.runNixOSTest {
         + "${capInvoke.capBinDir}/bin "
         + "${registryJson} "
         + "${policyJson} "
-        + "${pkgs.systemd}/bin/systemd-run 2>&1"
+        + "${pkgs.systemd}/bin/systemd-run "
+        + "${../bin/cap-net-fetch} 2>&1"
     )
     print(out)
 
@@ -99,8 +100,12 @@ pkgs.testers.runNixOSTest {
     # deletes legs and still exits 0. If you add a leg, add it here.
     for leg in ["cap-sandbox 0 OK", "cap-sandbox 1 OK", "cap-sandbox 2 OK", "cap-sandbox 3 OK",
                 "cap-sandbox 4 OK", "cap-sandbox 5 OK", "cap-sandbox 6 OK",
-                "cap-sandbox 7 OK",
-                "cap-sandbox: ALL PROPERTIES HOLD"]:
+                "cap-sandbox 7 OK", "cap-sandbox 9 OK",
+                # NOT "ALL PROPERTIES HOLD": 8b/8c legitimately report NOT-DEMONSTRATED on a single
+                # node (host-own target, loopback route), and the final line is qualified in that
+                # case. The ARM COUNT is what must always appear — it is the thing that notices a
+                # leg being deleted, which is the only failure succeed() cannot catch.
+                "11 arms"]:
         assert leg in out, f"battery exited 0 but never reported {leg!r} — legs were removed"
   '';
 }
