@@ -101,10 +101,22 @@ pkgs.testers.runNixOSTest {
     for leg in ["cap-sandbox 0 OK", "cap-sandbox 1 OK", "cap-sandbox 2 OK", "cap-sandbox 3 OK",
                 "cap-sandbox 4 OK", "cap-sandbox 5 OK", "cap-sandbox 6 OK",
                 "cap-sandbox 7 OK", "cap-sandbox 9 OK",
-                # NOT "ALL PROPERTIES HOLD": 8b/8c legitimately report NOT-DEMONSTRATED on a single
-                # node (host-own target, loopback route), and the final line is qualified in that
-                # case. The ARM COUNT is what must always appear — it is the thing that notices a
-                # leg being deleted, which is the only failure succeed() cannot catch.
+                # 8b, 8c and 8c-prefix ARE enumerated now, and the comment that used to sit here
+                # said they could not be — "8b/8c legitimately report NOT-DEMONSTRATED on a single
+                # node (host-own target, loopback route)". That was true only while the deny list
+                # was dead by construction: `IPAddressAllow=any` led netProps, matched every address
+                # at rule 1 of systemd.resource-control(5), and made a host-own target unreachable-
+                # by-deny for the same reason every target was. With the shadowing removed they are
+                # decisive on one node (PR #264, job 100708028354), and a non-OK on either is now a
+                # hard `fail` that exits non-zero anyway — so listing them encodes no answer the
+                # battery does not already enforce. It only stops them being SILENTLY DELETED, which
+                # is this guard's whole job and the one failure succeed() cannot catch.
+                #
+                # 8m is deliberately NOT listed: it may legitimately print MEASURED INERT on a host
+                # where IP filtering does not reach loopback, and requiring "8m OK" would encode an
+                # answer about the environment rather than protect an arm.
+                "cap-sandbox 8b OK", "cap-sandbox 8c OK", "cap-sandbox 8c-prefix OK",
+                # The ARM COUNT must always appear for the same reason.
                 "12 arms"]:
         assert leg in out, f"battery exited 0 but never reported {leg!r} — legs were removed"
   '';
