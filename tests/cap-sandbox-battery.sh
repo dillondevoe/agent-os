@@ -322,6 +322,24 @@ echo "cap-sandbox 7 OK  (network=false cap has NO stack under its real derived p
 
 # A NON-LOOPBACK IPv4 on this host that is itself inside a denied CIDR. Hard-fail rather than skip
 # if there is none: a silently-absent arm is what makes a battery look like coverage.
+#
+# KNOWN LIMIT OF THIS TARGET, recorded because the next reader will otherwise re-derive it: the
+# address is one of THIS HOST's own, so the listener is self-hosted and Linux routes the connection
+# over `lo` even though the address is not 127.x. It is non-loopback by CIDR, not by route. So an
+# 8b failure alone cannot separate "the filter is inert" from "the filter does not see loopback
+# traffic" — and systemd's IP filtering is documented not to apply to the loopback device.
+#
+# MEASURED, 2026-09-03, which is why 8b's message still says "inert": the same experiment was run
+# on a second, unrelated host (WSL2, kernel 6.6, cgroup2, as root) against a GENUINELY REMOTE
+# target — IPAddressDeny=1.1.1.1/32 then connect to 1.1.1.1:443. The connection was NOT blocked,
+# with the no-deny control also connecting. So on two independent environments the deny list did
+# not filter, one of them over a route that was certainly not loopback. That is convergent, not
+# conclusive: it does not prove the VM's failure had the same cause.
+#
+# WHAT WOULD SETTLE IT and is not built here: a SECOND NixOS test node, so 8b can probe an
+# off-host address in a denied CIDR over a real route. That is a change to the vm-test harness
+# (a two-node nixosTest), not to this battery, and it is the honest next step before anyone
+# concludes the confinement is or is not real.
 NETADDR="$("$PY" - <<'PY8A'
 import ipaddress, socket, sys
 DENY = [ipaddress.ip_network(c) for c in
@@ -408,7 +426,7 @@ case "$NETOUT" in
   *PROBE-RAN*) : ;;
   *) netcleanup; fail "8b: probe never executed under the derived properties, so this leg proved NOTHING (rc=$NETRC, out=$NETOUT)" ;;
 esac
-[ "$NETRC" != 0 ] || { netcleanup; fail "8b: IPAddressDeny did NOT stop a connection to $NETADDR, a NON-LOOPBACK address the policy denies. The kernel layer is inert on this host. This is the fail-OPEN modules/cap-invoke-pkg.nix's shipping gate exists to prevent: do NOT lift it here."; }
+[ "$NETRC" != 0 ] || { netcleanup; fail "8b: IPAddressDeny did NOT stop a connection to $NETADDR, an address the policy denies. Read the KNOWN LIMIT note above before concluding why: this target is one of THIS host's own addresses, so the route is loopback and systemd's IP filtering is documented not to cover it. Either way the confinement is NOT DEMONSTRATED here, which is all the shipping gate in modules/cap-invoke-pkg.nix needs: do NOT lift it."; }
 echo "cap-sandbox 8b OK (network=true: control arm with a stack reached $NETADDR; the SAME probe under the derived IPAddressDeny list RAN and was refused — the only delta is the deny entries)"
 
 # 8c. LOOPBACK, denied deliberately by the registry (the in-guest model on 127.0.0.1:11434). Its own
