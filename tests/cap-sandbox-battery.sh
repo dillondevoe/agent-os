@@ -16,7 +16,7 @@
 # so a through-the-seam call ALWAYS uses the hardcoded production roots — pointing this battery at
 # scratch roots would test a path production never takes.
 #
-# Eleven arms (legs 0-7, 8b, 8c, 9), in the order that makes the result meaningful:
+# Twelve arms (legs 0-7, 8m, 8b, 8c, 9), in the order that makes the result meaningful:
 #   0. NEGATIVE CONTROL — with the sandbox NOT configured, the escaping read SUCCEEDS and returns
 #      the canary. Without this leg, legs 1-2 could pass for the wrong reason (e.g. the impl simply
 #      erroring). This is the fail-OPEN state Geist's RULING 1 describes, demonstrated, not asserted.
@@ -350,7 +350,16 @@ echo "cap-sandbox 7 OK  (network=false cap has NO stack under its real derived p
 # address is one of THIS HOST's own, so the listener is self-hosted and Linux routes the connection
 # over `lo` even though the address is not 127.x. It is non-loopback by CIDR, not by route. So an
 # 8b failure alone cannot separate "the filter is inert" from "the filter does not see loopback
-# traffic" — and systemd's IP filtering is documented not to apply to the loopback device.
+# traffic".
+#
+# RETRACTED, 2026-09-03 (Geist's #262 ruling, verified here against the systemd source manual):
+# earlier revisions of this file asserted that "systemd's IP filtering is documented not to apply
+# to the loopback device". THAT SENTENCE WAS NEVER TRUE AND WAS NEVER CITED. systemd.resource-
+# control(5) says the opposite on both points: the access lists "are applied to all sockets created
+# by processes of this unit", and `localhost` is an explicitly filterable SYMBOLIC NAME expanding to
+# `127.0.0.0/8 ::1/128`. There is no loopback exemption in the manual. The fabricated sentence is
+# what licensed 8b/8c's NOT-DEMONSTRATED downgrade, so it did not merely sit in a comment: it
+# converted a measurement into a shrug. Leg 8m below replaces the claim with an experiment.
 #
 # MEASURED, 2026-09-03, which is why 8b's message still says "inert": the same experiment was run
 # on a second, unrelated host (WSL2, kernel 6.6, cgroup2, as root) against a GENUINELY REMOTE
@@ -468,6 +477,61 @@ NETOUT="$("$SYSTEMD_RUN" --quiet --pipe --wait --collect --property=IPAddressAll
 case "$NETOUT" in *PROBE-RAN*) : ;; *) netcleanup; fail "8a: control probe never ran ($NETOUT)" ;; esac
 [ "$NETRC" = 0 ] || { netcleanup; fail "8a: a unit with IPAddressAllow=any and no denies could NOT reach $NETADDR:$NETPORT (rc=$NETRC) — 8b would prove nothing"; }
 
+# 8m. MECHANISM, ON LOOPBACK, BEFORE ANY DERIVED LIST IS INVOLVED. This arm exists because the
+# thing 8b/8c most needed was never measured: does cgroup IP filtering do ANYTHING to a loopback
+# connection on this kernel? Every earlier revision answered that from a sentence about loopback
+# exemption that was fabricated -- see the RETRACTED note above -- and then downgraded two arms on
+# it. So: probe 127.0.0.1 under a deny list written HERE, not derived from policy, so a failure
+# cannot be blamed on rendering.
+#
+# Three sub-arms, and the control is first for the usual reason:
+#   8m-control  IPAddressAllow=any        must CONNECT   (else the harness, not the filter, is why)
+#   8m-any      IPAddressDeny=any         must be REFUSED
+#   8m-local    IPAddressDeny=localhost   must be REFUSED  (the manual's own symbolic name for
+#                                                            127.0.0.0/8 ::1/128)
+# `IPAddressDeny=any` is the blunt instrument on purpose: if even THAT does not stop a loopback
+# connection, the filter is inert on this host and no deny list of any shape will help. `localhost`
+# is then the named-range form the manual documents, which is what the shipping policy's 127.0.0.0/8
+# entry is meant to be doing.
+MECH=unknown
+NETOUT="$("$SYSTEMD_RUN" --quiet --pipe --wait --collect --property=IPAddressAllow=any \
+            "$PY" -c "$(probe_src 127.0.0.1 "$LOPORT")" 2>&1)"; NETRC=$?
+case "$NETOUT" in *PROBE-RAN*) : ;; *) netcleanup; fail "8m-control: loopback control probe never ran ($NETOUT)" ;; esac
+[ "$NETRC" = 0 ] || { netcleanup; fail "8m-control: a unit with IPAddressAllow=any could NOT reach 127.0.0.1:$LOPORT (rc=$NETRC) -- the loopback listener or the runner is broken, so 8m/8c would prove nothing"; }
+
+# Record what systemd actually applied, rather than what was asked for. A property silently
+# dropped by an old systemd, or a BPF filter that failed to install, is indistinguishable from an
+# inert filter at the socket -- and those are different findings with different fixes.
+SHOWUNIT="agentos-8m-show-$$"
+"$SYSTEMD_RUN" --quiet --unit="$SHOWUNIT" --property=IPAddressDeny=any --property=IPAddressAllow=localhost sleep 3 >/dev/null 2>&1 || true
+echo "cap-sandbox 8m: applied properties -> $(systemctl show -p IPAddressDeny -p IPAddressAllow "$SHOWUNIT.service" 2>&1 | tr '\n' ' ')"
+echo "cap-sandbox 8m: filter/BPF journal lines -> $(journalctl -u "$SHOWUNIT.service" --no-pager -n 50 2>/dev/null | grep -iE 'bpf|ip filter|firewall|EPERM' | tr '\n' ' ' | sed 's/^$/(none)/')"
+systemctl stop "$SHOWUNIT.service" >/dev/null 2>&1 || true
+
+NETOUT="$("$SYSTEMD_RUN" --quiet --pipe --wait --collect --property=IPAddressDeny=any \
+            "$PY" -c "$(probe_src 127.0.0.1 "$LOPORT")" 2>&1)"; NETRC=$?
+case "$NETOUT" in *PROBE-RAN*) : ;; *) netcleanup; fail "8m-any: probe never executed under IPAddressDeny=any, so this arm measured nothing (rc=$NETRC, out=$NETOUT)" ;; esac
+if [ "$NETRC" = 0 ]; then
+  MECH=inert
+  echo "cap-sandbox 8m-any: MEASURED INERT -- a loopback connection succeeded under IPAddressDeny=any, the broadest deny systemd accepts, with the control arm connecting too. cgroup IP filtering does not cover loopback traffic on this host. This is the FINDING, not a harness limit: the registry's 127.0.0.1:11434 denial cannot be resting on this layer."
+else
+  MECH=works
+  echo "cap-sandbox 8m-any OK (a loopback connection WAS refused under IPAddressDeny=any -- the mechanism reaches loopback traffic on this host)"
+fi
+
+NETOUT="$("$SYSTEMD_RUN" --quiet --pipe --wait --collect --property=IPAddressDeny=localhost \
+            "$PY" -c "$(probe_src 127.0.0.1 "$LOPORT")" 2>&1)"; NETRC=$?
+case "$NETOUT" in *PROBE-RAN*) : ;; *) netcleanup; fail "8m-local: probe never executed under IPAddressDeny=localhost, so this arm measured nothing (rc=$NETRC, out=$NETOUT)" ;; esac
+if [ "$NETRC" = 0 ]; then
+  if [ "$MECH" = works ]; then
+    netcleanup
+    fail "8m-local: IPAddressDeny=localhost did NOT stop a loopback connection, even though IPAddressDeny=any DID stop the same probe moments earlier. The mechanism works here; the SYMBOLIC NAME the manual documents for 127.0.0.0/8 is what failed. That is a real finding about the named range, not a route artifact."
+  fi
+  echo "cap-sandbox 8m-local: connection also succeeded under IPAddressDeny=localhost, consistent with 8m-any's inert result (no new information -- both are explained by the filter not covering loopback)"
+else
+  echo "cap-sandbox 8m-local OK (IPAddressDeny=localhost refused the loopback probe -- the manual's named range behaves as documented)"
+fi
+
 # 8b. Same probe, same runner, same target, plus the derived denies and nothing else.
 NETOUT="$("$SYSTEMD_RUN" --quiet --pipe --wait --collect $NETPROPS \
             "$PY" -c "$(probe_src "$NETADDR" "$NETPORT")" 2>&1)"; NETRC=$?
@@ -479,10 +543,10 @@ NOTDEMO=0
 if [ "$NETRC" = 0 ]; then
   if [ "$NETOWN" = yes ]; then
     # NOT a finding, and NOT a pass. The target is host-own, so the connection routed over `lo`,
-    # and systemd's IP filtering is documented not to apply there — this arm could not have gone
-    # green whatever the deny list does. Reported loudly, suite continues, exit code unaffected.
+    # and leg 8m -- not a sentence about the manual -- is what says whether the filter covers that
+    # route on this host. Reported loudly, suite continues, exit code unaffected.
     NOTDEMO=1
-    echo "cap-sandbox 8b NOT-DEMONSTRATED: the probe reached $NETADDR under the derived IPAddressDeny list, but that address is one of THIS HOST's own, so the route is loopback and the filter is documented not to cover it. This arm CANNOT pass on a single node — it is not evidence the filter is inert, and it is not evidence the filter works. Settle it with a two-node nixosTest (AGENT_OS_BATTERY_REMOTE_DENIED_ADDR). Until then the shipping gate in modules/cap-invoke-pkg.nix STAYS: do NOT lift \`offenders\`."
+    echo "cap-sandbox 8b NOT-DEMONSTRATED: the probe reached $NETADDR under the derived IPAddressDeny list, but that address is one of THIS HOST's own, so the route is loopback (see leg 8m for whether the filter covers that route here). This arm CANNOT pass on a single node — it is not evidence the filter is inert, and it is not evidence the filter works. Settle it with a two-node nixosTest (AGENT_OS_BATTERY_REMOTE_DENIED_ADDR). Until then the shipping gate in modules/cap-invoke-pkg.nix STAYS: do NOT lift \`offenders\`."
   else
     netcleanup
     fail "8b: IPAddressDeny did NOT stop a connection to $NETADDR, an address the policy denies, over a route that is NOT this host's own. That is a real finding, not a route artifact: the kernel layer is inert here. The shipping gate in modules/cap-invoke-pkg.nix STAYS and slice 1 switches to the netns+proxy shape."
@@ -503,13 +567,22 @@ esac
 netcleanup
 if [ "$NETRC" != 0 ]; then
   echo "cap-sandbox 8c OK (loopback is ALSO filtered — the registry's 127.0.0.1:11434 threat is covered by the kernel layer, not only by cap-net-fetch's resolve-check)"
-elif [ "$NOTDEMO" = 1 ]; then
-  # 8c's failure message INTERPRETS ITSELF AGAINST A GREEN 8b — "loopback is exempt even though the
-  # mechanism works" is only sayable when 8b showed the mechanism works. With 8b not demonstrated
-  # there is no such contrast, so this downgrades with it rather than asserting a gap it cannot see.
-  echo "cap-sandbox 8c NOT-DEMONSTRATED: the loopback probe reached 127.0.0.1 under the derived deny list, but 8b did not establish that the mechanism works on ANY target here, so this arm cannot separate 'loopback is exempt' from 'the filter is inert'. The registry denies loopback on purpose, so until a two-node run settles 8b that threat rests ONLY on cap-net-fetch's resolve-then-check (one userspace layer) — which is why the shipping gate stays."
+elif [ "$MECH" = inert ]; then
+  # 8c's claim INTERPRETS ITSELF AGAINST A WORKING MECHANISM — "the derived list misses loopback"
+  # is only sayable once something has shown the filter reaches loopback at all. That is leg 8m's
+  # job, and it is keyed here rather than on 8b's downgrade: 8b is about a DIFFERENT route, and
+  # keying one arm's meaning on another arm's inability to run is how the fabricated exemption
+  # sentence stayed load-bearing for as long as it did.
+  echo "cap-sandbox 8c NOT-DEMONSTRATED (as to the deny LIST): the loopback probe reached 127.0.0.1 under the derived deny list, but leg 8m measured the filter INERT on loopback here — so this arm cannot separate 'the derived list is wrong' from 'no list would have worked'. The registry denies loopback on purpose, so on this host that threat rests ONLY on cap-net-fetch's resolve-then-check (one userspace layer). The shipping gate stays."
+elif [ "$MECH" = works ]; then
+  netcleanup
+  fail "8c: IPAddressDeny did NOT stop a connection to 127.0.0.1, even though leg 8m refused the SAME probe on the SAME route under IPAddressDeny=any. The mechanism reaches loopback here and the DERIVED list did not -- a rendering or application bug in the policy the capability actually runs under, not a route artifact and not a kernel limit. capability-registry.nix denies loopback ON PURPOSE (a fetch to 127.0.0.1:11434 could drive the in-guest model). Rule on this before lifting the shipping gate."
 else
-  fail "8c: IPAddressDeny did NOT stop a connection to 127.0.0.1 even though 8b shows the mechanism WORKS on a non-loopback denied address. Loopback is exempt from cgroup IP filtering on this host. That is a real gap, not a harness bug: capability-registry.nix denies loopback ON PURPOSE (a fetch to 127.0.0.1:11434 could drive the in-guest model), so here that threat rests ONLY on cap-net-fetch's own resolve-then-check — one userspace layer, defeatable by DNS rebinding. Rule on this before lifting the shipping gate."
+  # Unreachable while leg 8m runs, which is the point of asserting it rather than assuming it: if a
+  # future edit moves or skips 8m, this arm must refuse to interpret itself rather than fall back on
+  # whichever sentence happens to be sitting here.
+  netcleanup
+  fail "8c: the loopback probe reached 127.0.0.1 under the derived deny list, but leg 8m did not run (MECH=$MECH), so nothing here can say whether the filter covers loopback on this host. Refusing to classify: this is exactly the state in which the fabricated loopback-exemption sentence was previously supplied as the answer."
 fi
 
 # 9. USERSPACE: cap-net-fetch must DENY an IPv4-mapped IPv6 literal. This is the layer 1 half —
@@ -572,7 +645,7 @@ echo "cap-sandbox 9 OK (cap-net-fetch denies $MAPPED_URL AT THE ADDRESS CHECK; w
 # Nor is NAT64 (`64:ff9b::/96`) covered: it embeds the same IPv4 space and still passes both layers.
 # The registry `egressDenyList` does not carry it either, so it moves as one change to both lists.
 if [ "$NOTDEMO" = 1 ]; then
-  echo "cap-sandbox: 11 arms ran, 9 HOLD — legs 8b and 8c are NOT-DEMONSTRATED on this single node (host-own target, loopback route). The suite is GREEN on what it can measure and SILENT on what it cannot; it is NOT a clearance to lift \`offenders\`."
+  echo "cap-sandbox: 12 arms ran, 10 HOLD — legs 8b and 8c are NOT-DEMONSTRATED on this single node (host-own target, loopback route). The suite is GREEN on what it can measure and SILENT on what it cannot; it is NOT a clearance to lift \`offenders\`."
 else
-  echo "cap-sandbox: ALL PROPERTIES HOLD (11 arms: legs 0-7, 8b, 8c, 9; leg 0 negative control, 7a/8a positive controls, 9-control pre-fix arm)"
+  echo "cap-sandbox: ALL PROPERTIES HOLD (12 arms: legs 0-7, 8m, 8b, 8c, 9; leg 0 negative control, 7a/8a/8m-control positive controls, 9-control pre-fix arm)"
 fi
