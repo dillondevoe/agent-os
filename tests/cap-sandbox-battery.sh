@@ -16,7 +16,7 @@
 # so a through-the-seam call ALWAYS uses the hardcoded production roots — pointing this battery at
 # scratch roots would test a path production never takes.
 #
-# Five properties, in the order that makes the result meaningful:
+# Nine arms (legs 0-8), in the order that makes the result meaningful:
 #   0. NEGATIVE CONTROL — with the sandbox NOT configured, the escaping read SUCCEEDS and returns
 #      the canary. Without this leg, legs 1-2 could pass for the wrong reason (e.g. the impl simply
 #      erroring). This is the fail-OPEN state Geist's RULING 1 describes, demonstrated, not asserted.
@@ -38,6 +38,12 @@
 #   4. Symlinked-PARENT write (workspace/sub -> outside) is BLOCKED and nothing lands outside.
 #   5. Fail-closed wiring: a capability absent from the policy is DENIED, and an unset
 #      AGENT_OS_SYSTEMD_RUN DENIES rather than falling back to an unconfined exec.
+#   6. No transient units leak after the run.
+#   7. NETWORK, the network=false direction: a cap with no declared stack cannot open a socket
+#      under its own derived properties (control arm connects first).
+#   8. NETWORK, the network=true direction: IPAddressDeny actually drops packets to a denied CIDR.
+#      This is the one the T2 egress slice rests on, and its control arm differs from the confined
+#      arm by the deny entries ALONE. It gates lifting `offenders` in modules/cap-invoke-pkg.nix.
 set -u
 
 INVOKE="${1:?path to bin/cap-invoke required}"
@@ -280,4 +286,103 @@ esac
 netcleanup
 echo "cap-sandbox 7 OK  (network=false cap has NO stack under its real derived properties — control arm connected, confined arm RAN and was refused)"
 
-echo "cap-sandbox: ALL PROPERTIES HOLD"
+# ── 8. the network=TRUE half: IPAddressDeny actually STOPS packets ────────────────────────────
+# Leg 7 proves a cap declared network=false has no stack. That is the easy direction: PrivateNetwork
+# either exists or it does not. This is the direction the T2 egress slice actually rests on — a cap
+# that IS allowed a stack, confined to "public internet only" by IPAddressAllow=any plus a
+# per-CIDR IPAddressDeny list (modules/cap-sandbox.nix `netProps`, derived from the registry's
+# egressDenyList). Nothing had ever observed a packet being dropped by that list.
+#
+# WHY THIS GATES THE SHIP. modules/cap-invoke-pkg.nix `offenders` refuses to put any
+# sandbox.network=true impl in capBinDir. That gate is correct and it is not paperwork: IPAddressDeny
+# is a cgroup-v2 BPF filter, and on a host without that support systemd logs a WARNING and the
+# property SILENTLY DOES NOT APPLY. The unit still starts. The property still appears in the
+# materialized policy. `systemctl show` still lists it. That is a fail-OPEN whose every visible
+# artifact is identical to the enforcing case — the same class as ProtectSystem=strict cancelled by
+# composition, which this module has already been bitten by once. The fs gate was only lifted after
+# legs 0-4 demonstrated the kernel stopping a real escape; the net gate is entitled to the same
+# standard, and this leg is that evidence.
+#
+# THE CONTROL PAIR IS TIGHTER THAN LEG 7'S, on purpose. Leg 7's two arms differ by the WHOLE net
+# property set, so a pass is attributable to PrivateNetwork or to RestrictAddressFamilies or to
+# both. Here, 8a runs under `IPAddressAllow=any` alone and 8b under `IPAddressAllow=any` PLUS the
+# derived denies. The ONLY delta is the deny entries, so a block in 8b is attributable to nothing
+# else. Both arms have a network stack; both must print the marker.
+NETDIR="$(mktemp -d)"
+NETPORT=""
+NETPID=""
+"$PY" - <<'PYEOF' > "$NETDIR/netport" 2>/dev/null &
+import socket, sys, time
+s = socket.socket(); s.bind(("127.0.0.1", 0)); s.listen(8)
+sys.stdout.write(str(s.getsockname()[1])); sys.stdout.flush()
+time.sleep(60)
+PYEOF
+NETPID=$!
+netcleanup() { kill "$NETPID" 2>/dev/null || true; rm -rf "$NETDIR"; }
+for _ in $(seq 1 50); do
+  NETPORT="$(cat "$NETDIR/netport" 2>/dev/null || true)"
+  [ -n "$NETPORT" ] && break
+  sleep 0.1
+done
+[ -n "$NETPORT" ] || { netcleanup; fail "8: probe listener never published a port — harness broken, not a finding"; }
+
+# net.fetch's derived network properties, from the materialized policy. Three things are hard
+# failures rather than skips, because each would make 8b pass while proving nothing:
+#   * the cap absent from the policy         -> no properties, 8b == 8a
+#   * no IPAddressAllow=any                  -> not the network=true shape at all
+#   * no IPAddressDeny covering 127.0.0.0/8  -> the probe's target is not on the deny list, so a
+#                                               block would have to come from somewhere else
+NETPROPS="$("$PY" - "$POLICY" <<'PYEOF'
+import json, sys
+pol = json.load(open(sys.argv[1]))
+props = pol.get("net.fetch")
+if not props:
+    sys.stderr.write("net.fetch absent from the materialized policy\n"); sys.exit(1)
+net = [p for p in props
+       if p.split("=")[0] in ("PrivateNetwork", "IPAddressAllow", "IPAddressDeny",
+                              "RestrictAddressFamilies")]
+if "IPAddressAllow=any" not in net:
+    sys.stderr.write("net.fetch policy has no IPAddressAllow=any — not a network=true cap\n")
+    sys.exit(1)
+if "IPAddressDeny=127.0.0.0/8" not in net:
+    sys.stderr.write("net.fetch policy does not deny 127.0.0.0/8, which is this leg's target\n")
+    sys.exit(1)
+if any(p.startswith("PrivateNetwork=yes") for p in net):
+    sys.stderr.write("net.fetch policy carries PrivateNetwork=yes — 8b would block for the "
+                     "wrong reason and this leg would prove nothing about the deny list\n")
+    sys.exit(1)
+sys.stdout.write(" ".join("--property=" + p for p in net))
+PYEOF
+)" || { netcleanup; fail "8: could not derive network properties for net.fetch from $POLICY"; }
+
+NETPROBE_SRC="import socket,sys
+print('PROBE-RAN', flush=True)
+try:
+    socket.create_connection(('127.0.0.1', $NETPORT), timeout=3).close()
+except Exception:
+    sys.exit(7)"
+
+# 8a. CONTROL ARM FIRST: a transient unit WITH a network stack and NO denies. Must run and connect.
+# If this fails, the confined arm's refusal would be attributable to systemd-run, to the unit
+# environment, or to the listener — anything but the deny list.
+NETOUT="$("$SYSTEMD_RUN" --quiet --pipe --wait --collect --property=IPAddressAllow=any \
+            "$PY" -c "$NETPROBE_SRC" 2>&1)"; NETRC=$?
+case "$NETOUT" in *PROBE-RAN*) : ;; *) netcleanup; fail "8a: control probe never ran ($NETOUT)" ;; esac
+[ "$NETRC" = 0 ] || { netcleanup; fail "8a: a transient unit with IPAddressAllow=any and no denies could NOT reach 127.0.0.1:$NETPORT (rc=$NETRC) — 8b would prove nothing"; }
+
+# 8b. Same probe, same runner, plus the derived denies and nothing else.
+NETOUT="$("$SYSTEMD_RUN" --quiet --pipe --wait --collect $NETPROPS "$PY" -c "$NETPROBE_SRC" 2>&1)"; NETRC=$?
+case "$NETOUT" in
+  *PROBE-RAN*) : ;;
+  *) netcleanup; fail "8b: probe never executed under net.fetch's derived network properties, so this leg proved NOTHING about the deny list (rc=$NETRC, out=$NETOUT)" ;;
+esac
+[ "$NETRC" != 0 ] || { netcleanup; fail "8b: IPAddressDeny did NOT stop a connection to a denied CIDR — the deny list is present in the policy but NOT ENFORCED by this kernel (no cgroup-v2 BPF?). This is the fail-OPEN the shipping gate in modules/cap-invoke-pkg.nix exists to prevent: do NOT lift it on this host."; }
+netcleanup
+echo "cap-sandbox 8 OK  (network=true cap: control arm WITH a stack and no denies connected; the SAME probe under the derived IPAddressDeny list RAN and was refused — the only delta between the arms is the deny entries)"
+
+# NOT COVERED HERE, stated so it is not mistaken for coverage: that PUBLIC egress still SUCCEEDS
+# under net.fetch's properties (i.e. the deny list did not degenerate into deny-everything). That
+# needs a reachable off-box endpoint, which would make this battery non-hermetic and flaky on a
+# sealed host. The registry-side half of the claim — IPAddressAllow=any is present, and the deny
+# list is exactly the private/loopback/link-local ranges — is asserted above and in checks.cap-sandbox.
+echo "cap-sandbox: ALL PROPERTIES HOLD (9 arms run: legs 0-8; leg 0 negative control, 7a/8a positive controls)"
