@@ -2115,11 +2115,46 @@
             SHIPPED_OVERRIDES=${b shippedOverrides} \
             DETECTOR_ARMED=${b detectorArmed} \
             bash ${./tests/escalate-preflight-battery.sh}
-            # think-twice stream rules (HARNESS-MAP guardrail 4): drives the REAL
-            # chat_stream_safe→chat_stream seam with only the transport scripted.
-            python3 tests/ttsr-battery.py
             touch $out
           '';
+
+        # Think-twice stream rules (HARNESS-MAP guardrail 4) — its OWN derivation.
+        #
+        # This battery previously rode inside escalate-preflight-check as a bare
+        # `python3 tests/ttsr-battery.py`, which was wrong three separate ways and only the
+        # first one was visible:
+        #   1. that runCommand has `{ }` for its attrs, so the sandbox had NO python3 at all
+        #      -- `python3: command not found`, after the escalate arms had already printed
+        #      "8 passed", so the log's last green line described a different battery;
+        #   2. the path was RELATIVE, and a runCommand's cwd is an empty build dir. Fixing
+        #      only (1) would have swapped one red for a different red -- the battery resolves
+        #      `modules/` from its own __file__, so it needs the tests/+modules/ work-dir
+        #      shape, not an interpreter;
+        #   3. a failure here reported as `escalate-preflight-check`, pointing whoever read
+        #      the status line at the wrong battery entirely.
+        # pyyaml is a HARD dependency here: ttsr-battery imports the shipped providers.py,
+        # which does `import yaml` at module scope, so without it the battery dies at import.
+        # Verified by running it against a shadowing yaml.py that raises -- ImportError, exit 1,
+        # zero arms executed. Note this is NOT the reason given on brain-dispatch-contract
+        # below ("silently degraded module, arms pass vacuously"): that reasoning is about
+        # agent-brain.py importing providers behind a broad `except`, and it does not apply on
+        # this path. I carried that sentence over verbatim before testing it and it was wrong
+        # here -- the dependency is real, the stated mechanism was not.
+        ttsr-stream-rules =
+          let
+            pkgs = nixpkgs.legacyPackages.${system};
+            pyWithYaml = pkgs.python3.withPackages (ps: [ ps.pyyaml ]);
+          in pkgs.runCommand "ttsr-stream-rules-check"
+            { nativeBuildInputs = [ pyWithYaml ]; } ''
+              work="$(mktemp -d)"
+              mkdir -p "$work/modules" "$work/tests"
+              cp ${./modules/agent-brain.py} "$work/modules/agent-brain.py"
+              cp ${./modules/providers.py} "$work/modules/providers.py"
+              cp ${./tests/ttsr-battery.py} "$work/tests/ttsr-battery.py"
+              cd "$work"
+              python3 tests/ttsr-battery.py
+              touch $out
+            '';
 
         # WP-A2 (task 287) — bin/mem's CONTRACT BATTERY: the memory-as-filesystem layer every
         # other Agent OS layer is built on (remember / recall / tree / cap). `mem-cap` above
