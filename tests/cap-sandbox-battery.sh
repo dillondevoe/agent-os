@@ -359,10 +359,15 @@ echo "cap-sandbox 7 OK  (network=false cap has NO stack under its real derived p
 # not filter, one of them over a route that was certainly not loopback. That is convergent, not
 # conclusive: it does not prove the VM's failure had the same cause.
 #
-# WHAT WOULD SETTLE IT and is not built here: a SECOND NixOS test node, so 8b can probe an
-# off-host address in a denied CIDR over a real route. That is a change to the vm-test harness
-# (a two-node nixosTest), not to this battery, and it is the honest next step before anyone
-# concludes the confinement is or is not real.
+# WHAT SETTLES IT: a SECOND NixOS test node, so 8b can probe an off-host address in a denied CIDR
+# over a real route. That harness is tests/cap-sandbox-confinement-2node.nix.
+#
+# The sentence that stood here said this was "a change to the vm-test harness, not to this
+# battery." That was wrong, and it was wrong in the direction that matters: the battery bound its
+# own 8a/8b listener to the target address, which is impossible when the target is another
+# machine, so the remote seam terminated in EADDRNOTAVAIL rather than in a verdict. Building the
+# second node is what surfaced it -- the claim that no battery change was needed had never been
+# executed. See the listener block below for the split and the companion port seam.
 # Emits "<addr> <hostown:yes|no>". HOSTOWN is what decides whether an 8b failure is a FINDING or
 # merely NOT-DEMONSTRATED, so it is MEASURED, not assumed: the address is compared against this
 # host's own set (getaddrinfo of the hostname, plus the kernel-selected source address for each
@@ -416,13 +421,47 @@ EOF
 case "$NETOWN" in yes|no) : ;; *) fail "8: hostown must be yes or no, got $NETOWN" ;; esac
 [ "$NETOWN" = no ] || echo "cap-sandbox 8: NOTE — $NETADDR is one of THIS HOST's own addresses, so the 8b/8c route is loopback and those arms can only report NOT-DEMONSTRATED (set AGENT_OS_BATTERY_REMOTE_DENIED_ADDR from a two-node harness to make them decisive)"
 
+# THE LISTENER SIDE, AND WHY IT IS SPLIT FROM THE TARGET SIDE.
+#
+# This used to be one line -- `a.bind((NETADDR, 0))` -- and that single line made the
+# AGENT_OS_BATTERY_REMOTE_DENIED_ADDR seam UNENTERABLE. You cannot bind a socket to an address
+# that belongs to another machine: supplying a genuinely remote target made bind() fail with
+# EADDRNOTAVAIL (measured, errno 99), the ports file was never written, and the run died at
+# "probe listeners never published ports -- harness broken, not a finding". So the hook whose
+# stated purpose was to keep the remote branch REACHABLE could not itself be reached, and the
+# comment three paragraphs up promising a two-node harness would fill it in was describing a
+# path that ended in a bind error. That is precisely the defect this battery says it exists to
+# avoid -- untested code that reads as coverage -- sitting inside the affordance built to avoid it.
+#
+# So: a remote target implies a remote LISTENER, which this process cannot open and must be told
+# about. AGENT_OS_BATTERY_REMOTE_DENIED_PORT is that companion seam, and it is REQUIRED whenever
+# the address seam is set -- not defaulted, because a wrong port would make 8a fail and read as
+# "the control could not connect" rather than "the harness was misconfigured".
+#
+# The loopback listener for 8c is always local: 8c's target is 127.0.0.1 by definition and does
+# not move to the other node.
+REMOTEPORT="${AGENT_OS_BATTERY_REMOTE_DENIED_PORT:-}"
+if [ "$NETOWN" = no ] && [ -z "$REMOTEPORT" ]; then
+  fail "8: AGENT_OS_BATTERY_REMOTE_DENIED_ADDR names an off-host target ($NETADDR) but AGENT_OS_BATTERY_REMOTE_DENIED_PORT is unset. This harness cannot bind a listener on another node's address, so it must be told which port that node is listening on."
+fi
+if [ -n "$REMOTEPORT" ] && [ "$NETOWN" != no ]; then
+  fail "8: AGENT_OS_BATTERY_REMOTE_DENIED_PORT is set but the 8b target $NETADDR is one of this host's own addresses — that combination is a misconfigured harness, not a run worth trusting."
+fi
+
 NETDIR="$(mktemp -d)"
 NETPID=""
-"$PY" - "$NETADDR" <<'PY8B' > "$NETDIR/ports" 2>/dev/null &
+"$PY" - "$NETADDR" "$REMOTEPORT" <<'PY8B' > "$NETDIR/ports" 2>/dev/null &
 import socket, sys, time
-a = socket.socket(); a.bind((sys.argv[1], 0)); a.listen(8)
+target, remote_port = sys.argv[1], sys.argv[2]
+if remote_port:
+    # Off-host target: the listener is the other node's, already up before we were started.
+    # Nothing to bind here, and nothing to verify either -- 8a is the control that decides
+    # whether that listener is actually reachable, and it must stay the thing that decides it.
+    aport = int(remote_port)
+else:
+    a = socket.socket(); a.bind((target, 0)); a.listen(8); aport = a.getsockname()[1]
 b = socket.socket(); b.bind(("127.0.0.1", 0)); b.listen(8)
-sys.stdout.write("%d %d" % (a.getsockname()[1], b.getsockname()[1])); sys.stdout.flush()
+sys.stdout.write("%d %d" % (aport, b.getsockname()[1])); sys.stdout.flush()
 time.sleep(120)
 PY8B
 NETPID=$!

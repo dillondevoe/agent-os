@@ -227,6 +227,24 @@
           inherit baseModules;
         };
 
+        # The SAME battery, on TWO nodes — the only environment where leg 8b can be decisive.
+        # On one node every candidate 8b target is host-own, so the probe routes over `lo` and
+        # systemd's IP filtering is documented not to apply there: the arm reports NOT-DEMONSTRATED
+        # and cannot go green whatever the deny list does. Here the target is a second VM on the
+        # shared test VLAN, whose RFC1918 /24 sits inside the 192.168.0.0/16 that net.fetch's  # gate-allow
+        # policy already denies — so the route is real ethernet and the arm can both pass and fail.
+        #
+        # This test does NOT lift `offenders` in modules/cap-invoke-pkg.nix. It produces the
+        # evidence a lift would have to cite, and the consequences of either outcome are ruled in
+        # advance in the test's own header. Out of `checks` for the same reason as its siblings
+        # (it boots VMs); added to the vm-tests.yml matrix in the same commit, per that file's
+        # own rule. Run on demand:
+        #   nix build .#test-cap-sandbox-confinement-2node
+        test-cap-sandbox-confinement-2node = import ./tests/cap-sandbox-confinement-2node.nix {
+          pkgs = nixpkgs.legacyPackages.${system};
+          inherit baseModules;
+        };
+
         # The COMPOSED path — real broker -> real (confined) wrapper -> real impl, in a VM. The
         # third leg of GATE #5(a)'s evidence and the only RUNTIME witness that the two exports in
         # mkWrapper's `lib.optionalString confined` block actually deliver the confinement:

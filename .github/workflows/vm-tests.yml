@@ -154,6 +154,14 @@ jobs:
           # cancelled by a property that is present and correct-looking (ProtectSystem=strict does
           # exactly that — see modules/cap-sandbox.nix). Only a booted VM can tell them apart.
           - test-cap-sandbox-confinement
+          # The two-node variant, added in the same commit as
+          # tests/cap-sandbox-confinement-2node.nix. It is NOT a duplicate of the entry above: the
+          # single-node run leaves leg 8b permanently NOT-DEMONSTRATED, because on one node every
+          # 8b target is host-own and the probe routes over `lo`, where systemd's IP filtering is
+          # documented not to apply. This entry is the only scheduled thing on which 8b can go
+          # either way, and it asserts that 8b does NOT abstain — so if the remote seam ever stops
+          # taking effect, this lane reds instead of quietly reverting to the one-node reading.
+          - test-cap-sandbox-confinement-2node
           # WP-S2 / GATE #5(a), the COMPOSED leg. Same rule again: added in the same commit as
           # tests/cap-composed-path.nix. It is the entry that would have caught the hole
           # `checks.cap-wrapper-pinned` was written for — the confinement reaching production
