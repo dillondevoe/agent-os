@@ -40,15 +40,30 @@ import os
 import agos_events as E
 import agos_comms_shadow as S
 
+# ---- default paths -----------------------------------------------------------------------------
+# These were the AUTHOR's own mesh-bus paths, hardcoded as fallbacks. That is
+# operator infrastructure naming in a public repo -- the exact class tools/personal-data-denylist.txt
+# names under "operator home paths (the mesh bus)" -- and it was invisible to the gate, which reads
+# ADDED LINES IN A DIFF and so cannot see what already sits in HEAD.
+#
+# Every one of them was ALREADY overridable by an env var, so the leak lived purely in the fallback:
+# the deployment that mattered never used these strings, and nothing would ever have failed to
+# reveal them. Neutral XDG-ish defaults below; the env vars are unchanged and remain the supported
+# way to point this at a real bus.
+_DEFAULT_STATE_DIR   = os.path.expanduser("~/.local/state/agent-os")
+_DEFAULT_COMMS_DIR   = os.path.join(_DEFAULT_STATE_DIR, "brain-comms")
+_DEFAULT_EVENTS_ROOT = os.path.join(_DEFAULT_STATE_DIR, "events-root")
+
+
 
 # ---- config (defaults match agos_comms_shadow: the live root IS the proven shadow root) --------------
 def default_root():
     return os.path.expanduser(os.environ.get(
-        "AGOS_EVENTS_DIR", "~/jarvis-sync/dvo-orchestration-shadow/events-root"))
+        "AGOS_EVENTS_DIR", _DEFAULT_EVENTS_ROOT))
 
 
 def default_comms_dir():
-    return os.path.expanduser(os.environ.get("AGOS_COMMS_DIR", "~/jarvis-sync/brain-comms"))
+    return os.path.expanduser(os.environ.get("AGOS_COMMS_DIR", _DEFAULT_COMMS_DIR))
 
 
 def load_model():

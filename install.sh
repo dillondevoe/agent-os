@@ -31,12 +31,38 @@ case "$VARIANT" in
   agentos|agentos-open) : ;;
   *) echo "Unknown VARIANT '$VARIANT' (expected 'agentos' or 'agentos-open')."; exit 1 ;;
 esac
-FLAKE="github:dillondevoe/agent-os#${VARIANT}"
+# --- THE FLAKE PIN -----------------------------------------------------------------
+# Fresh installs build a PINNED rev, not whatever `main` happens to be. Rabbot's ruling
+# 2026-08-31 (Dillon delegated: "let's just do what's best"): a fresh install of a broken
+# `main` is the worse failure, because STALENESS IS VISIBLE AND BREAKAGE ON FIRST BOOT IS
+# NOT. A box that installs an old-but-verified system boots, joins the mesh, and can be
+# updated; a box that installs a broken HEAD is a stranger staring at an error on a screen
+# with no way in.
+#
+# WHAT THE PIN DOES NOT COVER, stated so it is not over-read. This script is itself fetched
+# from `main` by the curl one-liner in the README, so the SCRIPT is unpinned and always
+# newest. Script and pin therefore travel together in the same commit — the pin cannot lag
+# behind the script that carries it. What it CAN do is lag behind `main` when someone merges
+# without bumping it, and that is the only failure mode left. It is caught by
+# tests/pin-freshness.sh in CI, not by anyone remembering.
+#
+# BUMP IT AS PART OF A VERIFIED RELEASE, never as a habit: the point of the pin is that the
+# rev named here has been booted on real hardware. Moving it to an unverified HEAD converts
+# this line back into the moving ref it replaced while still looking pinned.
+#
+# Override for testing an unmerged branch:  ... | FLAKE_REV=my-branch bash
+FLAKE_REV="${FLAKE_REV:-6d54109023911b23a8d009b57997b6537c773613}"
+FLAKE="github:dillondevoe/agent-os/${FLAKE_REV}#${VARIANT}"
 DISK="${DISK:-/dev/nvme0n1}"   # override:  curl ... | DISK=/dev/sdX bash   (prefix on the piped bash)
 TS_AUTHKEY="${TS_AUTHKEY:-}"   # OPEN variant only — Tailscale pre-auth key (runtime secret, never committed)
 
 echo "=============================================================="
 echo " Agent OS installer — variant: $VARIANT — target disk: $DISK"
+# Print the pin at the YES gate. A pin nobody can see at install time is the same
+# shape as the moving ref it replaced: the operator has to be able to read WHICH rev
+# is about to be built before typing YES, otherwise a stale or overridden pin lands
+# silently and the first evidence is a box running a rev nobody chose.
+echo " building rev: $FLAKE_REV"
 echo "=============================================================="
 lsblk -o NAME,SIZE,TYPE,MODEL,MOUNTPOINT
 echo "--------------------------------------------------------------"

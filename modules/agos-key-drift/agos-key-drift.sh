@@ -35,6 +35,8 @@ REPORT="${AGOS_KEY_DRIFT_REPORT:-$PREFIX/var/lib/agos-key-drift/report.txt}"
 
 rc=0
 out=""
+files_examined=0
+keys_examined=0
 say() { out+="$1"$'\n'; echo "$1"; }
 
 # Fingerprint every key in a file, one "SHA256:... comment" per line.
@@ -61,6 +63,7 @@ fps() {
 check_user() {
   local user="$1" mutable="$2" declared="$DECL_DIR/$1"
   [ -e "$mutable" ] || return 0
+  files_examined=$((files_examined+1))
   if [ ! -r "$mutable" ]; then
     say "CANNOT-ASSESS $user: $mutable exists but is unreadable"; rc=2; return 0
   fi
@@ -75,6 +78,7 @@ check_user() {
     [ -n "$f" ] || continue
     case "$f" in UNPARSEABLE*) continue ;; esac
     c="${f%% *}"
+    keys_examined=$((keys_examined+1))
     if printf '%s\n' "$decl" | awk '{print $1}' | grep -qxF "$c"; then
       say "ok        $user: $f (declared)"
     else
@@ -89,17 +93,37 @@ if [ ! -d "$DECL_DIR" ]; then
   say "CANNOT-ASSESS: no $DECL_DIR — nothing declares anything, so nothing can be compared"
   rc=2
 else
-  check_user root "$PREFIX/root/.ssh/authorized_keys"
-  for h in "$PREFIX"/home/*; do
-    [ -d "$h" ] || continue
-    check_user "$(basename "$h")" "$h/.ssh/authorized_keys"
-  done
+  # WHICH ACCOUNTS. sshd reads %h/.ssh/authorized_keys for EVERY account with a home,
+  # so the set to scan is the passwd database — not a /home/* glob. Measured on the Dell
+  # 2026-09-02: 48 of 51 declared users have homes outside /root and /home/*, one of them
+  # writable (`ollama` -> /var/lib/ollama). The incident key planted in such a home was
+  # invisible to the glob and the scan still printed "RESULT clean". Same defect this tree
+  # has now hit five times: a sound predicate handed the wrong SET.
+  #
+  # ONE code path for box and fixture. Reading passwd only when unprefixed would leave the
+  # real enumeration untested — the battery writes an $PREFIX/etc/passwd and exercises
+  # exactly the lines that run on the box.
+  if [ -r "$PREFIX/etc/passwd" ]; then
+    while IFS=: read -r u _ _ _ _ home _; do
+      [ -n "$u" ] && [ -n "$home" ] || continue
+      check_user "$u" "$PREFIX$home/.ssh/authorized_keys"
+    done < "$PREFIX/etc/passwd"
+  else
+    say "CANNOT-ASSESS: no $PREFIX/etc/passwd — the set of accounts to scan is unknown"
+    rc=2
+  fi
 fi
 
+# THE POPULATION IS PART OF THE VERDICT. A clean result on a box with no mutable
+# authorized_keys anywhere (the shipped posture since 2026-08-31) was byte-identical to a
+# clean result on a box where every key checked out — and identical again to a scan whose
+# enumeration silently returned nothing. A zero you can READ beats a zero you have to infer.
+scanned=" [examined $files_examined mutable authorized_keys file(s), $keys_examined key(s)]"
+
 case $rc in
-  0) say "RESULT clean — declared state is the whole of SSH access" ;;
-  1) say "RESULT DRIFT — undeclared key(s) above have access; declare them or remove them" ;;
-  2) say "RESULT CANNOT-ASSESS — the scan is incomplete; this is NOT a clean result" ;;
+  0) say "RESULT clean — declared state is the whole of SSH access$scanned" ;;
+  1) say "RESULT DRIFT — undeclared key(s) above have access; declare them or remove them$scanned" ;;
+  2) say "RESULT CANNOT-ASSESS — the scan is incomplete; this is NOT a clean result$scanned" ;;
 esac
 
 mkdir -p "$(dirname "$REPORT")" 2>/dev/null

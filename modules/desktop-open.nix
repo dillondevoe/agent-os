@@ -5,7 +5,7 @@
 # REPRODUCIBLE so every Phase 2 app has a compositor to "tile cleanly" in, and FINISHES the Waybar
 # ambient bar (clock / battery / network / volume — the roadmap's "partial, finish it").
 #
-# Live source of truth: ~/jarvis-sync/dvo-inbox/dell-desktop-baseline/ (hyprland.conf verified
+# Live source of truth: the out-of-tree desktop baseline for this box (hyprland.conf verified
 # `hyprctl configerrors`-clean on Hyprland 0.56: multi-line blur/shadow blocks, no `pseudotile`).
 #
 # OPEN-only + self-contained (isolation doctrine — imported solely from configuration-open.nix,

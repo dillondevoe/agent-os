@@ -34,8 +34,31 @@ except Exception:
     _load_providers = _providers_resolve = None
     class _ProviderConfigError(Exception): pass
 
+# The two CUMULATIVE spend ceilings (Rabbot's GO, 2026-08-31). Imported the same optional
+# way as providers, with one asymmetry that matters: if the module is MISSING while a
+# ceiling is CONFIGURED, that is not a degrade to "no ceiling" — it is a safety stage that
+# cannot run, and _spend_gate() below turns it into a refusal. An absent guard must never
+# read as an absent need for one.
+try:
+    import spend_ceiling as _spend
+except Exception:
+    _spend = None
+
 _PROVIDERS_PATH = os.environ.get("AGENT_OS_PROVIDERS", "/etc/agent-os/providers.yaml")
 _PROVIDERS = None
+# THREE states, not two. `os.path.exists()` alone answers False for a DANGLING SYMLINK, and
+# /etc/agent-os/providers.yaml is a symlink into the nix store on every open build — so a
+# GC'd or half-switched target used to read as "no config at all" and degrade silently to the
+# legacy OLLAMA_MODEL path, taking the spend-gated escalate role with it and saying nothing.
+# Absence is LEGITIMATE on sealed (which imports no escalate module and is meant to run
+# floor-only), so absence must stay quiet; a BROKEN link is a deployment fault and must be as
+# loud as a malformed config. Visible starvation beats invisible absence.
+_dangling = (not os.path.exists(_PROVIDERS_PATH)) and os.path.islink(_PROVIDERS_PATH)
+if _dangling:
+    sys.stderr.write(
+        f"\n\033[1;31m⛔ provider config path is a broken symlink: {_PROVIDERS_PATH} "
+        f"— that is a broken deployment, not an absent config. I am not starting.\033[0m\n")
+    sys.exit(1)
 if os.path.exists(_PROVIDERS_PATH):
     if _load_providers is None:
         sys.stderr.write("\n\033[2m⚠ provider config present but providers.py unavailable — falling back to OLLAMA_MODEL\033[0m\n")
@@ -61,6 +84,13 @@ def _floor_model():
 
 MODEL, ACTIVE_PROVIDER, ACTIVE_PROVIDER_KIND = _floor_model()
 
+# Declared HERE, above _escalate_status, and not down with the consent block where it used to
+# live: _escalate_status() is CALLED at module level a few lines below, and it now resolves
+# through this set. Defined later, that call raises NameError at import and the brain
+# crash-loops under brain-home's `while :;` — which is exactly what it did on the Dell at
+# 18:53Z on 2026-09-01, live, until this line moved.
+_ESCALATE_UNAVAILABLE = set()   # escalate providers rate-limited/unreachable THIS session
+
 def _escalate_status():
     # Config-only escalate-role RESOLUTION, distinct from and much smaller than the
     # deferred Anthropic shim (task 287, 2026-08-13 assessment): this answers "is a
@@ -73,7 +103,12 @@ def _escalate_status():
     roles = _PROVIDERS.get("roles", {})
     if "escalate" not in roles:
         return {"configured": False, "provider": None, "reason": "no escalate role in providers.yaml"}
-    name, cfg, degraded = _providers_resolve(_PROVIDERS, "escalate")
+    # Resolve through _ESCALATE_UNAVAILABLE, not around it. Without the argument this
+    # answers from config alone and reports "available" for a provider the startup
+    # preflight or an in-session 429 has already marked unusable — the status surface
+    # then contradicts the router standing next to it.
+    name, cfg, degraded = _providers_resolve(_PROVIDERS, "escalate",
+                                             unavailable=frozenset(_ESCALATE_UNAVAILABLE))
     return {"configured": not degraded, "provider": name, "reason": None if not degraded else "escalate unavailable, degraded to floor"}
 
 ESCALATE_STATUS = _escalate_status()
@@ -92,7 +127,46 @@ ESCALATE_STATUS = _escalate_status()
 # `always` is NOT offered in this phase and is refused loudly rather than silently
 # downgraded — a config that thinks it armed spending forever, and didn't, is worse than
 # one that fails to start.
-_ESCALATE_UNAVAILABLE = set()   # escalate providers rate-limited/unreachable THIS session
+
+
+def _preflight_escalate_secret():
+    """Mark an escalate provider UNAVAILABLE at startup when its secret cannot be resolved.
+
+    Without this, a missing key is discovered in the WRONG PLACE. _route_for_turn resolves
+    happily (it inspects roles and availability, never the secret), returns role=escalate with
+    `degraded: None`, and the RuntimeError does not surface until _resolve_secret runs inside
+    _anthropic_stream_events — which is a GENERATOR, so it does not even raise when called, only
+    when first consumed, from inside the transport. chat_stream_safe's degrade handler catches
+    (TimeoutError, URLError, ConnectionError) and RuntimeError is none of those, so it escapes
+    the turn loop: the brain dies and brain-home's `while :;` restarts it, taking the session
+    with it. Measured on the Dell 2026-09-01 before this existed, which is why it exists.
+
+    The contract this restores is the one the rest of the escalate path already holds: an
+    escalate provider we cannot use is UNAVAILABLE, and an unavailable escalate degrades to the
+    local floor with a VISIBLE reason — never a crash, and never a spill to another metered
+    provider. Resolution failure is a config fact, knowable at startup; discovering it mid-turn
+    was only ever an accident of where the lookup happened to live.
+
+    Reads the secret to prove it RESOLVES and throws the value away — the key is never retained,
+    logged, or included in the reason string.
+    """
+    roles = (_PROVIDERS or {}).get("roles") or {}
+    wanted = roles.get("escalate")
+    if not wanted:
+        return None
+    cfg = (_PROVIDERS or {}).get("providers", {}).get(wanted, {})
+    ref = cfg.get("api_key_ref")
+    if not ref:
+        _ESCALATE_UNAVAILABLE.add(wanted)
+        return f"escalate provider {wanted!r} has no api_key_ref"
+    try:
+        _resolve_secret(ref)
+    except Exception as e:
+        # The message names the REF (a path or an env var name), never the secret: the ref is
+        # exactly the remedy the operator needs and is not itself sensitive.
+        _ESCALATE_UNAVAILABLE.add(wanted)
+        return f"escalate key unresolved ({e}) — escalate inert, answering on the local floor"
+    return None
 
 class _EscalateConsent:
     def __init__(self, raw=None):
@@ -113,6 +187,77 @@ class _EscalateConsent:
         return "session" if self.session else None
 
 CONSENT = _EscalateConsent()
+
+# ── summon_claude consent, IN CODE (Rabbot door (i), 2026-09-02) ──────────────────────
+# THE HOLE THIS CLOSES. `summon_claude` spawns the operator's Claude CLI as a subprocess:
+# their account, their permissions, no broker, no uid split. Until now the ONLY thing
+# between a model-emitted tool call and that subprocess was prompt text — the tool
+# description saying "call ONLY after the user has explicitly said yes", and one line in
+# SYS_BASE. The structural guard that exists (the 3B front door cannot reach do_tool at
+# all — kick wall, PR #64) protects a different path; on the 9B side the gate was prose.
+#
+# A CONTROL THAT LIVES ONLY IN PROSE IS NOT A CONTROL. This tree has paid for that lesson
+# in the debounce marker, in `gh pr merge --auto`, and in a lint that documented a scope it
+# did not have. Consent asserted by the model is the model deciding it has consent.
+#
+# So the grant is armed ONLY from the REPL input path, by the operator typing `:summon` —
+# the same shape as `:escalate`, and reachable by nothing the model emits. It is one-shot
+# and it expires, because a grant that outlives the exchange that motivated it is a
+# standing permission nobody remembers giving.
+#
+# DELIBERATELY ONE FUNCTION. `ok_to_summon()` is the whole gate, so door (ii) — routing
+# run_command + summon_claude + fetch_web through the broker as one uid-split slice — can
+# take ownership of it without unpicking anything. (i) does not preclude (ii).
+_SUMMON_GRANT_TTL_S = 300  # ~ a few turns at this box's cadence; a stale yes is not a yes
+
+class _SummonConsent:
+    def __init__(self, ttl=_SUMMON_GRANT_TTL_S):
+        self._at = None
+        self._ttl = ttl
+    def arm(self):
+        """Called ONLY from the operator's own input line. Never from a tool, a model
+        response, or anything parsed out of model output."""
+        self._at = time.time()
+    def check_and_consume(self, now=None):
+        """(True, None) if a summon may proceed, else (False, reason). Single-use: a
+        successful check disarms the grant, so one `:summon` buys exactly one summon."""
+        now = time.time() if now is None else now
+        if self._at is None:
+            return False, "no operator consent — summon_claude is cloud and uses the user's account"
+        age = now - self._at
+        if age > self._ttl:
+            self._at = None
+            return False, f"consent expired ({int(age)}s > {self._ttl}s) — ask again"
+        self._at = None
+        return True, None
+    def armed(self, now=None):
+        now = time.time() if now is None else now
+        return self._at is not None and (now - self._at) <= self._ttl
+
+SUMMON_CONSENT = _SummonConsent()
+
+def ok_to_summon(consent=None, now=None):
+    """THE gate. The deployed path and the battery both call this — no fixture-only route.
+
+    (#256's lesson: an arm that exercises a different code path than the box runs is an arm
+    that proves nothing about the box.)"""
+    return (consent or SUMMON_CONSENT).check_and_consume(now=now)
+
+def _log_summon_attempt(allowed, reason=None):
+    """A refused summon is LOUD. A legitimate summon blocked by this gate must show up as a
+    defect in the record, not as a silence someone has to notice the absence of."""
+    try:
+        os.makedirs(os.path.dirname(_TURN_LOG_PATH), exist_ok=True)
+        with open(_TURN_LOG_PATH, "a") as f:
+            f.write(json.dumps({
+                "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                "event": "summon_claude",
+                "allowed": bool(allowed),
+                "reason": reason,
+            }) + "\n")
+    except Exception:
+        pass
+
 if CONSENT.rejected_always:
     sys.stderr.write("\n\033[1;31m⛔ AGENT_OS_ESCALATE_CONSENT=always is not offered in this phase "
                      "(Geist ruling 2026-08-22) — use `session`, or grant per turn with `:escalate`.\033[0m\n")
@@ -121,6 +266,26 @@ if CONSENT.rejected_always:
 def _floor_route(degraded=None):
     return {"role": "floor", "provider": ACTIVE_PROVIDER, "model": MODEL,
             "kind": ACTIVE_PROVIDER_KIND, "consent_source": None, "degraded": degraded}
+
+def _spend_gate():
+    """(True, None) if a metered turn may run, else (False, reason). Never raises.
+
+    Fail-CLOSED in both directions the contract names: a ceiling that is configured but
+    cannot be evaluated refuses, and a spend_ceiling module that is missing while a ceiling
+    is configured refuses. The only path that returns True without consulting a counter is
+    the one where NO ceiling is configured at all."""
+    configured = any(os.environ.get(k, "").strip() for k in
+                     ("AGENT_OS_SPEND_DAY_TOKENS", "AGENT_OS_SPEND_CUMULATIVE_TOKENS"))
+    if not configured:
+        return True, None
+    if _spend is None:
+        return False, "spend ceiling UNAVAILABLE — a ceiling is configured but spend_ceiling.py could not be imported"
+    try:
+        return _spend.check()
+    except Exception as e:
+        # check() is written not to raise; this is the belt to that suspenders. An
+        # unexpected exception here is still a safety stage that did not run.
+        return False, f"spend ceiling UNAVAILABLE — {e}"
 
 def _route_for_turn(consent_source=None):
     """Resolve which provider answers this turn. No consent → floor, unconditionally.
@@ -140,6 +305,12 @@ def _route_for_turn(consent_source=None):
     if name != wanted:
         return _floor_route(f"escalate provider {wanted!r} unavailable — degraded to the local "
                             f"floor (never to another metered provider)")
+    ok, why = _spend_gate()
+    if not ok:
+        # NEVER-SPILL when the ceiling trips: the local floor, not a cheaper metered
+        # provider. A budget that reroutes to something else that costs money has not
+        # stopped spending, it has renamed it.
+        return _floor_route(why + " — answering on the local floor")
     return {"role": "escalate", "provider": name, "model": cfg.get("model", MODEL),
             "kind": cfg.get("kind", "claude"), "consent_source": consent_source, "degraded": None}
 
@@ -219,16 +390,48 @@ def _log_turn_provenance(route=None, tokens=None):
     except Exception:
         pass
 
+# Substituted at build by genesis-open.nix from environment.variables.OLLAMA_THINK — the
+# SAME attrset the login env is built from, so there is one spelling and it cannot drift.
+# Left as the literal placeholder in a bare dev checkout, which _think_budget() detects.
+_THINK_BUILD_DEFAULT = "@THINK_DEFAULT@"
+
 def _think_budget():
     # OLLAMA_THINK: think-budget control for thinking models on the ~3 tok/s CPU box
     # (spec 2026-08-05 item b). off/false/0 → no thinking (fastest replies);
     # low/medium/high → per-level budget where the model supports it; on/true/1 → full.
-    # Unset → omit the key, keep the model's default.
-    v=os.environ.get("OLLAMA_THINK","").strip().lower()
-    if v in ("off","false","0","no"): return False
-    if v in ("on","true","1","yes"): return True
-    if v in ("low","medium","high"): return v
-    return None
+    # Unset or UNRECOGNISED → fall back to the BUILD-TIME default; if that is absent too, omit.
+    #
+    # WHY A BUILD-TIME DEFAULT AND NOT JUST THE ENV (2026-08-31, Dillon's photo of the TUI
+    # still thinking for 81s with OLLAMA_THINK=off already deployed). `environment.variables`
+    # builds the LOGIN environment. The TUI is launched by `systemd --user` (brain-home.service,
+    # commit baac2a3) which does not source /etc/set-environment, so the shipped value reached
+    # the login shell I probed and NOT the process that reads it. Baking it into the script
+    # makes it hold in EVERY launch context — systemd user unit, login shell, cron, a bare
+    # exec — because there is no inheritance step left to lose it.
+    #
+    # The env still WINS when set, deliberately: `OLLAMA_THINK=on` in the session stays the
+    # zero-rebuild rollback. This is a default, not a seam pin — unlike broker/confirm/taint,
+    # where an inherited value is an attack surface and the wrapper must be authoritative.
+    #
+    # AN UNRECOGNISED VALUE FALLS BACK TO THE BAKED DEFAULT, it does not return None. Returning
+    # None omits the key and restores the MODEL's default, i.e. thinking ON — so before this,
+    # `OLLAMA_THINK=disbaled` in a session was indistinguishable from never setting it and
+    # silently undid the whole fix. A typo must degrade to the shipped value, never past it.
+    def parse(v):
+        v = (v or "").strip().lower()
+        if v in ("off","false","0","no"):    return False
+        if v in ("on","true","1","yes"):     return True
+        if v in ("low","medium","high"):     return v
+        return None                          # unrecognised OR empty — not a value
+
+    got = parse(os.environ.get("OLLAMA_THINK"))
+    if got is not None:
+        return got
+    # An unsubstituted placeholder is NOT a value either: without this test a bare dev checkout
+    # would parse "@think_default@" to None and land on the model's default, which is the exact
+    # silent-ON outcome this change exists to remove and is invisible in a correct-looking build.
+    d = _THINK_BUILD_DEFAULT.strip().lower()
+    return None if d.startswith("@") else parse(d)
 THINK=_think_budget()
 
 # ── R1 CONTEXT BOUND (tier-0 item 3, Rabbot's runtime-config lane) ────────────
@@ -345,7 +548,7 @@ TOOLS=[
  {"type":"function","function":{"name":"media_info","description":"Probe an image/video/audio file (type, format, duration, dimensions, streams). Use to inspect a media file.","parameters":{"type":"object","properties":{"path":{"type":"string","description":"path to the media file"}},"required":["path"]}}},
  {"type":"function","function":{"name":"notes","description":"The user's notes. action 'list' shows all notes newest-first; 'read' returns one note's body (needs slug).","parameters":{"type":"object","properties":{"action":{"type":"string","description":"list | read"},"slug":{"type":"string","description":"for 'read': the note slug"}}}}},
  {"type":"function","function":{"name":"fetch_web","description":"Fetch a public web page and return its readable text (nav/boilerplate stripped). Use to READ what a page says (the inference half of browsing); use open_url instead to show the user a site.","parameters":{"type":"object","properties":{"url":{"type":"string","description":"full http(s) URL"}},"required":["url"]}}},
- {"type":"function","function":{"name":"summon_claude","description":"Bring in cloud Claude for a task beyond the local brain. CLOUD, uses the user's account — call ONLY after the user has explicitly said yes to a summon offer this turn. Never auto-fire.","parameters":{"type":"object","properties":{"task":{"type":"string","description":"what Claude should do, stated completely"},"context_summary":{"type":"string","description":"compact summary of the last ~6 turns relevant to the task — never the whole history, never secrets"}},"required":["task","context_summary"]}}},
+ {"type":"function","function":{"name":"summon_claude","description":"Bring in cloud Claude for a task beyond the local brain. CLOUD, uses the user's account. Consent is enforced in code, not here: the call is REFUSED unless the operator typed `:summon` at the prompt. Offer a summon and tell them to type `:summon <msg>`; a yes in conversation does not arm it. Never auto-fire.","parameters":{"type":"object","properties":{"task":{"type":"string","description":"what Claude should do, stated completely"},"context_summary":{"type":"string","description":"compact summary of the last ~6 turns relevant to the task — never the whole history, never secrets"}},"required":["task","context_summary"]}}},
 ]
 
 def live_context():
@@ -393,7 +596,8 @@ SYS_BASE=("You are Agent OS's local brain — sovereign, private, on-machine, no
      "changes happen in the OS repo — say so instead of editing. "
      "SUMMON: when a task is beyond you (deep code work, long documents, hard reasoning), OFFER: "
      "\"this one's beyond me — want me to bring in Claude? [cloud, uses your account]\" and call "
-     "summon_claude only after an explicit yes. The offer must name that it's cloud.")
+     "summon_claude only after an explicit yes, which the operator gives by typing `:summon` — "
+     "a conversational yes does not arm it and the call will be refused. The offer must name that it's cloud.")
 
 def sysmsg():
     # SOUL first, unspoofably (Geist item 3): identity leads, then operational addendum.
@@ -505,6 +709,24 @@ def _resolve_secret(ref):
         f"unsupported api_key_ref scheme {scheme!r} — the sealed image ships no secret-manager "
         f"CLI, so use env://VAR or file://PATH (a systemd LoadCredential= or EnvironmentFile= "
         f"is the intended delivery path for {ref!r})")
+
+# Run the escalate-secret preflight HERE, not at the definition above: it calls
+# _resolve_secret, which is only defined at this point in the module. Recompute
+# ESCALATE_STATUS afterwards — it was computed near the top, before this could run, so
+# without this line the status surface reports "escalate: configured" on a box with no
+# key, which is the same class of lie the ceiling work spent a day removing: a status
+# field that is not the authority. (_escalate_status() did NOT consult
+# _ESCALATE_UNAVAILABLE until the fix above — I asserted that it did before checking, in
+# the fix about status fields that lie. It does now.)
+_ESCALATE_PREFLIGHT_REASON = _preflight_escalate_secret()
+if _ESCALATE_PREFLIGHT_REASON:
+    # Both fields, deliberately. escalate_status_line() branches on `configured` and only
+    # reads `reason` in the not-configured arm, so setting `reason` alone left the surface
+    # printing "cloud-claude available" on a box with no key. Caught by the control arm,
+    # not by review: the routing assertion passed while the line beside it still lied.
+    ESCALATE_STATUS = _escalate_status()
+    ESCALATE_STATUS["configured"] = False
+    ESCALATE_STATUS["reason"] = _ESCALATE_PREFLIGHT_REASON
 
 def _anthropic_translate_tools(tools):
     # Ollama: {"type":"function","function":{name, description, parameters}}
@@ -764,6 +986,30 @@ def chat_stream(msgs, route=None):
     # this before appending — armed by the consent battery, because an internal key leaking into
     # a provider payload is the kind of thing that fails only on the metered side. The same
     # popped value feeds the cost-cap breaker's cumulative output-token count.
+    # A TURN THAT PRODUCED NOTHING SAYS SO. Until 2026-08-31 an empty answer with no tool
+    # calls printed the timing line and nothing else, so the box looked like it had replied
+    # with silence. That is not hypothetical: with thinking on, this model spent its entire
+    # `num_predict` budget (2048) reasoning, hit the ceiling mid-thought and returned an
+    # EMPTY message — 457s, twice, measured on the Dell. `OLLAMA_THINK=off` (configuration-
+    # open.nix) fixes THAT cause, but the class survives the cause: any future ceiling, stop
+    # sequence, or transport hiccup can still land here, and the operator's only signal was
+    # a prompt coming back.
+    #
+    # The generalisation from that hunt, which is why this is worth a branch: a stopwatch
+    # reports "slow" for a run that produced no answer EXACTLY as for one that produced a
+    # good answer, so the mute state hides inside the merely-slow one indefinitely. This is
+    # the renderer refusing to let those two look alike.
+    #
+    # eval_count is named rather than described because it is the discriminator: a mute turn
+    # with a LARGE count burned its budget (thinking, or a runaway that never emitted), while
+    # one with ~0 means the model returned immediately and the problem is upstream. Those want
+    # opposite fixes, so the number is the message.
+    if not content and not tool_calls:
+        sys.stderr.write(
+            f"\033[33m[no answer — the model returned an empty message after {eval_count or 0} "
+            f"output tokens. A large count means the reply budget went to reasoning "
+            f"(check OLLAMA_THINK, it should be 'off'); a near-zero count means it stopped "
+            f"immediately and the cause is upstream of the model.]\033[0m\n")
     return {"role":"assistant","content":content,"tool_calls":tool_calls,"_usage":eval_count or None}
 
 def chat(msgs):
@@ -772,6 +1018,50 @@ def chat(msgs):
                      "options":{"num_ctx":NUM_CTX}}).encode()
     r=urllib.request.Request(OLLAMA,data=body,headers={"Content-Type":"application/json"})
     return json.load(urllib.request.urlopen(r,timeout=180))["message"]
+
+# XML/Hermes tool-call form, emitted as CONTENT when the Modelfile template does not
+# marshal structured `tool_calls`. Observed live on qwen3.5:9b (Dillon's photo of the Dell
+# TUI, 2026-08-31 06:44 CDT), shaped:
+#
+#     <tool_call><function=run_command><parameter=command>uptime</parameter></function></tool_call>
+#
+# WHY THIS IS A CORRECTNESS BUG AND NOT A COSMETIC ONE. The JSON fallback below does not
+# match this shape, so the block fell through as prose — and the brain then NARRATED a
+# system status it had never run. A tool call that renders as text is a CLAIM: the model
+# asked to act, nothing acted, and the next turn spoke as though it had. Parsing it is what
+# makes the answer honest, not what makes it pretty.
+#
+# SCOPE, STATED SO THE NEXT READER DOES NOT OVERTRUST IT: this parses the observed form and
+# the bare `<function=…>` block (a `<tool_call>` wrapper truncated by a token limit is
+# exactly the dangerous prose case, so it must not be the thing that decides). Parameter
+# values are RAW TEXT, never json.loads'd — `<parameter=command>` carries a shell string,
+# and a command containing `{` is not a JSON object. A shape neither branch recognises is
+# still left in `clean`, where _TOOLCALL_TOKEN_RE (the front-door kick) can still see it.
+_XML_TOOLCALL_BLOCK_RE = re.compile(r"<tool_call>\s*(.*?)\s*</tool_call>", re.S)
+_XML_FUNCTION_RE       = re.compile(r"<function\s*=\s*([A-Za-z_][\w.]*)\s*>(.*?)</function>", re.S)
+_XML_PARAMETER_RE      = re.compile(r"<parameter\s*=\s*([A-Za-z_][\w.]*)\s*>(.*?)</parameter>", re.S)
+
+def _extract_xml_tools(c):
+    """Pull XML-form calls out of content. Returns (calls, content_with_blocks_removed).
+
+    A `<function=…>` found inside a `<tool_call>` wrapper and one found bare are treated
+    the same; only the span removed from `clean` differs, so a partial emission cannot
+    leave half a call rendering as prose."""
+    out=[]; clean=c; spans=[]
+    for blk in _XML_TOOLCALL_BLOCK_RE.finditer(c):
+        inner=blk.group(1); found=False
+        for fn in _XML_FUNCTION_RE.finditer(inner):
+            out.append((fn.group(1), {k: v for k, v in _XML_PARAMETER_RE.findall(fn.group(2))})); found=True
+        # An empty or unrecognised <tool_call> wrapper is NOT swallowed — leaving it in
+        # `clean` is what keeps the front-door kick able to see that the model tried.
+        if found: spans.append(blk.span())
+    if not out:
+        for fn in _XML_FUNCTION_RE.finditer(c):
+            out.append((fn.group(1), {k: v for k, v in _XML_PARAMETER_RE.findall(fn.group(2))}))
+            spans.append(fn.span())
+    for a,b in reversed(spans):
+        clean = clean[:a] + clean[b:]
+    return out, clean
 
 def extract_tools(msg):
     tcs=msg.get("tool_calls") or []
@@ -783,6 +1073,8 @@ def extract_tools(msg):
     for m in re.finditer(r"\{[^{}]*\"name\"\s*:\s*\"(\w+)\"[^{}]*\"arguments\"\s*:\s*(\{[^{}]*\})[^{}]*\}", c):
         try: out.append((m.group(1), json.loads(m.group(2)))); clean=clean.replace(m.group(0),"")
         except: pass
+    if not out:
+        out, clean = _extract_xml_tools(c)
     clean=re.sub(r"\bbrtc\b","",clean).strip()
     return out, clean
 
@@ -902,6 +1194,15 @@ def _summon_claude(task,context_summary):
     # has said yes. Reachable only through do_tool, which the 3B front-door structurally
     # cannot fire (kick wall, PR #64) — cloud stays a summon on the 9B side, never an OS
     # dependency. Brief = task + compacted context + one machine line, never full history.
+    # THE GATE. Before the task check, so a consent-less call is refused on the ground it
+    # is actually refused on, and cannot be probed for validity by sending an empty task.
+    allowed, why = ok_to_summon()
+    if not allowed:
+        _log_summon_attempt(False, why)
+        return ("summon refused: " + why + ". The operator grants it by typing `:summon` at the "
+                "prompt — saying yes in conversation is not enough, because this path spends "
+                "their cloud account.")
+    _log_summon_attempt(True, None)
     if not task: return "summon error: no task given"
     brief=(f"Task from Agent OS's local brain (relay your answer to the user through it):\n{task}\n\n"
            f"Conversation context:\n{context_summary}\n\n"
@@ -1069,6 +1370,18 @@ def turn(msgs, consent_source=None):
         # from a transport that reported nothing counts as 0 spend — it cannot trip the
         # ceiling, and the provenance line above already records the unknown as null).
         spent+=usage or 0; hops+=1
+        # Record METERED spend against the cumulative ceilings, per hop rather than per
+        # turn — a turn that never returns (the respawn-loop shape the ceiling exists for)
+        # would otherwise contribute nothing to the counter it is supposed to be filling.
+        # Floor turns are free and deliberately not counted; see spend_ceiling.py's UNIT.
+        if route.get("role") == "escalate" and usage and _spend is not None:
+            try:
+                _spend.record(int(usage))
+            except Exception as e:
+                # Unrecorded spend is unbounded spend: say so loudly and stop the turn
+                # rather than continue paying into a counter that is not counting.
+                print(f"\n\033[1;31m⛔ spend ceiling could not record this hop ({e}) — halting the turn\033[0m")
+                return
         msgs.append(msg)
         calls,clean=extract_tools(msg)
         if not calls:
@@ -1290,6 +1603,18 @@ def main():
             if 1<=n<=len(EXPAND_BUFFERS): print(EXPAND_BUFFERS[n-1])
             else: print(f"  \033[2m(no such buffer — have 1..{len(EXPAND_BUFFERS)})\033[0m")
             continue
+        # ── `:summon` — the consent act for summon_claude (Rabbot door (i), 2026-09-02) ──
+        # Typing it IS the consent, and typing it is the ONLY way to arm it. Bare `:summon`
+        # reports status rather than arming, so a half-typed command cannot grant anything.
+        if u.split()[0]==":summon":
+            rest=u[len(":summon"):].strip()
+            if not rest:
+                st=("armed" if SUMMON_CONSENT.armed() else "not armed")
+                print(f"  \033[2msummon_claude consent: {st} "
+                      f"(one-shot, expires {_SUMMON_GRANT_TTL_S}s after `:summon <msg>`)\033[0m")
+                continue
+            SUMMON_CONSENT.arm()
+            u=rest
         # ── `:escalate` — the per-turn consent act (task 323, Geist ruling 2026-08-22) ──
         # Typing it IS the consent; there is no other path from this prompt to the metered
         # provider. Bare `:escalate` reports status rather than arming anything, so a

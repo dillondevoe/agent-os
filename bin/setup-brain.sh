@@ -13,6 +13,10 @@ setup-brain.sh — provision the Agent OS brain(s).
   bin/setup-brain.sh --model TAG     pull a specific ollama model tag
   bin/setup-brain.sh --cloud         ALSO install the cloud brain (Claude Code)
   bin/setup-brain.sh --cloud-only    install only the cloud brain (skip the model pull)
+                                     OPEN PROFILE ONLY: the sealed profile drops the
+                                     installer's fetch by design, and installing the
+                                     cloud brain does NOT make it the login brain —
+                                     that takes an explicit BRAIN=claude.
   bin/setup-brain.sh -h | --help     this help
 
 Env:
@@ -83,8 +87,21 @@ if [ "$DO_CLOUD" = 1 ]; then
     command -v curl >/dev/null 2>&1 || die "curl not found — cannot fetch the Claude Code installer."
     say "installing Claude Code (cloud brain) into \$HOME/.local/bin ..."
     # The native installer targets $HOME (writable) — not the immutable /usr the ollama
-    # daemon-installer needs — so unlike ollama, the cloud CLI *can* be curl-installed here.
-    curl -fsSL https://claude.ai/install.sh | bash || die "Claude Code install failed."
+    # daemon-installer needs — so unlike ollama, the cloud CLI *can* be fetched and run here.
+    #
+    # It is NOT piped into a shell. `curl ... | bash` executes whatever the socket produced,
+    # including a truncated transfer — bash runs the first half of a script whose second half
+    # never arrived — and there is no point at which the bytes could have been rejected.
+    # fetch-verified.sh checks them against supply-chain/pins.txt FIRST and writes nothing on
+    # a mismatch, so this call has two outcomes: the pinned installer, or a hard stop.
+    #
+    # A mismatch here is not automatically an attack; upstream rotates the script. It is also
+    # not automatically a rotation. Read the diff before re-recording the pin — see pins.txt.
+    HERE="$(cd "$(dirname "$0")" && pwd)"
+    INST="$(mktemp)"; trap 'rm -f "$INST"' EXIT
+    "$HERE/fetch-verified.sh" claude-code-install "$INST" \
+      || die "Claude Code installer failed verification (see above) — refusing to run it."
+    bash "$INST" || die "Claude Code install failed."
     if command -v claude >/dev/null 2>&1; then
       say "Claude Code installed — run 'claude' once to log in (interactive)."
     else
@@ -95,10 +112,15 @@ fi
 
 # --- how the shell will choose on next login ----------------------------------------
 say "done. On next login agent-shell picks a brain by precedence:"
-printf '   1. $BRAIN                 (explicit override, if set)\n'
-printf '   2. cloud `claude`         (if installed + logged in)\n'
-printf '   3. local `brain-ollama`   floor -> %s @ %s\n' "$MODEL" "$OLLAMA_HOST"
+printf '   1. $BRAIN                 (explicit override, if set; probed before use)\n'
+printf '   2. local `agent-loop`     tool-calling loop -> %s @ %s\n' "$MODEL" "$OLLAMA_HOST"
+printf '   3. local `brain-ollama`   chat floor\n'
 printf '   4. mem REPL               (always works, zero deps)\n'
+printf '\n'
+printf '   The cloud brain is NEVER auto-selected, installed or not. Having `claude` on\n'
+printf '   PATH does not send anything off this machine; it only makes the local brain\n'
+printf '   able to call out when YOU say yes. To hand the login shell to the cloud, set\n'
+printf '   BRAIN=claude deliberately.\n'
 if [ "$DO_LOCAL" = 1 ] && [ "$DO_CLOUD" = 0 ]; then
   say "sovereign: no cloud brain installed — this box talks with NO internet on '${MODEL}'."
 fi

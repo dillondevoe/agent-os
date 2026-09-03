@@ -324,6 +324,216 @@
             touch $out
           '';
 
+        # `OLLAMA_THINK=off` is DECLARED, and the value the open variant declares is one the
+        # brain's OWN parser turns into "no thinking" — checked by running that parser, not by
+        # re-listing the tokens it accepts.
+        #
+        # WHY THIS IS NOT A STYLE CHECK. `_think_budget()` (agent-brain.py:223) returns None for
+        # anything outside off/false/0/no|on/true/1/yes|low/medium/high, and None means "omit the
+        # key, keep the model's default". So a typo — `OLLAMA_THINK = "disabled"`, `"OFF "`,
+        # `"none"` — does not fail, does not warn, and silently ships thinking back ON. The
+        # failure state of this setting is INDISTINGUISHABLE from never having set it, which is
+        # the same shape as the sentinel that collided with a real value (PR #237) and the control
+        # that was budgeted against but never set (MAX_LOADED_MODELS). Third instance on this
+        # surface in one week, so it gets a gate rather than a comment.
+        #
+        # WHAT IS AT STAKE, measured on the Dell 2026-08-31: with thinking on, the 9B spends the
+        # whole 2048-token `num_predict` budget reasoning and returns an EMPTY answer after ~7.5
+        # minutes (twice, with a control arm). This value is not a speed tuning; it is what makes
+        # the brain answer at all. A silent revert to the default is a mute box.
+        #
+        # BOTH HALVES ARE READ FROM THE SHIPPED CONFIG, neither retyped: the value comes out of
+        # the open variant's own `environment.variables`, and the parser is the same
+        # `agent-brain.py` that genesis-open.nix copies to `bin/agent-brain`. A check carrying its
+        # own copy of either one stops testing the shipped thing the moment they drift.
+        # THINKING IS OFF IN THE BRAIN THE SYSTEM SHIPS, WITH NO ENVIRONMENT AT ALL.
+        #
+        # This REPLACES `think-off-is-declared-and-parseable`, which was green throughout the
+        # failure it existed to prevent. That check read OLLAMA_THINK out of
+        # `environment.variables` and fed it to the parser in `agent-brain.py`, and both halves
+        # were correct — but `environment.variables` builds the LOGIN environment, and the TUI
+        # is started by `systemd --user` (brain-home.service, baac2a3), which never sources it.
+        # So the declaration was right, the parser was right, and the running brain still had
+        # OLLAMA_THINK unset and thought for 81 seconds a turn. Dillon photographed it.
+        #
+        # THE FIX TO THE CHECK IS THE VANTAGE, NOT THE ASSERTION. It now execs the BUILT
+        # artifact (system.build.agentBrain — the script with @THINK_DEFAULT@ substituted) with
+        # OLLAMA_THINK **deleted from the environment**, because that is precisely the condition
+        # a systemd user unit presents. Passing the value in was the whole defect: a check that
+        # supplies the input it is verifying arrives can only ever confirm its own argument.
+        think-off-reaches-the-brain-with-no-env =
+          let
+            p = nixpkgs.legacyPackages.${system};
+            brain = self.nixosConfigurations.agentos-open.config.system.build.agentBrain;
+          in p.runCommand "think-off-reaches-the-brain-with-no-env" {
+            nativeBuildInputs = [ p.python3 ];
+          } ''
+            cat > check.py <<'PYEOF'
+            import importlib.util, os, sys
+            from importlib.machinery import SourceFileLoader
+
+            def think(value):
+                """Load the BUILT brain under a given OLLAMA_THINK and read the constant it
+                computed. `value is None` means the variable is ABSENT, not empty."""
+                os.environ.pop("OLLAMA_THINK", None)
+                if value is not None:
+                    os.environ["OLLAMA_THINK"] = value
+                # An EXPLICIT loader, because the shipped artifact is `bin/agent-brain` with no
+                # .py suffix: spec_from_file_location infers the loader from the EXTENSION and
+                # returns None for this path, which is how the first run of this check died.
+                # Naming the loader is also the point -- the file under test is the installed
+                # one, not a .py copy that would have imported by luck.
+                loader = SourceFileLoader("ab", sys.argv[1])
+                spec = importlib.util.spec_from_loader("ab", loader)
+                m = importlib.util.module_from_spec(spec)
+                loader.exec_module(m)
+                return m
+
+            # THE ARM THAT MATTERS, and the one the old check could not express: NO env.
+            m = think(None)
+            print("no OLLAMA_THINK in env -> THINK=%r (want False), baked default=%r"
+                  % (m.THINK, m._THINK_BUILD_DEFAULT))
+            if m.THINK is not False:
+                raise SystemExit(
+                    "the brain this system ships thinks by default when launched with no "
+                    "OLLAMA_THINK (THINK=%r). That is how systemd --user starts it, so this is "
+                    "the live TUI's condition, not a corner case." % (m.THINK,))
+
+            # The substitution actually HAPPENED. Without this the check passes on a build where
+            # @THINK_DEFAULT@ was never replaced but some other path produced False -- and a
+            # placeholder that reaches runtime is a defect even when the answer is right today.
+            if m._THINK_BUILD_DEFAULT.startswith("@"):
+                raise SystemExit("@THINK_DEFAULT@ was never substituted: the shipped script "
+                                 "carries the literal placeholder, so the value is accidental.")
+
+            # CONTROL, named in the OUTPUT so a reader is not asked to take the source's word:
+            # without it, a brain hard-wired to False would pass every arm above and the
+            # rollback documented in configuration-open.nix would be fiction.
+            on = think("on")
+            print("CONTROL, not a defect: OLLAMA_THINK=on -> THINK=%r (want True) "
+                  "-- proves the env still overrides, i.e. the zero-rebuild rollback is real"
+                  % (on.THINK,))
+            if on.THINK is not True:
+                raise SystemExit("control arm failed: the env no longer overrides the baked "
+                                 "default (got %r), so there is no rollback without a rebuild"
+                                 % (on.THINK,))
+
+            # CONTROL: a typo must still be distinguishable from the shipped value. It now falls
+            # back to the BAKED default rather than to the model's, which is a strictly safer
+            # failure -- assert that, rather than the old None.
+            typo = think("disabled")
+            print("CONTROL, not a defect: OLLAMA_THINK=disabled -> THINK=%r (want False via the "
+                  "baked default) -- an unrecognised value no longer silently restores thinking"
+                  % (typo.THINK,))
+            if typo.THINK is not False:
+                raise SystemExit("control arm failed: an unrecognised value parsed to %r"
+                                 % (typo.THINK,))
+            PYEOF
+            sed -i 's/^            //' check.py
+            python3 check.py ${brain}/bin/agent-brain
+            echo "think-off-reaches-the-brain-with-no-env: the shipped brain does not think when launched with an empty environment"
+            touch $out
+          '';
+
+        # Every module the shipped brain IMPORTS resolves FROM THE SHIPPED CLOSURE.
+        #
+        # WHY THIS EXISTS. #243 merged 11/11 green and shipped broken. `spend-ceiling-contract`
+        # above copies modules/spend_ceiling.py into a work tree it builds itself and runs the
+        # battery there — so it verified the Python and could not observe the package. The
+        # derivation copied exactly one file, agent-brain.py. The gate code reached the Dell;
+        # the module it imports did not. `import spend_ceiling` is wrapped in try/except by
+        # design, so nothing logged: with no ceiling configured the stage is inert, and with one
+        # configured it fail-closes to "spend ceiling UNAVAILABLE" — meaning the budget cannot
+        # be armed AT ALL, discovered on the day a credential lands. Same vantage error as the
+        # firewall outage: an instrument that cannot see the state it exists to detect.
+        #
+        # So this check imports from the artifact and ASSERTS THE RESOLVED PATH IS INSIDE IT.
+        # Without that assertion the check passes off the checker's own cwd or a PYTHONPATH
+        # leak — it would confirm the module exists somewhere, which was never in doubt.
+        brain-imports-resolve-in-the-shipped-closure =
+          let
+            p = nixpkgs.legacyPackages.${system};
+            brain = self.nixosConfigurations.agentos-open.config.system.build.agentBrain;
+          in p.runCommand "brain-imports-resolve-in-the-shipped-closure" {
+            nativeBuildInputs = [ p.python3 ];
+          } ''
+            cat > check.py <<'PYEOF'
+            import os, re, subprocess, sys
+
+            bindir  = sys.argv[1]
+            store   = os.path.dirname(bindir)         # the $out of the agent-brain derivation
+            repomod = sys.argv[2]                     # the REPO's modules/ dir, in the store
+            src     = open(os.path.join(bindir, "agent-brain")).read()
+
+            # Read the imports OUT OF THE SHIPPED SCRIPT rather than listing them here. A
+            # hand-kept list is a second place to update, and forgetting to extend it yields a
+            # silently narrower check that still prints green — the failure this file is about.
+            #
+            # BOTH import forms, because the two that were missing used one each: `import
+            # spend_ceiling as _spend` and `from providers import load_providers as ...`. The
+            # first draft of this check matched only the former and would have shipped the
+            # providers half of the same bug.
+            named = set(re.findall(r"^\s*import (\w+)(?: as \w+)?\s*$", src, re.M))
+            named |= set(re.findall(r"^\s*from (\w+) import ", src, re.M))
+
+            # Keep only FIRST-PARTY modules. The repo's modules/ dir is the authority on what is
+            # ours — asking the package would be circular, since a module missing from the
+            # package is precisely the defect. stdlib names drop out here; without this the
+            # in-closure assertion below would fire on `os` and the check would be unusable.
+            ours   = {f[:-3] for f in os.listdir(repomod) if f.endswith(".py")}
+            wanted = sorted(named & ours)
+            if not wanted:
+                raise SystemExit("the shipped brain imports no first-party module — this check "
+                                 "has lost its subject and would pass vacuously.")
+            print("first-party imports declared by the shipped brain: %s" % (wanted,))
+
+            # THE ARTIFACT'S OWN INTERPRETER, read out of its shebang — not this check's python3.
+            # They are different: the brain ships `brainPython`, which carries pyyaml, and
+            # providers.py imports yaml at module scope. Probing with the checker's bare python3
+            # reported a ModuleNotFoundError that the running brain does not have, i.e. it would
+            # have failed the build over a condition that exists only inside the check. A gate
+            # is only worth its vantage, and the vantage here is the shipped shebang.
+            interp = src.splitlines()[0].lstrip("#!").strip()
+            if not interp.startswith("/nix/store/"):
+                raise SystemExit("the shipped brain's shebang is %r — not a pinned store "
+                                 "interpreter, so this check cannot reproduce its import "
+                                 "environment." % (interp,))
+            print("probing with the artifact's own interpreter: %s" % (interp,))
+
+            # sys.path[0] is the SCRIPT'S directory for a real invocation, so reproduce exactly
+            # that and nothing else. An inherited PYTHONPATH would be the leak this guards.
+            env = dict(os.environ); env.pop("PYTHONPATH", None)
+            probe = ("import importlib,sys,json;"
+                     "print(json.dumps({m: getattr(importlib.import_module(m),'__file__',None)"
+                     " for m in %r}))" % (wanted,))
+            out = subprocess.run([interp, "-c", probe], cwd=bindir, env=env,
+                                 capture_output=True, text=True)
+            if out.returncode != 0:
+                raise SystemExit("a module the shipped brain imports is NOT in the closure:\n"
+                                 + out.stderr.strip())
+            import json
+            for mod, path in sorted(json.loads(out.stdout).items()):
+                inside = bool(path) and os.path.realpath(path).startswith(os.path.realpath(store))
+                print("  %-16s -> %s  in_closure=%s" % (mod, path, inside))
+                if not inside:
+                    raise SystemExit(
+                        "%s resolved to %r, which is OUTSIDE the shipped closure %s. The check "
+                        "would have passed on a package that does not contain it." % (mod, path, store))
+
+            # The CLI the ceiling's own error text instructs the operator to run. Advice naming
+            # an absent command is how "fail-closed" becomes "permanently disabled".
+            cli = os.path.join(bindir, "agent-os-budget")
+            if not os.access(cli, os.X_OK):
+                raise SystemExit("bin/agent-os-budget is not in the closure, but spend_ceiling.py "
+                                 "tells the operator to run it by name when the counter is missing.")
+            print("  agent-os-budget  -> %s  executable=True" % (cli,))
+            PYEOF
+            sed -i 's/^            //' check.py
+            python3 check.py ${brain}/bin ${./modules}
+            echo "brain-imports-resolve-in-the-shipped-closure: every module the brain imports is IN the package, not merely in the repo"
+            touch $out
+          '';
+
         # The Hyprland config the OPEN variant actually ships PARSES, checked by the
         # PINNED COMPOSITOR ITSELF — not by a regex that encodes my belief about the grammar.
         #
@@ -367,6 +577,85 @@
         # ARMED RED BEFORE IT WAS TRUSTED. Run against the eight broken rules on main it
         # FAILED, naming lines 68-72/77/78/80 — that is the pre-fix arm, and without it a
         # check that verified nothing would have shipped looking identical to this one.
+        # The Tailscale SSH re-assert HEALS THE OFF STATE — armed against the exact
+        # input that defeated it in production, running the SHIPPED binary.
+        #
+        # WHY THIS EXISTS. The unit went out with `jq -r '.RunSSH // "MISSING"'`. jq's
+        # alternative operator fires on `false` as well as `null`, so `RunSSH=false` —
+        # the ONE state the healer exists to correct — came back as the MISSING sentinel
+        # and left through the CANNOT-ASSESS arm. Measured on the Dell 2026-08-31: after
+        # a hand `tailscale set --ssh=false`, the timer fired on its own at 03:49:46 CDT
+        # and journalled "CANNOT-ASSESS — .RunSSH was 'MISSING'", exit 2, unit `failed`,
+        # pref still false. Every earlier run was green because the pref was true — the
+        # healer was reachable ONLY in the branch where there was nothing to heal, and a
+        # deploy, a review and a passing unit all agreed with it.
+        #
+        # THE ARM IS THE FALSE CASE. A check that only fed it `true` would pass against
+        # the broken binary and the fixed one alike. The false arm is the whole check;
+        # the other two exist so a binary that answered HEAL to everything cannot pass.
+        #
+        # IT RUNS THE SHIPPED DERIVATION, not a copy of the logic. `system.build.
+        # agosTailscaleSshReassert` is the same store path the module puts in
+        # systemPackages, driven against a stub `tailscale` earlier on PATH. Re-deriving
+        # the jq program here would put the check and the unit in two spellings with
+        # nothing asserting they agree — the drift this surface keeps scarring on.
+        tailscale-ssh-reassert-heals-off-state =
+          let
+            p = nixpkgs.legacyPackages.${system};
+            # A stand-in `tailscale` that reports whatever prefs the arm asks for and
+            # records any `set` call. It is injected as `services.tailscale.package`,
+            # the very attribute the module already reads — NOT prepended to PATH:
+            # writeShellApplication exports its runtimeInputs AHEAD of $PATH, so a PATH
+            # stub is silently outranked by the real binary. (Observed here: arm 1 came
+            # back "Failed to connect to local Tailscale daemon" from the genuine CLI.)
+            stubTailscale = p.writeShellScriptBin "tailscale" ''
+              if [ "$1" = "debug" ]; then cat "$AGOS_TEST_PREFS"; exit 0; fi
+              if [ "$1" = "set" ]; then echo "SET $*" >> "$AGOS_TEST_LOG"; exit 0; fi
+              exit 9
+            '';
+            bin = (self.nixosConfigurations.agentos-open.extendModules {
+              modules = [ { services.tailscale.package = p.lib.mkForce stubTailscale; } ];
+            }).config.system.build.agosTailscaleSshReassert;
+          in p.runCommand "tailscale-ssh-reassert-heals-off-state" { } ''
+            export AGOS_TEST_PREFS=$(mktemp) AGOS_TEST_LOG=$(mktemp)
+            # NOT `out=$(run)`: `$out` is the derivation's own output path and shadowing
+            # it makes the final `touch $out` write to the captured message instead.
+            run() { ${bin}/bin/agos-tailscale-ssh-reassert; }
+            fail() { echo "tailscale-ssh-reassert: $1"; exit 1; }
+
+            # ARM 1 — THE REGRESSION ARM. RunSSH=false must heal (exit 0) and must have
+            # actually called `tailscale set --ssh=true`. The pre-fix binary exits 2.
+            printf '%s' '{"RunSSH":false}' > "$AGOS_TEST_PREFS"; : > "$AGOS_TEST_LOG"
+            set +e; res=$(run 2>&1); rc=$?; set -e
+            printf 'arm1 REGRESSION-ARM (RunSSH=false MUST heal) rc=%s EXPECT=0 %s\n' "$rc" "$res"
+            [ "$rc" = 0 ] || fail "RunSSH=false did not heal (rc=$rc): $res"
+            grep -q -- '--ssh=true' "$AGOS_TEST_LOG" \
+              || fail "RunSSH=false reported healed without calling set --ssh=true"
+
+            # ARM 2 — CONTROL. Its row says so in the OUTPUT, not just here: on 2026-08-31 a
+            # digest read this arm's bare `arm2 rc=0` line as a reported defect and broadcast
+            # "deploy claim needed" to six brains before being corrected. A control arm that
+            # only announces itself in a source comment is indistinguishable from a finding to
+            # everything downstream that reads the log. Already serving: exit 0 and NO set call. Without this, a
+            # binary that blindly set on every run would pass arm 1.
+            printf '%s' '{"RunSSH":true}' > "$AGOS_TEST_PREFS"; : > "$AGOS_TEST_LOG"
+            set +e; res=$(run 2>&1); rc=$?; set -e
+            printf 'arm2 CONTROL, not a defect (RunSSH=true MUST stay silent) rc=%s EXPECT=0 %s\n' "$rc" "$res"
+            [ "$rc" = 0 ] || fail "RunSSH=true should be a silent pass (rc=$rc)"
+            [ ! -s "$AGOS_TEST_LOG" ] || fail "RunSSH=true called set anyway: $(cat "$AGOS_TEST_LOG")"
+
+            # ARM 3 — control. A genuinely ABSENT field is CANNOT-ASSESS (2), which is
+            # what the sentinel was always for. This is what distinguishes the fix from
+            # simply deleting the sentinel and calling every non-true value false.
+            printf '%s' '{"WantRunning":true}' > "$AGOS_TEST_PREFS"
+            set +e; res=$(run 2>&1); rc=$?; set -e
+            printf 'arm3 CONTROL, not a defect (absent field MUST cannot-assess) rc=%s EXPECT=2 %s\n' "$rc" "$res"
+            [ "$rc" = 2 ] || fail "absent RunSSH should be CANNOT-ASSESS 2, got $rc"
+
+            echo "tailscale-ssh-reassert-heals-off-state: false heals, true is silent, absent cannot-assess"
+            touch $out
+          '';
+
         hyprland-config-parses =
           let
             p = nixpkgs.legacyPackages.${system};
@@ -544,6 +833,30 @@
               cp ${./modules/bip340.py} "$work/modules/bip340.py"
               cd "$work"
               python3 tests/bip340-battery.py
+              touch $out
+            '';
+
+        # The login shell's brain-precedence arms. agent-shell is the login program:
+        # its failure mode is a box that will not boot, and until 2026-09-02 it was the
+        # only component in the tree with no arm on it. Proves the cloud brain is never
+        # auto-selected (installing Claude Code must not silently invert "nothing leaves
+        # the machine") and that NO brain is exec'd without a passing probe (a `claude`
+        # present on PATH but unrunnable — the NixOS dynamic-ELF case — must fall to the
+        # local chain, not crash-loop getty's autologin). It drives the REAL script in a
+        # sandboxed HOME with stub brains, because the defect lives in agent-shell's own
+        # selection branch. A regression here fails `nix flake check`.
+        agent-shell-brain-precedence =
+          nixpkgs.legacyPackages.${system}.runCommand "agent-shell-brain-precedence-check"
+            {
+              nativeBuildInputs = with nixpkgs.legacyPackages.${system}; [ bash coreutils gnugrep ];
+            } ''
+              work="$(mktemp -d)"
+              mkdir -p "$work/bin" "$work/tests"
+              cp ${./bin/agent-shell} "$work/bin/agent-shell"
+              cp ${./tests/agent-shell-brain-precedence.sh} "$work/tests/agent-shell-brain-precedence.sh"
+              chmod +x "$work/bin/agent-shell" "$work/tests/agent-shell-brain-precedence.sh"
+              cd "$work"
+              bash tests/agent-shell-brain-precedence.sh
               touch $out
             '';
 
@@ -798,6 +1111,81 @@
                + "[${lib.concatStringsSep " | " (map (r: lib.concatStringsSep "," r) leaked)}]. "
                + "That argument is bound read-only into EVERY cap namespace, so an unguarded value "
                + "hands back what TemporaryFileSystem=/:ro took away.");
+          assert
+            # checkAllow NEGATIVE CONTROL, and read the scope line carefully because two revisions
+            # of this comment got it wrong in the same direction. `checkAllow` inspects
+            # `c.sandbox.egressAllow` -- the OPERATOR-DECLARATION path, the one registry invariant
+            # (5b) deliberately leaves open by forbidding a non-empty egressAllow in-tree. It is the
+            # same MECHANISM as PR #263 (a blanket Allow matches every address at rule 1 of
+            # systemd.resource-control(5), so the egressDeny list is dead by construction), but it is
+            # NOT the #263 INSTANCE: that one was hard-coded in `netProps` itself and never passes
+            # through this filter at all. Demonstrated, not reasoned -- PR #266 reintroduced the
+            # verbatim #263 shape and this control stayed GREEN (job 100733793522). The hard-coded
+            # shape is caught by `hardcodedBlanket` below (eval) and by the battery's arm-8
+            # precondition (VM, job 100733794512). Two guards, two defects, and the sentence that
+            # used to sit here claimed one covered both. Driven through the exported `netProps` seam.
+            let
+              np = (import ./modules/cap-sandbox.nix { inherit lib; }).netProps;
+              # The deny entry is TEST-NET-2 and the specific-allow control TEST-NET-3 (RFC 5737
+              # documentation ranges) rather than an RFC1918 literal: `checkAllow` inspects only
+              # egressAllow, so the deny value is inert here, and the personal-data gate is right to
+              # refuse a 10/8 literal in a public repo. Removed rather than allowlist-exempted --
+              # an exemption would retire this line from scrutiny for every future pattern too.
+              evals = allow:
+                (builtins.tryEval (builtins.deepSeq
+                  (np { sandbox = { network = true; egressDeny = [ "198.51.100.0/24" ]; egressAllow = allow; }; })
+                  true)).success;
+              blanket = [ [ "any" ] [ "0.0.0.0/0" ] [ "::/0" ]
+                          # mixed: a specific CIDR must NOT launder a blanket entry beside it
+                          [ "203.0.113.4/32" "any" ] ];
+              admitted = lib.filter evals blanket;
+              # POSITIVE CONTROL, and it is the half that stops this arm passing vacuously: a guard
+              # that threw on EVERYTHING would satisfy the check above while breaking every legitimate
+              # operator exception. A specific CIDR must still evaluate, and an empty list must too.
+              specificOk = evals [ "203.0.113.4/32" ];
+              emptyOk = evals [ ];
+            in lib.assertMsg (admitted == [ ] && specificOk && emptyOk)
+              ("cap-sandbox: checkAllow negative control failed. Blanket egressAllow values that were "
+               + "ADMITTED (each one reinstates the dead-deny-list defect of #263): "
+               + "[${lib.concatStringsSep " | " (map (a: lib.concatStringsSep "," a) admitted)}]. "
+               + "Specific-CIDR control evaluated: ${lib.boolToString specificOk}; "
+               + "empty-list control evaluated: ${lib.boolToString emptyOk} "
+               + "(both must be true -- a guard that refuses everything is not a guard).");
+          assert
+            # hardcodedBlanket EVAL CONTROL. This is the arm the checkAllow control above cannot be:
+            # checkAllow filters `egressAllow`, so a blanket written directly into `netProps` --
+            # which is EXACTLY what PR #263 was -- walks straight past it. PR #266 proved that
+            # empirically: the verbatim #263 diff left the checkAllow control green and was caught
+            # only in the VM lane, by the battery's arm-8 precondition (job 100733794512), ~6 minutes
+            # into a run instead of at eval.
+            #
+            # The property, and it is deliberately not "no `any`": for a capability declaring NO
+            # exception at all, netProps must render ZERO `IPAddressAllow=` entries of ANY value.
+            # With `egressAllow = []` there is no legitimate source for an Allow entry, so any Allow
+            # that appears is hard-coded in this module by construction -- which catches a narrowed
+            # re-introduction (`IPAddressAllow=0.0.0.0/0`, or some future specific literal) that a
+            # string match on "any" would wave through.
+            let
+              np = (import ./modules/cap-sandbox.nix { inherit lib; }).netProps;
+              render = allow: np {
+                sandbox = { network = true; egressDeny = [ "198.51.100.0/24" ]; egressAllow = allow; };
+              };
+              allowsOf = props: lib.filter (lib.hasPrefix "IPAddressAllow=") props;
+              hardcoded = allowsOf (render [ ]);
+              # POSITIVE CONTROL, same role as specificOk above and for the same reason: an arm that
+              # asserted "no Allow entries ever" would be satisfied by a netProps that had stopped
+              # rendering operator exceptions entirely -- silently deleting the feature while going
+              # green. A declared exception must still render, exactly once and unchanged.
+              declaredRenders = allowsOf (render [ "203.0.113.4/32" ]) == [ "IPAddressAllow=203.0.113.4/32" ];
+            in lib.assertMsg (hardcoded == [ ] && declaredRenders)
+              ("cap-sandbox: hardcodedBlanket control failed. netProps rendered "
+               + "[${lib.concatStringsSep " | " hardcoded}] for a capability whose egressAllow is "
+               + "EMPTY -- every one of those is hard-coded in modules/cap-sandbox.nix, and any "
+               + "Allow entry makes the egressDeny list dead for the range it covers (rule 1 of "
+               + "systemd.resource-control(5)); this is the PR #263 defect itself, not the "
+               + "declaration path checkAllow guards. Declared-exception control rendered "
+               + "correctly: ${lib.boolToString declaredRenders} (must be true -- a netProps that "
+               + "dropped operator exceptions altogether would pass the first half).");
           nixpkgs.legacyPackages.${system}.runCommand "cap-sandbox-check" { } ''
             test -s ${nixpkgs.legacyPackages.${system}.writeText "policy.json" sb.policyJson}
             touch $out
@@ -1065,6 +1453,14 @@
               "agentos-open-imports: key-drift-open.nix is NOT imported — agos-key-drift missing from systemPackages.";
             assert lib.assertMsg (builtins.hasAttr "agos-key-drift" cfg.systemd.timers)
               "agentos-open-imports: key-drift-open.nix installs the scanner but NOTHING RUNS IT — the agos-key-drift timer is absent. An undeclared root key is found by a scan that FIRES, and a package sitting unrun on disk is the same shape as the hand-written authorized_keys it was written to catch.";
+        assert lib.assertMsg (hasPkg "agos-user-drift")
+          "agentos-open-imports: user-drift-open.nix is NOT imported — agos-user-drift missing from systemPackages.";
+        assert lib.assertMsg (builtins.hasAttr "agos-user-drift" cfg.systemd.timers)
+          "agentos-open-imports: the user/group scanner is installed but NOTHING RUNS IT — the agos-user-drift timer is absent. mutableUsers=true means a console-added wheel member persists across every rebuild; a scanner sitting unrun on disk is the same shape as the hand-edited /etc/group it exists to catch.";
+            assert lib.assertMsg (hasPkg "agos-tailscale-ssh-reassert")
+              "agentos-open-imports: tailscale-ssh-reassert-open.nix is NOT imported — agos-tailscale-ssh-reassert missing from systemPackages.";
+            assert lib.assertMsg (builtins.hasAttr "agos-tailscale-ssh-reassert" cfg.systemd.timers)
+              "agentos-open-imports: the Tailscale SSH re-assert is installed but NOTHING RUNS IT — the agos-tailscale-ssh-reassert timer is absent. This unit exists precisely BECAUSE tailscaled-autoconnect asserts --ssh once at first auth and never again; shipping it without a timer reproduces the one-shot defect it was written to close, and the door it holds open is the mesh's own write path onto this box.";
             assert lib.assertMsg (hasPkg "agos-calc")
               "agentos-open-imports: calculator-open.nix is NOT imported — agos-calc missing from systemPackages.";
             assert lib.assertMsg (hasPkg "agos-files")
@@ -1567,12 +1963,157 @@
             cp ${./tests/providers-battery.py} "$work/tests/providers-battery.py"
             cp ${./tests/wiring-battery.py} "$work/tests/wiring-battery.py"
             cp ${./tests/cost-cap-battery.py} "$work/tests/cost-cap-battery.py"
+            cp ${./tests/summon-consent-battery.py} "$work/tests/summon-consent-battery.py"
             cd "$work"
             PYTHONPATH=modules python3 tests/providers-battery.py
             python3 tests/wiring-battery.py
             # cost-cap breaker (HARNESS-MAP guardrail 3): limits validation, yaml>env>default
             # precedence, token-trip refusal + transcript stubs, loud hop exhaustion.
             python3 tests/cost-cap-battery.py
+            # summon_claude consent gate (Rabbot door (i), 2026-09-02): the tool spawns the
+            # operator's Claude CLI, and until this gate the only thing between a model-emitted
+            # call and that subprocess was prompt text. Arms drive `ok_to_summon` — the same
+            # function the deployed path calls — plus `_summon_claude` itself with the CLI
+            # stubbed, so there is no fixture-only route (#256's lesson).
+            python3 tests/summon-consent-battery.py
+            touch $out
+          '';
+
+        # 2026-09-02 — the providers.yaml the DELL ACTUALLY BOOTS WITH, parsed by the real
+        # loader. Until this check existed, nothing in this tree ever read that file: every
+        # battery above authors its own fixture, so `modules/escalate-secret-open.nix` could
+        # ship a typo'd api_key_ref, a key path inside the world-readable /nix/store, or a
+        # floor provider with no model, and `nix flake check` would stay green all the way to
+        # a box whose brain cannot read its own config. Same shape as 0620404 — "CI was green
+        # on a package that cannot arm a budget".
+        #
+        # The bytes come from the EVALUATED configuration's environment.etc entry, NOT from a
+        # copy of the module kept in step by hand; a check that reads a duplicate is only ever
+        # testing the duplicate. The battery also carries seven NEGATIVE arms (N1-N6) that feed
+        # deliberately broken configs through the same predicates and require rejection, plus
+        # N0 as the permitting arm for that harness — without N0, a predicate that failed
+        # EVERYTHING would make every negative arm pass for the wrong reason.
+        shipped-providers =
+          let
+            pkgs = nixpkgs.legacyPackages.${system};
+            pyWithYaml = pkgs.python3.withPackages (ps: [ ps.pyyaml ]);
+            shipped = self.nixosConfigurations.agentos-open.config.environment.etc."agent-os/providers.yaml".source;
+          in pkgs.runCommand "shipped-providers-check" { nativeBuildInputs = [ pyWithYaml ]; } ''
+            work="$(mktemp -d)"
+            mkdir -p "$work/modules" "$work/tests"
+            cp ${./modules/providers.py} "$work/modules/providers.py"
+            cp ${./tests/shipped-providers-battery.py} "$work/tests/shipped-providers-battery.py"
+            cd "$work"
+            PYTHONPATH=modules SHIPPED_PROVIDERS=${shipped} python3 tests/shipped-providers-battery.py
+            touch $out
+          '';
+
+        # 2026-09-02 — the SEALED variants must carry NO cloud provider config. Today this holds
+        # by construction: modules/escalate-secret-open.nix lives only in `openModules`, so
+        # `agentos-sealed` never gets an /etc/agent-os/providers.yaml. But "true by construction"
+        # is true until someone moves one line, and nothing asserted it. A sealed image that
+        # shipped a cloud `api_key_ref` would have only the nftables wall behind it — a
+        # config-level breach of the seal that every existing egress check would still pass.
+        #
+        # THE CONTROL ARM IS INSIDE THE CHECK, and it has to be: the passing condition here is an
+        # ABSENT attribute, which is exactly the state where an assertion goes vacuous without
+        # anyone noticing. So the third value below re-evaluates the sealed config with the
+        # escalate module deliberately grafted on via extendModules, and the check FAILS unless
+        # the predicate SEES it there. Absence only means something once presence has been shown
+        # to be detectable.
+        sealed-no-cloud-provider =
+          let
+            pkgs = nixpkgs.legacyPackages.${system};
+            hasProviders = c: c.config.environment.etc ? "agent-os/providers.yaml";
+            sealed   = hasProviders self.nixosConfigurations.agentos-sealed;
+            sealedS5 = hasProviders self.nixosConfigurations.agentos-sealed-s5;
+            grafted  = hasProviders (self.nixosConfigurations.agentos-sealed.extendModules {
+              modules = [ ./modules/escalate-secret-open.nix ];
+            });
+            b = x: if x then "true" else "false";
+          in pkgs.runCommand "sealed-no-cloud-provider-check" { } ''
+            fail=0
+            echo "  agentos-sealed    ships agent-os/providers.yaml: ${b sealed}   (want false)"
+            echo "  agentos-sealed-s5 ships agent-os/providers.yaml: ${b sealedS5} (want false)"
+            echo "  CONTROL: sealed + escalate module grafted on:     ${b grafted}  (want true)"
+            [ "${b sealed}"   = "false" ] || { echo "  FAIL sealed carries a cloud provider config"; fail=1; }
+            [ "${b sealedS5}" = "false" ] || { echo "  FAIL sealed-s5 carries a cloud provider config"; fail=1; }
+            [ "${b grafted}"  = "true"  ] || { echo "  FAIL control arm: the predicate cannot SEE a providers.yaml even when one is grafted on — the two arms above are vacuous"; fail=1; }
+            [ "$fail" = "0" ] || exit 1
+            echo "  ALL PASS"
+            touch $out
+          '';
+
+        # 2026-09-02 — a LINT for test arms that swallow their own failure signal.
+        #
+        # providers-battery arm J was written as: call the function inside a `try`, `raise
+        # AssertionError` if it did NOT reject, and treat `except Exception` as the pass.
+        # AssertionError is an Exception, so the handler caught the arm's own failure signal
+        # and reported it as the rejection under test. The arm printed PASS *precisely when*
+        # the module silently degraded — a complete inversion, in the arm whose whole job was
+        # to catch that degrade. Reproduced by stubbing load_providers to return {}.
+        #
+        # A battery cannot catch this: the failure mode IS a green run, so there is no run to
+        # observe. Hence a structural scan, with its own control + permitting arms inline (a
+        # detector that finds nothing reports a clean tree, which is indistinguishable from
+        # health). Verified against the pre-fix tree: the lint names providers-battery.py:277.
+        tests-no-self-swallowing-arms =
+          let pkgs = nixpkgs.legacyPackages.${system};
+          in pkgs.runCommand "tests-no-self-swallowing-arms" { nativeBuildInputs = [ pkgs.python3 ]; } ''
+            work="$(mktemp -d)"; mkdir -p "$work/tests"
+            cp -r ${./tests}/*.py "$work/tests/"
+            # The .sh copy is not cosmetic. The lint grew a shell half on 2026-09-02, and this
+            # line is the SET it is handed: with only *.py copied the shell arms scan zero files
+            # and the check is green while covering nothing -- the same "sound check, wrong set"
+            # defect the lint exists to catch, one level up, in its own sandbox. The verdict now
+            # prints both counts so a zero here is visible in the build log rather than implied.
+            cp -r ${./tests}/*.sh "$work/tests/"
+            cp ${./tests/no-self-swallowing-arms.py} "$work/lint.py"
+            python3 "$work/lint.py" "$work/tests"
+            touch $out
+          '';
+
+        # 2026-09-02 — the escalate key PREFLIGHT has six branches and until now exactly ONE of
+        # them had ever executed. The box's steady state is "no key placed", so every green
+        # `Result=success` I have ever read off `agos-escalate-key-preflight` came from the
+        # absent branch returning 0. The mode / owner / empty / trailing-newline rejections —
+        # the entire reason the unit exists — were unexecuted code guarding a secret.
+        #
+        # It was untestable BY CONSTRUCTION: the key path was baked in, so no fixture could
+        # reach it. So the script now takes two env overrides, used only here, and arms S1/S2
+        # against the risk that introduces: S1 asserts the SHIPPED unit sets neither, and S2 is
+        # the control arm for S1 — it grafts a unit that DOES set one and fails unless the
+        # detector sees it. An absence assertion is vacuous until presence is shown detectable.
+        #
+        # C1 inside the battery is the other control arm: every functional arm passes the owner
+        # override, so without C1 the override could simply be disabling the owner check and all
+        # five would still be green. C1 drops the override and requires the check to fire.
+        #
+        # The binary under test is the unit's own ExecStart, read out of the evaluated config —
+        # not a rebuild of the script here. Same rule as shipped-providers: test the artifact
+        # that ships, never a copy kept in step by hand.
+        escalate-preflight =
+          let
+            pkgs = nixpkgs.legacyPackages.${system};
+            open = self.nixosConfigurations.agentos-open;
+            unitOf = c: c.config.systemd.services.agos-escalate-key-preflight;
+            execStart = (unitOf open).serviceConfig.ExecStart;
+            hasOverride = c:
+              let e = (unitOf c).environment or { };
+              in (e ? AGOS_ESCALATE_KEY) || (e ? AGOS_ESCALATE_KEY_OWNER);
+            shippedOverrides = hasOverride open;
+            detectorArmed = hasOverride (open.extendModules {
+              modules = [{
+                systemd.services.agos-escalate-key-preflight.environment.AGOS_ESCALATE_KEY =
+                  "/tmp/grafted-override";
+              }];
+            });
+            b = x: if x then "1" else "0";
+          in pkgs.runCommand "escalate-preflight-check" { } ''
+            PREFLIGHT=${execStart} \
+            SHIPPED_OVERRIDES=${b shippedOverrides} \
+            DETECTOR_ARMED=${b detectorArmed} \
+            bash ${./tests/escalate-preflight-battery.sh}
             touch $out
           '';
 
@@ -1662,6 +2203,92 @@
               touch $out
             '';
 
+        # Nothing this repo DOWNLOADS AND EXECUTES is executed unverified — and the helper
+        # that enforces that is shown REFUSING before its acceptance is trusted.
+        #
+        # WHY THIS EXISTS. `bin/setup-brain.sh` ran `curl -fsSL https://claude.ai/install.sh
+        # | bash` on a box being provisioned. Whatever the socket produced was executed, and
+        # the pipe makes the failure mode PARTIAL EXECUTION — bash runs the first half of a
+        # script whose second half never arrived. There was no point in that pipeline at
+        # which bytes could have been rejected, so there was nothing for a check to check.
+        #
+        # THE ARMS RUN OFFLINE ON PURPOSE. The fixtures are `file://` URLs fetched through
+        # the real curl path, so the seam under test is the shipped one, not a mock — and a
+        # sandbox with no network cannot turn this check into a test of Anthropic's uptime.
+        # The live pin was exercised separately against the real URL before it was recorded
+        # (verified 0 on the true digest, 1 on a corrupted one, no file left behind).
+        #
+        # ARM I IS THE ONE THAT KEEPS THIS HONEST. It asserts the CALL SITE stayed converted.
+        # A verified-fetch helper sitting unused beside a live `curl | bash` is the same
+        # shape as a scanner installed with no timer — and arm I was RED against the
+        # pre-fix `bin/setup-brain.sh` before the conversion landed.
+        #
+        # NOT COVERED, stated so a green is not over-read: the README bootstrap
+        # (`curl .../install.sh | sudo bash`) is trust-on-first-use by construction — the
+        # thing that would verify it is the thing being fetched. Pinning what the installer
+        # then pulls narrows the window; closing it needs an out-of-band digest or a
+        # signature and is NOT claimed by this check.
+        supply-chain-pinning-contract =
+          let p = nixpkgs.legacyPackages.${system};
+          in p.runCommand "supply-chain-pinning-contract-check"
+            { nativeBuildInputs = with p; [ bash coreutils gnugrep gnused gawk curl ]; } ''
+              work="$(mktemp -d)"
+              mkdir -p "$work/bin" "$work/tests" "$work/supply-chain"
+              cp ${./bin/fetch-verified.sh}            "$work/bin/fetch-verified.sh"
+              cp ${./bin/setup-brain.sh}               "$work/bin/setup-brain.sh"
+              cp ${./tests/fetch-verified-battery.sh}  "$work/tests/fetch-verified-battery.sh"
+              cp ${./supply-chain/pins.txt}            "$work/supply-chain/pins.txt"
+              cd "$work"
+              bash tests/fetch-verified-battery.sh bin/fetch-verified.sh "$work"
+
+              # Every pin line must carry a full 64-hex digest and an https URL. A truncated
+              # or placeholder digest would still "match" nothing and read as a live pin.
+              if ! awk '$1 !~ /^#/ && NF { if ($2 !~ /^[0-9a-f]{64}$/ || $3 !~ /^https:/) { print "bad pin line: " $0; bad=1 } } END { exit bad }' supply-chain/pins.txt; then
+                echo "supply-chain: malformed pin in pins.txt"; exit 1
+              fi
+              touch $out
+            '';
+
+        # Declared state is the whole of WHO CAN LOG IN and WHO IS PRIVILEGED — the half
+        # agos-key-drift does not cover.
+        #
+        # WHY THIS EXISTS. The open variant sets `users.mutableUsers = true` on purpose (dev
+        # box; runtime passwd changes are meant to persist). That is declared, not drift — but
+        # it means /etc/passwd and /etc/group are hand-editable and survive every rebuild, so a
+        # console-added user or a name appended to `wheel` is invisible to this flake, to the
+        # module, and to the key scanner. Same class as the undeclared root key removed
+        # 2026-08-31, one file over.
+        #
+        # ARM D IS WHY THE SCANNER IS WORTH SHIPPING. The obvious check reads /etc/group's
+        # member lists — and a box where someone set a user's PRIMARY GID to wheel's gid reads
+        # perfectly clean under it, because that user never appears in a member list at all.
+        # Arm D performs exactly that edit and asserts the scan fails. Arm I is its control: a
+        # user whose primary group IS its declared group must stay silent, so a scanner that
+        # flagged every gid match cannot pass D.
+        #
+        # THE FIXTURES ARE THE DELL, read off the box 2026-08-31 — agent (uid 1000, primary
+        # group `users`), operator (the sole declared member of `wheel`), root, sshd nologin.
+        # Arm B is that box clean and runs FIRST, so a scanner that flags everything cannot
+        # pass the drift arms. Every other arm is that box with one hand edit.
+        #
+        # NOT COVERED, stated so a green is not over-read: the tailscale-ssh user mapping is a
+        # SEPARATE surface (Tailscale SSH authenticates against tailnet ACLs and never consults
+        # /etc/passwd for authorization) and is deliberately not folded in here. And a flake
+        # check cannot see a file someone typed at a console — the battery proves the scanner,
+        # the systemd timer on the box is what actually looks.
+        user-drift-contract =
+          let p = nixpkgs.legacyPackages.${system};
+          in p.runCommand "user-drift-contract-check"
+            { nativeBuildInputs = with p; [ bash coreutils gnused gnugrep python3 ]; } ''
+              work="$(mktemp -d)"
+              mkdir -p "$work/modules/agos-user-drift" "$work/tests"
+              cp ${./modules/agos-user-drift/agos-user-drift.py} "$work/modules/agos-user-drift/agos-user-drift.py"
+              cp ${./tests/user-drift-battery.sh} "$work/tests/user-drift-battery.sh"
+              cd "$work"
+              bash tests/user-drift-battery.sh modules/agos-user-drift/agos-user-drift.py
+              touch $out
+            '';
+
         brain-context-contract =
           let
             pkgs = nixpkgs.legacyPackages.${system};
@@ -1675,6 +2302,49 @@
               cp ${./tests/brain-context-battery.py} "$work/tests/brain-context-battery.py"
               cd "$work"
               python3 tests/brain-context-battery.py
+              touch $out
+            '';
+
+        # A tool call that renders as prose is a CLAIM — the model asked to act, nothing
+        # acted, and the next turn narrated a result it never produced. Observed live on
+        # qwen3.5:9b (Dillon's Dell TUI photo, 2026-08-31): an XML/Hermes `<tool_call>` block
+        # that extract_tools()'s JSON-shaped fallback did not match. This gate holds the XML
+        # branch AND the two controls that keep it honest — structured `tool_calls` still win,
+        # and the older JSON fallback is not displaced — plus a PRE-FIX arm that runs the old
+        # JSON-only regex on the live input and requires it to find NOTHING. Without that arm
+        # the battery could be passing on an input the old code already handled.
+        xml-toolcall-contract =
+          nixpkgs.legacyPackages.${system}.runCommand "xml-toolcall-contract-check"
+            { nativeBuildInputs = [ nixpkgs.legacyPackages.${system}.python3 ]; } ''
+              work="$(mktemp -d)"
+              mkdir -p "$work/modules" "$work/tests"
+              cp ${./modules/agent-brain.py} "$work/modules/agent-brain.py"
+              cp ${./tests/xml-toolcall-battery.py} "$work/tests/xml-toolcall-battery.py"
+              cd "$work"
+              python3 tests/xml-toolcall-battery.py
+              touch $out
+            '';
+
+        # The two CUMULATIVE spend ceilings (Rabbot's GO 2026-08-31, built before any
+        # credential exists — the bleed scar's ordering). `max_output_tokens_per_turn`
+        # already in the brain is a RATE LIMITER: it bounds one turn and forgets, so a
+        # respawn loop pays it forever and trips nothing. This gate holds the ceilings that
+        # accumulate, and — the half that matters — that a TYPO does not silently disable
+        # them. A disabled ceiling and a working one are indistinguishable until the bill
+        # arrives, so arm G walks "off"/"none"/"0"/"-1"/"true"/"1e6" and requires each to
+        # refuse rather than pass as a cap. Two controls keep the rest honest: J (no ceiling
+        # configured → inert, so the other arms are not passing off a stage that refuses
+        # unconditionally) and K (a ceiling configured with the module ABSENT still refuses).
+        spend-ceiling-contract =
+          nixpkgs.legacyPackages.${system}.runCommand "spend-ceiling-contract-check"
+            { nativeBuildInputs = [ nixpkgs.legacyPackages.${system}.python3 ]; } ''
+              work="$(mktemp -d)"
+              mkdir -p "$work/modules" "$work/tests"
+              cp ${./modules/agent-brain.py} "$work/modules/agent-brain.py"
+              cp ${./modules/spend_ceiling.py} "$work/modules/spend_ceiling.py"
+              cp ${./tests/spend-ceiling-battery.py} "$work/tests/spend-ceiling-battery.py"
+              cd "$work"
+              python3 tests/spend-ceiling-battery.py
               touch $out
             '';
 

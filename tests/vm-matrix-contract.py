@@ -97,6 +97,13 @@ WIRED_VIA_WORKFLOW = {
     # step and never told the registry, and "wired somewhere I can see" is not "wired where the
     # ledger can see." The claim below is CHECKED against a non-comment line of that workflow.
     "vm-connect-probe-battery.sh": "flake-check.yml",
+    # The installer flake-pin freshness check (PR #234). It CANNOT be a flake.nix test-* package
+    # and that is not a preference: it asserts the pin is an ANCESTOR of main and measures commit
+    # DISTANCE, both of which need git history — and a nix build sandbox has no .git at all. Wired
+    # into flake-check.yml, which fetches origin/main explicitly before running it. It tripped
+    # THIS check on the commit that added it, exactly as the two entries above did; a check about
+    # controls that never run, caught by the control that catches controls that never run.
+    "pin-freshness.sh": "flake-check.yml",
     # The personal-data gate's battery (PR #222). Pure bash, no nix, no VM — same lane as the
     # two above. Wired into its OWN workflow rather than flake-check.yml because the gate is a
     # publication control: its workflow runs on pull_request AND on push to main, so the battery
@@ -810,6 +817,97 @@ def wired_disarm_selftest(tmpdir_lines=None):
     return failures
 
 
+def flake_wired_batteries(tests_dir, flake_text):
+    """Test files named in flake.nix that are in NEITHER ledger.
+
+    `wired_but_disarming()` above sweeps WIRED_VIA_WORKFLOW, and the OK-branch print loop
+    sweeps KNOWN_UNWIRED_DEBT. Those two sets are 10 of the 51 test files flake.nix names;
+    the other 41 run as `nix flake check` derivations and were outside BOTH sweeps.
+
+    LIMIT, stated so a green is not over-read: membership is decided by the basename appearing
+    anywhere in flake.nix, the same substring notion the debt ledger's own comment uses. A file
+    named only inside a comment would count as wired here. That over-INCLUDES, which is the safe
+    direction for this check -- it can add a battery to the sweep that did not need it, never
+    drop one that did.
+    """
+    return sorted(b for b in os.listdir(tests_dir)
+                  if b.endswith((".py", ".sh"))
+                  and b in flake_text
+                  and b not in WIRED_VIA_WORKFLOW
+                  and b not in KNOWN_UNWIRED_DEBT)
+
+
+def flake_wired_but_disarming(tests_dir, flake_text):
+    """[base] for flake.nix-wired batteries that self-disarm -- an ungated exit 0.
+
+    The battery half of `wired_but_disarming()`, asked of the LANE THAT CARRIES THE BULK.
+    That function's own docstring argues a wired battery which self-disarms "reports success
+    in a lane somebody trusts" and is strictly worse than an unwired one. Every word of that
+    applies to `nix flake check`, which is the lane the gate actually reads -- so the argument
+    was already written down for a set it was not being asked about.
+
+    The repo's answer is [] today and I verified that BEFORE writing this, by running
+    `self_disarms()` over all 43 unswept files and getting zero. So this is NOT a live defect;
+    it is the same shape as #251 and #252 -- a real guarantee that nothing was watching. The
+    hole in `wired_but_disarming()` was itself FOUND BY A CONTROL THAT CAME BACK GREEN (see
+    its docstring), which is the reason not to wait for this one to go red on its own.
+    """
+    return sorted(b for b in flake_wired_batteries(tests_dir, flake_text)
+                  if self_disarms(os.path.join(tests_dir, b)))
+
+
+def flake_wired_disarm_selftest():
+    """Drive the predicate and the MEMBERSHIP on files, not on the repo's current answer.
+
+    Two failure modes, two arms. `wired_disarm_selftest()` already arms `self_disarms()`
+    itself, so what is new here is the SET: a membership function that returned nothing would
+    make this check pass forever with the predicate in perfect working order. That is the
+    #246 shape -- the detector is fine, it is just never handed anything.
+    """
+    import tempfile
+    failures = []
+    ungated = ('import shutil, sys\n'
+               'if not shutil.which("x"):\n'
+               '    print("  SKIP thing: not here")\n'
+               '    sys.exit(0)\n')
+    gated = ('import os, shutil, sys\n'
+             'if not shutil.which("x"):\n'
+             '    if os.environ.get("AGENT_OS_STRICT") == "1":\n'
+             '        sys.exit("FAIL")\n'
+             '    print("  SKIP thing: not here")\n'
+             '    sys.exit(0)\n')
+    with tempfile.TemporaryDirectory() as d:
+        open(os.path.join(d, "planted-battery.py"), "w").write(ungated)
+        open(os.path.join(d, "gated-battery.py"), "w").write(gated)
+        open(os.path.join(d, "unnamed-battery.py"), "w").write(ungated)
+        flake_text = "bash tests/planted-battery.py\npython3 tests/gated-battery.py\n"
+
+        # CONTROL: a flake-named battery with an ungated exit 0 MUST be caught.
+        got = flake_wired_but_disarming(d, flake_text)
+        if "planted-battery.py" not in got:
+            failures.append("selftest: a flake-NAMED battery with an ungated skip-then-exit-0 "
+                            "was NOT reported -- flake_wired_but_disarming() cannot see the "
+                            "shape it exists to catch")
+        # PERMITTING: a strict-gated one must NOT be, or every check goes red and the sweep
+        # gets reverted rather than believed.
+        if "gated-battery.py" in got:
+            failures.append("selftest: a STRICT-GATED battery was reported as self-disarming "
+                            "-- the exemption is broken")
+        # MEMBERSHIP ARM: a self-disarming battery flake.nix does NOT name is out of scope, and
+        # saying so is what proves the set is computed rather than returned wholesale.
+        if "unnamed-battery.py" in got:
+            failures.append("selftest: a battery NOT named in flake.nix was swept -- the "
+                            "membership function is not reading flake.nix at all")
+        # AND THE ARM THAT STOPS THE THREE ABOVE PASSING ON AN EMPTY SET: a membership
+        # function returning [] satisfies two of them for free. Assert the set is populated.
+        members = flake_wired_batteries(d, flake_text)
+        if sorted(members) != ["gated-battery.py", "planted-battery.py"]:
+            failures.append("selftest: flake_wired_batteries() returned %r, expected exactly "
+                            "the two files flake.nix names -- an empty or wholesale set makes "
+                            "the arms above vacuous" % (members,))
+    return failures
+
+
 def strict_callers_unarmed(tests_dir, workflows_dir=None):
     """Sweep the real tree: every strict-gated battery, every workflow that runs it."""
     if workflows_dir is None:
@@ -1104,7 +1202,8 @@ class Findings:
 # purpose: the selftests are deliberately kept out of the collector — see Findings' docstring.
 REQUIRED_CHECKS = {
     "unlisted", "dangling", "unwired", "vacuous", "stale",
-    "debt_added", "debt_removed", "unarmed", "wired_disarming", "ruling_table",
+    "debt_added", "debt_removed", "unarmed", "wired_disarming", "flake_wired_disarming",
+    "ruling_table",
 }
 
 
@@ -1188,6 +1287,7 @@ SELFTESTS = (
     ruling_conditions_selftest,
     strict_caller_selftest,
     wired_disarm_selftest,
+    flake_wired_disarm_selftest,
     findings_selftest,
 )
 
@@ -1198,7 +1298,7 @@ SELFTESTS = (
 # a set computed from the tuple would shrink with it, and then nothing compares anything.
 REQUIRED_RULING = {
     "exemption_staleness_selftest", "ruling_conditions_selftest", "strict_caller_selftest",
-    "wired_disarm_selftest", "findings_selftest",
+    "wired_disarm_selftest", "flake_wired_disarm_selftest", "findings_selftest",
 }
 
 
@@ -1244,6 +1344,10 @@ def main():
     # These decide before anything the collector touches.
     unarmed = f.add("unarmed", strict_callers_unarmed(args.tests_dir))
     wired_disarming = f.add("wired_disarming", wired_but_disarming(args.tests_dir))
+    flake_text_for_sweep = open(args.flake).read()
+    flake_wired_disarming = f.add(
+        "flake_wired_disarming",
+        flake_wired_but_disarming(args.tests_dir, flake_text_for_sweep))
     # A finding about the REAL TREE — an 'enforced' row citing no executing lane — so it belongs
     # with the checks, not with the selftests that prove the checker can go red.
     ruling_table = f.add("ruling_table",
@@ -1338,6 +1442,14 @@ def main():
         for base in wired_disarming:
             print(f"  {base}  <-  {WIRED_VIA_WORKFLOW[base]}", file=sys.stderr)
         print("      Gate the skip on AGENT_OS_STRICT (see calendar-battery.py), or unwire it.",
+              file=sys.stderr)
+    if f["flake_wired_disarming"]:
+        print("FAIL: a battery wired into `nix flake check` SELF-DISARMS. Same defect as the",
+              file=sys.stderr)
+        print("      block above, in the lane the merge gate actually reads:", file=sys.stderr)
+        for base in flake_wired_disarming:
+            print(f"  {base}  <-  named in flake.nix", file=sys.stderr)
+        print("      Gate the skip on AGENT_OS_STRICT, or stop naming it in flake.nix.",
               file=sys.stderr)
     if f["unarmed"]:
         print("FAIL: a strict-gated battery is WIRED BUT UNARMED. The battery refuses to exit 0",

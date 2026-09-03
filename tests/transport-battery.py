@@ -205,5 +205,54 @@ finally:
 check("I. dispatcher passes the RESOLVED provider name to the transport",
       _seen.get("provider") == "some-escalate-provider")
 
+# ── J. A MUTE TURN IS VISIBLE ──
+# The scar: 2026-08-31 the Dell returned an EMPTY message after burning all 2048 output
+# tokens on reasoning, and chat_stream printed the timing line and nothing else — the box
+# looked like it had answered with silence, for 457 seconds, twice. OLLAMA_THINK=off fixed
+# that CAUSE; this arm covers the CLASS, which outlives it (any ceiling, stop sequence or
+# transport hiccup lands in the same place).
+# Arm I above leaves ACTIVE_PROVIDER_KIND pointing at its spy transport and does not put it
+# back, so anything added after it inherits a module that cannot route to ollama. Restored
+# here explicitly rather than by reordering: a battery whose arms depend on running in a
+# particular order is one edit away from a false green.
+b.ACTIVE_PROVIDER_KIND, b.ACTIVE_PROVIDER = "ollama", None
+
+def _run_stream(ndjson):
+    """Drive chat_stream against a canned wire body; return what the operator SAW on stderr."""
+    err = io.StringIO()
+    _o_urlopen, _o_stderr = b.urllib.request.urlopen, sys.stderr
+    b.urllib.request.urlopen = lambda *a, **k: _FakeResp(ndjson)
+    sys.stderr = err
+    try:
+        return b.chat_stream([{"role": "user", "content": "hi"}]), err.getvalue()
+    finally:
+        b.urllib.request.urlopen, sys.stderr = _o_urlopen, _o_stderr
+
+MUTE = b"".join([
+    b'{"message":{"thinking":"reasoning forever"}}\n',
+    b'{"done":true,"eval_count":2048,"eval_duration":450000000000}\n',
+])
+res, err = _run_stream(MUTE)
+check("J. a mute turn (no content, no tool_calls) is reported to the operator",
+      "no answer" in err)
+check("J. the report names eval_count — a large count and a ~0 count want opposite fixes",
+      "2048" in err)
+check("J. the mute turn still returns a well-formed empty message",
+      res["content"] == "" and res["tool_calls"] == [])
+
+# CONTROL, not a defect: a turn that DID answer must stay quiet. Without this arm a
+# renderer that warned on every turn would pass J above and the check would be noise.
+res2, err2 = _run_stream(b'{"message":{"content":"hi"}}\n{"done":true,"eval_count":3}\n')
+check("J. CONTROL, not a defect: a turn WITH content emits no no-answer report",
+      "no answer" not in err2 and res2["content"] == "hi")
+
+# CONTROL, not a defect: tool_calls alone is a legitimate silent turn — the model acted
+# instead of speaking, and warning there would train the operator to ignore the warning.
+res3, err3 = _run_stream(
+    b'{"message":{"tool_calls":[{"function":{"name":"echo","arguments":{"s":"hi"}}}]}}\n'
+    b'{"done":true,"eval_count":9}\n')
+check("J. CONTROL, not a defect: tool_calls with no prose emits no no-answer report",
+      "no answer" not in err3 and res3["tool_calls"] != [])
+
 print("transport-battery: " + ("PASS" if EX == 0 else "FAIL"))
 sys.exit(EX)

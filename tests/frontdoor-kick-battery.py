@@ -105,6 +105,12 @@ check("summon_claude tool declared with consent guard",
       summon_tool and "Never auto-fire" in summon_tool[0]["function"]["description"])
 
 # 11. Fail-soft: no `claude` on PATH → graceful setup message, never an exception.
+# CONSENT IS ARMED FIRST, deliberately. Since the consent gate landed (door (i),
+# 2026-09-02) an unconsented summon is refused before the subprocess is ever attempted, so
+# without this arm() the property under test here — "a MISSING CLI degrades gracefully" —
+# would silently become "an unconsented summon is refused", which arm 12 covers instead.
+# Two different failures wearing the same green.
+brain.SUMMON_CONSENT.arm()
 _orig_path = os.environ.get("PATH", "")
 os.environ["PATH"] = "/nonexistent"
 try:
@@ -112,5 +118,11 @@ try:
 finally:
     os.environ["PATH"] = _orig_path
 check("summon fail-soft when claude missing", "isn't set up" in r)
+
+# 12. The consent gate holds on THIS path too. The front door's whole subject is what the
+# model can reach unaided; an unconsented summon must not reach the CLI even when the CLI
+# is present and everything else about the turn is well-formed.
+check("summon without operator consent is refused",
+      "refused" in brain._summon_claude("test task", "ctx"))
 
 print(f"frontdoor-kick-battery: PASS ({PASS} properties)")

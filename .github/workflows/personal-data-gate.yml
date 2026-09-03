@@ -27,3 +27,9 @@ jobs:
           fi
           case "$base" in ''|0000000000000000000000000000000000000000) base=$(git rev-parse HEAD~1) ;; esac
           ./tools/personal-data-gate.sh "$base..${{ github.sha }}"
+      - name: scan HEAD itself against the baseline
+        # The step above reads ADDED LINES. Anything already in HEAD was never an added line
+        # under this gate's watch, so no amount of diff scanning reaches it -- that set was
+        # found by a one-off sweep on 2026-09-02, and a one-off finds a leak once and never
+        # notices the next one. This step makes the cleaned state enforceable.
+        run: ./tools/personal-data-gate.sh --tree

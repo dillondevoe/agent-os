@@ -83,9 +83,12 @@ in {
     ./modules/genesis-open.nix
     ./modules/selfimprove-open.nix
     ./modules/key-drift-open.nix
+    ./modules/user-drift-open.nix
+    ./modules/tailscale-ssh-reassert-open.nix
     ./modules/calculator-open.nix
     ./modules/files-open.nix
     ./modules/email-open.nix
+    ./modules/escalate-secret-open.nix
     ./modules/mail-secret-open.nix
     ./modules/mail-proton-bridge-open.nix
     ./modules/notes-open.nix
@@ -381,6 +384,21 @@ in {
     # 815-tok prefix) on EVERY call after an idle gap; resident → first token 314ms.
     # ~160× on perceived latency, free, zero quality change — THE "it's slow" fix.
     environmentVariables.OLLAMA_KEEP_ALIVE = "-1";
+    # DECLARED, not assumed. This value was carried for weeks as a *decision* — "hold
+    # MAX_LOADED_MODELS at 1 pending the merge/keep call" — and was never once set on the
+    # box. `systemctl show ollama -p Environment` on the Dell listed only KEEP_ALIVE, so
+    # ollama ran on its own CPU default of 3. A control that is budgeted against but absent
+    # is worse than a known-absent one: every argument downstream of it was reasoning about
+    # a limit that was not in force (Rabbot, 2026-08-31: "I budgeted against a control that
+    # was an intention").
+    #
+    # 2, not 1 and not the default 3. The box deliberately runs BOTH brains co-resident
+    # (the 3B router + the 9B agentos brain, ~9 GB together against 23.9 GB available) —
+    # that is the KEEP ruling, so 1 would evict one of them on every alternation and hand
+    # back the ~51s cold reload KEEP_ALIVE exists to prevent. 3 leaves room for a third
+    # model to be pulled in by accident and quietly change the memory picture. 2 is the
+    # number the design actually uses, stated where a reader can see it.
+    environmentVariables.OLLAMA_MAX_LOADED_MODELS = "2";
   };
   environment.variables = {
     OLLAMA_HOST  = "http://127.0.0.1:11434";
@@ -390,6 +408,55 @@ in {
     # qwen2.5:7b-instruct, was #66 drift: model-open.nix stopped seeding that tag when the
     # 9B became the default brain, so this env pointed at a model the image no longer ships.)
     OLLAMA_MODEL = "qwen3.5:9b-agentos";
+
+    # R1 tier-0, the last knob of item 3 — and it is NOT the latency tuning the plan
+    # filed it as. MEASURED ON THE DELL 2026-08-31, same prompt, seed 42, num_ctx 8192,
+    # three arms because two cannot separate a knob from noise on a ~3 tok/s CPU box:
+    #
+    #   arm 1  think unset (SHIPPED DEFAULT)  457422 ms  eval_count=2048  thinking=7809 chars  CONTENT: ""
+    #   arm 2  think=false                     13550 ms  eval_count=61    thinking=0 chars     CONTENT: a real answer
+    #   arm 3  think unset, REPEAT (control)  437634 ms  eval_count=2048  thinking=7690 chars  CONTENT: ""
+    #
+    # The headline is not "34x faster". It is the CONTENT column. `num_predict` is 2048
+    # (model-lora-open.nix:97) and it bounds THINKING AND ANSWER TOGETHER, so the model
+    # spent the entire budget reasoning, hit the ceiling mid-thought, and returned an
+    # EMPTY message — twice, seven and a half minutes each. The box a stranger sits down
+    # at was answering ordinary questions with nothing at all, slowly. The control arm is
+    # what makes that a property of the configuration rather than one unlucky sample.
+    #
+    # Note how this hid. Every prior measurement on this surface was a STOPWATCH, and a
+    # stopwatch reports "slow" for a run that produced no answer exactly as it reports
+    # "slow" for a run that produced a good one. Capturing `message.content` alongside the
+    # duration is the whole reason this was found, and the reason the quality arm is not
+    # optional: latency alone cannot tell a slow brain from a mute one.
+    #
+    # `off`, spelled as one of the tokens _think_budget() actually parses
+    # (agent-brain.py — off/false/0/no).
+    #
+    # THIS ATTRSET IS NOT WHAT REACHES THE BRAIN, and believing it was cost a day.
+    # `environment.variables` builds the LOGIN environment. The TUI is started by
+    # `systemd --user` (brain-home.service, baac2a3), which never sources
+    # /etc/set-environment — so this value shipped, the login shell reported it, and the
+    # running brain had OLLAMA_THINK unset and thought for 81s a turn. What actually
+    # carries it is genesis-open.nix, which BAKES this string into the agent-brain script
+    # at build time, reading it from HERE so there is one spelling. This declaration is
+    # therefore the source of truth for the baked default, and only incidentally the login
+    # env. Do not add a launch path that expects to inherit it.
+    #
+    # It also reaches agos-boot-prewarm via genesis-open.nix's sessionOllamaEnv filter, so
+    # the prewarm and the session cannot disagree — the derivation that fixed the
+    # OLLAMA_MODEL drift.
+    #
+    # flake.nix's `think-off-reaches-the-brain-with-no-env` is the gate, and its vantage is
+    # the point: it execs the BUILT script with OLLAMA_THINK deleted from the environment,
+    # which is the condition a systemd user unit presents. Its predecessor read this
+    # attrset and the parser separately and was green throughout the failure.
+    #
+    # The rollback is `OLLAMA_THINK=on` in the session, no rebuild — the env still wins when
+    # it is set to something the parser recognises. A value it does NOT recognise now falls
+    # back to this baked default rather than to the model's, so a typo degrades to `off`
+    # instead of silently restoring thinking.
+    OLLAMA_THINK = "off";
   };
 
   # --- toolbox: a normal, usable box -------------------------------------------

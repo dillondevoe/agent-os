@@ -32,7 +32,7 @@
 #   wiring-battery.py             8 checks — agent-brain <-> providers.py wiring (needs pyyaml)
 #   brain-dispatch-battery.py     32 checks — agent-brain desktop hands: Lua eval sink unreachable
 #   cost-cap-battery.py           28 checks — cost-cap breaker: limits config + turn() trips (needs pyyaml)
-#   transport-battery.py          23 checks — provider transport seam + ollama transport
+#   transport-battery.py          31 checks — provider transport seam + ollama transport
 #   anthropic-transport-battery.py 34 checks — anthropic SSE transport + translation
 #   bip340-battery.py             47 checks — vendored BIP-340 signer vs the OFFICIAL vectors,
 #                                 must-fail half included, control-armed
@@ -201,6 +201,21 @@ fi
 # ollama payload, and a history trimmer that only ever cuts at a user boundary so a tool
 # result is never orphaned from the assistant tool_call it answers. Arm F runs the naive
 # trimmer on the same fixture and asserts it DOES cut mid-group.
+if need "$ROOT/modules/agos-user-drift/agos-user-drift.py" user-drift; then
+  run user-drift sh -c 'cd "$1" && bash tests/user-drift-battery.sh modules/agos-user-drift/agos-user-drift.py' _ "$ROOT"
+fi
+
+# The installer's flake pin must not rot behind main. Runs here as well as in CI on purpose:
+# a check that exists only in the workflow is one nobody sees until after they have pushed,
+# and this one's whole job is to be noticed BEFORE a stale pin ships.
+if need "$ROOT/tests/pin-freshness.sh" pin-freshness; then
+  run pin-freshness sh -c 'cd "$1" && bash tests/pin-freshness.sh' _ "$ROOT"
+fi
+
+if need "$ROOT/bin/fetch-verified.sh" supply-chain; then
+  run supply-chain sh -c 'cd "$1" && bash tests/fetch-verified-battery.sh bin/fetch-verified.sh "$1"' _ "$ROOT"
+fi
+
 if need "$ROOT/modules/agos-key-drift/agos-key-drift.sh" key-drift; then
   run key-drift sh -c 'cd "$1" && bash tests/key-drift-battery.sh modules/agos-key-drift/agos-key-drift.sh' _ "$ROOT"
 fi

@@ -191,3 +191,39 @@ jobs:
       # `-L` prints full build logs so a battery failure is legible in the run output.
       - name: nix flake check (sandbox=true)
         run: nix flake check --option sandbox true -L
+
+  # SEPARATE JOB, and the separation is the point. A failing STEP ends its JOB, so this
+  # cosmetic aging check sat immediately ahead of `nix flake check` and DELETED the eval gate:
+  # every eval-time assert in the repo — the registry invariants, the runtimePaths negative
+  # control, cap-sandbox-check — went unevaluated for ~20h across #259–#265 (2026-09-02/03,
+  # 12/12 runs step-skipped) while the checks list showed nothing but a red everyone had already
+  # learned to call "known, pin drift". Reordering would have fixed the suppression and kept the
+  # worse half: two unrelated verdicts on one check line, so the next drift past 25 re-earns the
+  # "known red" label and a REAL eval failure hides behind it. Two jobs means two independently
+  # legible verdicts — `flake-check (sandboxed)` means evaluation, `pin-freshness` means aging —
+  # and the dismissable label can only ever attach to the one that is actually cosmetic.
+  #
+  # The script is pure git, so this job needs no Nix install: checkout + fetch + script.
+  pin-freshness:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        # SHA-pinned (Fable fold a): immutable commit of the newest v* release tag.
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      # The installer's FLAKE_REV must not rot behind main. install.sh pins the flake to a rev
+      # so a fresh install builds a KNOWN system rather than whatever main is that second; the
+      # cost of that trade is a NEW quiet failure — main advances, nobody bumps, and a fresh
+      # install lays down a system that predates every fix since, with nothing erroring anywhere.
+      # Rabbot's ruling 2026-08-31: aging must be LOUD, not visible-if-someone-looks.
+      #
+      # The fetch is explicit rather than relying on the checkout's depth: the default checkout is
+      # SHALLOW, so `origin/main` and `git rev-list` silently resolve to nothing, and a check that
+      # cannot see the mainline would report on a distance it never measured. `--depth=200` bounds
+      # the fetch while still exceeding the 25-commit threshold by a wide margin; if the pin is
+      # ever further back than that, the ancestry test fails rather than passing on a truncated
+      # history — the empty-result law, applied to git.
+      - name: install.sh flake pin is fresh (not rotting behind main)
+        run: |
+          git fetch --depth=200 origin main
+          BASE=FETCH_HEAD ./tests/pin-freshness.sh

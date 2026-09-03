@@ -1,0 +1,225 @@
+#!/usr/bin/env python3
+# cap-net-fetch — Phase S · door (ii) slice 1 impl for the T2 `net.fetch` capability.
+#
+# Security surface: branch -> PR -> Fable -> merge. Never direct-push.
+#
+# Tier T2 (ALWAYS-CONFIRM — never auto, regardless of provenance; docs/phase2-threat-model.md
+# §T2). This impl performs the egress itself rather than shelling out to `agos-web fetch`
+# (docs/door-ii-capability-migration.md §1, resolved Q3 on the #259 gate: direct, not a wrapper —
+# a wrapper would put an unstamped fetch path beside the stamped one).
+#
+# This impl NEVER emits an `origin` field. Origin is broker policy (docs/phase2-broker-spec.md
+# §4.5a) and `bin/broker`'s ORIGIN_BY_CAP already pins net.fetch -> UNTRUSTED, so the taint is
+# committed from the capability NAME before these bytes are released. An impl that reported its
+# own origin would be fail-open by construction.
+#
+# ── Confinement is enforced TWICE, by design ──────────────────────────────────────────────────
+# Same posture as cap-file-read's root re-check, for the same reason, against a different boundary:
+#
+#   1. THIS impl resolves the URL's host and refuses if ANY resolved address falls inside the
+#      deny-list below. That list MIRRORS `egressDenyList` in modules/capability-registry.nix.
+#   2. The kernel, via the transient unit cap-invoke derives from that same registry declaration
+#      (modules/cap-sandbox.nix `netProps`: IPAddressDeny=<cidr> per entry, and DELIBERATELY no
+#      IPAddressAllow. This line used to read "IPAddressAllow=any + IPAddressDeny=<cidr>", which
+#      described the code accurately and the BEHAVIOUR not at all: `any` matches at rule 1 of
+#      systemd.resource-control(5), so layer 2 was inert and this impl's resolve-check was the
+#      only layer standing. Battery legs 8c/8c-prefix now measure that, in both renderings.)
+#
+# Neither layer is redundant, and the ORDER of their weaknesses is why:
+#
+#   * Layer 1 alone is defeatable by DNS rebinding — the name can resolve to a public address at
+#     getaddrinfo() time and to 127.0.0.1 by connect() time. That TOCTOU is unclosable in
+#     userspace; the cgroup filter in layer 2 is evaluated per-packet and closes it.
+#   * Layer 2 alone is silent if the host lacks cgroup-v2 BPF support: systemd logs a warning and
+#     IPAddressDeny simply does not take effect. That is a fail-OPEN, and it is exactly what
+#     tests/cap-sandbox-battery.sh leg 8 exists to detect on a real box before the shipping gate
+#     in modules/cap-invoke-pkg.nix is lifted.
+#
+# REDIRECTS ARE NOT FOLLOWED, and this is a security property rather than a simplification. A
+# 302 to http://127.0.0.1:11434 or to a link-local metadata address is the canonical way to walk
+# a fetch past a check that only ever examined the URL the caller supplied. Layer 1 validates the
+# address it is about to dial; a followed redirect would dial an address it never validated. The
+# redirect is surfaced to the caller (status + Location in meta) so a human can re-issue it as a
+# fresh, separately-confirmed net.fetch — which is the correct shape for a T2 capability.
+#
+# Seam contract (invoked by cap-invoke, the AGENT_OS_INVOKE_SEAM dispatcher):
+#   stdin  : {"capability":"net.fetch","arguments":{"url":<str>,"method":"GET"|"HEAD"}}
+#   stdout : {"ok":true, "content":<body as utf-8 str; "" for HEAD>,
+#             "meta":{"status":<int>,"method":<str>,"url":<str>,"bytes":<int>,
+#                     "content_type":<str>,"location":<str|absent>}}          exit 0
+#   stdout : {"ok":false,"content":null,"meta":{}}                            exit 3
+#            on any contract/infra/policy failure (dispatcher then withholds, fail-closed).
+
+import ipaddress
+import json
+import os
+import socket
+import sys
+import urllib.error
+import urllib.request
+from urllib.parse import urlsplit
+
+# MIRROR of modules/capability-registry.nix `egressDenyList`. Duplicated deliberately: this impl
+# must fail closed even if it is ever invoked without the registry-derived unit around it (a
+# direct-invoke, a battery, a future seam slip). If the registry list changes, change it here —
+# tests/cap-sandbox-battery.sh leg 8 derives ITS properties from the materialized policy, so a
+# drift between the two shows up there as a deny the kernel enforces and this impl does not.
+EGRESS_DENY = [
+    "127.0.0.0/8", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16",  # gate-allow
+    "100.64.0.0/10",   # CGNAT / shared address space (RFC 6598), real LAN hops  # gate-allow
+    "169.254.0.0/16",         # link-local, incl. cloud instance-metadata
+    "::1/128", "fc00::/7", "fe80::/10",
+]
+_DENY_NETS = [ipaddress.ip_network(c) for c in EGRESS_DENY]
+
+ALLOWED_SCHEMES = ("http", "https")
+ALLOWED_METHODS = ("GET", "HEAD")          # mirrors registry argEnums.method (read-only verbs)
+MAX_BODY_BYTES = 1048576                   # 1 MiB — bounds memory vs a hostile endless response
+TIMEOUT_S = 15
+
+
+def _fail(msg):
+    sys.stderr.write("cap-net-fetch: %s\n" % msg)
+    sys.stdout.write(json.dumps({"ok": False, "content": None, "meta": {}},
+                                sort_keys=True, separators=(",", ":"), ensure_ascii=True))
+    sys.exit(3)
+
+
+def _addr_denied(addr):
+    """True iff `addr` (a str IP) is inside any denied network. An address we cannot parse is
+    treated as DENIED — an unparseable address is not a safe one.
+
+    IPv4-MAPPED IPv6 IS UNWRAPPED FIRST. `::ffff:127.0.0.1` is not a member of `127.0.0.0/8` by
+    `in`, so without this it walks straight through the membership check while dialing host
+    loopback — measured live on this list: `::ffff:127.0.0.1`, `::ffff:10.0.0.1` and  # gate-allow
+    `::ffff:169.254.169.254` (instance metadata) all returned denied=False. An AAAA record is
+    enough to reach it; no local config is needed. The broker does the same unwrap in
+    `validate_url` (§4.3) — this is the impl-side half of one rule, kept because this impl must
+    fail closed on a direct-invoke that never passed the broker.
+
+    KNOWN LIMIT, not fixed here: NAT64 (`64:ff9b::/96`) embeds the same IPv4 space and also
+    passes. The registry `egressDenyList` does not carry it either, so unwrapping it here alone
+    would put the impl and the kernel-enforced policy out of step — the drift leg 8 exists to
+    catch. It moves as one change to both lists or not at all."""
+    try:
+        ip = ipaddress.ip_address(addr)
+    except ValueError:
+        return True
+    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
+        ip = ip.ipv4_mapped            # unwrap ::ffff:127.0.0.1 -> 127.0.0.1
+    return any(ip in net for net in _DENY_NETS)
+
+
+class _NoRedirects(urllib.request.HTTPRedirectHandler):
+    """Refuse every redirect. See the REDIRECTS block in the header — urllib's default handler
+    would follow to an address layer 1 never validated."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def main():
+    try:
+        raw = sys.stdin.buffer.read()
+    except OSError as e:
+        _fail("could not read stdin (%s)" % e)
+
+    try:
+        req = json.loads(raw.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError) as e:
+        _fail("request is not valid JSON (%s)" % e)
+    if not isinstance(req, dict):
+        _fail("request is not a JSON object")
+
+    args = req.get("arguments")
+    if not isinstance(args, dict):
+        _fail("'arguments' is not a JSON object")
+
+    url = args.get("url")
+    if not isinstance(url, str) or not url:
+        _fail("'url' missing or not a string")
+
+    # `method` is optional at this layer and defaults to GET. The broker's enum validation is the
+    # authority on what the MODEL may ask for (registry argEnums, fail-closed on an absent member
+    # set); this re-check is the same defense-in-depth as the address check — a direct-invoke that
+    # bypassed the broker must not be able to smuggle a state-changing verb through.
+    method = args.get("method", "GET")
+    if not isinstance(method, str) or method not in ALLOWED_METHODS:
+        _fail("'method' not one of %s" % (ALLOWED_METHODS,))
+
+    parts = urlsplit(url)
+    if parts.scheme not in ALLOWED_SCHEMES:
+        _fail("scheme %r not allowed" % parts.scheme)
+    if not parts.hostname:
+        _fail("url has no host")
+    port = parts.port or (443 if parts.scheme == "https" else 80)
+
+    # Resolve BEFORE dialing and check every answer, not just the first. A host with one public
+    # and one loopback A record must be refused outright — picking the "good" one and proceeding
+    # would leave which address gets dialed up to the resolver's ordering.
+    try:
+        infos = socket.getaddrinfo(parts.hostname, port, proto=socket.IPPROTO_TCP)
+    except socket.gaierror as e:
+        _fail("could not resolve host (%s)" % e)
+    if not infos:
+        _fail("host resolved to no addresses")
+    for info in infos:
+        if _addr_denied(info[4][0]):
+            # The address is NOT echoed. A denied fetch that reports which internal address it
+            # resolved to is a network-mapping oracle for whatever asked for the fetch.
+            _fail("host resolves to a denied (private/loopback/link-local) address")
+
+    opener = urllib.request.build_opener(_NoRedirects)
+    request = urllib.request.Request(url, method=method)
+    try:
+        resp = opener.open(request, timeout=TIMEOUT_S)
+    except urllib.error.HTTPError as e:
+        # A 3xx arrives here because _NoRedirects refused it. Surface it as a REFUSED redirect
+        # rather than an ordinary failure, so the caller can tell "the site moved" from "the
+        # fetch broke" — and can re-issue the new URL as a fresh, separately-confirmed T2 call.
+        if 300 <= e.code < 400:
+            loc = e.headers.get("Location") or ""
+            sys.stdout.write(json.dumps(
+                {"ok": True, "content": "",
+                 "meta": {"status": e.code, "method": method, "url": url, "bytes": 0,
+                          "content_type": e.headers.get("Content-Type") or "",
+                          "location": loc,
+                          "note": "redirect NOT followed; re-issue as a new net.fetch"}},
+                sort_keys=True, separators=(",", ":"), ensure_ascii=True))
+            sys.exit(0)
+        _fail("http error %s" % e.code)
+    except (urllib.error.URLError, OSError, ValueError) as e:
+        _fail("fetch failed (%s)" % e)
+
+    with resp:
+        status = getattr(resp, "status", None) or resp.getcode()
+        ctype = resp.headers.get("Content-Type") or ""
+        if method == "HEAD":
+            octets = b""
+        else:
+            try:
+                octets = resp.read(MAX_BODY_BYTES + 1)
+            except (OSError, urllib.error.URLError) as e:
+                _fail("could not read response body (%s)" % e)
+            if len(octets) > MAX_BODY_BYTES:
+                _fail("response exceeds MAX_BODY_BYTES cap")
+
+    # v1 LIMIT, stated rather than papered over: the body must be valid utf-8. The seam contract
+    # carries `content` as a JSON string, and decoding with errors="replace" would hand the model
+    # silently-mangled bytes under a successful-looking ok:true. Fail closed instead; charset
+    # negotiation from Content-Type is deferred and is not a security property.
+    try:
+        content = octets.decode("utf-8")
+    except UnicodeDecodeError as e:
+        _fail("response body is not valid utf-8 (%s)" % e)
+
+    sys.stdout.write(json.dumps(
+        {"ok": True, "content": content,
+         "meta": {"status": status, "method": method, "url": url,
+                  "bytes": len(octets), "content_type": ctype}},
+        sort_keys=True, separators=(",", ":"), ensure_ascii=True))
+    sys.exit(0)
+
+
+if __name__ == "__main__":
+    main()
