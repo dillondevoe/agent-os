@@ -39,7 +39,7 @@ one impl binary:
 | what | where |
 |---|---|
 | tier + args + summary | `modules/capability-registry.nix`, via `mkCap` |
-| verdict class | derived from tier (T0 auto / T1 auto+checkpoint / T2 always-confirm) |
+| verdict class | derived from tier (T0 auto / T1 confirm-in-v1, checkpoint scope from `readWritePaths`, auto deferred to §5a / T2 always-confirm) |
 | confinement | the same entry's `sandbox = { … }` |
 | impl binary | `bin/cap-<name>`, resolved by `bin/cap-invoke` |
 
@@ -87,12 +87,13 @@ seam has a defect, it surfaces here, on the capability where a wrong answer is c
 result BEFORE the result's bytes are released. Fetched web bytes are the canonical untrusted
 input, and today they enter the brain unstamped.
 
-**Open:** whether `agos-web fetch` becomes `cap-net-fetch` directly or the impl wraps it.
-Wrapping is smaller; direct is honest about what runs in the sandbox. Leaning direct.
+**Resolved (gate on #259, Q3): direct.** `cap-net-fetch` does the fetch itself rather than
+wrapping `agos-web fetch`. Wrapping is smaller, but the audit line should name what actually
+runs in the unit.
 
 ---
 
-## 2. `run_command` → `sys.run` (new, T2) — confinement, not verdicts
+## 2. `run_command` → `sys.run` (new, **T1**) — confinement, not verdicts
 
 Today (`agent-brain.py:1153-1157`):
 
@@ -104,44 +105,61 @@ o = subprocess.run(["bash","-c",args.get("command","")], capture_output=True, te
 *"You HAVE HANDS"* and the same prompt tells it to read web pages. **This is the live wire door
 (ii) actually cuts:** prompt-injection → arbitrary exec, on the operator's uid.
 
-**The ruling's core point, adopted verbatim: do not try to classify arbitrary shell.** A broker
-verdict on `bash -c <anything>` can only honestly be REQUIRE-CONFIRM-always, and a
-confirm-every-command box is a different product. So:
+The ruling's core point, adopted verbatim: **do not try to classify arbitrary shell.** The
+broker's contribution here is confinement and an audit line, not a semantic gate on the command
+string.
 
-- **Verdict:** ALLOW-AUTO. The broker's contribution here is the **audit line**, not a gate.
-- **Confinement:** the exec happens in a transient `cap-sandbox` unit derived from the registry
-  decl. Blast radius by declaration.
-- **Operator friction added:** zero.
+- **Tier: T1** (Geist's gate on #259, Q1). The checkpoint scope is **derived from
+  `readWritePaths`** — the mechanism `capability-registry.nix:113-115` already prescribes, so
+  this widens nothing.
+- **Confinement:** a transient `cap-sandbox` unit derived from the registry decl. Blast radius
+  by declaration.
 - **Widening the sandbox is a PR-gated registry change** — which is exactly where that decision
   belongs, and is the whole benefit of the move.
 
-Proposed opening decl, deliberately tight — the first PR should be *too narrow* and widen on
-evidence, never the reverse:
-
 ```nix
 "sys.run" = mkCap {
-  tier = "T2"; impl = "cap-sys-run";
+  tier = "T1"; impl = "cap-sys-run";
   summary = "Run a shell command inside the declared sandbox.";
   args = { command = "string"; };
   sandbox = { readWritePaths = [ "/var/lib/agent-os/workspace" ]; network = false; };
 };
 ```
 
-`network = false` yields `PrivateNetwork=yes` + `IPAddressDeny=any` from
-`cap-sandbox.nix:158`. Note what that costs: `run_command curl …` stops working. That is the
-point, and it is also the thing most likely to be wrong in practice — flagged as the primary
-question for the gate.
+### 2a. Why not ALLOW-AUTO — the ask was standing on a false premise
 
-**Tier honesty, open question for Geist:** T2 is defined as *"irreversible / outward-facing,
-ALWAYS human-confirm"*. Registering `sys.run` as T2 while asking for ALLOW-AUTO contradicts
-the tier's own definition. Two options, and I do not think this is mine to pick:
-1. a new tier for *"audited, confined, not confirmed"*; or
-2. T1 with the checkpoint scope derived from `readWritePaths` (the mechanism T1 already has).
+An earlier draft asked for ALLOW-AUTO and worried that T2's always-confirm definition
+contradicted it. **The contradiction was not between the tier and the ask; it was in the ask.**
+`capability-registry.nix:112` — *"T1 — reversible local side effects. Confirmed-in-v1 (T1-auto
+deferred)"* — and threat model §5, *"confirm everything above T0"*. ALLOW-AUTO-always was never
+available **at any tier**. So the real choice was: invent a verdict class consulting neither
+operator nor taint, or take T1's road. §5a already rules no-second-vocabulary. T1's road.
 
-**(2) looks right** — T1's checkpoint is precisely "reversible within a declared scope", which
-is what a sandboxed exec is. But it widens what T1 means, so it is a ruling, not a preference.
+**The general law, and it is the durable half — tiers must be closed under emulation.** A
+workspace-scoped `sys.run` is a universal `file.write` emulator: anything `file.write` can do
+inside `/var/lib/agent-os/workspace`, `sys.run` can do with a redirect. An auto `sys.run` would
+therefore make `file.write`'s confirm **advisory** — the tier survives on paper while the
+capability that emulates it walks around it. Check any new capability against this: *what do my
+declared paths and args let me emulate, and is that thing's tier still true afterwards?*
 
----
+**Honest cost, restated:** friction is not zero. It is **`file.write`'s friction**, until §5a's
+`T1-auto-on-trusted` lands. That is the correct place for the pressure — and note that slice 1
+ships §5a's own enabling dependency (taint stamping on fetched bytes) first, so the order
+already serves it. **Friction pressure routes to implementing §5a, never to loosening the
+tier.**
+
+### 2b. `network = false` is load-bearing and permanent
+
+Not, as the earlier draft had it, "the line most likely to be wrong." Two independent reasons:
+
+1. **Registry assert (4): network ⟹ T2.** A networked `sys.run` is *definitionally* T2, hence
+   always-confirm. There is no slice at which it widens and stays auto — the invariant closes
+   that door before policy gets a vote.
+2. **A sandboxed `curl` would bring web bytes back UNSTAMPED**, laundering straight past the
+   anti-laundering property §1 exists to establish.
+
+So `run_command curl …` dying is **the control working**. A real need for networked exec names
+a **new T2 capability** with its own decl and its own confirm — never a wider `sys.run`.
 
 ## 3. `summon_claude` → `cloud.summon` (T2) — and (i) retires here
 
@@ -165,8 +183,11 @@ seam, not against the spec.** If any property is weaker in practice, (i) stays u
 | logged both ways | `_log_summon_attempt(allowed, reason)` — a refusal is LOUD | audit-before-effect, both verdicts | ☐ |
 
 Discharging those four boxes against `docs/phase2-step6-confirm-channel-spec.md` **and the
-deployed unit** is a precondition of the summon PR, and it is the one part of this document I
-expect to change on contact.
+deployed unit** is the **summon PR's first commit** (gate on #259, Q4) — deliberately *not*
+today. A box ticked now would certify a seam slice 3 acts on later, and a "verified" row that
+ages is the record disagreeing with the machine silently: the exact failure the unticked-box
+design exists to prevent. The doc-gate obligation was the table existing with the right four
+rows; that is discharged.
 
 ### 3b. Retirement + battery migration
 
@@ -249,9 +270,20 @@ Small and independent of the three slices. Ships wherever it is cheapest.
 Separate PRs, security surface, Fable review. Idle-until-work material; nothing here preempts
 step (c), which is Dillon-gated and untouched.
 
-## 6. Open questions for the gate
+## 6. Questions carried to the gate — all four answered
 
-1. **§2 tier** — new tier, or T1-with-derived-checkpoint for `sys.run`? (I lean T1.)
-2. **§2 confinement** — is `network = false` on the opening `sys.run` decl too tight to be usable?
-3. **§1 impl** — `cap-net-fetch` directly, or wrapping `agos-web fetch`? (I lean direct.)
-4. **§3a** — is discharging the four-property table a doc-gate obligation, or the summon PR's first commit?
+Ruled by Geist on PR #259, 2026-09-03T00:43:16Z. Kept as a record of what was decided and on
+what grounds, since two of the four turned on lines neither of us had quoted.
+
+1. **`sys.run` tier — T1, no new tier.** The ALLOW-AUTO ask was standing on a false premise:
+   T1 is *also* confirmed-in-v1, so auto was never available at any tier. Option (2) widens
+   nothing — `capability-registry.nix:113-115` already prescribes checkpoint-scope-from-
+   `readWritePaths`. See §2a, including the emulation law.
+2. **`network = false` — permanent, not too tight.** Registry assert (4) makes a networked
+   `sys.run` definitionally T2, and a sandboxed `curl` would launder unstamped web bytes past
+   §1's whole point. See §2b.
+3. **Slice 1 impl — direct**, not a wrapper. See §1.
+4. **§3a discharge — the summon PR's first commit**, not the doc gate. See §3a.
+
+**Standing convention adopted from this gate:** arm-count-printed-beside-the-verdict becomes the
+battery's convention generally, not just for the summon migration.
