@@ -3,7 +3,7 @@
 #
 # Usage (MUST run as root on a host with a live SYSTEM systemd):
 #   sudo tests/cap-sandbox-battery.sh <bin/cap-invoke> <cap-bin-dir> <registry.json> \
-#                                     <cap-sandbox.json> [systemd-run]
+#                                     <cap-sandbox.json> [systemd-run] [bin/cap-net-fetch]
 #
 # This battery deliberately CANNOT run inside `nix flake check`: a check derivation has no
 # systemd, no D-Bus, and no ability to create /var/lib/agent-os. The pure, eval-level half of
@@ -16,7 +16,7 @@
 # so a through-the-seam call ALWAYS uses the hardcoded production roots — pointing this battery at
 # scratch roots would test a path production never takes.
 #
-# Ten arms (legs 0-7, 8b, 8c), in the order that makes the result meaningful:
+# Eleven arms (legs 0-7, 8b, 8c, 9), in the order that makes the result meaningful:
 #   0. NEGATIVE CONTROL — with the sandbox NOT configured, the escaping read SUCCEEDS and returns
 #      the canary. Without this leg, legs 1-2 could pass for the wrong reason (e.g. the impl simply
 #      erroring). This is the fail-OPEN state Geist's RULING 1 describes, demonstrated, not asserted.
@@ -46,6 +46,23 @@
 #      8b a NON-LOOPBACK denied address (does the kernel layer work at all?) and 8c loopback,
 #      which the registry denies on purpose. 8a's control differs from 8b by the deny entries
 #      ALONE. This gates lifting `offenders` in modules/cap-invoke-pkg.nix.
+#
+#      8b/8c DOWNGRADE TO NOT-DEMONSTRATED when the target is one of this host's own addresses
+#      (Geist's gate on #260, 2026-09-03). On a single node every candidate 8b can find is
+#      host-own by construction, so the connection routes over `lo` and the arm CANNOT pass. A
+#      leg that cannot pass is as uninformative as one that cannot fail, and merging it as a hard
+#      failure would redden this vm-test on every future PR forever — alarm fatigue, not a
+#      finding. The protection it claims already rests in the CLOSED `offenders` list, which this
+#      PR does not touch. So: host-own target -> report NOT-DEMONSTRATED loudly, qualify the final
+#      line, exit 0. Genuinely-remote target -> the hard failure stays exactly as it was.
+#   9. USERSPACE, cap-net-fetch's own resolve-then-check: an IPv4-MAPPED IPv6 literal
+#      (`::ffff:127.0.0.1`) must be DENIED. Measured bypass, found by Geist on the Air and
+#      reproduced here: `::ffff:127.0.0.1` is not a member of `127.0.0.0/8` under `in`, so
+#      pre-fix it walked through `_addr_denied` and dialled host loopback. getaddrinfo does NOT
+#      normalize the mapped form away (measured: `[::ffff:7f00:1]` resolves to `::ffff:127.0.0.1`,
+#      not `127.0.0.1`), so the arm is not vacuous. It carries its own PRE-FIX CONTROL: the same
+#      probe against a copy of the impl with the unwrap removed must be ALLOWED through, or the
+#      arm is passing for a reason other than the fix.
 set -u
 
 INVOKE="${1:?path to bin/cap-invoke required}"
@@ -53,6 +70,12 @@ CAPBIN="${2:?cap bin dir required}"
 REGISTRY="${3:?registry.json required}"
 POLICY="${4:?cap-sandbox.json required}"
 SYSTEMD_RUN="${5:-$(command -v systemd-run || echo /usr/bin/systemd-run)}"
+# Leg 9 needs the net.fetch IMPL, which is deliberately NOT in capBinDir: `offenders` in
+# modules/cap-invoke-pkg.nix refuses to ship any sandbox.network=true cap until the confinement is
+# demonstrated, and this PR does not lift it. So the path is passed in separately rather than
+# derived from CAPBIN — deriving it would make leg 9 hard-fail for exactly the reason the gate is
+# working correctly.
+NETFETCH="${6:-$CAPBIN/cap-net-fetch}"
 PY="${PYTHON:-python3}"
 
 [ "$(id -u)" = 0 ] || { echo "cap-sandbox SKIP-FAIL: must run as root (transient SYSTEM units)" >&2; exit 1; }
@@ -340,32 +363,58 @@ echo "cap-sandbox 7 OK  (network=false cap has NO stack under its real derived p
 # off-host address in a denied CIDR over a real route. That is a change to the vm-test harness
 # (a two-node nixosTest), not to this battery, and it is the honest next step before anyone
 # concludes the confinement is or is not real.
-NETADDR="$("$PY" - <<'PY8A'
-import ipaddress, socket, sys
+# Emits "<addr> <hostown:yes|no>". HOSTOWN is what decides whether an 8b failure is a FINDING or
+# merely NOT-DEMONSTRATED, so it is MEASURED, not assumed: the address is compared against this
+# host's own set (getaddrinfo of the hostname, plus the kernel-selected source address for each
+# probe route — a `getsockname` after a UDP connect returns a local address by definition).
+#
+# On a single node every candidate is host-own, so this always reports yes and 8b can never pass.
+# AGENT_OS_BATTERY_REMOTE_DENIED_ADDR is the seam the two-node nixosTest fills in with a genuinely
+# off-host address in a denied CIDR; supplied that way, HOSTOWN is no and the hard failure returns.
+# The hook exists so the remote branch is REACHABLE — a branch no harness can enter is untested
+# code that reads as coverage, which is the defect this battery is otherwise built to avoid.
+NETINFO="$("$PY" - <<'PY8A'
+import ipaddress, os, socket, sys
 DENY = [ipaddress.ip_network(c) for c in
         ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "100.64.0.0/10", "169.254.0.0/16")]  # gate-allow
-cands = []
+own = set()
 try:
     for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
-        cands.append(info[4][0])
+        own.add(info[4][0])
 except OSError:
     pass
 for probe in ("10.0.2.2", "1.1.1.1"):  # qemu user-net gw, then a public addr  # gate-allow
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
-        s.connect((probe, 9)); cands.append(s.getsockname()[0])
+        s.connect((probe, 9)); own.add(s.getsockname()[0])
     except OSError:
         pass
     finally:
         s.close()
-for a in cands:
+
+supplied = os.environ.get("AGENT_OS_BATTERY_REMOTE_DENIED_ADDR", "").strip()
+if supplied:
+    ip = ipaddress.ip_address(supplied)
+    if ip.is_loopback or not any(ip in n for n in DENY):
+        sys.stderr.write("supplied remote target %s is loopback or not in a denied CIDR\n" % supplied)
+        sys.exit(1)
+    sys.stdout.write("%s %s" % (supplied, "yes" if supplied in own else "no"))
+    sys.exit(0)
+
+for a in sorted(own):
     ip = ipaddress.ip_address(a)
     if not ip.is_loopback and any(ip in n for n in DENY):
-        sys.stdout.write(a); sys.exit(0)
-sys.stderr.write("no non-loopback IPv4 inside a denied CIDR (candidates: %r)\n" % cands)
+        sys.stdout.write("%s yes" % a); sys.exit(0)
+sys.stderr.write("no non-loopback IPv4 inside a denied CIDR (candidates: %r)\n" % sorted(own))
 sys.exit(1)
 PY8A
 )" || fail "8: no non-loopback denied address to probe — this leg cannot run here, and a skipped arm must not read as a pass"
+read -r NETADDR NETOWN <<EOF
+$NETINFO
+EOF
+[ -n "$NETADDR" ] && [ -n "$NETOWN" ] || fail "8: target selector did not emit '<addr> <hostown>' (got: $NETINFO)"
+case "$NETOWN" in yes|no) : ;; *) fail "8: hostown must be yes or no, got $NETOWN" ;; esac
+[ "$NETOWN" = no ] || echo "cap-sandbox 8: NOTE — $NETADDR is one of THIS HOST's own addresses, so the 8b/8c route is loopback and those arms can only report NOT-DEMONSTRATED (set AGENT_OS_BATTERY_REMOTE_DENIED_ADDR from a two-node harness to make them decisive)"
 
 NETDIR="$(mktemp -d)"
 NETPID=""
@@ -426,8 +475,21 @@ case "$NETOUT" in
   *PROBE-RAN*) : ;;
   *) netcleanup; fail "8b: probe never executed under the derived properties, so this leg proved NOTHING (rc=$NETRC, out=$NETOUT)" ;;
 esac
-[ "$NETRC" != 0 ] || { netcleanup; fail "8b: IPAddressDeny did NOT stop a connection to $NETADDR, an address the policy denies. Read the KNOWN LIMIT note above before concluding why: this target is one of THIS host's own addresses, so the route is loopback and systemd's IP filtering is documented not to cover it. Either way the confinement is NOT DEMONSTRATED here, which is all the shipping gate in modules/cap-invoke-pkg.nix needs: do NOT lift it."; }
-echo "cap-sandbox 8b OK (network=true: control arm with a stack reached $NETADDR; the SAME probe under the derived IPAddressDeny list RAN and was refused — the only delta is the deny entries)"
+NOTDEMO=0
+if [ "$NETRC" = 0 ]; then
+  if [ "$NETOWN" = yes ]; then
+    # NOT a finding, and NOT a pass. The target is host-own, so the connection routed over `lo`,
+    # and systemd's IP filtering is documented not to apply there — this arm could not have gone
+    # green whatever the deny list does. Reported loudly, suite continues, exit code unaffected.
+    NOTDEMO=1
+    echo "cap-sandbox 8b NOT-DEMONSTRATED: the probe reached $NETADDR under the derived IPAddressDeny list, but that address is one of THIS HOST's own, so the route is loopback and the filter is documented not to cover it. This arm CANNOT pass on a single node — it is not evidence the filter is inert, and it is not evidence the filter works. Settle it with a two-node nixosTest (AGENT_OS_BATTERY_REMOTE_DENIED_ADDR). Until then the shipping gate in modules/cap-invoke-pkg.nix STAYS: do NOT lift \`offenders\`."
+  else
+    netcleanup
+    fail "8b: IPAddressDeny did NOT stop a connection to $NETADDR, an address the policy denies, over a route that is NOT this host's own. That is a real finding, not a route artifact: the kernel layer is inert here. The shipping gate in modules/cap-invoke-pkg.nix STAYS and slice 1 switches to the netns+proxy shape."
+  fi
+else
+  echo "cap-sandbox 8b OK (network=true: control arm with a stack reached $NETADDR; the SAME probe under the derived IPAddressDeny list RAN and was refused — the only delta is the deny entries)"
+fi
 
 # 8c. LOOPBACK, denied deliberately by the registry (the in-guest model on 127.0.0.1:11434). Its own
 # arm because it is a DIFFERENT claim from 8b: 8b says the mechanism works, 8c says whether it
@@ -441,11 +503,76 @@ esac
 netcleanup
 if [ "$NETRC" != 0 ]; then
   echo "cap-sandbox 8c OK (loopback is ALSO filtered — the registry's 127.0.0.1:11434 threat is covered by the kernel layer, not only by cap-net-fetch's resolve-check)"
+elif [ "$NOTDEMO" = 1 ]; then
+  # 8c's failure message INTERPRETS ITSELF AGAINST A GREEN 8b — "loopback is exempt even though the
+  # mechanism works" is only sayable when 8b showed the mechanism works. With 8b not demonstrated
+  # there is no such contrast, so this downgrades with it rather than asserting a gap it cannot see.
+  echo "cap-sandbox 8c NOT-DEMONSTRATED: the loopback probe reached 127.0.0.1 under the derived deny list, but 8b did not establish that the mechanism works on ANY target here, so this arm cannot separate 'loopback is exempt' from 'the filter is inert'. The registry denies loopback on purpose, so until a two-node run settles 8b that threat rests ONLY on cap-net-fetch's resolve-then-check (one userspace layer) — which is why the shipping gate stays."
 else
   fail "8c: IPAddressDeny did NOT stop a connection to 127.0.0.1 even though 8b shows the mechanism WORKS on a non-loopback denied address. Loopback is exempt from cgroup IP filtering on this host. That is a real gap, not a harness bug: capability-registry.nix denies loopback ON PURPOSE (a fetch to 127.0.0.1:11434 could drive the in-guest model), so here that threat rests ONLY on cap-net-fetch's own resolve-then-check — one userspace layer, defeatable by DNS rebinding. Rule on this before lifting the shipping gate."
 fi
 
+# 9. USERSPACE: cap-net-fetch must DENY an IPv4-mapped IPv6 literal. This is the layer 1 half —
+# legs 8b/8c are the kernel half — and it is measured through the impl's REAL entry point (stdin
+# JSON on the seam contract), not by calling a private function.
+#
+# The arm is only meaningful with its PRE-FIX CONTROL, so both run: a copy of the impl with the
+# unwrap line removed must ALLOW the same input through. Without that, leg 9 would pass on any impl
+# that fails every fetch for any reason at all — including a broken one.
+CNF="$NETFETCH"
+[ -x "$CNF" ] || fail "9: net.fetch impl not found or not executable at '$CNF' — this arm cannot run, and a skipped arm must not read as a pass. Pass its path as argument 6 (capBinDir does not carry it while \`offenders\` is closed)."
+
+# `[::ffff:7f00:1]` over `[::ffff:127.0.0.1]` deliberately: it is the form a hostile AAAA record
+# takes, and it proves the check does not merely string-match the dotted tail. MEASURED: getaddrinfo
+# resolves it to `::ffff:127.0.0.1` and does NOT flatten it to `127.0.0.1`, so the mapped form is
+# what reaches the membership test.
+MAPPED_URL='http://[::ffff:7f00:1]:11434/'
+# The rejection this arm is about, by its exact stderr text. MEASURED, and it is why the control
+# below cannot key on the exit code: pre-fix the address check PASSES and the dial then fails with
+# "fetch failed (Connection refused)" — a DIFFERENT rejection producing the SAME ok=false/exit 3.
+# An arm that only checked "it refused" would pass on the broken impl.
+DENY_MSG='host resolves to a denied'
+mapped_out() { printf '{"capability":"net.fetch","arguments":{"url":"%s","method":"GET"}}' "$MAPPED_URL" | "$1" 2>&1; }
+
+OUT="$(mapped_out "$CNF")"; RC=$?
+[ "$RC" = 3 ] || fail "9: cap-net-fetch exited $RC (want 3) on the mapped-loopback URL $MAPPED_URL — output: $OUT"
+case "$OUT" in
+  *'"ok":false'*) : ;;
+  *) fail "9: cap-net-fetch did not report ok=false on $MAPPED_URL ($OUT)" ;;
+esac
+case "$OUT" in
+  *"$DENY_MSG"*) : ;;
+  *) fail "9: cap-net-fetch refused $MAPPED_URL but NOT at the address check (wanted '$DENY_MSG'). Some other guard rejected it, so this arm did not measure the mapped-IPv6 denial: $OUT" ;;
+esac
+
+# 9-CONTROL (pre-fix): with the unwrap neutered, the SAME input must get PAST the address check.
+# It will still fail — nothing is listening — so the discriminator is WHICH rejection, not whether
+# one happened.
+PREFIX_DIR="$(mktemp -d)"
+# NEUTERED, not deleted: the unwrap is the body of an `if`, so removing the line leaves a dangling
+# block and the control dies with IndentationError — which exits non-zero and would have read as
+# "the pre-fix impl refused it too". A control arm that crashes must not be mistakable for a
+# control arm that measured something.
+sed 's/ip = ip\.ipv4_mapped.*/pass  # 9-control: unwrap disabled/' "$CNF" > "$PREFIX_DIR/cap-net-fetch"
+chmod +x "$PREFIX_DIR/cap-net-fetch"
+cmp -s "$CNF" "$PREFIX_DIR/cap-net-fetch" && { rm -rf "$PREFIX_DIR"; fail "9-control: the unwrap line was not found to neuter, so the control arm is a COPY of the fixed impl and proves nothing"; }
+"$PY" -c 'import ast,sys; ast.parse(open(sys.argv[1]).read())' "$PREFIX_DIR/cap-net-fetch" \
+  || { rm -rf "$PREFIX_DIR"; fail "9-control: the neutered impl does not parse, so its refusal would be a crash rather than a policy decision"; }
+PREOUT="$(mapped_out "$PREFIX_DIR/cap-net-fetch")"
+rm -rf "$PREFIX_DIR"
+case "$PREOUT" in
+  *"$DENY_MSG"*)
+    fail "9-control: the PRE-FIX impl ALSO refused $MAPPED_URL at the address check. Leg 9 cannot attribute its pass to the ipv4_mapped unwrap — either the neuter did not take effect or another guard denies this address first. Fix the control before trusting the arm." ;;
+esac
+echo "cap-sandbox 9 OK (cap-net-fetch denies $MAPPED_URL AT THE ADDRESS CHECK; with the ipv4_mapped unwrap neutered the same input gets past it and fails later at the dial instead — the pass is attributable to the fix, not to the fetch merely failing)"
+
 # NOT COVERED HERE, stated so it is not mistaken for coverage: that PUBLIC egress still SUCCEEDS
 # under net.fetch's properties (i.e. the deny list did not degenerate into deny-everything). That
 # needs a reachable off-box endpoint and would make this battery non-hermetic on a sealed host.
-echo "cap-sandbox: ALL PROPERTIES HOLD (10 arms: legs 0-7, 8b, 8c; leg 0 negative control, 7a/8a positive controls)"
+# Nor is NAT64 (`64:ff9b::/96`) covered: it embeds the same IPv4 space and still passes both layers.
+# The registry `egressDenyList` does not carry it either, so it moves as one change to both lists.
+if [ "$NOTDEMO" = 1 ]; then
+  echo "cap-sandbox: 11 arms ran, 9 HOLD — legs 8b and 8c are NOT-DEMONSTRATED on this single node (host-own target, loopback route). The suite is GREEN on what it can measure and SILENT on what it cannot; it is NOT a clearance to lift \`offenders\`."
+else
+  echo "cap-sandbox: ALL PROPERTIES HOLD (11 arms: legs 0-7, 8b, 8c, 9; leg 0 negative control, 7a/8a positive controls, 9-control pre-fix arm)"
+fi

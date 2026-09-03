@@ -83,11 +83,26 @@ def _fail(msg):
 
 def _addr_denied(addr):
     """True iff `addr` (a str IP) is inside any denied network. An address we cannot parse is
-    treated as DENIED — an unparseable address is not a safe one."""
+    treated as DENIED — an unparseable address is not a safe one.
+
+    IPv4-MAPPED IPv6 IS UNWRAPPED FIRST. `::ffff:127.0.0.1` is not a member of `127.0.0.0/8` by
+    `in`, so without this it walks straight through the membership check while dialing host
+    loopback — measured live on this list: `::ffff:127.0.0.1`, `::ffff:10.0.0.1` and  # gate-allow
+    `::ffff:169.254.169.254` (instance metadata) all returned denied=False. An AAAA record is
+    enough to reach it; no local config is needed. The broker does the same unwrap in
+    `validate_url` (§4.3) — this is the impl-side half of one rule, kept because this impl must
+    fail closed on a direct-invoke that never passed the broker.
+
+    KNOWN LIMIT, not fixed here: NAT64 (`64:ff9b::/96`) embeds the same IPv4 space and also
+    passes. The registry `egressDenyList` does not carry it either, so unwrapping it here alone
+    would put the impl and the kernel-enforced policy out of step — the drift leg 8 exists to
+    catch. It moves as one change to both lists or not at all."""
     try:
         ip = ipaddress.ip_address(addr)
     except ValueError:
         return True
+    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
+        ip = ip.ipv4_mapped            # unwrap ::ffff:127.0.0.1 -> 127.0.0.1
     return any(ip in net for net in _DENY_NETS)
 
 
