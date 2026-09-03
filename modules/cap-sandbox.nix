@@ -171,7 +171,12 @@ let
   # reinstate the dead-deny-list bug exactly, from config instead of from this file. The comment
   # above is not load-bearing on its own: this refuses to evaluate. Registry invariant (5b)
   # already forbids a non-empty egressAllow in-tree, so this covers the operator-config path
-  # that invariant deliberately leaves open.
+  # that invariant deliberately leaves open -- AND ONLY THAT PATH. `checkAllow` reads
+  # `c.sandbox.egressAllow`; a blanket written directly into `netProps` below never reaches it.
+  # That is not a hypothetical distinction: it is precisely what PR #263 was, and PR #266
+  # reintroduced the verbatim shape and left this guard green (job 100733793522). The hard-coded
+  # shape is caught at eval by the `hardcodedBlanket` control in flake.nix and in the VM by the
+  # battery's arm-8 precondition.
   blanketAllow = [ "any" "0.0.0.0/0" "::/0" ];
   checkAllow = c:
     let bad = lib.filter (cidr: lib.elem cidr blanketAllow) c.sandbox.egressAllow; in
@@ -179,7 +184,11 @@ let
     else throw ("cap-sandbox: capability egressAllow contains a blanket entry ${toString bad}. "
                 + "A blanket IPAddressAllow matches every address at rule 1 of "
                 + "systemd.resource-control(5), which makes the egressDeny list dead by "
-                + "construction — the defect measured in PR #263. Name specific CIDRs.");
+                + "construction — the same MECHANISM as PR #263, arriving from operator "
+                + "config instead of from this file. The #263 INSTANCE was hard-coded in netProps "
+                + "and does not pass through this filter at all; that shape is caught by the "
+                + "hardcodedBlanket eval control in flake.nix and by the battery arm-8 "
+                + "precondition. Name specific CIDRs.");
 
   netProps = c:
     if c.sandbox.network
