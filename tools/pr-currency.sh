@@ -49,6 +49,40 @@ set -uo pipefail
 CRITERIA_RE='^(\.github/workflows/|flake\.nix$|tests/|tools/)'
 BASE="${BASE:-origin/main}"
 
+# GATE STRENGTH (--gate-strength, OFF by default because it costs one API call per criteria commit).
+#
+# Augur, 2026-09-03, from the first run of this tool against real PRs rather than fixtures: a commit
+# under CRITERIA_RE is reviewed by a SMALLER check set than the commits whose greens it devalues.
+# #272 changes .github/workflows/personal-data-gate.yml and is gated by 3 checks, because vm-tests.yml
+# is paths-filtered and does not fire on it -- while #168 and #232, which it devalues, carry 12.
+# The axis this file measures is moved most cheaply by the commits it is least able to see reviewed.
+#
+# Augur's literal proposal was "print the check count next to the currency count -- you already print
+# it in outcome". That number is THIS PR's, and printing it twice says nothing new; the sentence his
+# prose actually makes is about the INCREMENTING commits' own gate. So this resolves each counted
+# commit to its merged PR and reports THAT check count. It is the more expensive reading and it is
+# the one that carries the finding.
+#
+# NOT a gate and not a default: a small gate set is frequently correct scoping (a docs commit should
+# not pay for the vm-test matrix), so this reports a shape for a human, and a low number here is a
+# question, not a defect.
+GATE_STRENGTH=0
+case "${1:-}" in --gate-strength) GATE_STRENGTH=1 ;; esac
+_GS_CACHE="$(mktemp -d)"; trap 'rm -rf "$_GS_CACHE"' EXIT
+
+# sha -> "<pr>:<nchecks>", cached, because one criteria commit devalues many PRs and would otherwise
+# be looked up once per PR. Prints "?" on any failure -- an unresolvable commit must not render as a
+# small gate, which would invent the very finding this is here to measure.
+gate_of() {
+  _f="$_GS_CACHE/$1"
+  [ -f "$_f" ] && { cat "$_f"; return 0; }
+  _p="$(gh pr list --search "$1" --state merged --json number --jq '.[0].number' 2>/dev/null)"
+  case "$_p" in ''|*[!0-9]*) echo '?' > "$_f"; cat "$_f"; return 0 ;; esac
+  _n="$(gh pr checks "$_p" 2>/dev/null | grep -c .)"
+  case "$_n" in ''|0) echo '?' > "$_f" ;; *) echo "$_n" > "$_f" ;; esac
+  cat "$_f"
+}
+
 # Reads `gh pr checks` rows on stdin, prints ONE outcome verdict. THREE states, not two.
 #
 # FS='\t' is load-bearing, not style: matrix job names contain spaces, so default splitting puts the
@@ -105,11 +139,11 @@ if [ "${1:-}" = "--selftest" ]; then
       echo 'case "$1 $2" in'
       echo '  "pr list") echo 999 ;;'
       echo '  "pr checks") printf %b "$STUB_ROWS" ;;'
-      echo '  "pr view") echo deadbeef ;;'
-      echo '  "run view") echo 2026-09-03T00:00:00Z ;;'
+      echo '  "pr view") echo "${STUB_HEAD:-deadbeef}" ;;'
+      echo '  "run view") echo "${STUB_DATE:-2026-09-03T00:00:00Z}" ;;'
       echo 'esac'; } > "$d/gh"
     chmod +x "$d/gh"
-    STUB_ROWS="$1" PATH="$d:$PATH" bash "$0" 2>&1
+    STUB_ROWS="$1" PATH="$d:$PATH" bash "$0" ${2:-} 2>&1
     rm -rf "$d"
   }
   o="$(ord_run 'codecov/patch\tfail\t3s\thttps://codecov.io/x\n')"
@@ -121,8 +155,19 @@ if [ "${1:-}" = "--selftest" ]; then
   # i.e. one that had lost currency entirely -- would satisfy ORD1 and ORD2 both.
   o3="$(ord_run 'gate\tpass\t3s\thttps://github.com/o/r/actions/runs/1/job/2\n')"
   case "$o3" in *"currency : unknown"*) echo "  FAIL ORD3 CONTROL: a real Actions run still read as unknown"; fail=1 ;;
-    *"criteria commit"*) echo "  ok   ORD3 CONTROL: a real run still gets a real currency count" ;;
+    *"criteria commit"*) echo "  ok   ORD3 CONTROL: a real run gets a computed currency line, not 'unknown'" ;;
     *) echo "  FAIL ORD3 CONTROL: no currency line at all; got [$o3]"; fail=1 ;; esac
+  # GS arms: --gate-strength annotates each counted commit with the gate its OWN PR passed.
+  # The stub answers `pr checks` with one row, so an annotated commit must read "(1ck)".
+  echo "GS arms: gate strength of the commits that devalue the green"
+  gs="$(STUB_DATE=2026-01-01T00:00:00Z STUB_HEAD="$(git rev-parse HEAD~6 2>/dev/null)" ord_run 'gate\tpass\t3s\thttps://github.com/o/r/actions/runs/1/job/2\n' --gate-strength)"
+  case "$gs" in *"ck)"*) echo "  ok   GS1 counted commits carry their own PR's check count" ;;
+    *) echo "  FAIL GS1: no gate annotation under --gate-strength; got [$gs]"; fail=1 ;; esac
+  # GS2 is the control arm and it is the one that matters: without it, a script that annotated
+  # UNCONDITIONALLY would pass GS1, and the flag's whole justification is that the lookup is opt-in
+  # because it costs an API call per commit. A default that silently pays that cost is the defect.
+  case "$o3" in *"ck)"*) echo "  FAIL GS2 CONTROL: annotated without the flag -- lookup is not opt-in"; fail=1 ;;
+    *) echo "  ok   GS2 CONTROL: default run does no gate lookup" ;; esac
   [ "$fail" = 0 ] && echo "ALL GREEN" || echo "SELFTEST FAILED"
   exit "$fail"
 fi
@@ -181,7 +226,10 @@ for pr in $prs; do
     # made 00:00-05:00 local then sorts BEFORE a run in that window and is silently dropped -- an
     # UNDER-report, i.e. it makes a stale PR look current, the wrong direction for this tool to fail.
     cz="$(TZ=UTC git log -1 --format=%cd --date=format-local:%Y-%m-%dT%H:%M:%SZ "$c" 2>/dev/null)"
-    [ "$cz" \> "$when" ] && { n=$((n+1)); which="$which $(git log -1 --format=%h "$c")"; }
+    if [ "$cz" \> "$when" ]; then
+      n=$((n+1)); sh="$(git log -1 --format=%h "$c")"
+      if [ "$GATE_STRENGTH" = 1 ]; then which="$which $sh($(gate_of "$c")ck)"; else which="$which $sh"; fi
+    fi
   done
 
   echo "PR $pr"
@@ -190,6 +238,9 @@ for pr in $prs; do
   echo "    currency : $n criteria commit(s) landed after its run ($when)"
   [ "$n" -gt 0 ] && echo "               ->$which"
   [ "$n" -gt 0 ] && echo "               a re-run repairs this and moves NO other number here."
+  # The comparison Augur's finding is made of: this PR's gate against the gate its devaluers passed.
+  [ "$n" -gt 0 ] && [ "$GATE_STRENGTH" = 1 ] && \
+    echo "               (Nck = checks on the commit's OWN merged PR; compare against this PR's outcome count)"
 done
 
 # Deliberately NOT a merge gate. Currency is context for a human deciding whether to re-run; a
