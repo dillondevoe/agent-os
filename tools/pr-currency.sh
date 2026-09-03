@@ -121,7 +121,13 @@ for pr in $prs; do
   # OUTCOME first, deliberately: the axis this report does not measure goes at the front so it
   # cannot be crowded out by the one it does.
   outcome="$(gh pr checks "$pr" 2>/dev/null | classify_checks)"
-  case "$outcome" in FAIL*) rc=1 ;; esac
+  # rc counts "could not determine the outcome" as an outcome failure, not as a pass. Augur's finding:
+  # rc used to mean only "no FAIL string was produced", which is satisfied equally by twelve greens and
+  # by a script that could not reach GitHub -- and the same real event (auth expiry, rate limit, network
+  # drop) exited 1 through the NO RUN branch and 0 through this one. The file's own rule is that an
+  # unrecognised state must not be absorbed into green; rc was the last place it still was.
+  # INCOMPLETE stays 0 deliberately: "still running" really is context, not a verdict.
+  case "$outcome" in FAIL*|"NO ROWS"*|UNKNOWN*) rc=1 ;; esac
 
   mb="$(git merge-base "$BASE" "$head" 2>/dev/null)"
   dist="$(git rev-list --count "${mb}..${BASE}" 2>/dev/null || echo '?')"
