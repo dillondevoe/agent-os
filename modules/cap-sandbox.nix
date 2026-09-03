@@ -192,9 +192,7 @@ let
 
   netProps = c:
     if c.sandbox.network
-    # DEMO A -- DO NOT MERGE. Verbatim pre-#264 shape: blanket at the HEAD of the list.
-    then [ "IPAddressAllow=any" ]
-         ++ map (cidr: "IPAddressDeny=${cidr}") c.sandbox.egressDeny
+    then map (cidr: "IPAddressDeny=${cidr}") c.sandbox.egressDeny
          ++ map (cidr: "IPAddressAllow=${cidr}") (checkAllow c)
     else [ "PrivateNetwork=yes" "IPAddressDeny=any" "RestrictAddressFamilies=AF_UNIX" ];
 
