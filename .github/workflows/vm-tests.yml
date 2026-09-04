@@ -26,6 +26,24 @@
 # Widening the filter is cheap; if you find yourself adding a path that can change what these VMs
 # BOOT or what the wall DOES, add it here in the same commit.
 #
+# THE RESIDUAL HAS A STANDING, MEASURED INSTANCE: `.github/workflows/**` IS NOT IN THE FILTER, so a
+# PR that edits CI itself — including THIS FILE — never runs this lane. As of 2026-09-04 that has
+# happened at least 14 times since the lane was created on 2026-08-13; the earliest is 238f0b4
+# (2026-08-16, three days in) and the most recent open one is #272, a dependabot bump of
+# actions/checkout touching only personal-data-gate.yml. This is not an argument for adding the
+# path: a workflow edit cannot change what the VMs BOOT, so running minutes of VMs on it would buy
+# nothing, and the nightly cron on main already backstops the case. It is here because the residual
+# above is written in the conditional — "a PR ... merges without this lane ever running" — and a
+# conditional invites the reader to price it as hypothetical. IT IS THE ORDINARY CASE FOR ONE WHOLE
+# DIRECTORY, and the number is the part that stops it reading as a corner.
+#
+# Provenance, because the correction is the useful half: Augur asked for a row here on the claim
+# that #272 was the FIRST commit to touch a workflow file other than vm-tests.yml under a
+# paths-filtered slow lane. Measured before writing, it is the fourteenth or later, and the counting
+# is what makes the residual concrete rather than what makes it a first. A claim that a thing has
+# never happened is refuted by one instance; the reason to go count anyway is that the count is the
+# only version of the sentence that tells you how much the residual costs.
+#
 # That sentence used to read "an egress-relevant path", and the wording was itself the bug: it
 # invited the reader to ask "does my change touch egress?" when the question that matters is
 # "does my change reach these VMs?". `configuration.nix` is the first entry in baseModules and is
