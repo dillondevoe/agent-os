@@ -1842,14 +1842,35 @@ def warmup_greeting(msgs):
 _ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
 
 class _JournalTee:
+    # PER-THREAD line buffers, not one shared buffer with a lock (Geist's #286 note 2, measured
+    # rather than taken). The brain writes to stderr from the warmup thread as well as the turn
+    # loop. The screen was never at risk — prompt_toolkit's proxy locks its own write — but the
+    # journal side buffers until a newline, and a partial write from one thread followed by
+    # another thread's `...\n` produces ONE journal line built from TWO writers.
+    #
+    # A lock around the buffer does NOT fix that, and this is the part worth keeping: the splice
+    # happens BETWEEN two write() calls, so any per-call lock is the wrong granularity. Measured
+    # on DVo before and after — two threads, 300 partial+newline pairs each: 550 of 600 lines
+    # spliced under the shared buffer, 0 under per-thread buffers. Keying the buffer to the
+    # writer is what makes a journal line attributable to one of them.
+    #
+    # The lock is still here, for the dict itself and for close_copy's drain.
     def __init__(self, proxy, journal):
-        self._proxy = proxy; self._journal = journal; self._buf = ""
+        self._proxy = proxy; self._journal = journal
+        self._bufs = {}
+        self._lock = threading.Lock()
     def write(self, d):
         n = self._proxy.write(d)
-        self._buf += d
-        while "\n" in self._buf:
-            line, self._buf = self._buf.split("\n", 1)
-            self._emit(line)
+        key = threading.get_ident()
+        with self._lock:
+            buf = self._bufs.get(key, "") + d
+            while "\n" in buf:
+                line, buf = buf.split("\n", 1)
+                self._emit(line)
+            # drop the entry when it drains, so a long-lived process does not accumulate one
+            # dead key per thread that ever wrote a partial line
+            if buf: self._bufs[key] = buf
+            else: self._bufs.pop(key, None)
         return n
     def _emit(self, line):
         line = _ANSI_RE.sub("", line.rsplit("\r", 1)[-1]).rstrip()
@@ -1866,8 +1887,11 @@ class _JournalTee:
         try: self._journal.flush()
         except Exception: pass
     def close_copy(self):
-        if self._buf:
-            self._emit(self._buf); self._buf = ""
+        # Drain EVERY thread's tail, not just the caller's — the unwinding thread is the turn
+        # loop, and the warmup thread's half-line is exactly as owed to the journal.
+        with self._lock:
+            for key in list(self._bufs):
+                self._emit(self._bufs.pop(key))
     def isatty(self):
         return self._proxy.isatty()
     def __getattr__(self, name):
