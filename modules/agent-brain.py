@@ -214,10 +214,12 @@ class _SummonConsent:
     def __init__(self, ttl=_SUMMON_GRANT_TTL_S):
         self._at = None
         self._ttl = ttl
+        self._spent_at = None   # the stamp the last consume took, so restore() can put THAT back
     def arm(self):
         """Called ONLY from the operator's own input line. Never from a tool, a model
         response, or anything parsed out of model output."""
         self._at = time.time()
+        self._spent_at = None
     def check_and_consume(self, now=None):
         """(True, None) if a summon may proceed, else (False, reason). Single-use: a
         successful check disarms the grant, so one `:summon` buys exactly one summon."""
@@ -228,8 +230,32 @@ class _SummonConsent:
         if age > self._ttl:
             self._at = None
             return False, f"consent expired ({int(age)}s > {self._ttl}s) — ask again"
+        self._spent_at = self._at
         self._at = None
         return True, None
+    def restore(self):
+        """Put back a grant that was consumed by an attempt which never produced an answer.
+
+        THE RULE: A GRANT BUYS AN ANSWER, NOT AN ATTEMPT. The operator's `:summon` pays for
+        one reply from cloud Claude; a CLI that is absent, unauthenticated, timed out or
+        errored spent nothing on their account and returned nothing to them, so charging the
+        grant for it destroys a consent act in exchange for an error string. The observed
+        shape on this OS: `claude-code` is in the closure but auth is per-user OAuth, so a
+        box where nobody has run `claude` once fails EVERY summon this way — the operator
+        types `:summon`, gets "isn't logged in", and must re-consent for each retry.
+
+        THE CLOCK IS NOT REFRESHED, and that is the whole safety property: this restores the
+        ORIGINAL stamp, so a restored grant expires exactly when the operator's act said it
+        would. Restoring with `now` would mint consent-time nobody granted, and a loop of
+        failing attempts could then hold a grant open indefinitely. Restore can only ever
+        give back a grant that was armed from the `:summon` input line (arm() is the sole
+        writer of `_at`, asserted structurally by arm F of the battery) — it can never
+        manufacture one, and it cannot outlive the TTL.
+        """
+        if self._spent_at is None:
+            return False
+        self._at, self._spent_at = self._spent_at, None
+        return True
     def armed(self, now=None):
         now = time.time() if now is None else now
         return self._at is not None and (now - self._at) <= self._ttl
@@ -242,6 +268,18 @@ def ok_to_summon(consent=None, now=None):
     (#256's lesson: an arm that exercises a different code path than the box runs is an arm
     that proves nothing about the box.)"""
     return (consent or SUMMON_CONSENT).check_and_consume(now=now)
+
+def restore_summon_grant(consent=None):
+    """Counterpart to ok_to_summon, and reached by the deployed path for the same reason.
+
+    Called ONLY when a consumed summon produced no answer. See _SummonConsent.restore for
+    why this cannot manufacture or extend consent."""
+    return (consent or SUMMON_CONSENT).restore()
+
+# Appended to every summon failure that gave the operator nothing, so the surviving grant is
+# stated rather than left for them to discover by guessing. Silence here would be the same
+# defect one level down: a consent act whose fate only the code knows.
+_SUMMON_KEPT = " (Your `:summon` is still good — nothing was spent, so you can retry without re-consenting.)"
 
 def _log_summon_attempt(allowed, reason=None):
     """A refused summon is LOUD. A legitimate summon blocked by this gate must show up as a
@@ -586,6 +624,18 @@ def live_context():
     def probe(cmd):
         try: return _sh(cmd,4).stdout.strip()
         except Exception: return ""
+    # Augur's #277 review §4: `_sh` raises a NAMED RuntimeError so callers report a cause
+    # instead of an errno, and probe() — the caller that shapes what the model believes about
+    # the machine it is on — swallows it to "". With no shell, every line below silently
+    # vanishes and the model is handed a context in which the machine simply has no
+    # hostname, no uptime, no installed apps: an ABSENCE that reads exactly like a fresh box
+    # rather than like a blind one. probe()'s fail-soft is still right per-probe (no battery,
+    # no hyprctl, an empty result are all ordinary), so the fix is not to make it raise — it
+    # is to say the ONE thing that explains all of them at once, where the model can read it.
+    if not SHELL:
+        lines.append("NOTE: no shell could be resolved on this system, so none of the live "
+                     "machine facts below could be read. Their absence is a blind instrument, "
+                     "NOT a description of the machine — do not infer anything from it.")
     host=probe("hostname");
     if host: lines.append("Machine: "+host+" — Agent OS, a NixOS LINUX system (not Windows/macOS; nix installs, systemctl for power).")
     bat=probe("cat /sys/class/power_supply/BAT*/capacity 2>/dev/null | head -1")
@@ -1242,21 +1292,36 @@ def _summon_claude(task,context_summary):
     brief=(f"Task from Agent OS's local brain (relay your answer to the user through it):\n{task}\n\n"
            f"Conversation context:\n{context_summary}\n\n"
            f"Machine: NixOS Linux (Agent OS, flake-built — system changes go in the OS repo).")
+    # A GRANT BUYS AN ANSWER, NOT AN ATTEMPT. Every return below this point that hands the
+    # operator an error instead of a reply gives the grant back on its ORIGINAL clock, so a
+    # box whose `claude` has never been logged in does not eat one consent act per retry.
+    # ONE rule, applied to rc!=0 and to every exception alike — deliberately not a per-error
+    # classification, and in particular NOT a string match on stderr deciding whether the
+    # account was touched. The success path is the only path that consumes.
+    def _kept(msg):
+        return msg + _SUMMON_KEPT if restore_summon_grant() else msg
     try:
         o=subprocess.run(["claude","-p",brief,"--output-format","text"],
                          capture_output=True,text=True,timeout=180)
         if o.returncode!=0:
             err=(o.stderr or o.stdout).strip()[:300]
-            if "log in" in err.lower() or "auth" in err.lower():
-                return "Claude Code isn't logged in — run `claude` once in a terminal to sign in"
-            return f"Claude couldn't complete that: {err or 'no output'}"
+            # BEST-EFFORT MESSAGING ONLY, and it is only safe to leave as a substring guess
+            # BECAUSE of the restore above: this branch no longer decides anything about the
+            # operator's grant, which is given back on every failure path alike. It picks
+            # which sentence they read, nothing more. `login` is matched as well as `log in`
+            # — they are not substrings of each other, and an arm using an auth-shaped
+            # failure ("Please run /login") fell straight through the old pair into the
+            # generic "couldn't complete that", which names no remedy at all.
+            if any(s in err.lower() for s in ("log in", "login", "auth", "api key")):
+                return _kept("Claude Code isn't logged in — run `claude` once in a terminal to sign in")
+            return _kept(f"Claude couldn't complete that: {err or 'no output'}")
         return (o.stdout.strip() or "(Claude returned nothing)")[:8000]
     except FileNotFoundError:
-        return "Claude Code isn't set up — run `claude` once in a terminal to log in"
+        return _kept("Claude Code isn't set up — run `claude` once in a terminal to log in")
     except subprocess.TimeoutExpired:
-        return "Claude took too long (180s) — try a smaller ask, or run `claude` in a terminal for long jobs"
+        return _kept("Claude took too long (180s) — try a smaller ask, or run `claude` in a terminal for long jobs")
     except Exception as e:
-        return f"summon error: {e}"  # fail-soft — never crash a turn
+        return _kept(f"summon error: {e}")  # fail-soft — never crash a turn
 
 def _run_agos(*cmd):
     # generic runner for the agos-* ambient-dozen CLIs; passes their JSON stdout through verbatim
@@ -1529,6 +1594,20 @@ def _frontdoor_available():
 # It is also not a confirmation bypass. Typing the bare word IS the act — the same standard
 # as `:summon` and `:escalate` one screen down, where typing the token is itself the consent
 # and nothing else can arm it.
+#
+# ⚠ THIS TABLE ASSUMES A TYPED TRANSPORT, AND THE CODE CANNOT SEE ITS TRANSPORT.
+# The safety argument one paragraph up — "typing the bare word IS the act" — is a claim
+# about how the utterance ARRIVED, not about anything in this file. It is true today:
+# `frontdoor_turn` has one call site, fed from the typed REPL loop, and there is no
+# ASR/whisper/STT path anywhere in agent-brain.py (Augur verified this against origin/main
+# in the #277 review rather than taking it on my word).
+#
+# IF A NON-TYPED FRONT END IS EVER WIRED TO THIS LOOP — voice, transcription, a remote
+# message bus, anything that can put text in `msgs` without a human pressing keys — REVISIT
+# HERE FIRST, BEFORE wiring it. A mis-transcribed one-word utterance would then reboot the
+# machine with no model anywhere in the path to hesitate, and every line above would still
+# read as correct, because each one is. A defence argued on one axis does not survive a
+# change on another; this note exists so the change on the other axis lands on the defence.
 _LITERAL_VERBS = {
     "reboot":    ("system", {"action": "power", "value": "reboot"}),
     "restart":   ("system", {"action": "power", "value": "reboot"}),

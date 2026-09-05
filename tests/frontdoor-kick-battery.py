@@ -122,7 +122,23 @@ check("summon fail-soft when claude missing", "isn't set up" in r)
 # 12. The consent gate holds on THIS path too. The front door's whole subject is what the
 # model can reach unaided; an unconsented summon must not reach the CLI even when the CLI
 # is present and everything else about the turn is well-formed.
+#
+# THE PRECONDITION IS ESTABLISHED HERE, NOT INHERITED. Until the summon-grant restore
+# landed, this arm was silently relying on arm 11 above having CONSUMED the grant it armed
+# — so "no operator consent" was a side effect of the previous arm, not a state this arm
+# set. A grant that survives a failed attempt (a missing CLI spends nothing, so it is given
+# back) left arm 11's consent live and this arm went red on correct behaviour. It was
+# testing the right property from a state it did not own, which is arm 11's own stated
+# worry — "two different failures wearing the same green" — one arm further down.
+brain.SUMMON_CONSENT = brain._SummonConsent()
 check("summon without operator consent is refused",
       "refused" in brain._summon_claude("test task", "ctx"))
+
+# 12b. CONTROL FOR 12, and it is what makes the reset above evidence rather than a way of
+# getting green: with a grant armed, this same call must NOT be refused. Without it, a
+# reset that broke the consent object outright would satisfy arm 12 forever.
+brain.SUMMON_CONSENT.arm()
+check("...and IS allowed through once the operator has consented",
+      "refused" not in brain._summon_claude("test task", "ctx"))
 
 print(f"frontdoor-kick-battery: PASS ({PASS} properties)")

@@ -135,6 +135,41 @@ brain.trim_history(huge)
 check("D an oversized single group is kept whole, not cut mid-group",
       huge == kept)
 
+# ── H — A BLIND INSTRUMENT MUST NOT READ AS A DESCRIPTION (Augur, #277 review §4) ───
+# `_sh` raises a NAMED RuntimeError when no shell resolves, precisely so callers report a
+# cause instead of an errno. live_context's `probe()` swallows it to "", so with no shell
+# every machine fact below it silently vanishes and the model is handed a context in which
+# the box simply HAS no hostname, no uptime, no installed apps. That absence reads exactly
+# like a fresh machine rather than like a blind one, and it is the context that shapes what
+# the model believes about the machine it is standing on.
+#
+# probe()'s per-probe fail-soft is still correct and is deliberately NOT changed here — no
+# battery, no hyprctl and an empty result are all ordinary. What is armed is the one line
+# that explains all of them at once.
+_real_shell = brain.SHELL
+try:
+    brain.SHELL = None
+    blind = brain.live_context()
+    check("H no shell -> the context SAYS the instrument is blind",
+          "no shell could be resolved" in blind)
+    check("H and tells the model not to infer from the absence",
+          "do not infer" in blind.lower())
+    check("H the machine facts are genuinely gone, so the note is load-bearing",
+          "Machine: " not in blind)
+    check("H the date line survives — it needs no shell, so the context is degraded, not empty",
+          "Current date & time:" in blind)
+
+    # H2 — PERMITTING TWIN. Without it a live_context that emitted the blind note
+    # unconditionally would pass every arm above while lying on every healthy box.
+    brain.SHELL = _real_shell
+    sighted = brain.live_context()
+    check("H2 with a shell, no blind note is emitted",
+          "no shell could be resolved" not in sighted)
+    check("H2 and the machine line really is present, so H2 is not passing on an empty probe",
+          "Machine: " in sighted)
+finally:
+    brain.SHELL = _real_shell
+
 print()
 if fails:
     print("brain-context-battery: %d FAILED — %s" % (len(fails), ", ".join(fails)))
