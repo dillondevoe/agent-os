@@ -243,6 +243,11 @@ if [ "${1:-}" = "--selftest" ]; then
     case "$pd" in *"against main $fixshort"*) echo "  ok   BD2 CONTROL: the stamped sha is the base actually measured ($fixshort)" ;;
       *) echo "  FAIL BD2 CONTROL: header sha is not the measured base $fixshort; got [$pd]"; fail=1 ;; esac
   fi
+  # BD3: the base must be DATED, not merely named -- see the header comment. Without it the header
+  # satisfies BD1/BD2 while carrying a stale ref no reader can detect. The fixture's base is committed
+  # during this run, so requiring a parseable Z date here also rejects a literal '?' fallback.
+  case "$pd" in *"(base dated "*"Z)"*) echo "  ok   BD3 the stamped base carries its own commit date" ;;
+    *) echo "  FAIL BD3: base named but not dated -- a stale ref is undetectable; got [$pd]"; fail=1 ;; esac
   rm -rf "$nog" "$FIX"
   [ "$fail" = 0 ] && echo "ALL GREEN" || echo "SELFTEST FAILED"
   exit "$fail"
@@ -263,7 +268,14 @@ if [ -z "$prs" ]; then echo "no open PRs"; exit 0; fi
 # The stamp does not stop the reuse. It makes the reuse checkable, which is the most a printed line can do.
 board_at="$(TZ=UTC date -u +%Y-%m-%dT%H:%M:%SZ)"
 board_base="$(git rev-parse --short "$BASE" 2>/dev/null || echo '?')"
-echo "board    : computed $board_at against $BASE $board_base"
+# ...AND THE STAMP MUST DATE THE BASE, NOT JUST NAME IT. `$BASE` is `origin/main` AS THIS CHECKOUT LAST
+# FETCHED IT, so a stale ref lets the board date itself honestly against something that is not what the
+# world calls main -- and the reader cannot tell, because a sha looks equally authoritative either way.
+# That is this change's own defect reproduced one level up: a named-but-undated base is a measurement
+# being read as a property. The base's committer date costs no network and is the discriminator: a
+# board computed "now" against a base from yesterday is visibly a board with a stale ref.
+board_bdate="$(TZ=UTC git log -1 --format=%cd --date=format-local:%Y-%m-%dT%H:%M:%SZ "$BASE" 2>/dev/null || echo '?')"
+echo "board    : computed $board_at against $BASE $board_base (base dated $board_bdate)"
 echo "           a reading AT THAT BASE, not a property of any PR or path. Re-measure before reusing;"
 echo "           a path becomes criteria-bearing the moment a workflow starts building it."
 
