@@ -254,6 +254,23 @@ if [ "${1:-}" = "--selftest" ]; then
   case "$pd" in *"never fetched"*|*"fetched just now"*|*"FETCH FAILED"*)
       echo "  ok   BD4 the header states the base's FETCH state, not just its date" ;;
     *) echo "  FAIL BD4: no fetch state -- staleness is the default and goes unreported; got [$pd]"; fail=1 ;; esac
+  # BD6: the FETCH FAILED state, which Augur flagged as the one state no arm produced. It is the state
+  # most likely to appear in the wild (CI with no credentials for the remote, a laptop offline) and the
+  # only one whose text carries real information. Exercised by giving the fixture a remote named `origin`
+  # that points nowhere, with the remote-tracking ref planted by hand so the BASE still resolves -- so
+  # the fetch fails while everything downstream of it stays measurable, which is exactly the wild case.
+  if [ -n "$FIX" ]; then
+    git -C "$FIX" remote add origin /nonexistent/definitely-not-a-repo.git >/dev/null 2>&1
+    git -C "$FIX" update-ref refs/remotes/origin/main "$(git -C "$FIX" rev-parse main)" >/dev/null 2>&1
+    ff="$(FIXTURE="$FIX" BASE_OVERRIDE=origin/main STUB_DATE=2026-01-01T00:00:00Z STUB_HEAD="$FIXFORK" ord_run 'gate\tpass\t3s\thttps://github.com/o/r/actions/runs/1/job/2\n')"
+    case "$ff" in *"FETCH FAILED"*) echo "  ok   BD6 an unreachable remote is reported, not silently treated as fresh" ;;
+      *) echo "  FAIL BD6: fetch failed but the board did not say so; got [$ff]"; fail=1 ;; esac
+    # BD6b CONTROL: the run must still PRODUCE a board -- a fetch failure that aborted the report would
+    # satisfy BD6's sibling concerns while destroying the tool. Degrade, do not die.
+    case "$ff" in *"currency : "*) echo "  ok   BD6b CONTROL: the board still reports after a failed fetch" ;;
+      *) echo "  FAIL BD6b CONTROL: a failed fetch killed the report; got [$ff]"; fail=1 ;; esac
+    git -C "$FIX" remote remove origin >/dev/null 2>&1
+  fi
   # BD5 CONTROL, and it is the one that stops BD4 being satisfied by a lie: the fixture measures against a
   # LOCAL ref, so a header that claimed "fetched just now" unconditionally -- the flattering answer, and
   # the one that reproduces the defect -- must fail here.
@@ -286,6 +303,12 @@ board_at="$(TZ=UTC date -u +%Y-%m-%dT%H:%M:%SZ)"
 # sat at 5d4e475 while 703d930 was already merged. Fetch, and SAY whether the fetch worked -- a board that
 # could not reach the network and says so is honest; one that silently reports a week-old base is the
 # exact thing this header exists to prevent.
+# CONTRACT NOTE (Augur, 2026-09-05): this fetch means THE BOARD MUTATES WHAT IT MEASURES. Two
+# consecutive runs can disagree for a reason the first run itself caused, and running it moves
+# origin/* under whatever else the operator has going in that checkout. Only remote-tracking refs
+# move -- no worktree, no local branch, nothing lost -- but the file is no longer a pure read-only
+# probe, and the next person to read its NAME will otherwise be right about the name and wrong about
+# the file. Recorded here rather than in a reviewer's memory.
 case "$BASE" in
   origin/*|upstream/*)
     if git fetch -q "${BASE%%/*}" 2>/dev/null; then board_fresh="fetched just now"
