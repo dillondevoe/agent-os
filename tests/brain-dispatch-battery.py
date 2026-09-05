@@ -259,5 +259,52 @@ except Exception:
 check("I4 CONTROL: a non-literal turn DOES reach a model", len(HTTP) >= 1, repr(HTTP))
 check("I4 CONTROL: a non-literal turn dispatches no power", agos_calls() == [], repr(agos_calls()))
 
+# I5 — THE TRANSPORT ASSUMPTION IS STATED AT THE TABLE (Augur, #277 review §3).
+# The table's safety argument is "typing the bare word IS the act" — a claim about how the
+# utterance ARRIVED, which nothing in this file can see or check. It is true today (one
+# call site, the typed REPL; no ASR path anywhere in the module). If a voice/transcription
+# front end is ever wired in, a mis-transcribed one-word utterance reboots the box with no
+# model in the path, and every line of the table still reads as correct.
+#
+# ADJACENCY IS THE ARM, not the presence of the words. A rule with no trigger point does
+# not fire at an unfamiliar surface, and the surface it must fire at is this table — so the
+# note is required to sit in the contiguous comment block immediately above the definition,
+# where an editor reaching for _LITERAL_VERBS cannot miss it. A file-wide grep would pass
+# with the note stranded 900 lines away, which is the failure mode being guarded.
+_lines = src.split("\n")
+_tbl = [i for i, l in enumerate(_lines) if l.startswith("_LITERAL_VERBS = {")]
+check("I5 the literal-verb table is defined exactly once", len(_tbl) == 1, repr(_tbl))
+_i = _tbl[0] - 1
+_block = []
+while _i >= 0 and _lines[_i].lstrip().startswith("#"):
+    _block.append(_lines[_i]); _i -= 1
+# Comment markers stripped and whitespace collapsed BEFORE matching. A line-oriented match
+# over hard-wrapped prose measures the wrapping as much as the content: "revisit here" is
+# split across a line break in the shipped note, and the first version of this arm went red
+# on a note that says exactly what it demands. That is this tree's own scar (a phrase
+# grep that returned 0 for a heading its author had merged) applied before it could bite.
+# REVERSED back into reading order: the block is collected walking UPWARD from the table,
+# so joining it as-collected yields the note line-reversed and any multi-line phrase match
+# fails on prose that plainly contains it. Caught by this arm going red against a note that
+# says exactly what it asks for.
+_nlines = len(_block)          # captured BEFORE the collapse: the diagnostic below reported
+                              # `len(_block.split("\n"))` on an already-single-line string, so a
+                              # red arm always announced "1 contiguous comment lines" — a number
+                              # that is constant by construction and tells the reader nothing.
+_block = " ".join(l.lstrip().lstrip("#") for l in reversed(_block))
+_block = " ".join(_block.split()).lower()
+check("I5 the transport assumption is named in the comment block AT the table",
+      "typed transport" in _block, "not in the %d contiguous comment lines above" % _nlines)
+check("I5 and it names the trigger that must send a reader here",
+      ("voice" in _block or "asr" in _block) and "revisit here" in _block,
+      "the note states an assumption but no moment at which to revisit it")
+
+# I5b — CONTROL/VACUITY ARM. Without it, I5 would pass on a build whose comment scanner
+# silently swept the WHOLE file (or the whole module docstring) rather than the block, and
+# the adjacency property — the entire point — would go unmeasured.
+check("I5b the scanned block is genuinely bounded, not the whole file",
+      0 < len(_block) < len(src) / 4,
+      "scanned %d chars of a %d-char file" % (len(_block), len(src)))
+
 print(("  brain-dispatch: FAIL" if EX else "  brain-dispatch: all checks passed"))
 sys.exit(EX)
