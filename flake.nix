@@ -2263,6 +2263,37 @@
               touch $out
             '';
 
+        # The IN-LOOP stderr->journal copy (#285 follow-up, Geist RULED 2026-09-05T18:17Z).
+        #
+        # #285 could only tee the PRE-loop writes: the turn loop runs inside patch_stdout(raw=True),
+        # which swaps sys.stderr for a proxy onto stdout, so the router-leg latency lines never
+        # touch fd 2 and the unit's tee has nothing to copy. That gap was recorded as row A2 of
+        # #285's own firing table. The copy lives at ONE site, the guard, so these arms test the
+        # guard-side object rather than the eleven write call sites.
+        #
+        # A2 is the permitting twin -- without it a copy that installed unconditionally would pass
+        # every other arm while double-writing the pre-loop path into #285's tee. A8 is the pre-fix
+        # arm: the same writes with no copy installed must produce ZERO journal lines, or the gap
+        # this check exists for is unproven and the greens above mean nothing. A9 is the call-site
+        # arm -- a correct tee that nothing enters is exactly the "lives only in prose" failure one
+        # level up, and it also pins the ExitStack ORDER, which decides whether sys.stderr is
+        # handed back to a proxy that is still alive.
+        brain-stderr-journal-contract =
+          let
+            pkgs = nixpkgs.legacyPackages.${system};
+            pyWithYaml = pkgs.python3.withPackages (ps: [ ps.pyyaml ]);
+          in pkgs.runCommand "brain-stderr-journal-contract-check"
+            { nativeBuildInputs = [ pyWithYaml ]; } ''
+              work="$(mktemp -d)"
+              mkdir -p "$work/modules" "$work/tests"
+              cp ${./modules/agent-brain.py} "$work/modules/agent-brain.py"
+              cp ${./modules/providers.py} "$work/modules/providers.py"
+              cp ${./tests/brain-stderr-journal-battery.py} "$work/tests/brain-stderr-journal-battery.py"
+              cd "$work"
+              python3 tests/brain-stderr-journal-battery.py
+              touch $out
+            '';
+
         # The R1 CONTEXT BOUND, checked against the shipped module (tier-0 item 3).
         #
         # Two halves, both of which are easy to ship inert. `num_ctx` is a JSON key: omit it
