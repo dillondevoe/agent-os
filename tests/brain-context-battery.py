@@ -182,16 +182,26 @@ try:
 
     brain.shutil.which = lambda name: "/stub/bin/" + name
     _real_run = brain.subprocess.run
-    brain.subprocess.run = lambda *a, **k: types.SimpleNamespace(
-        stdout='[{"class":"kitty","title":"a terminal"}]')
+    seen_argv = []
+    def _rec(cmd, *a, **k):
+        seen_argv.append(cmd)
+        return types.SimpleNamespace(stdout='[{"class":"kitty","title":"a terminal"}]')
+    brain.subprocess.run = _rec
     try:
         seen = brain.live_context()
     finally:
         brain.subprocess.run = _real_run
     check("H2 hyprctl present -> the line carries content and does NOT say unavailable",
           "Open windows right now: kitty: a terminal" in seen)
-    check("H2 and hyprctl is invoked by resolved PATH, never through a shell",
-          "unavailable (hyprctl" not in seen)
+    # THE ARM RECORDS ARGV, BECAUSE THE OUTPUT CANNOT SEE THE ROUTING (geist, 2026-09-05).
+    # This arm used to assert `"unavailable (hyprctl" not in seen` and call that "never through
+    # a shell". Geist crippled the head to `[SHELL,"-c",hyprctl+" clients -j"]` -- the exact
+    # routing hyprland.lua's doctrine forbids, since a shell here could reach `hyprctl dispatch`
+    # -- and the arm stayed PASS. A label disagreeing with its verdict: the shell-routed and the
+    # argv-routed brain produce byte-identical output, so no assertion over `seen` can ever tell
+    # them apart. The claim is about the CALL, so the arm has to watch the call.
+    check("H2 and hyprctl is invoked by resolved argv, never routed through a shell",
+          seen_argv == [["/stub/bin/hyprctl", "clients", "-j"]])
 finally:
     brain.shutil.which = _real_which
 
