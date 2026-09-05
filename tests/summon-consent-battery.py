@@ -261,7 +261,39 @@ check("Q and still says the grant survived", "still good" in ab._SUMMON_KEPT, Tr
 # DERIVED, not retyped: arm O runs one check per unit of budget, so a change to
 # _SUMMON_MAX_RESTORES changes the arm count. Hard-coding the total would make the guard
 # fail on a legitimate edit — which is how an arm-count guard gets deleted.
-WANT_ARMS = 15 + 18 + 9 + ab._SUMMON_MAX_RESTORES
+# R — THE MESSAGE MUST AGREE WITH THE CLOCK IT OWNS (Augur's #278 finding). restore()
+# returned True without consulting the clock, so `_kept()` told the operator their `:summon`
+# was still good on a grant the very next check refuses as expired. J2's MIRROR IMAGE: J2
+# proves the GRANT expires and passes today because it never reads the message; L asserts
+# "still good" only on a fresh grant. Nothing joined the two.
+#
+# Not exotic: the subprocess timeout is 180s against a 300s TTL, so every summon consumed
+# after t=120 that times out lands here. Reproduced at 250s into a 300s TTL, retried at +430.
+c = ab._SummonConsent(ttl=300); c.arm()
+armed_at = c._at = c._at - 250
+ab.ok_to_summon(c, now=armed_at + 250)
+check("R restore refuses a grant whose ORIGINAL clock has run out",
+      ab.restore_summon_grant(c, now=armed_at + 430), False)
+ok, why = ab.ok_to_summon(c, now=armed_at + 431)
+check("R and the next check agrees, so no message could have promised otherwise", ok, False)
+
+# R2 — CONTROL FOR R, on the same timescale, INSIDE the window. Without it a restore that
+# refused everything past its first use would satisfy R while destroying the whole feature.
+c = ab._SummonConsent(ttl=300); c.arm()
+armed_at = c._at = c._at - 250
+ab.ok_to_summon(c, now=armed_at + 250)
+check("R2 a restore INSIDE the original TTL is still granted",
+      ab.restore_summon_grant(c, now=armed_at + 260), True)
+
+# R3 — AND THE BUDGET IS NOT SPENT BY THE EXPIRY REFUSAL. An expired restore must not also
+# consume one of the three, or the two bounds would silently interact.
+c = ab._SummonConsent(ttl=300); c.arm()
+armed_at = c._at = c._at - 250
+ab.ok_to_summon(c, now=armed_at + 250)
+ab.restore_summon_grant(c, now=armed_at + 430)
+check("R3 an expiry refusal does not spend the restore budget", c._restores, 0)
+
+WANT_ARMS = 15 + 18 + 13 + ab._SUMMON_MAX_RESTORES
 ran = passed + failed
 if ran != WANT_ARMS:
     print(f"FAIL arm count: {ran} arms ran, expected {WANT_ARMS} -- an arm was added or silently lost")

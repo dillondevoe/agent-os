@@ -236,7 +236,7 @@ class _SummonConsent:
         self._spent_at = self._at
         self._at = None
         return True, None
-    def restore(self):
+    def restore(self, now=None):
         """Put back a grant that was consumed by an attempt which never produced an answer.
 
         THE RULE: A GRANT BUYS AN ANSWER, NOT AN ATTEMPT. The operator's `:summon` pays for
@@ -260,7 +260,19 @@ class _SummonConsent:
         it. Without the second, a CLI that fails in milliseconds turns one consent act into an
         unbounded run of real subprocesses — the TTL never expires early enough to stop it.
         """
+        now = time.time() if now is None else now
         if self._spent_at is None:
+            return False
+        # THE MESSAGE MUST AGREE WITH THE CLOCK IT OWNS (Augur, #278 review). Returning True
+        # here without consulting the clock makes `_kept()` tell the operator their `:summon`
+        # is still good when the very next check will refuse it as expired. It is the defect
+        # removed one section above ("nothing was spent") applied one line further — except
+        # that spend is UNOBSERVABLE to this code while expiry is ENTIRELY INTERNAL, so this
+        # half was always ours to check rather than assert. Not exotic either: the subprocess
+        # timeout is 180s against a 300s TTL, so every summon consumed after t=120 that times
+        # out lands exactly here.
+        if now - self._spent_at > self._ttl:
+            self._spent_at = None
             return False
         if self._restores >= _SUMMON_MAX_RESTORES:
             self._spent_at = None
@@ -281,12 +293,12 @@ def ok_to_summon(consent=None, now=None):
     that proves nothing about the box.)"""
     return (consent or SUMMON_CONSENT).check_and_consume(now=now)
 
-def restore_summon_grant(consent=None):
+def restore_summon_grant(consent=None, now=None):
     """Counterpart to ok_to_summon, and reached by the deployed path for the same reason.
 
     Called ONLY when a consumed summon produced no answer. See _SummonConsent.restore for
     why this cannot manufacture or extend consent."""
-    return (consent or SUMMON_CONSENT).restore()
+    return (consent or SUMMON_CONSENT).restore(now=now)
 
 # Appended to every summon failure that gave the operator nothing, so the surviving grant is
 # stated rather than left for them to discover by guessing. Silence here would be the same
