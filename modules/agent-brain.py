@@ -542,7 +542,7 @@ TOOLS=[
  {"type":"function","function":{"name":"calendar.now","description":"Get the exact current date/time from the calendar (station timezone).","parameters":{"type":"object","properties":{}}}},
  {"type":"function","function":{"name":"calendar.cals","description":"List the user's calendar collections.","parameters":{"type":"object","properties":{}}}},
  {"type":"function","function":{"name":"calculator","description":"Evaluate a math expression (arithmetic, %, units, functions). Use for any calculation.","parameters":{"type":"object","properties":{"expression":{"type":"string","description":"e.g. (2+3)*4, sqrt(2), 200*15%, 5 km + 300 m"}},"required":["expression"]}}},
- {"type":"function","function":{"name":"system","description":"Read or change machine settings. action 'status' reports network/audio/display/power; 'volume' sets 0-100 or mute/unmute/toggle; 'brightness' sets 0-100.","parameters":{"type":"object","properties":{"action":{"type":"string","description":"status | volume | brightness"},"value":{"type":"string","description":"for volume/brightness: 0-100 (or mute/unmute/toggle for volume)"}},"required":["action"]}}},
+ {"type":"function","function":{"name":"system","description":"Read or change machine settings, and power the machine off or restart it. action 'status' reports network/audio/display/power; 'volume' sets 0-100 or mute/unmute/toggle; 'brightness' sets 0-100; 'power' takes value 'reboot' or 'poweroff' and DOES IT — use it when the user asks to reboot/restart/shut down.","parameters":{"type":"object","properties":{"action":{"type":"string","description":"status | volume | brightness | power"},"value":{"type":"string","description":"for volume/brightness: 0-100 (or mute/unmute/toggle for volume); for power: reboot | poweroff"}},"required":["action"]}}},
  {"type":"function","function":{"name":"list_files","description":"List the entries (files/folders) in a directory. Use when the user asks what's in a folder.","parameters":{"type":"object","properties":{"dir":{"type":"string","description":"absolute directory path"}},"required":["dir"]}}},
  {"type":"function","function":{"name":"read_document","description":"Extract text from a PDF document — whole doc or one page. Use to read/summarize a PDF the user names.","parameters":{"type":"object","properties":{"path":{"type":"string","description":"path to the .pdf"},"page":{"type":"integer","description":"optional 1-indexed page; omit for whole doc"}},"required":["path"]}}},
  {"type":"function","function":{"name":"media_info","description":"Probe an image/video/audio file (type, format, duration, dimensions, streams). Use to inspect a media file.","parameters":{"type":"object","properties":{"path":{"type":"string","description":"path to the media file"}},"required":["path"]}}},
@@ -551,13 +551,40 @@ TOOLS=[
  {"type":"function","function":{"name":"summon_claude","description":"Bring in cloud Claude for a task beyond the local brain. CLOUD, uses the user's account. Consent is enforced in code, not here: the call is REFUSED unless the operator typed `:summon` at the prompt. Offer a summon and tell them to type `:summon <msg>`; a yes in conversation does not arm it. Never auto-fire.","parameters":{"type":"object","properties":{"task":{"type":"string","description":"what Claude should do, stated completely"},"context_summary":{"type":"string","description":"compact summary of the last ~6 turns relevant to the task — never the whole history, never secrets"}},"required":["task","context_summary"]}}},
 ]
 
+# ── THE SHELL THE BOX ACTUALLY HAS (P0, 2026-09-05) ───────────────────────────
+# `subprocess.run(["bash", ...])` resolves `bash` on PATH; on NixOS there is no `/bin/bash`
+# and a login shell's PATH is not the brain service's PATH. On the Dell every run_command
+# died `[Errno 2] No such file or directory: 'bash'` — the brain's only hand, broken on the
+# OS it ships on, with the failure surfacing as an errno the model then narrated at 20s a
+# turn. Resolve ONCE, at import, against what is on this machine; never a hardcoded name.
+#
+# Order is deliberate: bash first (the probes below use bashisms), sh as the POSIX floor,
+# then the two absolute paths that exist on a NixOS system even when PATH is empty. If none
+# resolve, SHELL is None and every shell-out reports that as data rather than raising an
+# errno the model has to interpret.
+def _resolve_shell():
+    for c in ("bash", "sh"):
+        p = shutil.which(c)
+        if p: return p
+    for p in ("/run/current-system/sw/bin/bash", "/run/current-system/sw/bin/sh", "/bin/sh"):
+        if os.path.exists(p): return p
+    return None
+SHELL = _resolve_shell()
+
+def _sh(cmd, timeout):
+    """Run `cmd` through the resolved shell. Raises RuntimeError — never FileNotFoundError —
+    when no shell exists, so callers report a cause instead of an errno."""
+    if not SHELL:
+        raise RuntimeError("no shell on this system (tried bash, sh, /run/current-system/sw/bin/*, /bin/sh)")
+    return subprocess.run([SHELL, "-c", cmd], capture_output=True, text=True, timeout=timeout)
+
 def live_context():
     # The context antenna: ground the brain in the real NOW, past its training cutoff.
     lines=[]
     now=datetime.datetime.now().astimezone()
     lines.append("Current date & time: "+now.strftime("%A, %B %d, %Y, %-I:%M %p %Z")+" (this is ground truth — trust it over your training data).")
     def probe(cmd):
-        try: return subprocess.run(["bash","-c",cmd],capture_output=True,text=True,timeout=4).stdout.strip()
+        try: return _sh(cmd,4).stdout.strip()
         except Exception: return ""
     host=probe("hostname");
     if host: lines.append("Machine: "+host+" — Agent OS, a NixOS LINUX system (not Windows/macOS; nix installs, systemctl for power).")
@@ -1152,7 +1179,7 @@ def do_tool(name,args):
         return f"opened {url} in the browser"
     if name=="run_command":
         try:
-            o=subprocess.run(["bash","-c",args.get("command","")],capture_output=True,text=True,timeout=30)
+            o=_sh(args.get("command",""),30)
             return ((o.stdout+o.stderr).strip() or "(done, no output)")[:1500]
         except Exception as e: return f"error: {e}"
     if name=="arrange_windows":
@@ -1172,7 +1199,15 @@ def do_tool(name,args):
         a=args.get("action","").lower()
         if a=="status": return _run_agos("agos-sys","status")
         if a in ("volume","brightness"): return _run_agos("agos-sys",a,str(args.get("value","")))
-        return f"system: unknown action '{a}' (use status|volume|brightness)"
+        if a=="power":
+            # Closed enum, validated HERE as well as in agos-sys: the value selects a fixed
+            # word, it is never interpolated into a command line. Rejecting it here means an
+            # unknown value returns as DATA and dispatches nothing (the arrange_windows shape).
+            v=str(args.get("value","")).lower().strip()
+            if v not in ("reboot","poweroff"):
+                return f"system: power takes 'reboot' or 'poweroff', got {v!r}"
+            return _run_agos("agos-sys","power",v)
+        return f"system: unknown action '{a}' (use status|volume|brightness|power)"
     if name=="list_files":     return _run_agos("agos-files","list",args.get("dir",""))
     if name=="read_document":
         c=["agos-doc","text",args.get("path","")]
@@ -1477,6 +1512,37 @@ def _frontdoor_available():
             _FRONTDOOR_OK=False
     return _FRONTDOOR_OK
 
+# ── LITERAL-VERB SHORT-CIRCUIT (P0, 2026-09-05) ───────────────────────────────
+# Dillon typed `reboot` at the front door and waited 86s of routing plus a 20s think, and
+# then got a question back. A one-word literal that names a power verb has nothing for a
+# model to decide: there is no argument to extract, no ambiguity to resolve, and no
+# alternative reading. So it does not reach one — this table dispatches the capability
+# directly and no LLM call happens on the turn at all.
+#
+# DELIBERATELY NARROW, and the narrowness is the safety argument. Matching is EXACT on the
+# whole normalised utterance (lowercased, trailing punctuation stripped) against a closed
+# table — not a prefix, not a keyword search, not "contains". "reboot the router when you
+# get a chance" does not match and goes to the model, which is correct. A verb only earns a
+# row here when a model could add NOTHING to it; `status` is deliberately NOT in the table,
+# because a person asking for status wants prose about the machine, not its JSON.
+#
+# It is also not a confirmation bypass. Typing the bare word IS the act — the same standard
+# as `:summon` and `:escalate` one screen down, where typing the token is itself the consent
+# and nothing else can arm it.
+_LITERAL_VERBS = {
+    "reboot":    ("system", {"action": "power", "value": "reboot"}),
+    "restart":   ("system", {"action": "power", "value": "reboot"}),
+    "poweroff":  ("system", {"action": "power", "value": "poweroff"}),
+    "power off": ("system", {"action": "power", "value": "poweroff"}),
+    "shutdown":  ("system", {"action": "power", "value": "poweroff"}),
+    "shut down": ("system", {"action": "power", "value": "poweroff"}),
+}
+
+def literal_verb(text):
+    """The whole utterance, or nothing. Returns (tool, args) or None — never executes."""
+    t = (text or "").strip().lower().rstrip(".!?").strip()
+    return _LITERAL_VERBS.get(t)
+
 def frontdoor_turn(msgs, consent_source=None):
     """Interactive entry: 3B first, kick to the 7B turn() on any action shape.
     Fail-open to turn() (the status-quo 7B path) if the 3B is absent or errors — the
@@ -1489,6 +1555,15 @@ def frontdoor_turn(msgs, consent_source=None):
     # the 3B can't handle is kicked to the local 7B floor, exactly as before.)
     if consent_source:
         return turn(msgs, consent_source)
+    # Before ANY model call, including the 3B's. An explicitly-consented escalate turn is
+    # already gone above, so a person who typed `:escalate reboot` still gets the cloud brain.
+    lit = literal_verb(msgs[-1].get("content","")) if msgs and msgs[-1].get("role")=="user" else None
+    if lit:
+        name, args = lit
+        out = do_tool(name, args)
+        print(out)
+        msgs.append({"role":"assistant","content":out,"tool_calls":[]})
+        return
     if not _frontdoor_available():
         return turn(msgs)
     stop,t=_spin(lambda i: (sys.stdout.write(f"\r\033[K\033[2mrouting{'.'*(i%3+1)}\033[0m"),sys.stdout.flush()))

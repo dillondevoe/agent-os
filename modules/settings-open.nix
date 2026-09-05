@@ -28,13 +28,14 @@ let
       networkmanager      # nmcli — network state (NM is the box's backend)
       wireplumber         # wpctl — PipeWire volume/mute
       brightnessctl       # backlight
+      systemd             # systemctl — power (reboot/poweroff)
     ];
     text = ''
       # Strict mode is on (writeShellApplication). Every probe below tolerates a missing
       # backend with `|| default` so `status` degrades to nulls instead of aborting.
 
       usage() {
-        echo "usage: agos-sys {status | volume <0-100|mute|unmute|toggle> | brightness <0-100>}" >&2
+        echo "usage: agos-sys {status | volume <0-100|mute|unmute|toggle> | brightness <0-100> | power <reboot|poweroff>}" >&2
         exit 2
       }
 
@@ -112,10 +113,25 @@ let
         esac
       }
 
+      # POWER (P0, 2026-09-05 — Dillon typed `reboot` and the brain answered that it only
+      # does status/volume/brightness). A CLOSED enum of exactly two verbs: the value never
+      # reaches a command line, it selects a fixed argv, same shape as arrange_windows'
+      # table. No sudo and no root unit — logind's default polkit grants reboot/poweroff to
+      # an ACTIVE LOCAL SESSION, which is what the console user is; if that is ever not true
+      # this reports systemctl's own refusal rather than fabricating a success.
+      cmd_power() {
+        case "''${1:-}" in
+          reboot)   systemctl reboot ;;
+          poweroff) systemctl poweroff ;;
+          *)        echo "usage: agos-sys power <reboot|poweroff>" >&2; exit 2 ;;
+        esac
+      }
+
       case "''${1:-}" in
         status)     cmd_status ;;
         volume)     cmd_volume "''${2:-}" ;;
         brightness) cmd_brightness "''${2:-}" ;;
+        power)      cmd_power "''${2:-}" ;;
         *)          usage ;;
       esac
     '';
