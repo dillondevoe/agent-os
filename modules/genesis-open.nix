@@ -17,8 +17,16 @@
 #                prompt with it). We substitute its two BUILD-TIME placeholders:
 #                  @GENESIS_PATH@   -> ${genesis}/GENESIS.md   (baked store path)
 #                  @GENESIS_SHA256@ -> sha256 hex of that content (baked hash)
+#                  @SH@             -> ${pkgs.bash}/bin/bash          (baked interpreter)
 #                so its `LOCKED = not GENESIS_PATH.startswith("@")` flips true: it reads
 #                the baked path and refuses anything not hashing to the baked value.
+#                @SH@ is the same discipline pointed at the brain's HAND. `run_command` used
+#                to reach `bash` by NAME; brain-home.service's explicit PATH carries no shell,
+#                so every shell-out on a running deployment died `FileNotFoundError: 'bash'`
+#                (measured 2026-09-05) — an errno raised before any process started, not an rc
+#                a caller could read. Baking the store path means the built brain resolves no
+#                name at all. tests/shell-resolve-battery.py arms both halves, D against a
+#                real measured unit PATH.
 #
 # HONEST CLAIM (never "untamperable"): no runtime edit/repoint path; tampering is loud;
 # changing the soul is a rebuild-shaped act.
@@ -123,7 +131,8 @@ let
       --replace-fail '#!/usr/bin/env python3' '#!${brainPython}/bin/python3' \
       --replace-fail '@GENESIS_PATH@'   '${genesis}/GENESIS.md' \
       --replace-fail '@GENESIS_SHA256@' '${genesisSha}' \
-      --replace-fail '@THINK_DEFAULT@'  '${thinkDefault}'
+      --replace-fail '@THINK_DEFAULT@'  '${thinkDefault}' \
+      --replace-fail '@SH@'             '${pkgs.bash}/bin/bash'
     chmod +x "$out/bin/agent-brain"
   '';
   # R1 (tier 0) — the SESSION's ollama env, read from the one attrset that defines it.
