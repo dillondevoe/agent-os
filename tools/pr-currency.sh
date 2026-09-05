@@ -225,6 +225,24 @@ if [ "${1:-}" = "--selftest" ]; then
   pdx="$(cd "$nog" && FIXTURE="$FIX" BASE_OVERRIDE=main STUB_DATE=2026-01-01T00:00:00Z STUB_HEAD="$FIXFORK" ord_run 'gate\tpass\t3s\thttps://github.com/o/r/actions/runs/1/job/2\n')"
   case "$pdx" in *"currency : 2 criteria commit"*) echo "  ok   FX2 no ambient repo needed -- runs from a non-repo cwd" ;;
     *) echo "  FAIL FX2: depends on the ambient checkout; got [$pdx]"; fail=1 ;; esac
+  # BD arms: the board must DATE ITSELF. Augur's law, 2026-09-05: a currency (or inertness) verdict is
+  # a dated measurement of what CI DOES, not a property of a path -- valid for one PR, against one CI
+  # configuration, at one timestamp. He proved the retroactive half on #168: his own "a662b0d is inert"
+  # reading was correct when written and wrong eight minutes later, because `flake.nix` started building
+  # the path. Nothing in the reading said WHEN or AGAINST WHAT, so the natural reuse -- paste the board
+  # excerpt into the next comm -- silently converts a measurement into a property. And it converts in
+  # the permissive direction: "inert" reads as "no re-run needed".
+  echo "BD arms: the board dates itself, so a pasted excerpt cannot be reused as a property"
+  case "$pd" in *"board    : computed "*"Z against "*) echo "  ok   BD1 the board prints a UTC stamp and a base" ;;
+    *) echo "  FAIL BD1: no self-dating header; got [$pd]"; fail=1 ;; esac
+  # BD2 is the arm that makes BD1 mean anything: a header carrying a HARD-CODED or AMBIENT sha would
+  # satisfy BD1 while being exactly the lie the header exists to prevent. Require the sha printed to be
+  # the sha of the base this run actually measured against -- the fixture's, not this checkout's.
+  if [ -n "$FIX" ]; then
+    fixshort="$(git -C "$FIX" rev-parse --short main)"
+    case "$pd" in *"against main $fixshort"*) echo "  ok   BD2 CONTROL: the stamped sha is the base actually measured ($fixshort)" ;;
+      *) echo "  FAIL BD2 CONTROL: header sha is not the measured base $fixshort; got [$pd]"; fail=1 ;; esac
+  fi
   rm -rf "$nog" "$FIX"
   [ "$fail" = 0 ] && echo "ALL GREEN" || echo "SELFTEST FAILED"
   exit "$fail"
@@ -234,6 +252,20 @@ command -v gh >/dev/null 2>&1 || { echo "CANNOT-ASSESS: gh not on PATH; currency
 
 prs="$(gh pr list --state open --json number -q '.[].number' 2>/dev/null)"
 if [ -z "$prs" ]; then echo "no open PRs"; exit 0; fi
+
+# THE BOARD DATES ITSELF (Augur, 2026-09-05). Every line below is a measurement against ONE base at
+# ONE instant, and the natural thing to do with a board is paste an excerpt of it into a comm hours
+# later. Without a stamp there is nothing in the text that says the reading has an expiry, so it gets
+# reused as a PROPERTY of the PR ("still current") or of a path ("inert, no re-run needed") -- both of
+# which fail permissive. The base moves under this report constantly, and so does what counts as
+# criteria-bearing: `tools/pr-currency.sh` was correctly inert at a662b0d and criteria-bearing at
+# 703d930 with no change to the regex that matches it, because flake-check builds `checks` unfiltered.
+# The stamp does not stop the reuse. It makes the reuse checkable, which is the most a printed line can do.
+board_at="$(TZ=UTC date -u +%Y-%m-%dT%H:%M:%SZ)"
+board_base="$(git rev-parse --short "$BASE" 2>/dev/null || echo '?')"
+echo "board    : computed $board_at against $BASE $board_base"
+echo "           a reading AT THAT BASE, not a property of any PR or path. Re-measure before reusing;"
+echo "           a path becomes criteria-bearing the moment a workflow starts building it."
 
 rc=0
 for pr in $prs; do
