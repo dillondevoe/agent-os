@@ -249,11 +249,56 @@ if [ "${1:-}" = "--selftest" ]; then
   # DISCRIMINATES -- and the incident that motivated the header was eight minutes wide, where a date is
   # visibly fresh and still wrong. That limit belongs in the arm, not in a comment above it. BD4/BD5 are
   # what carry the discrimination, by asserting the FETCH STATE is reported and is not a blanket claim.
-  case "$pd" in *"(base dated "*)  echo "  ok   BD3 the stamped base carries its own commit date (format only -- see above)" ;;
-    *) echo "  FAIL BD3: base named but not dated -- a stale ref is undetectable; got [$pd]"; fail=1 ;; esac
+  # THE ANCHOR IS THE SHAPE OF A DATE, NOT ITS TIMEZONE SUFFIX (Augur, #276 review §1). This used to
+  # end `*"Z)"*`, which carried TWO properties -- "a date was printed" and "it parses" -- and only the
+  # first was about Z. Moving to %cI forced the Z out (his §4 on #275, the right fix) and took the
+  # second property with it, silently: what was left asserted only that the WORDS "base dated" were
+  # printed, which `(base dated ?; FETCH FAILED ...)` and `(base dated banana; ...)` both satisfy. The
+  # `?` branch is live code -- `git log ... || echo '?'` -- and reachable in precisely the scenario
+  # BD6 exists to cover, so BD3 would have stayed green on a board that had dated nothing. A leading
+  # four-digit year rejects both fallbacks and is agnostic to Z, -05:00, and any future format.
+  # ONE FUNCTION, TWO CALLERS. BD3b below feeds it the literals BD3 must reject, so the rule is not
+  # spelled twice -- a control arm that re-typed the glob could drift from the arm it controls and
+  # would then certify a pattern nothing uses.
+  bd3_dated() { case "$1" in *"(base dated "[0-9][0-9][0-9][0-9]-*) return 0 ;; *) return 1 ;; esac; }
+  if bd3_dated "$pd"; then echo "  ok   BD3 the stamped base carries its own commit date (shape only -- see above)"
+    else echo "  FAIL BD3: base named but not dated -- a stale ref is undetectable; got [$pd]"; fail=1; fi
+  # BD3b CONTROL, and it exists because the property it guards was LOST ONCE ALREADY, in silence. The
+  # `?` is live code (`git log ... || echo '?'`) and reachable in the same scenario BD6 covers, so
+  # without this arm BD3 goes green on a board that dated nothing. Assert the rejection, not just the
+  # acceptance: BD3 alone passes on a glob that matches everything.
+  if bd3_dated "board: computed X against main abc (base dated ?; FETCH FAILED)"; then
+      echo "  FAIL BD3b CONTROL: the '?' fallback satisfies BD3 -- the arm cannot see an undated board"; fail=1
+    elif bd3_dated "board: computed X against main abc (base dated banana; never fetched)"; then
+      echo "  FAIL BD3b CONTROL: a non-date satisfies BD3"; fail=1
+    else echo "  ok   BD3b CONTROL: BD3 rejects the '?' fallback and other non-dates"; fi
   case "$pd" in *"never fetched"*|*"fetched just now"*|*"FETCH FAILED"*)
       echo "  ok   BD4 the header states the base's FETCH state, not just its date" ;;
     *) echo "  FAIL BD4: no fetch state -- staleness is the default and goes unreported; got [$pd]"; fail=1 ;; esac
+  # BD6: the FETCH FAILED state, which Augur flagged as the one state no arm produced. It is the state
+  # most likely to appear in the wild (CI with no credentials for the remote, a laptop offline) and the
+  # only one whose text carries real information. Exercised by giving the fixture a remote named `origin`
+  # that points nowhere, with the remote-tracking ref planted by hand so the BASE still resolves -- so
+  # the fetch fails while everything downstream of it stays measurable, which is exactly the wild case.
+  if [ -n "$FIX" ]; then
+    git -C "$FIX" remote add origin /nonexistent/definitely-not-a-repo.git >/dev/null 2>&1
+    git -C "$FIX" update-ref refs/remotes/origin/main "$(git -C "$FIX" rev-parse main)" >/dev/null 2>&1
+    ff="$(FIXTURE="$FIX" BASE_OVERRIDE=origin/main STUB_DATE=2026-01-01T00:00:00Z STUB_HEAD="$FIXFORK" ord_run 'gate\tpass\t3s\thttps://github.com/o/r/actions/runs/1/job/2\n')"
+    case "$ff" in *"FETCH FAILED"*) echo "  ok   BD6 an unreachable remote is reported, not silently treated as fresh" ;;
+      *) echo "  FAIL BD6: fetch failed but the board did not say so; got [$ff]"; fail=1 ;; esac
+    # BD6b CONTROL: the run must still PRODUCE a board -- a fetch failure that aborted the report would
+    # satisfy BD6's sibling concerns while destroying the tool. Degrade, do not die.
+    # THE GAP I NAMED HERE WAS MALFORMED, and Augur's §3 dissolved it rather than accepting it. I had
+    # written that BD6b covers "still reports" and nothing covers "still reports CORRECTLY under a
+    # failed fetch". There is no such second thing: after a failed fetch every currency number still
+    # comes from local refs, so the board is exactly as correct as it always was ABOUT A BASE THAT IS
+    # NOW OLD -- and BD6 asserts the header says so. Correctness is not in question; noticing is, and
+    # noticing is what is armed. Recorded here rather than in a comm so the question is closed in the
+    # file instead of parked outside it.
+    case "$ff" in *"currency : "*) echo "  ok   BD6b CONTROL: the board still reports after a failed fetch" ;;
+      *) echo "  FAIL BD6b CONTROL: a failed fetch killed the report; got [$ff]"; fail=1 ;; esac
+    git -C "$FIX" remote remove origin >/dev/null 2>&1
+  fi
   # BD5 CONTROL, and it is the one that stops BD4 being satisfied by a lie: the fixture measures against a
   # LOCAL ref, so a header that claimed "fetched just now" unconditionally -- the flattering answer, and
   # the one that reproduces the defect -- must fail here.
@@ -286,6 +331,12 @@ board_at="$(TZ=UTC date -u +%Y-%m-%dT%H:%M:%SZ)"
 # sat at 5d4e475 while 703d930 was already merged. Fetch, and SAY whether the fetch worked -- a board that
 # could not reach the network and says so is honest; one that silently reports a week-old base is the
 # exact thing this header exists to prevent.
+# CONTRACT NOTE (Augur, 2026-09-05): this fetch means THE BOARD MUTATES WHAT IT MEASURES. Two
+# consecutive runs can disagree for a reason the first run itself caused, and running it moves
+# origin/* under whatever else the operator has going in that checkout. Only remote-tracking refs
+# move -- no worktree, no local branch, nothing lost -- but the file is no longer a pure read-only
+# probe, and the next person to read its NAME will otherwise be right about the name and wrong about
+# the file. Recorded here rather than in a reviewer's memory.
 case "$BASE" in
   origin/*|upstream/*)
     if git fetch -q "${BASE%%/*}" 2>/dev/null; then board_fresh="fetched just now"
