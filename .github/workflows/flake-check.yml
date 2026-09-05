@@ -168,6 +168,12 @@ jobs:
         # It copies the tree, plants one fault per arm, and asserts the named diagnostic came back
         # from the process — the only observation a neutered call site cannot satisfy. Same nix
         # python, same reason: the fixture resolves its own packages via nix eval.
+        env:
+          # This harness copies the tree to a temp dir, which has no .git, and the history
+          # controls need real history. Pointing them at the workspace keeps them RUNNING here
+          # rather than exempting the lane -- a skipped arm is invisible, which is the whole
+          # thing these particular arms exist to prevent.
+          AGENT_OS_GIT_REPO: ${{ github.workspace }}
         run: nix shell nixpkgs#python3Packages.pyyaml --command python3 tests/vm-matrix-call-site-arms.py
 
       # The retry decider's own battery. WIRED HERE DELIBERATELY, in the lane no path filter can

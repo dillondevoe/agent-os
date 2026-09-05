@@ -1471,6 +1471,14 @@ def _git_show(repo_root, sha, path):
     return None
 
 
+def _is_git_repo(path):
+    try:
+        return subprocess.run(["git", "rev-parse", "--git-dir"], cwd=path, check=True,
+                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) is not None
+    except Exception:
+        return False
+
+
 def history_control_arms(repo_root, in_ci):
     """Replay the pre-fix shas through the live checker. Returns (problems, ran).
 
@@ -1481,6 +1489,17 @@ def history_control_arms(repo_root, in_ci):
     """
     problems, ran = [], 0
     import tempfile
+    # AGENT_OS_GIT_REPO exists for the call-site harness, which copies the tree to a temp dir to
+    # prove main() uses its checks. That copy has no .git, so the arms cannot run there on their
+    # own -- and "not a repository" is a DIFFERENT condition from "sha missing in a repository".
+    # A shallow clone is a defect to fail on; a tree with no history at all cannot be asked. The
+    # env var lets the harness point the arms at the real clone so they run there too, rather
+    # than the two conditions being collapsed and the weaker one governing both.
+    repo_root = os.environ.get("AGENT_OS_GIT_REPO") or repo_root
+    if not _is_git_repo(repo_root):
+        return ([f"SKIP-ARM: {repo_root!r} is not a git repository, so the {len(HISTORY_CONTROLS)}"
+                 f" history controls have no history to read. Set AGENT_OS_GIT_REPO to a real "
+                 f"clone if this tree is a copy."], 0)
     for sha, path, expect, what in HISTORY_CONTROLS:
         blob = _git_show(repo_root, sha, path)
         if blob is None:
@@ -1529,6 +1548,26 @@ def history_control_selftest():
                             "shallow clone would make the checker unrunnable off CI")
     finally:
         globals()["HISTORY_CONTROLS"] = saved
+    # A tree with no history at all is a DIFFERENT condition, and it must still be loud: a copy
+    # that quietly reports zero arms is exactly the byte-identical pass these controls exist
+    # against. The call-site harness sets AGENT_OS_GIT_REPO rather than being exempted.
+    import tempfile
+    with tempfile.TemporaryDirectory() as d:
+        seen = os.environ.pop("AGENT_OS_GIT_REPO", None)
+        try:
+            probs, ran = history_control_arms(d, in_ci=True)
+            if ran or not any("not a git repository" in p for p in probs):
+                failures.append("selftest: a NON-REPOSITORY tree did not report its skipped "
+                                "arms — a copied tree would pass with zero controls run")
+            os.environ["AGENT_OS_GIT_REPO"] = os.path.dirname(os.path.dirname(
+                os.path.abspath(__file__)))
+            if history_control_arms(d, in_ci=True)[1] != len(HISTORY_CONTROLS):
+                failures.append("selftest: AGENT_OS_GIT_REPO did not redirect the arms to a "
+                                "real clone — the harness lane would have no way to run them")
+        finally:
+            os.environ.pop("AGENT_OS_GIT_REPO", None)
+            if seen is not None:
+                os.environ["AGENT_OS_GIT_REPO"] = seen
     return failures
 
 
