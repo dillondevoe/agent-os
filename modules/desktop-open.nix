@@ -386,6 +386,21 @@ in
   #   Restart=always          -> kitty itself dies, the window comes back
   systemd.user.services.brain-home = {
     description = "agent-brain home window (the desktop's primary surface)";
+    # THE ONE INSTRUMENT THAT IS GENUINELY AN EXTERNAL BINARY (geist's carve-out, 2026-09-05).
+    # #283 stopped live_context() looking up ANY binary by name -- machine/uptime/memory come
+    # from platform and /proc now -- for the reason that this unit's PATH is the brain's ACTING
+    # surface and widening it so the EYES can see couples two things v301 spent a week apart.
+    # `hyprctl` is the exception the rule needs: reading the compositor's client list is not a
+    # fact the kernel hands anyone, so it is a real external instrument rather than a victim of
+    # PATH. Adding it here was refused until the line could name its own absence; on 41a81f2 it
+    # can, and it does -- the deployed brain reads `Open windows right now: unavailable (hyprctl
+    # not on this unit's PATH)`, having been silently dead on every boot before that.
+    #
+    # `path`, not systemPackages: this widens the acting surface by exactly one binary, in the
+    # one unit that needs it, and says on the same screen why. The compositor package is the
+    # same `programs.hyprland.enable` pin below, so this cannot drift to a different hyprctl
+    # than the one running the session.
+    path = [ pkgs.hyprland ];
     serviceConfig = {
       # Absolute paths, not bare names: the old form ran from hyprland's exec and inherited the
       # login shell's PATH; a user unit does not. `agent-brain` is built in genesis-open.nix, so
