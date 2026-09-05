@@ -225,6 +225,41 @@ if [ "${1:-}" = "--selftest" ]; then
   pdx="$(cd "$nog" && FIXTURE="$FIX" BASE_OVERRIDE=main STUB_DATE=2026-01-01T00:00:00Z STUB_HEAD="$FIXFORK" ord_run 'gate\tpass\t3s\thttps://github.com/o/r/actions/runs/1/job/2\n')"
   case "$pdx" in *"currency : 2 criteria commit"*) echo "  ok   FX2 no ambient repo needed -- runs from a non-repo cwd" ;;
     *) echo "  FAIL FX2: depends on the ambient checkout; got [$pdx]"; fail=1 ;; esac
+  # BD arms: the board must DATE ITSELF. Augur's law, 2026-09-05: a currency (or inertness) verdict is
+  # a dated measurement of what CI DOES, not a property of a path -- valid for one PR, against one CI
+  # configuration, at one timestamp. He proved the retroactive half on #168: his own "a662b0d is inert"
+  # reading was correct when written and wrong eight minutes later, because `flake.nix` started building
+  # the path. Nothing in the reading said WHEN or AGAINST WHAT, so the natural reuse -- paste the board
+  # excerpt into the next comm -- silently converts a measurement into a property. And it converts in
+  # the permissive direction: "inert" reads as "no re-run needed".
+  echo "BD arms: the board dates itself, so a pasted excerpt cannot be reused as a property"
+  case "$pd" in *"board    : computed "*"Z against "*) echo "  ok   BD1 the board prints a UTC stamp and a base" ;;
+    *) echo "  FAIL BD1: no self-dating header; got [$pd]"; fail=1 ;; esac
+  # BD2 is the arm that makes BD1 mean anything: a header carrying a HARD-CODED or AMBIENT sha would
+  # satisfy BD1 while being exactly the lie the header exists to prevent. Require the sha printed to be
+  # the sha of the base this run actually measured against -- the fixture's, not this checkout's.
+  if [ -n "$FIX" ]; then
+    fixshort="$(git -C "$FIX" rev-parse --short main)"
+    case "$pd" in *"against main $fixshort"*) echo "  ok   BD2 CONTROL: the stamped sha is the base actually measured ($fixshort)" ;;
+      *) echo "  FAIL BD2 CONTROL: header sha is not the measured base $fixshort; got [$pd]"; fail=1 ;; esac
+  fi
+  # BD3 asserts a FORMAT, and Augur's review is right that this is its ceiling: the fixture's base is
+  # committed during the run, so its date is always ~now and always parseable. There is no run here in
+  # which a stale base makes BD3 go red. It proves the field is PRINTED; it cannot prove the field
+  # DISCRIMINATES -- and the incident that motivated the header was eight minutes wide, where a date is
+  # visibly fresh and still wrong. That limit belongs in the arm, not in a comment above it. BD4/BD5 are
+  # what carry the discrimination, by asserting the FETCH STATE is reported and is not a blanket claim.
+  case "$pd" in *"(base dated "*)  echo "  ok   BD3 the stamped base carries its own commit date (format only -- see above)" ;;
+    *) echo "  FAIL BD3: base named but not dated -- a stale ref is undetectable; got [$pd]"; fail=1 ;; esac
+  case "$pd" in *"never fetched"*|*"fetched just now"*|*"FETCH FAILED"*)
+      echo "  ok   BD4 the header states the base's FETCH state, not just its date" ;;
+    *) echo "  FAIL BD4: no fetch state -- staleness is the default and goes unreported; got [$pd]"; fail=1 ;; esac
+  # BD5 CONTROL, and it is the one that stops BD4 being satisfied by a lie: the fixture measures against a
+  # LOCAL ref, so a header that claimed "fetched just now" unconditionally -- the flattering answer, and
+  # the one that reproduces the defect -- must fail here.
+  case "$pd" in *"fetched just now"*) echo "  FAIL BD5 CONTROL: claimed a fetch for a purely local base"; fail=1 ;;
+    *"never fetched"*) echo "  ok   BD5 CONTROL: a local base is reported as never fetched, not as fresh" ;;
+    *) echo "  FAIL BD5 CONTROL: no fetch state at all; got [$pd]"; fail=1 ;; esac
   rm -rf "$nog" "$FIX"
   [ "$fail" = 0 ] && echo "ALL GREEN" || echo "SELFTEST FAILED"
   exit "$fail"
@@ -234,6 +269,38 @@ command -v gh >/dev/null 2>&1 || { echo "CANNOT-ASSESS: gh not on PATH; currency
 
 prs="$(gh pr list --state open --json number -q '.[].number' 2>/dev/null)"
 if [ -z "$prs" ]; then echo "no open PRs"; exit 0; fi
+
+# THE BOARD DATES ITSELF (Augur, 2026-09-05). Every line below is a measurement against ONE base at
+# ONE instant, and the natural thing to do with a board is paste an excerpt of it into a comm hours
+# later. Without a stamp there is nothing in the text that says the reading has an expiry, so it gets
+# reused as a PROPERTY of the PR ("still current") or of a path ("inert, no re-run needed") -- both of
+# which fail permissive. The base moves under this report constantly, and so does what counts as
+# criteria-bearing: `tools/pr-currency.sh` was correctly inert at a662b0d and criteria-bearing at
+# 703d930 with no change to the regex that matches it, because flake-check builds `checks` unfiltered.
+# The stamp does not stop the reuse. It makes the reuse checkable, which is the most a printed line can do.
+board_at="$(TZ=UTC date -u +%Y-%m-%dT%H:%M:%SZ)"
+# STALE IS THE DEFAULT, NOT THE EDGE CASE (Augur's #275 review, 2026-09-05). `origin/main` is a LOCAL
+# ref that moves only when someone runs `git fetch`; nothing in this file ever did. So the board did not
+# *risk* measuring against a stale base -- absent an unrelated fetch it always did, by an amount that is
+# a property of the operator's shell history. Augur hit it in this repo the same morning: his origin/main
+# sat at 5d4e475 while 703d930 was already merged. Fetch, and SAY whether the fetch worked -- a board that
+# could not reach the network and says so is honest; one that silently reports a week-old base is the
+# exact thing this header exists to prevent.
+case "$BASE" in
+  origin/*|upstream/*)
+    if git fetch -q "${BASE%%/*}" 2>/dev/null; then board_fresh="fetched just now"
+    else board_fresh="FETCH FAILED -- base is as of this checkout's last fetch, age unknown"; fi ;;
+  *) board_fresh="local ref, never fetched -- age is this checkout's" ;;
+esac
+board_base="$(git rev-parse --short "$BASE" 2>/dev/null || echo '?')"
+# ...AND THE STAMP MUST DATE THE BASE, NOT JUST NAME IT: a sha looks equally authoritative fresh or stale.
+# %cI carries a REAL OFFSET rather than a hand-appended `Z`. The earlier form put the Z literal in the
+# format string with `format-local`, the one directive that reads the environment -- so its correctness
+# lived entirely in a `TZ=UTC` prefix, and Augur reproduced the failure by dropping it while reviewing:
+# 703d930 printed as 01:11:31Z for a commit made at 06:11:31Z. CDT wearing a Z, no diagnostic. A format
+# that cannot lie about its offset beats a prefix that has to be remembered.
+board_bdate="$(git log -1 --format=%cI "$BASE" 2>/dev/null || echo '?')"
+echo "board    : computed $board_at against $BASE $board_base (base dated $board_bdate; $board_fresh)"
 
 rc=0
 for pr in $prs; do
