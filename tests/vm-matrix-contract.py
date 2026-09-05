@@ -1426,6 +1426,112 @@ def stale_side_effect_debt(tests_dir):
     return stale
 
 
+# THE HISTORY CONTROLS, AND WHY THEY LIVE IN THE CHECKER RATHER THAN IN A COMM.
+# Geist's from-history clause: a control arm is drawn from a sha that actually shipped the
+# defect, not from a fixture I wrote today. The reason is not purity — it is that my own
+# fixture HID a detector bug for a whole revision (see the alias pass above), because fixture
+# and detector shared an author and an assumption. Running the real pre-fix files caught it.
+#
+# Running them ONCE by hand and writing the result in a comm is what this replaces. That run
+# is a past-tense fact about code that has since changed; the next edit to the alias pass or
+# the literal scan regresses with nothing to catch it.
+#
+#   be1769b  the pre-#279 agos-web-battery — fetched a third-party host every run (egress)
+#   53f1b8a  the pre-fix agos-notes-battery — `agos-notes new` / `append` (shared-state)
+#
+# Each is replayed with `SIDE_EFFECTS = []` PREPENDED: the honest-looking declaration that the
+# boolean predecessor accepted. The arm asserts the checker goes RED anyway. The post-fix tree
+# is the green arm — it is the whole rest of this check.
+HISTORY_CONTROLS = (
+    ("be1769b", "tests/agos-web-battery.py", "does not declare 'egress'",
+     "pre-#279 agos-web-battery reached a third-party host on every run"),
+    ("53f1b8a", "tests/agos-notes-battery.py", "agos-notes new",
+     "pre-fix agos-notes-battery created a note in the human's notes dir"),
+)
+
+
+def _git_show(repo_root, sha, path):
+    """Bytes of `path` at `sha`, or None. Fetches the sha if the clone is shallow."""
+    ref = f"{sha}:{path}"
+    for attempt in (0, 1):
+        try:
+            return subprocess.run(["git", "show", ref], cwd=repo_root, check=True,
+                                  stdout=subprocess.PIPE, stderr=subprocess.DEVNULL).stdout
+        except Exception:
+            if attempt:
+                return None
+            # actions/checkout is shallow by default, so these two shas are not in a CI clone.
+            # A history control that silently skips in CI is a fixture with extra steps.
+            try:
+                subprocess.run(["git", "fetch", "--depth=1", "origin", sha], cwd=repo_root,
+                               check=True, stdout=subprocess.DEVNULL,
+                               stderr=subprocess.DEVNULL, timeout=60)
+            except Exception:
+                return None
+    return None
+
+
+def history_control_arms(repo_root, in_ci):
+    """Replay the pre-fix shas through the live checker. Returns (problems, ran).
+
+    `ran` is returned rather than kept private BECAUSE A SKIPPED ARM IS INVISIBLE OTHERWISE:
+    an unreachable sha would turn this into a byte-identical pass. Under CI a sha that cannot
+    be fetched is a FAILURE; locally it is a loud skip, and either way the arm count is part
+    of the verdict rather than a thing the reader is trusted to notice.
+    """
+    problems, ran = [], 0
+    import tempfile
+    for sha, path, expect, what in HISTORY_CONTROLS:
+        blob = _git_show(repo_root, sha, path)
+        if blob is None:
+            msg = (f"history control {sha}:{path} could not be read — the arm did not run, and "
+                   f"an arm that does not run passes")
+            problems.append(msg if in_ci else f"SKIP-ARM (local, not CI): {msg}")
+            continue
+        ran += 1
+        with tempfile.TemporaryDirectory() as d:
+            name = os.path.basename(path)
+            with open(os.path.join(d, name), "wb") as fh:
+                fh.write(b"SIDE_EFFECTS = []\n" + blob)
+            found = side_effect_declarations(d)
+            if not any(expect in p for p in found):
+                problems.append(
+                    f"history control {sha}:{path} came back CLEAN — {what}, and it was "
+                    f"replayed with the honest-looking `SIDE_EFFECTS = []` that the boolean "
+                    f"predecessor accepted. Expected a finding containing {expect!r}. The "
+                    f"detector no longer sees the defect it was built for")
+    if in_ci and ran != len(HISTORY_CONTROLS):
+        problems.append(f"history controls: {ran} of {len(HISTORY_CONTROLS)} arms ran under CI "
+                        f"— the count is part of the verdict")
+    return problems, ran
+
+
+def history_control_selftest():
+    """The controls control the controls: a broken detector must make the arms go RED."""
+    failures = []
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    # A sha that does not exist must FAIL under CI and SKIP locally. Both directions, because
+    # a function that always fails and a function that always skips each pass one of them.
+    bogus = (("0" * 40, "tests/nope.py", "x", "does not exist"),)
+    saved = globals()["HISTORY_CONTROLS"]
+    globals()["HISTORY_CONTROLS"] = bogus
+    try:
+        probs, ran = history_control_arms(root, in_ci=True)
+        if ran or not any("could not be read" in p for p in probs):
+            failures.append("selftest: an UNREACHABLE sha did not fail under CI — the controls "
+                            "would silently vanish in the one place nobody watches them run")
+        probs, ran = history_control_arms(root, in_ci=False)
+        if not any(p.startswith("SKIP-ARM") for p in probs):
+            failures.append("selftest: an unreachable sha was not reported as a loud skip "
+                            "locally — a skipped arm would be invisible")
+        if any(not p.startswith("SKIP-ARM") for p in probs):
+            failures.append("selftest: an unreachable sha was a hard failure LOCALLY — a "
+                            "shallow clone would make the checker unrunnable off CI")
+    finally:
+        globals()["HISTORY_CONTROLS"] = saved
+    return failures
+
+
 def side_effect_declaration_selftest():
     """Drive the checks against fixtures. Without these the checks are assertions.
 
@@ -1637,7 +1743,7 @@ class Findings:
 REQUIRED_CHECKS = {
     "unlisted", "dangling", "unwired", "vacuous", "stale",
     "debt_added", "debt_removed", "unarmed", "wired_disarming", "flake_wired_disarming",
-    "ruling_table", "side_effects", "stale_se_debt",
+    "ruling_table", "side_effects", "stale_se_debt", "history_controls",
 }
 
 
@@ -1724,6 +1830,7 @@ SELFTESTS = (
     flake_wired_disarm_selftest,
     findings_selftest,
     side_effect_declaration_selftest,
+    history_control_selftest,
 )
 
 # SELFTESTS ONLY, now that `ruling_table` has moved to the checks registry where it belongs.
@@ -1735,6 +1842,7 @@ REQUIRED_RULING = {
     "exemption_staleness_selftest", "ruling_conditions_selftest", "strict_caller_selftest",
     "wired_disarm_selftest", "flake_wired_disarm_selftest", "findings_selftest",
     "side_effect_declaration_selftest",
+    "history_control_selftest",
 }
 
 
@@ -1791,6 +1899,11 @@ def main():
     # Geist's law, as data (2026-09-05), and Augur's trigger point for the egress sweep.
     side_effects = f.add("side_effects", side_effect_declarations(args.tests_dir))
     stale_se_debt = f.add("stale_se_debt", stale_side_effect_debt(args.tests_dir))
+    # THE HISTORY CONTROLS run against the repo, not the fixtures — that is their whole point.
+    _root = os.path.dirname(os.path.abspath(args.tests_dir.rstrip("/"))) or "."
+    _in_ci = bool(os.environ.get("CI"))
+    hist, _hist_ran = history_control_arms(_root, _in_ci)
+    history_controls = f.add("history_controls", hist)
 
     # ONE ITERATION, NOT A SUM. Each term's NAME comes from the object that gets called, so a
     # term cannot be dropped from the chain while still counting as having run.
@@ -1895,6 +2008,25 @@ def main():
         print("     means 'no battery visibly contradicts its declaration', which is strictly",
               file=sys.stderr)
         print("     weaker than 'no battery has undeclared side effects'.", file=sys.stderr)
+    if f["history_controls"]:
+        print("FAIL: a HISTORY CONTROL did not behave. These replay the shas that actually",
+              file=sys.stderr)
+        print("      shipped the defect, each with the honest-looking `SIDE_EFFECTS = []` the",
+              file=sys.stderr)
+        print("      boolean predecessor accepted, and assert the checker goes RED anyway:",
+              file=sys.stderr)
+        for problem in history_controls:
+            print(f"  {problem}", file=sys.stderr)
+        print("  -> Geist 2026-09-05: controls come from HISTORY, not fixtures. A fixture I",
+              file=sys.stderr)
+        print("     write today shares an author and an assumption with the detector it tests,",
+              file=sys.stderr)
+        print("     and one already hid a detector that found NOTHING in the founding case.",
+              file=sys.stderr)
+        print("     A SKIP-ARM line means the sha was unreachable: the arm did not run, and an",
+              file=sys.stderr)
+        print("     arm that does not run passes. That is a hard failure under CI.",
+              file=sys.stderr)
     if f["stale_se_debt"]:
         print("FAIL: SIDE_EFFECT_DEBT names a battery the debt no longer describes:",
               file=sys.stderr)
