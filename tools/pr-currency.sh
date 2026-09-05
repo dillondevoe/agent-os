@@ -218,9 +218,18 @@ for pr in $prs; do
   mb="$(git merge-base "$BASE" "$head" 2>/dev/null)"
   dist="$(git rev-list --count "${mb}..${BASE}" 2>/dev/null || echo '?')"
 
-  n=0; which=""
+  n=0; which=""; detail=""
   for c in $(git rev-list "${mb}..${BASE}" 2>/dev/null); do
-    git show --name-only --format='' "$c" 2>/dev/null | grep -qE "$CRITERIA_RE" || continue
+    # Keep the matching PATHS, not just the fact that one matched. A COUNT cannot say what is in
+    # the gap, and the reader who cannot see the paths supplies a guess -- in this lane the guess
+    # has been "cosmetic" three times running. Measured 2026-09-05 on this repo's own board: of the
+    # 3 commits devaluing every open PR, one was a comment-only block in vm-tests.yml and one was a
+    # tool file no workflow invokes; only the actions/checkout bump changes what a run executes.
+    # Same count, three very different answers to "should I re-run this."
+    # Deliberately NOT classified inert/material here: a classifier that mislabels fails toward
+    # "no re-run needed", which is the direction this tool must never fail in. Show, do not judge.
+    cp="$(git show --name-only --format='' "$c" 2>/dev/null | grep -E "$CRITERIA_RE")"
+    [ -n "$cp" ] || continue
     # BOTH SIDES MUST BE Z. `[ a \> b ]` is a STRING compare, and the two clocks disagree by default:
     # git prints the committer's own offset (-05:00 throughout this repo) while gh prints UTC. A commit
     # made 00:00-05:00 local then sorts BEFORE a run in that window and is silently dropped -- an
@@ -229,6 +238,9 @@ for pr in $prs; do
     if [ "$cz" \> "$when" ]; then
       n=$((n+1)); sh="$(git log -1 --format=%h "$c")"
       if [ "$GATE_STRENGTH" = 1 ]; then which="$which $sh($(gate_of "$c")ck)"; else which="$which $sh"; fi
+      detail="$detail
+               $sh $(git log -1 --format=%s "$c" | cut -c1-60)
+$(echo "$cp" | sed 's/^/                    /')"
     fi
   done
 
@@ -237,6 +249,7 @@ for pr in $prs; do
   echo "    distance : $dist commits behind $BASE"
   echo "    currency : $n criteria commit(s) landed after its run ($when)"
   [ "$n" -gt 0 ] && echo "               ->$which"
+  [ "$n" -gt 0 ] && printf '%s\n' "${detail#?}"
   [ "$n" -gt 0 ] && echo "               a re-run repairs this and moves NO other number here."
   # The comparison Augur's finding is made of: this PR's gate against the gate its devaluers passed.
   [ "$n" -gt 0 ] && [ "$GATE_STRENGTH" = 1 ] && \
