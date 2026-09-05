@@ -1825,6 +1825,72 @@ def warmup_greeting(msgs):
     warmup_msgs=[sysmsg(), user_turn("boot complete, greet the operator in one line")]
     turn(warmup_msgs)
 
+# ── IN-LOOP STDERR → JOURNAL (task 285 follow-up; Geist RULED 2026-09-05T18:17Z) ──
+# #285 teed the brain's PRE-loop stderr into brain-home's journal and said, in its own commit
+# message, which half it could not reach: the turn loop runs inside patch_stdout(raw=True),
+# which replaces sys.stderr with a StdoutProxy onto STDOUT, so every in-loop write to fd 2 —
+# the `[front-door 26.3s]` router-leg lines — hits the screen and fd 2 never sees it. That is
+# row A2 of #285's firing table: screen YES, journal NO.
+#
+# ONE site, and it is the guard, not the writers. The eleven sys.stderr.write call sites are
+# untouched: the guard is what swallows the stream, so the guard is where the copy belongs.
+#
+# The screen side is byte-for-byte pass-through — a startup refusal and the dim styling both
+# stay exactly as they were. The journal side is COOKED: complete lines only, ANSI stripped,
+# and only the last frame of a \r-redraw, because the journal wants `[front-door 26.3s]` and
+# not two hundred spinner repaints.
+_ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
+
+class _JournalTee:
+    def __init__(self, proxy, journal):
+        self._proxy = proxy; self._journal = journal; self._buf = ""
+    def write(self, d):
+        n = self._proxy.write(d)
+        self._buf += d
+        while "\n" in self._buf:
+            line, self._buf = self._buf.split("\n", 1)
+            self._emit(line)
+        return n
+    def _emit(self, line):
+        line = _ANSI_RE.sub("", line.rsplit("\r", 1)[-1]).rstrip()
+        if not line:
+            return
+        # An observer that can raise takes down the turn it was only watching. This copy is
+        # never load-bearing: if the journal side is gone, the screen side has already run.
+        try:
+            self._journal.write(line + "\n"); self._journal.flush()
+        except Exception:
+            pass
+    def flush(self):
+        self._proxy.flush()
+        try: self._journal.flush()
+        except Exception: pass
+    def close_copy(self):
+        if self._buf:
+            self._emit(self._buf); self._buf = ""
+    def isatty(self):
+        return self._proxy.isatty()
+    def __getattr__(self, name):
+        if name.startswith("_"): raise AttributeError(name)
+        return getattr(self.__dict__["_proxy"], name)
+
+@contextlib.contextmanager
+def journal_stderr_copy():
+    # The test is `sys.stderr is sys.__stderr__`, NOT `_PTK` — it asks the question that
+    # actually matters (has something taken fd 2 away) rather than a proxy for it. In the
+    # nullcontext branch stderr already IS fd 2, and installing a copy there would double-write
+    # every line into the tee #285 put on the unit.
+    proxy = sys.stderr
+    if sys.__stderr__ is None or proxy is sys.__stderr__:
+        yield False; return
+    tee = _JournalTee(proxy, sys.__stderr__)
+    sys.stderr = tee
+    try:
+        yield True
+    finally:
+        tee.close_copy()
+        sys.stderr = proxy
+
 def main():
     # system message stays STATIC across turns (byte-identical prefix = KV cache hit);
     # live_context rides each user turn's tail instead (see user_turn()).
@@ -1856,6 +1922,9 @@ def main():
     # ExitStack instead of a `with` block so the whole existing loop keeps its indent
     # (minimal diff); closed after the loop to detach the stdout proxy cleanly.
     _stack=contextlib.ExitStack(); _stack.enter_context(_guard)
+    # Entered AFTER the guard so it unwinds BEFORE it: sys.stderr is handed back to the
+    # proxy while the proxy is still alive, and _stack.close() then detaches the proxy.
+    _stack.enter_context(journal_stderr_copy())
     while True:
         try: u=_read().strip()
         except EOFError: print(); break
