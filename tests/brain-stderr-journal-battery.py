@@ -22,9 +22,16 @@
 #   A6  isatty()/attribute pass-through: anything keying on the proxy sees the proxy.
 #   A7  unwind restores sys.stderr to the proxy itself (not to __stderr__, which would leave the
 #       guard's exit restoring the wrong object).
-#   A8  PRE-FIX ARM — the same writes with NO copy installed reach the screen and produce ZERO
-#       journal lines. Without it every arm above could pass on a journal that was never empty
-#       to begin with, and the gap #285 measured would be unproven here.
+#   A8  DIFFERENTIAL ARM — NOT a pre-fix arm, and the distinction is Geist's (#286 note 2).
+#       The first version wrote to a StringIO with no copy installed and asserted a different
+#       StringIO stayed empty: true of the harness no matter what agent-brain.py contains, so it
+#       could not go red on any change to the thing under test — an unreachable red inside a file
+#       written to close that class. It now runs the SAME fixture twice, once without and once
+#       WITH the module's own _JournalTee in the path, and requires the two to differ. That is
+#       reachable: a tee that stops emitting turns it red. The real pre-fix row is not here at
+#       all — it is A2 of #285's Dell table, and it stays there.
+#   A10 CONCURRENCY ARM — two threads interleaving partial writes must not splice one journal
+#       line out of two (#286 note 2). The screen was never at risk; the buffer was.
 #   A9  CALL-SITE ARM — main() actually enters journal_stderr_copy() on the same ExitStack, AFTER
 #       the guard. A perfect tee that nothing installs is the failure this whole file is about
 #       one level up; and entering it BEFORE the guard would unwind in the wrong order.
@@ -153,16 +160,36 @@ check("A6 isatty/attrs forward to the proxy", passthru)
 # ── A7 ──
 check("A7 unwind restores sys.stderr to the proxy", restored)
 
-# ── A8 (pre-fix arm) ──
-proxy, jrn = Proxy(), Journal()
-sys.stderr = proxy; sys.__stderr__ = jrn
-try:
-    sys.stderr.write(LINE)        # the pre-fix world: guard installed, no copy
-    prefix_screen, prefix_journal = proxy.getvalue(), jrn.getvalue()
-finally:
-    sys.stderr, sys.__stderr__ = REAL_ERR, REAL_UNDER
-check("A8 pre-fix: screen YES", prefix_screen == LINE)
-check("A8 pre-fix: journal NO (the gap #285 measured)", prefix_journal == "", repr(prefix_journal))
+# ── A8 (differential arm — the module IS on this path, so it can go red) ──
+bare_proxy, bare_jrn = Proxy(), Journal()
+bare_proxy.write(LINE)                                   # no copy in the path
+teed_proxy, teed_jrn = Proxy(), Journal()
+brain._JournalTee(teed_proxy, teed_jrn).write(LINE)      # the module's own object in the path
+check("A8 screen is identical either way", bare_proxy.getvalue() == teed_proxy.getvalue() == LINE)
+check("A8 without the tee the journal stays empty", bare_jrn.getvalue() == "", repr(bare_jrn.getvalue()))
+check("A8 the tee is what makes the difference", teed_jrn.getvalue() == "[front-door 26.3s]\n",
+      "a tee that stopped emitting would be caught here, which the fixture-only version could not do: "
+      + repr(teed_jrn.getvalue()))
+
+# ── A10 (concurrency — SHOWN FIRING: 550/600 lines spliced against a shared buffer) ──
+# The `time.sleep(0)` between the partial write and its newline is not a trick to manufacture a
+# failure: it is what makes the interleave OBSERVABLE at a 200-iteration scale instead of a
+# 200,000 one. Without it this arm passes against the broken implementation too, which is how
+# the first version of it was unreachable-red — the same class as A8's first version.
+import threading, time
+cproxy, cjrn = Proxy(), Journal()
+tee = brain._JournalTee(cproxy, cjrn)
+def hammer(tag):
+    for _ in range(300):
+        tee.write(tag * 8); time.sleep(0); tee.write(tag * 8 + "\n")
+ths = [threading.Thread(target=hammer, args=(t,)) for t in ("a", "b")]
+for t in ths: t.start()
+for t in ths: t.join()
+lines = [l for l in cjrn.getvalue().split("\n") if l]
+spliced = [l for l in lines if len(set(l)) != 1 or len(l) != 16]
+check("A10 no journal line is spliced from two writers", not spliced,
+      str(len(spliced)) + " spliced; first: " + repr(spliced[:1]))
+check("A10 the arm produced the lines it claims to judge (vacuity)", len(lines) == 600, str(len(lines)))
 
 # ── A9 (call-site arm) ──
 src = open(MOD, encoding="utf-8").read()
