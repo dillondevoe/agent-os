@@ -40,6 +40,11 @@
 # __file__ and loaded via spec_from_file_location, so the environment never mattered. Fixed in
 # the wiring commit rather than after it: per PR #189, a Run: header can only diverge from the
 # workflow once the file is WIRED, so that is the moment to make them agree.
+# SIDE_EFFECTS — Geist's law as amended 2026-09-05T13:05Z: a box-runnable battery declares
+# every effect that leaves the machine or outlives the run. Read as DATA by
+# tests/vm-matrix-contract.py, not as a comment.
+SIDE_EFFECTS = []
+
 import importlib.util, io, json, os, subprocess, sys, tempfile, textwrap, urllib.error
 
 MOD = os.path.join(os.path.dirname(__file__), "..", "modules", "agent-brain.py")

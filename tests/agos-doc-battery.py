@@ -4,6 +4,11 @@
 # fixture needed); if pdfinfo isn't present the CLI is absent and we SKIP. The contract
 # is: info <path> -> {ok,path,pages,title,author,pdf_version,page_size,bytes}.
 # Run: PYTHONPATH=modules python3 tests/agos-doc-battery.py
+# SIDE_EFFECTS — Geist's law as amended 2026-09-05T13:05Z: a box-runnable battery declares
+# every effect that leaves the machine or outlives the run. Read as DATA by
+# tests/vm-matrix-contract.py, not as a comment.
+SIDE_EFFECTS = []
+
 import subprocess, json, shutil, sys, tempfile, os
 
 EX = 0

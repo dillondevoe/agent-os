@@ -1,4 +1,9 @@
 #!/usr/bin/env python3
+# SIDE_EFFECTS — Geist's law as amended 2026-09-05T13:05Z: a box-runnable battery declares
+# every effect that leaves the machine or outlives the run. Read as DATA by
+# tests/vm-matrix-contract.py, not as a comment.
+SIDE_EFFECTS = []
+
 """xml-toolcall-battery.py — a tool call that renders as prose is a CLAIM.
 
 Rabbot's P1 item 2 (2026-08-31, from Dillon's photo of the Dell TUI at 06:44 CDT):

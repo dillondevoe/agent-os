@@ -30,6 +30,11 @@
 #
 # Usage: PYTHONPATH=modules python3 tests/mem-battery.py
 
+# SIDE_EFFECTS — Geist's law as amended 2026-09-05T13:05Z: a box-runnable battery declares
+# every effect that leaves the machine or outlives the run. Read as DATA by
+# tests/vm-matrix-contract.py, not as a comment.
+SIDE_EFFECTS = []
+
 import os
 import re
 import shutil

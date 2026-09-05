@@ -27,6 +27,11 @@
 #   * Anthropic REQUIRES tool_use_id on every tool_result, but this codebase appends bare
 #     {"role":"tool","content":res} with no id. Pairing is positional and has to be exactly
 #     right or the API 400s — mismatched ids are the single most likely way this breaks.
+# SIDE_EFFECTS — Geist's law as amended 2026-09-05T13:05Z: a box-runnable battery declares
+# every effect that leaves the machine or outlives the run. Read as DATA by
+# tests/vm-matrix-contract.py, not as a comment.
+SIDE_EFFECTS = []
+
 import importlib.util, io, json, os, py_compile, sys, tempfile
 
 MOD = "modules/agent-brain.py"

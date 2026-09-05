@@ -15,6 +15,11 @@
 #   D. sign/verify as a participant; two participants verify only against their OWN npub
 #   E. boot self-test passes, and FAILS LOUD when the signer is broken (control arm)
 #   F. preflight control arm: loosened perms are actually CAUGHT, on both file and dir
+# SIDE_EFFECTS — Geist's law as amended 2026-09-05T13:05Z: a box-runnable battery declares
+# every effect that leaves the machine or outlives the run. Read as DATA by
+# tests/vm-matrix-contract.py, not as a comment.
+SIDE_EFFECTS = []
+
 import os, py_compile, stat, sys, tempfile
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))

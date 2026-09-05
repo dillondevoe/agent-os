@@ -43,6 +43,7 @@ Control arms (each MUST fail — if one does not, that check is not a check):
     touch tests/orphan.nix && python3 tests/vm-matrix-contract.py ; rm tests/orphan.nix
 """
 import argparse
+import ast
 import glob
 import re
 import json
@@ -1137,6 +1138,585 @@ def ruling_conditions_selftest():
     return failures
 
 
+
+# ---------------------------------------------------------------------------
+# GEIST'S LAW, AS AMENDED 2026-09-05T13:05Z: A BOX-RUNNABLE BATTERY DECLARES ITS SIDE
+# EFFECTS, AND THE CHECKER DETECTS THEM RATHER THAN TAKING THE DECLARATION AT ITS WORD.
+#
+# The occasion: agos-notes-battery ran `agos-notes new` against /var/lib/agos-notes, the store
+# notes-open.nix documents as shared with the human, with no delete verb to undo it. Every run
+# left a note behind permanently. It was found by hand, in a one-off sweep, because Augur made
+# a remark on a different PR. Nothing in the repo would have found the next one.
+#
+# THE FIRST VERSION OF THIS CHECK WAS A BOOLEAN AND AUGUR KILLED IT, CORRECTLY. `MUTATES_SHARED_
+# STATE = False` is TRUE of the pre-#279 agos-web-battery: that battery fetched a third-party
+# host on every run and mutated no shared state whatsoever. So the field would have been
+# satisfied, honestly, by the very battery whose defect started this sweep — a declaration that
+# cannot be false on the founding case cannot control-arm it. The fix is not a better boolean;
+# it is that "side effect" was never one axis. Geist's amendment names three.
+#
+# TWO FIELDS, both module-level literals:
+#
+#   SIDE_EFFECTS = []                        closed enum, see SIDE_EFFECT_KINDS
+#   SIDE_EFFECTS_OWNER = "verb-battery.nix"  required iff SIDE_EFFECTS is non-empty
+#
+# The second field is MY reading, not Geist's text, and it is flagged here so a reviewer can
+# overrule it rather than inherit it. He wrote one field (`SIDE_EFFECTS = []`) and one rule
+# ("non-empty SIDE_EFFECTS must name the VM test owning those arms"). A list of enum members
+# cannot also carry a filename without smuggling structure into the members, so the owner is
+# its own field. A dict {kind: owner} was the alternative; it says less clearly that the owner
+# owns ALL of them, and it departs further from the shape he actually wrote.
+#
+# WHAT MAKES THIS DIFFERENT FROM THE BOOLEAN, and it is Augur's condition verbatim: THE CHECKER
+# DETECTS. An arm that only reads the field is satisfiable by writing the field. So each kind
+# has a detector, and a battery whose source shows a side effect it does not declare is RED
+# regardless of what it declares. The detectors are FLOORS and are described as such at each
+# one; a battery declaring a kind the detector cannot see is NOT an error, because the detector
+# is the weaker instrument and the declaration is allowed to know more than it does.
+SIDE_EFFECT_KINDS = {
+    "egress": "leaves the machine — any non-loopback host, any billed API",
+    "shared-state": "outlives the run in state the human owns (e.g. /var/lib/agos-notes)",
+    "box": "outlives the run in the machine (power, generation, settings)",
+}
+_SE_LEGAL = ("a list of " + "|".join(sorted(SIDE_EFFECT_KINDS)) +
+             " (use [] for none), plus SIDE_EFFECTS_OWNER when non-empty")
+
+# THE SHARED-STATE / BOX DETECTOR'S WHOLE KNOWLEDGE, and it is a table someone maintains by
+# hand — which is the honest description of its limit. A mutating verb that is not listed here
+# is INVISIBLE to the detector, so this table's incompleteness is the detector's blind spot,
+# not a bug in the scan. It is the same string-counting weakness the egress detector carries
+# below, and it fails in the same direction: silently, by not firing.
+#
+# Grounded in what is evidenced, not in what sounds plausible: notes `new`/`append` from the
+# sweep that started this, `cal add` from agent-brain.py's dispatch, and the power verbs #277
+# made first-class. Add a row when you meet a verb that outlives its run.
+MUTATING_VERBS = {
+    "agos-notes": {"new": "shared-state", "append": "shared-state"},
+    "agos-cal": {"add": "shared-state"},
+    "agos-sys": {"volume": "box", "reboot": "box", "poweroff": "box",
+                 "restart": "box", "shutdown": "box", "update": "box"},
+}
+
+# DEBT, NOT DESIGN — same rule as KNOWN_UNWIRED_DEBT above, and for the same reason.
+#
+# A battery here has a REAL side-effecting arm covering a REAL product verb, and the VM test
+# that should own it does not exist yet. Only a file named here may declare a non-empty
+# SIDE_EFFECTS whose owner is missing; everything else must name an owner that exists. That
+# keeps the ledger meaningful — it reads "known, ledgered, and someone is watching the count"
+# rather than "opted out". THIS LIST MAY ONLY SHRINK.
+#
+# calendar-battery is NOT the notes case and the difference decided the remedy. Geist's notes
+# ruling removed the write arms because the brain's notes hand is list|read only, so they
+# covered verbs the product never advertises — cost zero. But the brain DOES advertise
+# `calendar.add` (agent-brain.py:1386), so `cal("add", start, "battery-test-event")` covers a
+# verb an agent can actually reach. Deleting it would trade a mutation for a coverage hole in
+# a shipped verb. It moves to the VM arm instead, and waits for that arm to exist.
+#
+# Found 2026-09-05 while writing the declarations this check reads — which is the argument for
+# the check. The notes case was found by hand; this one was found because something finally
+# forced every battery to be looked at. Not confirmed by running it: agos-cal IS on the Dell,
+# so running it to "prove" the mutation IS the mutation.
+SIDE_EFFECT_DEBT = {
+    "calendar-battery.py":
+        'cal("add", start, "battery-test-event") — creates an event in the human calendar on '
+        "any box with agos-cal (the Dell has it). Covers the real calendar.add verb, so it "
+        "moves to tests/verb-battery.nix rather than being deleted; that file is not built yet.",
+}
+
+
+def _module_assign(path, name):
+    """Module-level assignment of `name`, as a literal. None if absent/not a literal.
+
+    ast, not import: importing a battery RUNS it, and running batteries is what this file
+    exists to have opinions about.
+    """
+    try:
+        tree = ast.parse(open(path, encoding="utf-8").read())
+    except Exception:
+        return ("__unparseable__", None)
+    for node in tree.body:
+        if isinstance(node, ast.Assign):
+            for t in node.targets:
+                if isinstance(t, ast.Name) and t.id == name:
+                    try:
+                        return ("ok", ast.literal_eval(node.value))
+                    except Exception:
+                        return ("__notliteral__", None)
+    return ("__absent__", None)
+
+
+# AUGUR'S ARM (2026-09-05): THE EGRESS DETECTOR.
+#
+# agos-web-battery fetched a third-party host on every run — from the operator's IP, for a
+# property the failure envelope satisfied anyway. It passed CI only because CI lacks the
+# binary and the battery SKIPs. Augur's point on #279 is the one that matters: I fixed the
+# arm and then wrote a comment accommodating "a future sweep grepping for non-loopback URLs",
+# and THERE WAS NO SUCH SWEEP. The sweep was me, by hand, once. A rule with no trigger point
+# does not fire at an unfamiliar surface. This is the trigger point.
+#
+# WHAT THIS DETECTOR IS: a floor, and a smaller one than it looks. It counts STRINGS, not
+# facts. A host assembled at runtime, read from env, or built by concatenation is invisible to
+# it — the same defect class as the independence gate that counted strings. It finding nothing
+# means "no battery contains a literal non-loopback URL", which is strictly weaker than "no
+# battery reaches the network". Do not promote the one into the other.
+_URL_RE = re.compile(r"\bhttps?://([A-Za-z0-9_.\-\[\]:]+)")
+_LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "[::1]", "::1")
+# RFC 6761/2606 reserve these so they can never resolve to a real server, which is a stronger
+# guarantee than "we agreed not to fetch it". example.com is NOT here on purpose: it is reserved
+# for DOCUMENTATION but it genuinely resolves and genuinely serves content, so a fixture using it
+# is one refactor away from a live fetch. Fixtures were moved to .invalid rather than exempted —
+# an allowlist entry retires the file from scrutiny, a non-resolving host retires the hazard.
+_UNRESOLVABLE_TLDS = (".invalid", ".test", ".example", ".localhost")
+
+
+def detect_egress(path):
+    """Lines showing a literal non-loopback http(s) host. Floor: literals only."""
+    hits = []
+    try:
+        lines = open(path, encoding="utf-8").read().splitlines()
+    except Exception as exc:
+        return [(0, f"unreadable ({exc!r})")]
+    for i, line in enumerate(lines, 1):
+        for host in _URL_RE.findall(line):
+            bare = host.split(":")[0] if not host.startswith("[") else host
+            if bare in _LOOPBACK_HOSTS or host in _LOOPBACK_HOSTS:
+                continue
+            if bare.lower().endswith(_UNRESOLVABLE_TLDS):
+                continue
+            if "." not in bare:
+                # A bare single label ("x") has no TLD and cannot be resolved by a stub
+                # resolver; these appear as HTTPError() constructor args, never as targets.
+                continue
+            hits.append((i, host))
+    return hits
+
+
+# THE ALIAS PASS, AND IT EXISTS BECAUSE THE FIRST VERSION OF THIS DETECTOR WAS BLIND TO EVERY
+# REAL BATTERY IN THE TREE. v1 wanted the CLI name and the verb on the same line. Not one
+# battery is written that way: they all bind the tool once (`ncli = shutil.which("agos-notes")`)
+# and then call `run([ncli, "new", ...])`. So v1 found nothing in the pre-fix agos-notes-battery
+# — the founding case — while its own selftest fixture passed, because I had written the fixture
+# with `# agos-notes` in a COMMENT on the call line. The fixture was written to the detector
+# instead of to reality, and the green was the crutch, not the catch. Caught only by running
+# Geist's control against the actual pre-fix sha rather than against something I made up.
+_ALIAS_RE = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=.*?[\"'](agos-[a-z]+)[\"']")
+
+
+def _cli_aliases(lines):
+    """Local names bound to an agos-* CLI. {name: cli}, plus each cli under its own name."""
+    aliases = {}
+    for line in lines:
+        m = _ALIAS_RE.match(line)
+        if m:
+            aliases[m.group(1)] = m.group(2)
+    return aliases
+
+
+def detect_verb_effects(path):
+    """Lines invoking a MUTATING_VERBS entry. Returns [(line, kind, "cli verb")].
+
+    Floor, and the shape of the floor is worth stating: it resolves a module-level alias to
+    its CLI and then wants the verb as a quoted literal on the calling line. A verb held in a
+    variable, built by concatenation, or reached through a wrapper defined in another file
+    does not register. Growing MUTATING_VERBS is how this gets stronger; nothing here can find
+    a mutating verb the table does not name.
+    """
+    hits = []
+    try:
+        lines = open(path, encoding="utf-8").read().splitlines()
+    except Exception:
+        return hits
+    aliases = _cli_aliases(lines)
+    for i, line in enumerate(lines, 1):
+        # Which CLIs could this line be calling? Its own name, or any alias bound to it.
+        candidates = set()
+        for cli in MUTATING_VERBS:
+            if cli in line:
+                candidates.add(cli)
+        for name, cli in aliases.items():
+            if cli in MUTATING_VERBS and re.search(r"\b" + re.escape(name) + r"\b", line):
+                candidates.add(cli)
+        if not candidates:
+            continue
+        for cli in sorted(candidates):
+            for verb, kind in MUTATING_VERBS[cli].items():
+                if f'"{verb}"' in line or f"'{verb}'" in line:
+                    hits.append((i, kind, f"{cli} {verb}"))
+    return hits
+
+
+def side_effect_declarations(tests_dir):
+    """Every *-battery.py declares SIDE_EFFECTS legally AND consistently with the detectors."""
+    problems = []
+    for path in sorted(glob.glob(os.path.join(tests_dir, "*-battery.py"))):
+        base = os.path.basename(path)
+        state, value = _module_assign(path, "SIDE_EFFECTS")
+        if state == "__unparseable__":
+            problems.append(f"{base}: could not be parsed to read its declaration")
+            continue
+        if state == "__absent__":
+            problems.append(f"{base}: no SIDE_EFFECTS declaration ({_SE_LEGAL})")
+            continue
+        if state == "__notliteral__":
+            problems.append(f"{base}: SIDE_EFFECTS is computed, not a literal — a declaration "
+                            f"a reader cannot evaluate is not a declaration")
+            continue
+        if not isinstance(value, list):
+            problems.append(f"{base}: SIDE_EFFECTS = {value!r} is not a list ({_SE_LEGAL})")
+            continue
+        declared = set()
+        for member in value:
+            if member in SIDE_EFFECT_KINDS:
+                declared.add(member)
+            else:
+                problems.append(f"{base}: SIDE_EFFECTS names {member!r}, which is not one of "
+                                f"{sorted(SIDE_EFFECT_KINDS)} — the enum is closed so that a "
+                                f"new kind is a deliberate edit here, not a free-text field")
+
+        # The owner half of Geist's rule: arms with side effects live in a VM test that exists.
+        ostate, owner = _module_assign(path, "SIDE_EFFECTS_OWNER")
+        if declared:
+            if ostate != "ok" or not isinstance(owner, str) or not owner:
+                problems.append(f"{base}: declares {sorted(declared)} but no SIDE_EFFECTS_OWNER "
+                                f"— non-empty side effects must name the VM test that owns "
+                                f"those arms")
+            elif not os.path.exists(os.path.join(tests_dir, owner)):
+                if base not in SIDE_EFFECT_DEBT:
+                    problems.append(f"{base}: names {owner!r} as the owner of its side-effecting "
+                                    f"arms, but that file does not exist and {base} is not in "
+                                    f"SIDE_EFFECT_DEBT. A missing owner is debt to be ledgered, "
+                                    f"not a declaration to be believed")
+        elif ostate == "ok":
+            problems.append(f"{base}: SIDE_EFFECTS is empty but SIDE_EFFECTS_OWNER is set — an "
+                            f"owner with nothing to own reads as coverage that is not there")
+
+        # AUGUR'S CONDITION: detect, do not merely read. Undeclared-but-detected is RED.
+        # Declared-but-undetected is NOT: the detectors are floors and the file may know more.
+        for line, host in detect_egress(path):
+            if "egress" not in declared:
+                problems.append(f"{base}:{line}: literal non-loopback host {host!r} but "
+                                f"SIDE_EFFECTS does not declare 'egress' — a battery that "
+                                f"reaches out is armed on every box where its binary exists "
+                                f"and green-by-accident everywhere it does not")
+        for line, kind, what in detect_verb_effects(path):
+            if kind not in declared:
+                problems.append(f"{base}:{line}: invokes `{what}`, which outlives the run "
+                                f"({kind}), but SIDE_EFFECTS does not declare {kind!r}")
+    return problems
+
+
+def stale_side_effect_debt(tests_dir):
+    """SIDE_EFFECT_DEBT entries that no longer apply — the list must shrink, and be seen to."""
+    stale = []
+    for base in sorted(SIDE_EFFECT_DEBT):
+        path = os.path.join(tests_dir, base)
+        if not os.path.exists(path):
+            stale.append(f"{base}: named in SIDE_EFFECT_DEBT but the file is gone")
+            continue
+        state, value = _module_assign(path, "SIDE_EFFECTS")
+        if state != "ok" or not value:
+            stale.append(f"{base}: in SIDE_EFFECT_DEBT but no longer declares any side effect "
+                         f"— the debt was paid and the ledger entry outlived it")
+            continue
+        ostate, owner = _module_assign(path, "SIDE_EFFECTS_OWNER")
+        if ostate == "ok" and isinstance(owner, str) and \
+                os.path.exists(os.path.join(tests_dir, owner)):
+            stale.append(f"{base}: in SIDE_EFFECT_DEBT but its owner {owner!r} now exists — the "
+                         f"debt was paid and the ledger entry outlived it")
+    return stale
+
+
+# THE HISTORY CONTROLS, AND WHY THEY LIVE IN THE CHECKER RATHER THAN IN A COMM.
+# Geist's from-history clause: a control arm is drawn from a sha that actually shipped the
+# defect, not from a fixture I wrote today. The reason is not purity — it is that my own
+# fixture HID a detector bug for a whole revision (see the alias pass above), because fixture
+# and detector shared an author and an assumption. Running the real pre-fix files caught it.
+#
+# Running them ONCE by hand and writing the result in a comm is what this replaces. That run
+# is a past-tense fact about code that has since changed; the next edit to the alias pass or
+# the literal scan regresses with nothing to catch it.
+#
+#   be1769b  the pre-#279 agos-web-battery — fetched a third-party host every run (egress)
+#   53f1b8a  the pre-fix agos-notes-battery — `agos-notes new` / `append` (shared-state)
+#
+# THE SHAS ARE 40 CHARACTERS AND THAT IS LOAD-BEARING, not tidiness. An abbreviation is a lookup
+# key against a LOCAL object store; it is not an identifier a remote will serve. `git fetch
+# --depth=1 origin be1769b` is refused by GitHub while the same fetch of the full sha succeeds.
+# I originally wrote the 7-char forms, watched CI report "0 of 2 arms ran", and concluded the
+# by-sha fetch itself was refused — the wrong mechanism, and I put it in a workflow comment as
+# "proven, not assumed". Geist tested both forms from a pristine shallow clone and found the
+# abbreviation was the whole of it. A wrong mechanism written down confidently is worse than an
+# open question: the next reader builds on it.
+#
+# Each is replayed with `SIDE_EFFECTS = []` PREPENDED: the honest-looking declaration that the
+# boolean predecessor accepted. The arm asserts the checker goes RED anyway. The post-fix tree
+# is the green arm — it is the whole rest of this check.
+HISTORY_CONTROLS = (
+    ("be1769ba35cb31bdf78583c515600e1cc54884e4", "tests/agos-web-battery.py", "does not declare 'egress'",
+     "pre-#279 agos-web-battery reached a third-party host on every run"),
+    ("53f1b8a456d9e30b0313f6c8e80fc979216d6519", "tests/agos-notes-battery.py", "agos-notes new",
+     "pre-fix agos-notes-battery created a note in the human's notes dir"),
+)
+
+
+def _git_show(repo_root, sha, path):
+    """Bytes of `path` at `sha`, or None. Fetches the sha if the clone is shallow."""
+    ref = f"{sha}:{path}"
+    for attempt in (0, 1):
+        try:
+            return subprocess.run(["git", "show", ref], cwd=repo_root, check=True,
+                                  stdout=subprocess.PIPE, stderr=subprocess.DEVNULL).stdout
+        except Exception:
+            if attempt:
+                return None
+            # actions/checkout is shallow by default, so these two shas are not in a CI clone.
+            # A history control that silently skips in CI is a fixture with extra steps.
+            try:
+                subprocess.run(["git", "fetch", "--depth=1", "origin", sha], cwd=repo_root,
+                               check=True, stdout=subprocess.DEVNULL,
+                               stderr=subprocess.DEVNULL, timeout=60)
+            except Exception:
+                return None
+    return None
+
+
+def _history_root():
+    """The checker's own repo. ONE expression, because two call sites once had two."""
+    return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def _is_git_repo(path):
+    try:
+        return subprocess.run(["git", "rev-parse", "--git-dir"], cwd=path, check=True,
+                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) is not None
+    except Exception:
+        return False
+
+
+def history_control_arms(repo_root, in_ci):
+    """Replay the pre-fix shas through the live checker. Returns (problems, ran).
+
+    `ran` is returned rather than kept private BECAUSE A SKIPPED ARM IS INVISIBLE OTHERWISE:
+    an unreachable sha would turn this into a byte-identical pass. Under CI a sha that cannot
+    be fetched is a FAILURE; locally it is a loud skip, and either way the arm count is part
+    of the verdict rather than a thing the reader is trusted to notice.
+    """
+    problems, ran = [], 0
+    import tempfile
+    if not _is_git_repo(repo_root):
+        return ([f"SKIP-ARM: {repo_root!r} is not a git repository, so the {len(HISTORY_CONTROLS)}"
+                 f" history controls have no history to read"], 0)
+    for sha, path, expect, what in HISTORY_CONTROLS:
+        blob = _git_show(repo_root, sha, path)
+        if blob is None:
+            msg = (f"history control {sha}:{path} could not be read — the arm did not run, and "
+                   f"an arm that does not run passes")
+            problems.append(msg if in_ci else f"SKIP-ARM (local, not CI): {msg}")
+            continue
+        ran += 1
+        with tempfile.TemporaryDirectory() as d:
+            name = os.path.basename(path)
+            with open(os.path.join(d, name), "wb") as fh:
+                fh.write(b"SIDE_EFFECTS = []\n" + blob)
+            found = side_effect_declarations(d)
+            if not any(expect in p for p in found):
+                problems.append(
+                    f"history control {sha}:{path} came back CLEAN — {what}, and it was "
+                    f"replayed with the honest-looking `SIDE_EFFECTS = []` that the boolean "
+                    f"predecessor accepted. Expected a finding containing {expect!r}. The "
+                    f"detector no longer sees the defect it was built for")
+    if in_ci and ran != len(HISTORY_CONTROLS):
+        problems.append(f"history controls: {ran} of {len(HISTORY_CONTROLS)} arms ran under CI "
+                        f"— the count is part of the verdict")
+    return problems, ran
+
+
+def history_control_selftest():
+    """The controls control the controls: a broken detector must make the arms go RED."""
+    failures = []
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    # A sha that does not exist must FAIL under CI and SKIP locally. Both directions, because
+    # a function that always fails and a function that always skips each pass one of them.
+    bogus = (("0" * 40, "tests/nope.py", "x", "does not exist"),)
+    saved = globals()["HISTORY_CONTROLS"]
+    globals()["HISTORY_CONTROLS"] = bogus
+    try:
+        probs, ran = history_control_arms(root, in_ci=True)
+        if ran or not any("could not be read" in p for p in probs):
+            failures.append("selftest: an UNREACHABLE sha did not fail under CI — the controls "
+                            "would silently vanish in the one place nobody watches them run")
+        probs, ran = history_control_arms(root, in_ci=False)
+        if not any(p.startswith("SKIP-ARM") for p in probs):
+            failures.append("selftest: an unreachable sha was not reported as a loud skip "
+                            "locally — a skipped arm would be invisible")
+        if any(not p.startswith("SKIP-ARM") for p in probs):
+            failures.append("selftest: an unreachable sha was a hard failure LOCALLY — a "
+                            "shallow clone would make the checker unrunnable off CI")
+    finally:
+        globals()["HISTORY_CONTROLS"] = saved
+    # A tree with no history at all must still be LOUD: a root that quietly reports zero arms is
+    # exactly the byte-identical pass these controls exist against. The second arm pins the root
+    # main() actually uses, so the two call sites cannot drift apart again.
+    import tempfile
+    with tempfile.TemporaryDirectory() as d:
+        probs, ran = history_control_arms(d, in_ci=True)
+        if ran or not any("not a git repository" in p for p in probs):
+            failures.append("selftest: a NON-REPOSITORY tree did not report its skipped arms "
+                            "— a copied tree would pass with zero controls run")
+    # THE ROOT main() ACTUALLY USES, asserted here rather than a root this selftest picks for
+    # itself. That distinction is the whole finding: anchoring on __file__ here while main()
+    # anchored on --tests-dir made this arm green against a path main() never took.
+    if history_control_arms(_history_root(), in_ci=True)[1] != len(HISTORY_CONTROLS):
+        failures.append("selftest: the arms did not run against the checker's OWN repo — that "
+                        "is the root main() uses, so a failure here is a failure there")
+    return failures
+
+
+def side_effect_declaration_selftest():
+    """Drive the checks against fixtures. Without these the checks are assertions.
+
+    THE ARM THAT MATTERS IS THE DETECTION ONE. A field-reading check is satisfiable by writing
+    the field, so `declares [] while the source shows egress` is the case Augur's condition
+    exists for, and it is the case the boolean predecessor could not express at all.
+    """
+    failures = []
+    import tempfile
+    with tempfile.TemporaryDirectory() as d:
+        def w(name, text):
+            with open(os.path.join(d, name), "w") as fh:
+                fh.write(text)
+
+        # --- shape of the declaration ---
+        w("a-battery.py", "SIDE_EFFECTS = []\n")
+        if side_effect_declarations(d):
+            failures.append("selftest: a clean empty declaration was reported as a problem — "
+                            "the check would be red on every correct battery")
+        w("b-battery.py", "x = 1\n")
+        if not any("no SIDE_EFFECTS" in p for p in side_effect_declarations(d)):
+            failures.append("selftest: an UNDECLARED battery was not reported — the check "
+                            "cannot see the condition it exists for")
+        os.remove(os.path.join(d, "b-battery.py"))
+        w("c-battery.py", "SIDE_EFFECTS = ['network']\n")
+        if not any("not one of" in p for p in side_effect_declarations(d)):
+            failures.append("selftest: a member OUTSIDE the enum was accepted — the enum would "
+                            "be a free-text field and 'network' vs 'egress' would both pass")
+        os.remove(os.path.join(d, "c-battery.py"))
+        w("d-battery.py", "SIDE_EFFECTS = 'egress'\n")
+        if not any("is not a list" in p for p in side_effect_declarations(d)):
+            failures.append("selftest: a bare string passed where a list is required — the "
+                            "shape would drift back to the boolean it replaced")
+        os.remove(os.path.join(d, "d-battery.py"))
+
+        # --- the owner half: non-empty must name a VM test that exists ---
+        w("e-battery.py", 'SIDE_EFFECTS = ["box"]\n')
+        if not any("no SIDE_EFFECTS_OWNER" in p for p in side_effect_declarations(d)):
+            failures.append("selftest: side effects with NO owner passed — declaring an effect "
+                            "would discharge the duty to put it somewhere")
+        w("e-battery.py", 'SIDE_EFFECTS = ["box"]\nSIDE_EFFECTS_OWNER = "nope.nix"\n')
+        if not any("does not exist" in p for p in side_effect_declarations(d)):
+            failures.append("selftest: a NON-EXISTENT owner passed — the owner field would be "
+                            "a way to name anything and be believed")
+        w("nope.nix", "")
+        if side_effect_declarations(d):
+            failures.append("selftest: naming an EXISTING owner still failed — the legal form "
+                            "is unusable, so batteries would be pushed to declare []")
+        os.remove(os.path.join(d, "nope.nix"))
+        # CONTROL for the opposite mistake: an owner with nothing to own.
+        w("e-battery.py", 'SIDE_EFFECTS = []\nSIDE_EFFECTS_OWNER = "nope.nix"\n')
+        if not any("nothing to own" in p for p in side_effect_declarations(d)):
+            failures.append("selftest: an owner on an EMPTY declaration passed — a file could "
+                            "advertise VM coverage it does not have")
+        os.remove(os.path.join(d, "e-battery.py"))
+
+        # --- DEBT: a missing owner is legal ONLY for a ledgered file ---
+        w("z-battery.py", 'SIDE_EFFECTS = ["shared-state"]\nSIDE_EFFECTS_OWNER = "later.nix"\n')
+        if not any("not in SIDE_EFFECT_DEBT" in p and "z-battery" in p
+                   for p in side_effect_declarations(d)):
+            failures.append("selftest: an UNLEDGERED missing owner was accepted — the owner "
+                            "field would become the opt-out the ruling forbids")
+        SIDE_EFFECT_DEBT["z-battery.py"] = "selftest fixture"
+        try:
+            if any("z-battery" in p for p in side_effect_declarations(d)):
+                failures.append("selftest: a LEDGERED missing owner was still rejected — the "
+                                "ledger is unusable, so real arms would go undeclared instead")
+            if any("z-battery" in x for x in stale_side_effect_debt(d)):
+                failures.append("selftest: a live debt entry was called stale — the ratchet "
+                                "would demand deletion of debt that still exists")
+            w("z-battery.py", "SIDE_EFFECTS = []\n")
+            if not any("debt was paid" in p and "z-battery" in p
+                       for p in stale_side_effect_debt(d)):
+                failures.append("selftest: a debt entry whose battery stopped declaring was not "
+                                "reported stale — the ledger could only ever grow")
+            # The OTHER way a debt is paid, and the one that actually happens here: the owner
+            # gets built. Without this arm the ratchet only notices deletions.
+            w("z-battery.py",
+              'SIDE_EFFECTS = ["shared-state"]\nSIDE_EFFECTS_OWNER = "later.nix"\n')
+            w("later.nix", "")
+            if not any("now exists" in p and "z-battery" in p
+                       for p in stale_side_effect_debt(d)):
+                failures.append("selftest: a debt whose OWNER was built was not reported stale "
+                                "— verb-battery.nix landing would leave the ledger entry behind")
+            os.remove(os.path.join(d, "later.nix"))
+        finally:
+            del SIDE_EFFECT_DEBT["z-battery.py"]
+        os.remove(os.path.join(d, "z-battery.py"))
+
+        # --- AUGUR'S CONDITION: the checker DETECTS, it does not read the field ---
+        # CONTROL: loopback and the reserved non-resolving TLDs must NOT trip, or the check is
+        # a blanket ban and the arms written to avoid egress (agos-web 2a/2b) would fail it.
+        w("f-battery.py",
+          'SIDE_EFFECTS = []\nA = "http://127.0.0.1:8080/"\nB = "https://localhost/x"\n'
+          'C = "http://127.0.0.1:%d/"\nD = "https://host.inv' + 'alid/x"\n')
+        if side_effect_declarations(d):
+            failures.append("selftest: a loopback-only battery was flagged — the check would "
+                            "fail the very arms written to avoid egress (agos-web 2a/2b)")
+        w("g-battery.py",
+          'SIDE_EFFECTS = []\nU = "https://" + "cdn." + ("rea" + "lhost.net") + "/x"\n')
+        if side_effect_declarations(d):
+            failures.append("selftest: a CONCATENATED host tripped the literal scan — that is "
+                            "not what this check claims to catch and a false positive here "
+                            "teaches people to disable it")
+        os.remove(os.path.join(d, "g-battery.py"))
+        # THE ARM. This is the pre-#279 agos-web-battery in miniature: an honest [] beside a
+        # source line that reaches the network. The boolean predecessor PASSED this exact
+        # shape, which is why it was replaced.
+        w("h-battery.py", 'SIDE_EFFECTS = []\nU = "https://cdn.' + 'rea' + 'lhost.net/x"\n')
+        if not any("does not declare 'egress'" in p for p in side_effect_declarations(d)):
+            failures.append("selftest: a battery declaring [] beside a literal non-loopback "
+                            "host was NOT reported — the check reads the field instead of "
+                            "detecting, which is the defect Augur named")
+        # ...and declaring it truthfully clears it. Without this the check is a ban on egress
+        # rather than a ban on UNDECLARED egress, and there would be no legal way to write one.
+        w("h-battery.py",
+          'SIDE_EFFECTS = ["egress"]\nSIDE_EFFECTS_OWNER = "own.nix"\n'
+          'U = "https://cdn.' + 'rea' + 'lhost.net/x"\n')
+        w("own.nix", "")
+        if side_effect_declarations(d):
+            failures.append("selftest: a TRUTHFULLY declared egress arm with a real owner was "
+                            "still rejected — there would be no legal way to write one")
+        os.remove(os.path.join(d, "h-battery.py"))
+        os.remove(os.path.join(d, "own.nix"))
+
+        # Same two directions for the verb detector — the notes case, in miniature.
+        # THE REAL SHAPE, not a shape written to suit the detector: bind the tool once, call
+        # it through the alias. v1 of the detector passed a fixture with `# agos-notes` in a
+        # comment on the call line and found NOTHING in the actual pre-fix battery.
+        w("i-battery.py", 'SIDE_EFFECTS = []\n'
+                          'ncli = shutil.which("agos-notes")\nrun([ncli, "new", slug])\n')
+        if not any("shared-state" in p and "agos-notes new" in p
+                   for p in side_effect_declarations(d)):
+            failures.append("selftest: `agos-notes new` beside [] was NOT reported — the verb "
+                            "detector is vacuous and the founding case would still pass")
+        w("i-battery.py", 'SIDE_EFFECTS = []\n'
+                          'ncli = shutil.which("agos-notes")\nrun([ncli, "read", slug])\n')
+        if side_effect_declarations(d):
+            failures.append("selftest: a NON-mutating notes verb tripped the detector — the "
+                            "table would be a ban on naming agos-notes at all, and the "
+                            "read-only arms that replaced the mutating ones would fail")
+        os.remove(os.path.join(d, "i-battery.py"))
+    return failures
+
+
 class Findings:
     """One place every check's output goes, so the OK verdict cannot forget a check.
 
@@ -1203,7 +1783,7 @@ class Findings:
 REQUIRED_CHECKS = {
     "unlisted", "dangling", "unwired", "vacuous", "stale",
     "debt_added", "debt_removed", "unarmed", "wired_disarming", "flake_wired_disarming",
-    "ruling_table",
+    "ruling_table", "side_effects", "stale_se_debt", "history_controls",
 }
 
 
@@ -1289,6 +1869,8 @@ SELFTESTS = (
     wired_disarm_selftest,
     flake_wired_disarm_selftest,
     findings_selftest,
+    side_effect_declaration_selftest,
+    history_control_selftest,
 )
 
 # SELFTESTS ONLY, now that `ruling_table` has moved to the checks registry where it belongs.
@@ -1299,6 +1881,8 @@ SELFTESTS = (
 REQUIRED_RULING = {
     "exemption_staleness_selftest", "ruling_conditions_selftest", "strict_caller_selftest",
     "wired_disarm_selftest", "flake_wired_disarm_selftest", "findings_selftest",
+    "side_effect_declaration_selftest",
+    "history_control_selftest",
 }
 
 
@@ -1352,6 +1936,22 @@ def main():
     # with the checks, not with the selftests that prove the checker can go red.
     ruling_table = f.add("ruling_table",
                          check_ruling_conditions(open(args.flake).read(), args.tests_dir))
+    # Geist's law, as data (2026-09-05), and Augur's trigger point for the egress sweep.
+    side_effects = f.add("side_effects", side_effect_declarations(args.tests_dir))
+    stale_se_debt = f.add("stale_se_debt", stale_side_effect_debt(args.tests_dir))
+    # THE HISTORY CONTROLS run against the repo, not the fixtures — that is their whole point.
+    # THE ROOT IS THE CHECKER'S OWN REPO, NOT THE TREE UNDER TEST, and the two are not the same
+    # thing. The subject of a history control is the DETECTOR -- the code in this process --
+    # replaying blobs out of history; the tree it happens to be pointed at has nothing to do with
+    # it. I first derived this from --tests-dir, which made main() and history_control_selftest()
+    # compute DIFFERENT roots for one arm: the selftest anchored on __file__ and passed, while
+    # main() anchored on the copy the call-site harness builds (no .git) and reported 0 of 2.
+    # A green selftest beside a check main() cannot run -- caught by step 163, which exists for
+    # exactly that, and found by Geist rather than by me.
+    _root = _history_root()
+    _in_ci = bool(os.environ.get("CI"))
+    hist, _hist_ran = history_control_arms(_root, _in_ci)
+    history_controls = f.add("history_controls", hist)
 
     # ONE ITERATION, NOT A SUM. Each term's NAME comes from the object that gets called, so a
     # term cannot be dropped from the chain while still counting as having run.
@@ -1432,6 +2032,57 @@ def main():
               file=sys.stderr)
         print("     table entry is discharged by prose, which is what this table is FOR.",
               file=sys.stderr)
+    if f["side_effects"]:
+        print("FAIL: SIDE_EFFECTS — a battery does not declare what it does, declares it",
+              file=sys.stderr)
+        print("      illegally, or DOES something its declaration denies:", file=sys.stderr)
+        for problem in side_effects:
+            print(f"  {problem}", file=sys.stderr)
+        print("  -> Geist 2026-09-05 (amended 13:05Z): a box-runnable battery never leaves the",
+              file=sys.stderr)
+        print("     machine and never outlives its run. Declare [], or move the arms into a VM",
+              file=sys.stderr)
+        print("     test and name it in SIDE_EFFECTS_OWNER.", file=sys.stderr)
+        print("  -> The two halves are not equally strong, and the difference is the point.",
+              file=sys.stderr)
+        print("     Undeclared-but-DETECTED is a real finding: the source shows the effect.",
+              file=sys.stderr)
+        print("     Declared-but-undetected is deliberately NOT a finding: the detectors read",
+              file=sys.stderr)
+        print("     literal strings and a known table of verbs, so they are floors, and a file",
+              file=sys.stderr)
+        print("     is allowed to know more about itself than they can see. A clean run here",
+              file=sys.stderr)
+        print("     means 'no battery visibly contradicts its declaration', which is strictly",
+              file=sys.stderr)
+        print("     weaker than 'no battery has undeclared side effects'.", file=sys.stderr)
+    if f["history_controls"]:
+        print("FAIL: a HISTORY CONTROL did not behave. These replay the shas that actually",
+              file=sys.stderr)
+        print("      shipped the defect, each with the honest-looking `SIDE_EFFECTS = []` the",
+              file=sys.stderr)
+        print("      boolean predecessor accepted, and assert the checker goes RED anyway:",
+              file=sys.stderr)
+        for problem in history_controls:
+            print(f"  {problem}", file=sys.stderr)
+        print("  -> Geist 2026-09-05: controls come from HISTORY, not fixtures. A fixture I",
+              file=sys.stderr)
+        print("     write today shares an author and an assumption with the detector it tests,",
+              file=sys.stderr)
+        print("     and one already hid a detector that found NOTHING in the founding case.",
+              file=sys.stderr)
+        print("     A SKIP-ARM line means the sha was unreachable: the arm did not run, and an",
+              file=sys.stderr)
+        print("     arm that does not run passes. That is a hard failure under CI.",
+              file=sys.stderr)
+    if f["stale_se_debt"]:
+        print("FAIL: SIDE_EFFECT_DEBT names a battery the debt no longer describes:",
+              file=sys.stderr)
+        for problem in stale_se_debt:
+            print(f"  {problem}", file=sys.stderr)
+        print("  -> remove the entry. A debt ledger that keeps paid entries stops being a count",
+              file=sys.stderr)
+        print("     anyone can watch go down, which is the only thing it was for.", file=sys.stderr)
     if f["wired_disarming"]:
         print("FAIL: a WIRED battery still SELF-DISARMS. It exits 0 announcing SKIP when its",
               file=sys.stderr)

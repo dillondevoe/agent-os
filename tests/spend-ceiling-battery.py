@@ -1,4 +1,9 @@
 #!/usr/bin/env python3
+# SIDE_EFFECTS — Geist's law as amended 2026-09-05T13:05Z: a box-runnable battery declares
+# every effect that leaves the machine or outlives the run. Read as DATA by
+# tests/vm-matrix-contract.py, not as a comment.
+SIDE_EFFECTS = []
+
 """spend-ceiling-battery.py — the cumulative spend ceilings, armed in BOTH directions.
 
 Rabbot's contract (2026-08-31, GO on item 3) asked for armed-red both ways: the ceiling

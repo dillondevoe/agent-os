@@ -4,6 +4,11 @@
 # status is READ-ONLY and degrades to nulls when a backend is absent, so it runs anywhere.
 # The mutating subcmds (volume/brightness) are NOT exercised — they change the box.
 # Run: PYTHONPATH=modules python3 tests/agos-sys-battery.py
+# SIDE_EFFECTS — Geist's law as amended 2026-09-05T13:05Z: a box-runnable battery declares
+# every effect that leaves the machine or outlives the run. Read as DATA by
+# tests/vm-matrix-contract.py, not as a comment.
+SIDE_EFFECTS = []
+
 import subprocess, json, shutil, sys
 
 EX = 0

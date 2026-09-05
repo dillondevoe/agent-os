@@ -9,6 +9,11 @@
 # discarded with NOTHING fired. No ollama needed — the decision layer is pure.
 #
 # Usage: python3 tests/frontdoor-kick-battery.py [path-to-agent-brain.py]
+# SIDE_EFFECTS — Geist's law as amended 2026-09-05T13:05Z: a box-runnable battery declares
+# every effect that leaves the machine or outlives the run. Read as DATA by
+# tests/vm-matrix-contract.py, not as a comment.
+SIDE_EFFECTS = []
+
 import types
 import importlib.util, json, sys, os
 

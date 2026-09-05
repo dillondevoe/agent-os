@@ -7,6 +7,11 @@
 #      a network failure surfaces as ok:false, which is still the correct contract)
 # Runs SKIP if agos-web isn't on PATH (image not built in this env).
 # Run: PYTHONPATH=modules python3 tests/agos-web-battery.py
+# SIDE_EFFECTS — Geist's law as amended 2026-09-05T13:05Z: a box-runnable battery declares
+# every effect that leaves the machine or outlives the run. Read as DATA by
+# tests/vm-matrix-contract.py, not as a comment.
+SIDE_EFFECTS = []
+
 import subprocess, json, shutil, sys
 
 EX = 0
@@ -55,23 +60,29 @@ except Exception as e:
 # and billed the operator's account, and passed CI only by the binary's absence.
 #
 # The replacement splits the arm in two and covers MORE than the original, offline:
-#   2a drives the failure envelope deterministically (unroutable, still http(s) so the guard
-#      passes it through to curl) — asserting exactly what the old arm asserted;
+#   2a drives the failure envelope deterministically (loopback, refused fast, still http(s)
+#      so the guard passes it through to curl) — asserting exactly what the old arm asserted;
 #   2b drives the SUCCESS path against a page this process serves on loopback — which the old
 #      arm only reached by luck of the network, and never asserted anything about.
 
-# 2a) http(s) accepted by the guard, fetch fails, envelope is well-formed. No egress: port 1
-# on loopback refuses instantly. Deterministic where the old arm was network-dependent.
+# 2a) http(s) accepted by the guard, fetch fails, envelope is well-formed. No egress.
+#
+# The address is REFUSED, not unroutable, and the distinction is the reason it is the right
+# choice (Augur, 2026-09-05 — the comment previously credited the property it does not use).
+# Nothing listens on loopback port 1, so the connect gets an instant RST and curl returns at
+# once. A genuinely UNROUTABLE address is the one that would block until the 20s --max-time
+# cap, turning every run of this battery into a 20-second stall. Refused-fast is the property;
+# unroutable would have been the bug.
 DEAD = "https://127.0.0.1:1/"
 rc, out, err = run([wcli, "fetch", DEAD])
 try:
     d = json.loads(out)
-    check("fetch https (unroutable) -> valid JSON {ok:bool}", d.get("ok") in (True, False), out[:60])
-    check("fetch https (unroutable) -> echoes url field", d.get("url") == DEAD, str(d.get("url")))
+    check("fetch https (refused, no egress) -> valid JSON {ok:bool}", d.get("ok") in (True, False), out[:60])
+    check("fetch https (refused, no egress) -> echoes url field", d.get("url") == DEAD, str(d.get("url")))
     check("...and it is the FAILURE envelope, so 2a is not passing on a lucky success",
           d.get("ok") is False, out[:80])
 except Exception as e:
-    check("unroutable fetch parses", False, str(e) + " | out=" + out[:60])
+    check("refused fetch parses", False, str(e) + " | out=" + out[:60])
 
 # 2b) SUCCESS path, served from this process on loopback — the coverage the old arm never
 # actually asserted. trafilatura needs real prose or it returns "no readable content", so the

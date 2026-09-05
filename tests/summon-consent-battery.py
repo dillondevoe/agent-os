@@ -1,4 +1,9 @@
 #!/usr/bin/env python3
+# SIDE_EFFECTS — Geist's law as amended 2026-09-05T13:05Z: a box-runnable battery declares
+# every effect that leaves the machine or outlives the run. Read as DATA by
+# tests/vm-matrix-contract.py, not as a comment.
+SIDE_EFFECTS = []
+
 """Battery for the summon_claude consent gate (Rabbot door (i), 2026-09-02).
 
 WHAT WAS WRONG. `_summon_claude` spawns the operator's Claude CLI as a subprocess — their

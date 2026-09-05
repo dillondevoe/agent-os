@@ -12,6 +12,14 @@
 #     silent degrade — the Dell gate catches the live half separately).
 # Run: PYTHONPATH=modules python3 tests/calendar-battery.py   (on a host with the image,
 # or any host with `khal` installed for the fallback path).
+# SIDE_EFFECTS — Geist's law as amended 2026-09-05T13:05Z. This one is NON-EMPTY and ledgered in
+# SIDE_EFFECT_DEBT: `cal("add", ...)` creates a real event on any box with agos-cal (the Dell
+# has it). Unlike the notes case it covers a verb the brain actually advertises
+# (calendar.add, agent-brain.py:1386), so it moves to tests/verb-battery.nix rather than
+# being deleted. Until that file exists this battery MUST NOT be run at a box.
+SIDE_EFFECTS = ["shared-state"]
+SIDE_EFFECTS_OWNER = "verb-battery.nix"
+
 import importlib.util, os, sys, tempfile, textwrap, subprocess, json, shutil
 
 EX = 0

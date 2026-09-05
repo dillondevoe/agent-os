@@ -23,6 +23,11 @@
 #
 # Zero compositor required: subprocess.Popen/run are stubbed and every invocation recorded.
 # Run: python3 tests/brain-dispatch-battery.py   (from the repo root)
+# SIDE_EFFECTS — Geist's law as amended 2026-09-05T13:05Z: a box-runnable battery declares
+# every effect that leaves the machine or outlives the run. Read as DATA by
+# tests/vm-matrix-contract.py, not as a comment.
+SIDE_EFFECTS = []
+
 import importlib.util, os, py_compile, sys
 
 MOD = "modules/agent-brain.py"
@@ -73,7 +78,7 @@ def hyprctl_calls():
     return out
 
 # ── A + B: the eval sink is unreachable from open_url ──
-PAYLOAD = 'https://example.com/") ; os.execute("touch /tmp/pwned") --'
+PAYLOAD = 'https://example.invalid/") ; os.execute("touch /tmp/pwned") --'
 CALLS.clear()
 brain.do_tool("open_url", {"url": PAYLOAD})
 check("A open_url issues ZERO hyprctl invocations", hyprctl_calls() == [],
@@ -104,7 +109,7 @@ for bad in ("--remote-debugging-port=9222", "--screenshot=/tmp/x.png", "-P evil"
     check("G " + repr(bad) + " reports the refusal as data",
           isinstance(r, str) and "refus" in r.lower(), "returned: " + repr(r))
 # and the control arm: an ordinary URL still opens, or the gate above is vacuous
-for good in ("https://example.com/a?b=c", "http://example.com", "HTTPS://Example.COM/x"):
+for good in ("https://example.invalid/a?b=c", "http://example.invalid", "HTTPS://Example.INVALID/x"):
     CALLS.clear()
     brain.do_tool("open_url", {"url": good})
     argv_ok = [a for k, a, _ in CALLS if k == "Popen"]

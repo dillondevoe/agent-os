@@ -48,6 +48,11 @@
 # default; the battery monkeypatches agent_loop._post + agent_loop.HOST so chat_once is deterministic
 # and model-free, while dispatch() still runs the REAL mcp|stub wall (the integration signal).
 
+# SIDE_EFFECTS — Geist's law as amended 2026-09-05T13:05Z: a box-runnable battery declares
+# every effect that leaves the machine or outlives the run. Read as DATA by
+# tests/vm-matrix-contract.py, not as a comment.
+SIDE_EFFECTS = []
+
 import json
 import os
 import re
