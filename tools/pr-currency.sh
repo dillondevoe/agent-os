@@ -168,6 +168,21 @@ if [ "${1:-}" = "--selftest" ]; then
   # because it costs an API call per commit. A default that silently pays that cost is the defect.
   case "$o3" in *"ck)"*) echo "  FAIL GS2 CONTROL: annotated without the flag -- lookup is not opt-in"; fail=1 ;;
     *) echo "  ok   GS2 CONTROL: default run does no gate lookup" ;; esac
+  # PD arms: the paths themselves. Added 2026-09-05, one tick after the paths shipped WITHOUT an
+  # arm and I said so in the state line -- a disclosed gap is still a gap, and the disclosure is not
+  # the control. The detail block is the whole point of that change: a COUNT cannot say what is in
+  # the gap, so an arm that only checks the count would have gone green over its removal.
+  echo "PD arms: the counted commits' PATHS, not just their count"
+  pd="$(STUB_DATE=2026-01-01T00:00:00Z STUB_HEAD="$(git rev-parse HEAD~6 2>/dev/null)" ord_run 'gate\tpass\t3s\thttps://github.com/o/r/actions/runs/1/job/2\n')"
+  if printf '%s\n' "$pd" | grep -qE "^ +(\.github/workflows/|flake\.nix|tests/|tools/)"; then
+    echo "  ok   PD1 a counted commit prints the criteria path it touched"
+  else echo "  FAIL PD1: counted commits but printed no paths; got [$pd]"; fail=1; fi
+  # PD2 is the control arm and it carries PD1. Without it, a script that dumped paths on every PR --
+  # including ones with nothing in the gap -- would satisfy PD1 while destroying the signal, because
+  # a report that prints paths unconditionally cannot distinguish a stale PR from a current one.
+  if printf '%s\n' "$o3" | grep -qE "^ +(\.github/workflows/|flake\.nix|tests/|tools/)"; then
+    echo "  FAIL PD2 CONTROL: printed paths for a PR with 0 criteria commits"; fail=1
+  else echo "  ok   PD2 CONTROL: no counted commits, no path block"; fi
   [ "$fail" = 0 ] && echo "ALL GREEN" || echo "SELFTEST FAILED"
   exit "$fail"
 fi
