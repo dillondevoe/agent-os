@@ -249,8 +249,29 @@ if [ "${1:-}" = "--selftest" ]; then
   # DISCRIMINATES -- and the incident that motivated the header was eight minutes wide, where a date is
   # visibly fresh and still wrong. That limit belongs in the arm, not in a comment above it. BD4/BD5 are
   # what carry the discrimination, by asserting the FETCH STATE is reported and is not a blanket claim.
-  case "$pd" in *"(base dated "*)  echo "  ok   BD3 the stamped base carries its own commit date (format only -- see above)" ;;
-    *) echo "  FAIL BD3: base named but not dated -- a stale ref is undetectable; got [$pd]"; fail=1 ;; esac
+  # THE ANCHOR IS THE SHAPE OF A DATE, NOT ITS TIMEZONE SUFFIX (Augur, #276 review §1). This used to
+  # end `*"Z)"*`, which carried TWO properties -- "a date was printed" and "it parses" -- and only the
+  # first was about Z. Moving to %cI forced the Z out (his §4 on #275, the right fix) and took the
+  # second property with it, silently: what was left asserted only that the WORDS "base dated" were
+  # printed, which `(base dated ?; FETCH FAILED ...)` and `(base dated banana; ...)` both satisfy. The
+  # `?` branch is live code -- `git log ... || echo '?'` -- and reachable in precisely the scenario
+  # BD6 exists to cover, so BD3 would have stayed green on a board that had dated nothing. A leading
+  # four-digit year rejects both fallbacks and is agnostic to Z, -05:00, and any future format.
+  # ONE FUNCTION, TWO CALLERS. BD3b below feeds it the literals BD3 must reject, so the rule is not
+  # spelled twice -- a control arm that re-typed the glob could drift from the arm it controls and
+  # would then certify a pattern nothing uses.
+  bd3_dated() { case "$1" in *"(base dated "[0-9][0-9][0-9][0-9]-*) return 0 ;; *) return 1 ;; esac; }
+  if bd3_dated "$pd"; then echo "  ok   BD3 the stamped base carries its own commit date (shape only -- see above)"
+    else echo "  FAIL BD3: base named but not dated -- a stale ref is undetectable; got [$pd]"; fail=1; fi
+  # BD3b CONTROL, and it exists because the property it guards was LOST ONCE ALREADY, in silence. The
+  # `?` is live code (`git log ... || echo '?'`) and reachable in the same scenario BD6 covers, so
+  # without this arm BD3 goes green on a board that dated nothing. Assert the rejection, not just the
+  # acceptance: BD3 alone passes on a glob that matches everything.
+  if bd3_dated "board: computed X against main abc (base dated ?; FETCH FAILED)"; then
+      echo "  FAIL BD3b CONTROL: the '?' fallback satisfies BD3 -- the arm cannot see an undated board"; fail=1
+    elif bd3_dated "board: computed X against main abc (base dated banana; never fetched)"; then
+      echo "  FAIL BD3b CONTROL: a non-date satisfies BD3"; fail=1
+    else echo "  ok   BD3b CONTROL: BD3 rejects the '?' fallback and other non-dates"; fi
   case "$pd" in *"never fetched"*|*"fetched just now"*|*"FETCH FAILED"*)
       echo "  ok   BD4 the header states the base's FETCH state, not just its date" ;;
     *) echo "  FAIL BD4: no fetch state -- staleness is the default and goes unreported; got [$pd]"; fail=1 ;; esac
@@ -267,6 +288,13 @@ if [ "${1:-}" = "--selftest" ]; then
       *) echo "  FAIL BD6: fetch failed but the board did not say so; got [$ff]"; fail=1 ;; esac
     # BD6b CONTROL: the run must still PRODUCE a board -- a fetch failure that aborted the report would
     # satisfy BD6's sibling concerns while destroying the tool. Degrade, do not die.
+    # THE GAP I NAMED HERE WAS MALFORMED, and Augur's §3 dissolved it rather than accepting it. I had
+    # written that BD6b covers "still reports" and nothing covers "still reports CORRECTLY under a
+    # failed fetch". There is no such second thing: after a failed fetch every currency number still
+    # comes from local refs, so the board is exactly as correct as it always was ABOUT A BASE THAT IS
+    # NOW OLD -- and BD6 asserts the header says so. Correctness is not in question; noticing is, and
+    # noticing is what is armed. Recorded here rather than in a comm so the question is closed in the
+    # file instead of parked outside it.
     case "$ff" in *"currency : "*) echo "  ok   BD6b CONTROL: the board still reports after a failed fetch" ;;
       *) echo "  FAIL BD6b CONTROL: a failed fetch killed the report; got [$ff]"; fail=1 ;; esac
     git -C "$FIX" remote remove origin >/dev/null 2>&1
