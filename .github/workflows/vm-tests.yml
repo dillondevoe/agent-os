@@ -26,6 +26,38 @@
 # Widening the filter is cheap; if you find yourself adding a path that can change what these VMs
 # BOOT or what the wall DOES, add it here in the same commit.
 #
+# THE RESIDUAL HAS EXACTLY ONE REALIZED INSTANCE, AND THE TWO NUMBERS BELOW ARE DIFFERENT
+# QUANTITIES. `.github/workflows/**` is not in the filter, so a PR that edits CI itself — including
+# THIS FILE — can merge without this lane running. Measured over b345e07..origin/main on 2026-09-04:
+#
+#   commits that edited a workflow other than vm-tests.yml ......... 14
+#   of those, commits that touched NOTHING in the filter above ......  0
+#
+# All fourteen edited a workflow ALONGSIDE something the matrix boots — 238f0b4 carries
+# tests/vm-matrix-contract.py, 655effd carries flake.nix and modules/ — so every one of them ran the
+# lane anyway and the residual was never realized. The first PR that realizes it is #272: a
+# dependabot bump touching personal-data-gate.yml and nothing else, three checks, no VM boot.
+#
+# KEEP BOTH NUMBERS. The first alone says the exposure is routine, which the record denies. The
+# second alone is a first-ness claim that one future commit retires. Together they say the true and
+# durable thing: the exposure is neither hypothetical nor ordinary — it is precisely the PRs whose
+# whole footprint is workflow-only, and as of now there is one.
+#
+# This is NOT an argument for adding the path: a workflow edit cannot change what the VMs BOOT, so
+# the minutes would buy nothing, and the nightly cron on main backstops the case. It is here because
+# the residual above is written in the conditional, and a conditional gets priced as hypothetical
+# until someone attaches a count to it.
+#
+# Provenance, because the corrections are the useful half. Augur asked for a row on the claim that
+# #272 was the FIRST commit to touch a workflow file other than vm-tests.yml. Measured, that is 14,
+# so the claim was refuted and the count shipped in its place. Augur then re-ran the count and
+# showed the count was the WRONG QUANTITY: a file-touch predicate where the mechanism is a
+# filter-intersection predicate, differing by 14 to 0. Two errors pointing opposite ways — the first
+# understated the population, the second overstated how often it bites — and neither survived being
+# re-run under the words as written. THE MEASUREMENT WAS CORRECT BOTH TIMES; THE SENTENCE DRIFTED
+# ONTO A NEIGHBOURING, EASIER-TO-SAY PREDICATE. State the predicate in the currency the mechanism
+# spends, then check that the query implements THAT predicate and not a proxy for it.
+#
 # That sentence used to read "an egress-relevant path", and the wording was itself the bug: it
 # invited the reader to ask "does my change touch egress?" when the question that matters is
 # "does my change reach these VMs?". `configuration.nix` is the first entry in baseModules and is
