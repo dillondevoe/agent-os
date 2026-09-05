@@ -534,6 +534,81 @@
             touch $out
           '';
 
+        # ARM G — THE HAND IS BAKED IN THE BUILT ARTIFACT, not merely in the nix source.
+        #
+        # #282 replaces `@SH@` in agent-brain.py with the store path of bash at build time, via
+        # a `--replace-fail` pair in genesis-open.nix. The battery's arm F asserts that pair is
+        # PRESENT in the nix source — and geist showed F is not a detector. Comment the line out
+        # rather than deleting it:
+        #
+        #     --replace-fail '@THINK_DEFAULT@' '${thinkDefault}' \
+        #     # --replace-fail '@SH@'            '${pkgs.bash}/bin/bash'
+        #
+        # the `\` continuation carries into a word beginning with `#`, the shell ends the command
+        # there, substituteInPlace runs with every pair BUT @SH@, and the build SUCCEEDS. The
+        # built brain then carries SH_BUILD = "@SH@", falls back to resolving `sh` by name — the
+        # exact defect #282 exists to remove — and F still prints "found the --replace-fail line"
+        # with 0 failures. F is a word test on a file that is not the guarded thing.
+        #
+        # AND NOTHING DOWNSTREAM CAN SEE IT. Main carries #277's runtime fallback, so a brain
+        # built with @SH@ unsubstituted still shells out correctly through the literal path: the
+        # verb battery passes, the readiness receipt passes, the Dell behaves. The substitution
+        # can drop out silently and stay dropped. That is why this is a gate condition and not a
+        # follow-up — G is the only detector that can exist for it.
+        sh-is-baked-into-the-built-brain =
+          let
+            p = nixpkgs.legacyPackages.${system};
+            brain = self.nixosConfigurations.agentos-open.config.system.build.agentBrain;
+          in p.runCommand "sh-is-baked-into-the-built-brain" {
+            nativeBuildInputs = [ p.python3 ];
+          } ''
+            cat > check.py <<'PYEOF'
+            import os, re, sys
+
+            script = os.path.join(sys.argv[1], "agent-brain")
+            src = open(script).read()
+
+            # VACUITY GUARD FIRST. Every assertion below is about the VALUE bound to SH_BUILD, so
+            # a rename or a deletion of that binding would leave this check asserting nothing over
+            # nothing and still printing green — the failure mode this whole arm was written to
+            # answer. Find the binding before judging it.
+            m = re.search(r'^SH_BUILD\s*=\s*"([^"]*)"', src, re.M)
+            if not m:
+                raise SystemExit("no `SH_BUILD = \"...\"` binding in the shipped brain. Either the "
+                                 "name changed or the line is gone; this check has lost its "
+                                 "subject and must not pass by finding nothing to object to.")
+            baked = m.group(1)
+            print("SH_BUILD as shipped: %r" % (baked,))
+
+            # (1) the placeholder is GONE from the artifact. Checked over the whole file, not just
+            # the binding: @SH@ surviving anywhere in the shipped script means substituteInPlace
+            # did not do its job, wherever it landed.
+            if "@SH@" in src:
+                raise SystemExit(
+                    "the placeholder @SH@ is still present in the BUILT brain at %s. The "
+                    "--replace-fail pair did not run -- and note the build SUCCEEDED anyway, "
+                    "which is precisely the silent shape this arm exists to catch." % (script,))
+
+            # (2) the baked value is a real path in the closure. Absence of the placeholder is not
+            # presence of a working hand: a substitution to a typo'd or garbage-collected path
+            # would clear (1) and still leave the brain unable to run a command.
+            if not baked.startswith("/nix/store/"):
+                raise SystemExit("SH_BUILD is %r, which is not a store path. The hand must be "
+                                 "resolved at BUILD time to a pinned interpreter, not left as a "
+                                 "name for the runtime to look up -- that lookup is the defect." % (baked,))
+            if not os.path.exists(baked):
+                raise SystemExit("SH_BUILD is %r, which does not exist. The substitution ran but "
+                                 "produced a path nothing can execute." % (baked,))
+            if not os.access(baked, os.X_OK):
+                raise SystemExit("SH_BUILD is %r, which exists but is not executable." % (baked,))
+            print("baked hand: %s  exists=True executable=True" % (baked,))
+            PYEOF
+            sed -i 's/^            //' check.py
+            python3 check.py ${brain}/bin
+            echo "sh-is-baked-into-the-built-brain: the ARTIFACT carries a pinned interpreter, not a placeholder"
+            touch $out
+          '';
+
         # The Hyprland config the OPEN variant actually ships PARSES, checked by the
         # PINNED COMPOSITOR ITSELF — not by a regex that encodes my belief about the grammar.
         #

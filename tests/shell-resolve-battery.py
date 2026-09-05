@@ -131,7 +131,18 @@ def main():
     import shutil
     pre_fix = with_path(DELL_UNIT_PATH,
                         lambda: shutil.which("bash") or shutil.which("sh"))
-    check("D  PRE-FIX: name-only resolution finds NO shell on the recorded unit PATH",
+    # D IS A RECORD, NOT AN ARM — geist's ruling on #282, and it is worth being exact about why.
+    # `shutil.which` here runs over five store directories that exist on the Dell and on no other
+    # machine. Off the Dell they are simply absent, so the lookup returns None for a reason that
+    # has nothing to do with the defect, and D CANNOT GO RED anywhere this battery normally runs.
+    # A green D therefore certifies nothing about the code; counting it as coverage would inflate
+    # this battery by one arm that is structurally incapable of objecting.
+    #
+    # It stays because it is a good record: it pins the exact PATH the deployed unit had when the
+    # defect was observed, so a future reader can see the environment rather than take my sentence
+    # for it. Read it as evidence, not as a detector. Arm G (flake check
+    # `sh-is-baked-into-the-built-brain`) is the detector that stands behind this file.
+    check("D  RECORD (cannot fail off the Dell): name-only resolution finds NO shell on the recorded unit PATH",
           pre_fix is None, "found %r — if this is not None the defect is not reproduced here" % (pre_fix,))
 
     # E — no shell anywhere is a cause, not an errno.
