@@ -5,9 +5,10 @@
 # gracefully (ok:false) — we assert the JSON contract either way, and SKIP the
 # write-path detail if the store isn't writable (Dell gate owns the real store).
 # Run: PYTHONPATH=modules python3 tests/agos-notes-battery.py
-# MUTATES_SHARED_STATE — Geist's law, 2026-09-05: a box-runnable battery never mutates
-# human-shared state. Read as DATA by tests/vm-matrix-contract.py, not as a comment.
-MUTATES_SHARED_STATE = False
+# SIDE_EFFECTS — Geist's law as amended 2026-09-05T13:05Z: a box-runnable battery declares
+# every effect that leaves the machine or outlives the run. Read as DATA by
+# tests/vm-matrix-contract.py, not as a comment.
+SIDE_EFFECTS = []
 
 import subprocess, json, shutil, sys
 

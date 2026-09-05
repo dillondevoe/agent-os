@@ -20,9 +20,10 @@
 #   B. second run -> identical npubs and UNTOUCHED key files (idempotent, cannot rotate)
 #   C. the nix wiring: imported, invoked, and one shared root pin across mint and sign
 #   D. modes after a boot mint, and the control arm that they are checkable at all
-# MUTATES_SHARED_STATE — Geist's law, 2026-09-05: a box-runnable battery never mutates
-# human-shared state. Read as DATA by tests/vm-matrix-contract.py, not as a comment.
-MUTATES_SHARED_STATE = False
+# SIDE_EFFECTS — Geist's law as amended 2026-09-05T13:05Z: a box-runnable battery declares
+# every effect that leaves the machine or outlives the run. Read as DATA by
+# tests/vm-matrix-contract.py, not as a comment.
+SIDE_EFFECTS = []
 
 import os, re, sys, tempfile
 

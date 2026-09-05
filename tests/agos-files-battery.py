@@ -3,9 +3,10 @@
 # Verifies the read-only contract: list <dir> -> {ok,dir,count,entries[]}; stat <path>.
 # READ-ONLY by design (never creates/moves/deletes) — safe to run anywhere on /tmp.
 # Run: PYTHONPATH=modules python3 tests/agos-files-battery.py
-# MUTATES_SHARED_STATE — Geist's law, 2026-09-05: a box-runnable battery never mutates
-# human-shared state. Read as DATA by tests/vm-matrix-contract.py, not as a comment.
-MUTATES_SHARED_STATE = False
+# SIDE_EFFECTS — Geist's law as amended 2026-09-05T13:05Z: a box-runnable battery declares
+# every effect that leaves the machine or outlives the run. Read as DATA by
+# tests/vm-matrix-contract.py, not as a comment.
+SIDE_EFFECTS = []
 
 import subprocess, json, shutil, sys, tempfile, os
 

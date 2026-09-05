@@ -1140,35 +1140,70 @@ def ruling_conditions_selftest():
 
 
 # ---------------------------------------------------------------------------
-# GEIST'S LAW (2026-09-05, P2 ACTION): A BOX-RUNNABLE BATTERY NEVER MUTATES
-# HUMAN-SHARED STATE — AND IT IS DATA, NOT A COMMENT.
+# GEIST'S LAW, AS AMENDED 2026-09-05T13:05Z: A BOX-RUNNABLE BATTERY DECLARES ITS SIDE
+# EFFECTS, AND THE CHECKER DETECTS THEM RATHER THAN TAKING THE DECLARATION AT ITS WORD.
 #
 # The occasion: agos-notes-battery ran `agos-notes new` against /var/lib/agos-notes, the store
 # notes-open.nix documents as shared with the human, with no delete verb to undo it. Every run
 # left a note behind permanently. It was found by hand, in a one-off sweep, because Augur made
 # a remark on a different PR. Nothing in the repo would have found the next one.
 #
-# Geist's ruling was explicit that a comment does not discharge this: each battery DECLARES
-# `MUTATES_SHARED_STATE`, and the declaration is read by a check. Three legal values:
+# THE FIRST VERSION OF THIS CHECK WAS A BOOLEAN AND AUGUR KILLED IT, CORRECTLY. `MUTATES_SHARED_
+# STATE = False` is TRUE of the pre-#279 agos-web-battery: that battery fetched a third-party
+# host on every run and mutated no shared state whatsoever. So the field would have been
+# satisfied, honestly, by the very battery whose defect started this sweep — a declaration that
+# cannot be false on the founding case cannot control-arm it. The fix is not a better boolean;
+# it is that "side effect" was never one axis. Geist's amendment names three.
 #
-#   False        the battery mutates nothing outside its own temp dirs. Box-runnable.
-#   "<path>"     it HAS mutating arms, and they live in the named VM test, which must exist.
-#   True         always a failure. True means "I mutate shared state and nothing owns that",
-#                which is the condition being outlawed, so it is not a way to opt out.
+# TWO FIELDS, both module-level literals:
 #
-# WHAT THIS CHECK IS: a floor. It reads a declaration; it cannot read behaviour. A battery
-# declaring False while shelling out to something that writes /var is green here and wrong.
-# The declaration makes the claim ATTRIBUTABLE and reviewable, which the absence of one did
-# not — it does not make it true. Do not read this green as "no battery mutates anything".
-_MUT_LEGAL = "False, or a string naming the VM test that owns the mutating arms"
+#   SIDE_EFFECTS = []                        closed enum, see SIDE_EFFECT_KINDS
+#   SIDE_EFFECTS_OWNER = "verb-battery.nix"  required iff SIDE_EFFECTS is non-empty
+#
+# The second field is MY reading, not Geist's text, and it is flagged here so a reviewer can
+# overrule it rather than inherit it. He wrote one field (`SIDE_EFFECTS = []`) and one rule
+# ("non-empty SIDE_EFFECTS must name the VM test owning those arms"). A list of enum members
+# cannot also carry a filename without smuggling structure into the members, so the owner is
+# its own field. A dict {kind: owner} was the alternative; it says less clearly that the owner
+# owns ALL of them, and it departs further from the shape he actually wrote.
+#
+# WHAT MAKES THIS DIFFERENT FROM THE BOOLEAN, and it is Augur's condition verbatim: THE CHECKER
+# DETECTS. An arm that only reads the field is satisfiable by writing the field. So each kind
+# has a detector, and a battery whose source shows a side effect it does not declare is RED
+# regardless of what it declares. The detectors are FLOORS and are described as such at each
+# one; a battery declaring a kind the detector cannot see is NOT an error, because the detector
+# is the weaker instrument and the declaration is allowed to know more than it does.
+SIDE_EFFECT_KINDS = {
+    "egress": "leaves the machine — any non-loopback host, any billed API",
+    "shared-state": "outlives the run in state the human owns (e.g. /var/lib/agos-notes)",
+    "box": "outlives the run in the machine (power, generation, settings)",
+}
+_SE_LEGAL = ("a list of " + "|".join(sorted(SIDE_EFFECT_KINDS)) +
+             " (use [] for none), plus SIDE_EFFECTS_OWNER when non-empty")
+
+# THE SHARED-STATE / BOX DETECTOR'S WHOLE KNOWLEDGE, and it is a table someone maintains by
+# hand — which is the honest description of its limit. A mutating verb that is not listed here
+# is INVISIBLE to the detector, so this table's incompleteness is the detector's blind spot,
+# not a bug in the scan. It is the same string-counting weakness the egress detector carries
+# below, and it fails in the same direction: silently, by not firing.
+#
+# Grounded in what is evidenced, not in what sounds plausible: notes `new`/`append` from the
+# sweep that started this, `cal add` from agent-brain.py's dispatch, and the power verbs #277
+# made first-class. Add a row when you meet a verb that outlives its run.
+MUTATING_VERBS = {
+    "agos-notes": {"new": "shared-state", "append": "shared-state"},
+    "agos-cal": {"add": "shared-state"},
+    "agos-sys": {"volume": "box", "reboot": "box", "poweroff": "box",
+                 "restart": "box", "shutdown": "box", "update": "box"},
+}
 
 # DEBT, NOT DESIGN — same rule as KNOWN_UNWIRED_DEBT above, and for the same reason.
 #
-# A battery here has a REAL mutating arm covering a REAL product verb, and the VM test that
-# should own it does not exist yet. It may declare True; nothing else may. That keeps `True`
-# meaningful — it reads "known, ledgered, and someone is watching the count" rather than
-# "opted out" — and it keeps the ruling's default (False or an owner) intact for every file
-# that is not named here. THIS LIST MAY ONLY SHRINK.
+# A battery here has a REAL side-effecting arm covering a REAL product verb, and the VM test
+# that should own it does not exist yet. Only a file named here may declare a non-empty
+# SIDE_EFFECTS whose owner is missing; everything else must name an owner that exists. That
+# keeps the ledger meaningful — it reads "known, ledgered, and someone is watching the count"
+# rather than "opted out". THIS LIST MAY ONLY SHRINK.
 #
 # calendar-battery is NOT the notes case and the difference decided the remedy. Geist's notes
 # ruling removed the write arms because the brain's notes hand is list|read only, so they
@@ -1181,7 +1216,7 @@ _MUT_LEGAL = "False, or a string naming the VM test that owns the mutating arms"
 # the check. The notes case was found by hand; this one was found because something finally
 # forced every battery to be looked at. Not confirmed by running it: agos-cal IS on the Dell,
 # so running it to "prove" the mutation IS the mutation.
-MUTATION_DEBT = {
+SIDE_EFFECT_DEBT = {
     "calendar-battery.py":
         'cal("add", start, "battery-test-event") — creates an event in the human calendar on '
         "any box with agos-cal (the Dell has it). Covers the real calendar.add verb, so it "
@@ -1210,38 +1245,7 @@ def _module_assign(path, name):
     return ("__absent__", None)
 
 
-def mutation_declarations(tests_dir):
-    """Every *-battery.py declares MUTATES_SHARED_STATE, legally. Returns a list of problems."""
-    problems = []
-    for path in sorted(glob.glob(os.path.join(tests_dir, "*-battery.py"))):
-        base = os.path.basename(path)
-        state, value = _module_assign(path, "MUTATES_SHARED_STATE")
-        if state == "__unparseable__":
-            problems.append(f"{base}: could not be parsed to read its declaration")
-        elif state == "__absent__":
-            problems.append(f"{base}: no MUTATES_SHARED_STATE declaration ({_MUT_LEGAL})")
-        elif state == "__notliteral__":
-            problems.append(f"{base}: MUTATES_SHARED_STATE is computed, not a literal — a "
-                            f"declaration a reader cannot evaluate is not a declaration")
-        elif value is True:
-            if base not in MUTATION_DEBT:
-                problems.append(f"{base}: declares MUTATES_SHARED_STATE = True and is not in "
-                                f"MUTATION_DEBT. True is not an opt-out — move the mutating "
-                                f"arms into a VM test and name it, or ledger the debt")
-        elif value is False:
-            pass
-        elif isinstance(value, str):
-            owner = os.path.join(tests_dir, value)
-            if not os.path.exists(owner):
-                problems.append(f"{base}: names {value!r} as the owner of its mutating arms, "
-                                f"but {owner} does not exist")
-        else:
-            problems.append(f"{base}: MUTATES_SHARED_STATE = {value!r} ({_MUT_LEGAL})")
-    return problems
-
-
-# ---------------------------------------------------------------------------
-# AUGUR'S ARM (2026-09-05): NO BATTERY NAMES A NON-LOOPBACK HOST.
+# AUGUR'S ARM (2026-09-05): THE EGRESS DETECTOR.
 #
 # agos-web-battery fetched a third-party host on every run — from the operator's IP, for a
 # property the failure envelope satisfied anyway. It passed CI only because CI lacks the
@@ -1250,11 +1254,11 @@ def mutation_declarations(tests_dir):
 # and THERE WAS NO SUCH SWEEP. The sweep was me, by hand, once. A rule with no trigger point
 # does not fire at an unfamiliar surface. This is the trigger point.
 #
-# WHAT THIS CHECK IS: a floor, and a smaller one than it looks. It counts STRINGS, not facts.
-# A host assembled at runtime, read from env, or built by concatenation is invisible to it —
-# the same defect class as the independence gate that counted strings. A green here means
-# "no battery contains a literal non-loopback URL", which is strictly weaker than "no battery
-# reaches the network". Do not promote the one into the other.
+# WHAT THIS DETECTOR IS: a floor, and a smaller one than it looks. It counts STRINGS, not
+# facts. A host assembled at runtime, read from env, or built by concatenation is invisible to
+# it — the same defect class as the independence gate that counted strings. It finding nothing
+# means "no battery contains a literal non-loopback URL", which is strictly weaker than "no
+# battery reaches the network". Do not promote the one into the other.
 _URL_RE = re.compile(r"\bhttps?://([A-Za-z0-9_.\-\[\]:]+)")
 _LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "[::1]", "::1")
 # RFC 6761/2606 reserve these so they can never resolve to a real server, which is a stronger
@@ -1265,50 +1269,170 @@ _LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "[::1]", "::1")
 _UNRESOLVABLE_TLDS = (".invalid", ".test", ".example", ".localhost")
 
 
-def outbound_url_literals(tests_dir):
-    """Literal non-loopback http(s) hosts in any battery. Returns a list of problems."""
+def detect_egress(path):
+    """Lines showing a literal non-loopback http(s) host. Floor: literals only."""
+    hits = []
+    try:
+        lines = open(path, encoding="utf-8").read().splitlines()
+    except Exception as exc:
+        return [(0, f"unreadable ({exc!r})")]
+    for i, line in enumerate(lines, 1):
+        for host in _URL_RE.findall(line):
+            bare = host.split(":")[0] if not host.startswith("[") else host
+            if bare in _LOOPBACK_HOSTS or host in _LOOPBACK_HOSTS:
+                continue
+            if bare.lower().endswith(_UNRESOLVABLE_TLDS):
+                continue
+            if "." not in bare:
+                # A bare single label ("x") has no TLD and cannot be resolved by a stub
+                # resolver; these appear as HTTPError() constructor args, never as targets.
+                continue
+            hits.append((i, host))
+    return hits
+
+
+# THE ALIAS PASS, AND IT EXISTS BECAUSE THE FIRST VERSION OF THIS DETECTOR WAS BLIND TO EVERY
+# REAL BATTERY IN THE TREE. v1 wanted the CLI name and the verb on the same line. Not one
+# battery is written that way: they all bind the tool once (`ncli = shutil.which("agos-notes")`)
+# and then call `run([ncli, "new", ...])`. So v1 found nothing in the pre-fix agos-notes-battery
+# — the founding case — while its own selftest fixture passed, because I had written the fixture
+# with `# agos-notes` in a COMMENT on the call line. The fixture was written to the detector
+# instead of to reality, and the green was the crutch, not the catch. Caught only by running
+# Geist's control against the actual pre-fix sha rather than against something I made up.
+_ALIAS_RE = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=.*?[\"'](agos-[a-z]+)[\"']")
+
+
+def _cli_aliases(lines):
+    """Local names bound to an agos-* CLI. {name: cli}, plus each cli under its own name."""
+    aliases = {}
+    for line in lines:
+        m = _ALIAS_RE.match(line)
+        if m:
+            aliases[m.group(1)] = m.group(2)
+    return aliases
+
+
+def detect_verb_effects(path):
+    """Lines invoking a MUTATING_VERBS entry. Returns [(line, kind, "cli verb")].
+
+    Floor, and the shape of the floor is worth stating: it resolves a module-level alias to
+    its CLI and then wants the verb as a quoted literal on the calling line. A verb held in a
+    variable, built by concatenation, or reached through a wrapper defined in another file
+    does not register. Growing MUTATING_VERBS is how this gets stronger; nothing here can find
+    a mutating verb the table does not name.
+    """
+    hits = []
+    try:
+        lines = open(path, encoding="utf-8").read().splitlines()
+    except Exception:
+        return hits
+    aliases = _cli_aliases(lines)
+    for i, line in enumerate(lines, 1):
+        # Which CLIs could this line be calling? Its own name, or any alias bound to it.
+        candidates = set()
+        for cli in MUTATING_VERBS:
+            if cli in line:
+                candidates.add(cli)
+        for name, cli in aliases.items():
+            if cli in MUTATING_VERBS and re.search(r"\b" + re.escape(name) + r"\b", line):
+                candidates.add(cli)
+        if not candidates:
+            continue
+        for cli in sorted(candidates):
+            for verb, kind in MUTATING_VERBS[cli].items():
+                if f'"{verb}"' in line or f"'{verb}'" in line:
+                    hits.append((i, kind, f"{cli} {verb}"))
+    return hits
+
+
+def side_effect_declarations(tests_dir):
+    """Every *-battery.py declares SIDE_EFFECTS legally AND consistently with the detectors."""
     problems = []
     for path in sorted(glob.glob(os.path.join(tests_dir, "*-battery.py"))):
         base = os.path.basename(path)
-        try:
-            lines = open(path, encoding="utf-8").read().splitlines()
-        except Exception as exc:
-            problems.append(f"{base}: unreadable ({exc!r})")
+        state, value = _module_assign(path, "SIDE_EFFECTS")
+        if state == "__unparseable__":
+            problems.append(f"{base}: could not be parsed to read its declaration")
             continue
-        for i, line in enumerate(lines, 1):
-            for host in _URL_RE.findall(line):
-                bare = host.split(":")[0] if not host.startswith("[") else host
-                if bare in _LOOPBACK_HOSTS or host in _LOOPBACK_HOSTS:
-                    continue
-                if bare.lower().endswith(_UNRESOLVABLE_TLDS):
-                    continue
-                if "." not in bare:
-                    # A bare single label ("x") has no TLD and cannot be resolved by a stub
-                    # resolver; these appear as HTTPError() constructor args, never as targets.
-                    continue
-                problems.append(f"{base}:{i}: literal non-loopback host {host!r} — a battery "
-                                f"that reaches out is armed on every box where its binary "
-                                f"exists and green-by-accident everywhere it does not")
+        if state == "__absent__":
+            problems.append(f"{base}: no SIDE_EFFECTS declaration ({_SE_LEGAL})")
+            continue
+        if state == "__notliteral__":
+            problems.append(f"{base}: SIDE_EFFECTS is computed, not a literal — a declaration "
+                            f"a reader cannot evaluate is not a declaration")
+            continue
+        if not isinstance(value, list):
+            problems.append(f"{base}: SIDE_EFFECTS = {value!r} is not a list ({_SE_LEGAL})")
+            continue
+        declared = set()
+        for member in value:
+            if member in SIDE_EFFECT_KINDS:
+                declared.add(member)
+            else:
+                problems.append(f"{base}: SIDE_EFFECTS names {member!r}, which is not one of "
+                                f"{sorted(SIDE_EFFECT_KINDS)} — the enum is closed so that a "
+                                f"new kind is a deliberate edit here, not a free-text field")
+
+        # The owner half of Geist's rule: arms with side effects live in a VM test that exists.
+        ostate, owner = _module_assign(path, "SIDE_EFFECTS_OWNER")
+        if declared:
+            if ostate != "ok" or not isinstance(owner, str) or not owner:
+                problems.append(f"{base}: declares {sorted(declared)} but no SIDE_EFFECTS_OWNER "
+                                f"— non-empty side effects must name the VM test that owns "
+                                f"those arms")
+            elif not os.path.exists(os.path.join(tests_dir, owner)):
+                if base not in SIDE_EFFECT_DEBT:
+                    problems.append(f"{base}: names {owner!r} as the owner of its side-effecting "
+                                    f"arms, but that file does not exist and {base} is not in "
+                                    f"SIDE_EFFECT_DEBT. A missing owner is debt to be ledgered, "
+                                    f"not a declaration to be believed")
+        elif ostate == "ok":
+            problems.append(f"{base}: SIDE_EFFECTS is empty but SIDE_EFFECTS_OWNER is set — an "
+                            f"owner with nothing to own reads as coverage that is not there")
+
+        # AUGUR'S CONDITION: detect, do not merely read. Undeclared-but-detected is RED.
+        # Declared-but-undetected is NOT: the detectors are floors and the file may know more.
+        for line, host in detect_egress(path):
+            if "egress" not in declared:
+                problems.append(f"{base}:{line}: literal non-loopback host {host!r} but "
+                                f"SIDE_EFFECTS does not declare 'egress' — a battery that "
+                                f"reaches out is armed on every box where its binary exists "
+                                f"and green-by-accident everywhere it does not")
+        for line, kind, what in detect_verb_effects(path):
+            if kind not in declared:
+                problems.append(f"{base}:{line}: invokes `{what}`, which outlives the run "
+                                f"({kind}), but SIDE_EFFECTS does not declare {kind!r}")
     return problems
 
 
-def stale_mutation_debt(tests_dir):
-    """MUTATION_DEBT entries that no longer apply — the list must shrink, and be seen to."""
+def stale_side_effect_debt(tests_dir):
+    """SIDE_EFFECT_DEBT entries that no longer apply — the list must shrink, and be seen to."""
     stale = []
-    for base in sorted(MUTATION_DEBT):
+    for base in sorted(SIDE_EFFECT_DEBT):
         path = os.path.join(tests_dir, base)
         if not os.path.exists(path):
-            stale.append(f"{base}: named in MUTATION_DEBT but the file is gone")
+            stale.append(f"{base}: named in SIDE_EFFECT_DEBT but the file is gone")
             continue
-        state, value = _module_assign(path, "MUTATES_SHARED_STATE")
-        if value is not True:
-            stale.append(f"{base}: in MUTATION_DEBT but no longer declares True — the debt was "
-                         f"paid and the ledger entry outlived it")
+        state, value = _module_assign(path, "SIDE_EFFECTS")
+        if state != "ok" or not value:
+            stale.append(f"{base}: in SIDE_EFFECT_DEBT but no longer declares any side effect "
+                         f"— the debt was paid and the ledger entry outlived it")
+            continue
+        ostate, owner = _module_assign(path, "SIDE_EFFECTS_OWNER")
+        if ostate == "ok" and isinstance(owner, str) and \
+                os.path.exists(os.path.join(tests_dir, owner)):
+            stale.append(f"{base}: in SIDE_EFFECT_DEBT but its owner {owner!r} now exists — the "
+                         f"debt was paid and the ledger entry outlived it")
     return stale
 
 
-def mutation_declaration_selftest():
-    """Drive both new checks against fixtures. Without these the checks are assertions."""
+def side_effect_declaration_selftest():
+    """Drive the checks against fixtures. Without these the checks are assertions.
+
+    THE ARM THAT MATTERS IS THE DETECTION ONE. A field-reading check is satisfiable by writing
+    the field, so `declares [] while the source shows egress` is the case Augur's condition
+    exists for, and it is the case the boolean predecessor could not express at all.
+    """
     failures = []
     import tempfile
     with tempfile.TemporaryDirectory() as d:
@@ -1316,74 +1440,134 @@ def mutation_declaration_selftest():
             with open(os.path.join(d, name), "w") as fh:
                 fh.write(text)
 
-        # --- MUTATES_SHARED_STATE ---
-        w("a-battery.py", "MUTATES_SHARED_STATE = False\n")
-        if mutation_declarations(d):
-            failures.append("selftest: a clean False declaration was reported as a problem — "
+        # --- shape of the declaration ---
+        w("a-battery.py", "SIDE_EFFECTS = []\n")
+        if side_effect_declarations(d):
+            failures.append("selftest: a clean empty declaration was reported as a problem — "
                             "the check would be red on every correct battery")
         w("b-battery.py", "x = 1\n")
-        if not any("no MUTATES_SHARED_STATE" in p for p in mutation_declarations(d)):
+        if not any("no SIDE_EFFECTS" in p for p in side_effect_declarations(d)):
             failures.append("selftest: an UNDECLARED battery was not reported — the check "
                             "cannot see the condition it exists for")
         os.remove(os.path.join(d, "b-battery.py"))
-        w("c-battery.py", "MUTATES_SHARED_STATE = True\n")
-        if not any("not in MUTATION_DEBT" in p for p in mutation_declarations(d)):
-            failures.append("selftest: True was accepted — True would become the opt-out the "
-                            "ruling forbids")
+        w("c-battery.py", "SIDE_EFFECTS = ['network']\n")
+        if not any("not one of" in p for p in side_effect_declarations(d)):
+            failures.append("selftest: a member OUTSIDE the enum was accepted — the enum would "
+                            "be a free-text field and 'network' vs 'egress' would both pass")
         os.remove(os.path.join(d, "c-battery.py"))
-        w("d-battery.py", "MUTATES_SHARED_STATE = 'no-such-vm-test.nix'\n")
-        if not any("does not exist" in p for p in mutation_declarations(d)):
-            failures.append("selftest: a battery naming a NON-EXISTENT owner passed — the "
-                            "string form would be a way to name anything and be believed")
-        w("no-such-vm-test.nix", "")
-        if mutation_declarations(d):
-            failures.append("selftest: naming an EXISTING owner still failed — the legal "
-                            "string form is unusable, so batteries would be pushed to False")
+        w("d-battery.py", "SIDE_EFFECTS = 'egress'\n")
+        if not any("is not a list" in p for p in side_effect_declarations(d)):
+            failures.append("selftest: a bare string passed where a list is required — the "
+                            "shape would drift back to the boolean it replaced")
         os.remove(os.path.join(d, "d-battery.py"))
-        os.remove(os.path.join(d, "no-such-vm-test.nix"))
 
-        # --- MUTATION_DEBT: True is legal ONLY for a ledgered file ---
-        w("z-battery.py", "MUTATES_SHARED_STATE = True\n")
-        if not any("not in MUTATION_DEBT" in p for p in mutation_declarations(d)):
-            failures.append("selftest: an UNLEDGERED True was accepted — True would be the "
-                            "opt-out the ruling forbids")
-        MUTATION_DEBT["z-battery.py"] = "selftest fixture"
+        # --- the owner half: non-empty must name a VM test that exists ---
+        w("e-battery.py", 'SIDE_EFFECTS = ["box"]\n')
+        if not any("no SIDE_EFFECTS_OWNER" in p for p in side_effect_declarations(d)):
+            failures.append("selftest: side effects with NO owner passed — declaring an effect "
+                            "would discharge the duty to put it somewhere")
+        w("e-battery.py", 'SIDE_EFFECTS = ["box"]\nSIDE_EFFECTS_OWNER = "nope.nix"\n')
+        if not any("does not exist" in p for p in side_effect_declarations(d)):
+            failures.append("selftest: a NON-EXISTENT owner passed — the owner field would be "
+                            "a way to name anything and be believed")
+        w("nope.nix", "")
+        if side_effect_declarations(d):
+            failures.append("selftest: naming an EXISTING owner still failed — the legal form "
+                            "is unusable, so batteries would be pushed to declare []")
+        os.remove(os.path.join(d, "nope.nix"))
+        # CONTROL for the opposite mistake: an owner with nothing to own.
+        w("e-battery.py", 'SIDE_EFFECTS = []\nSIDE_EFFECTS_OWNER = "nope.nix"\n')
+        if not any("nothing to own" in p for p in side_effect_declarations(d)):
+            failures.append("selftest: an owner on an EMPTY declaration passed — a file could "
+                            "advertise VM coverage it does not have")
+        os.remove(os.path.join(d, "e-battery.py"))
+
+        # --- DEBT: a missing owner is legal ONLY for a ledgered file ---
+        w("z-battery.py", 'SIDE_EFFECTS = ["shared-state"]\nSIDE_EFFECTS_OWNER = "later.nix"\n')
+        if not any("not in SIDE_EFFECT_DEBT" in p and "z-battery" in p
+                   for p in side_effect_declarations(d)):
+            failures.append("selftest: an UNLEDGERED missing owner was accepted — the owner "
+                            "field would become the opt-out the ruling forbids")
+        SIDE_EFFECT_DEBT["z-battery.py"] = "selftest fixture"
         try:
-            if mutation_declarations(d):
-                failures.append("selftest: a LEDGERED True was still rejected — the debt ledger "
-                                "is unusable, so real mutating arms would go undeclared instead")
-            if any("z-battery" in x for x in stale_mutation_debt(d)):
+            if any("z-battery" in p for p in side_effect_declarations(d)):
+                failures.append("selftest: a LEDGERED missing owner was still rejected — the "
+                                "ledger is unusable, so real arms would go undeclared instead")
+            if any("z-battery" in x for x in stale_side_effect_debt(d)):
                 failures.append("selftest: a live debt entry was called stale — the ratchet "
                                 "would demand deletion of debt that still exists")
-            w("z-battery.py", "MUTATES_SHARED_STATE = False\n")
-            if not any("debt was paid" in p and "z-battery" in p for p in stale_mutation_debt(d)):
-                failures.append("selftest: a PAID debt entry was not reported stale — the "
-                                "ledger could only ever grow")
+            w("z-battery.py", "SIDE_EFFECTS = []\n")
+            if not any("debt was paid" in p and "z-battery" in p
+                       for p in stale_side_effect_debt(d)):
+                failures.append("selftest: a debt entry whose battery stopped declaring was not "
+                                "reported stale — the ledger could only ever grow")
+            # The OTHER way a debt is paid, and the one that actually happens here: the owner
+            # gets built. Without this arm the ratchet only notices deletions.
+            w("z-battery.py",
+              'SIDE_EFFECTS = ["shared-state"]\nSIDE_EFFECTS_OWNER = "later.nix"\n')
+            w("later.nix", "")
+            if not any("now exists" in p and "z-battery" in p
+                       for p in stale_side_effect_debt(d)):
+                failures.append("selftest: a debt whose OWNER was built was not reported stale "
+                                "— verb-battery.nix landing would leave the ledger entry behind")
+            os.remove(os.path.join(d, "later.nix"))
         finally:
-            del MUTATION_DEBT["z-battery.py"]
+            del SIDE_EFFECT_DEBT["z-battery.py"]
         os.remove(os.path.join(d, "z-battery.py"))
 
-        # --- non-loopback URL literals ---
-        # CONTROL FIRST: loopback and the ephemeral-port form must NOT trip, or the check is
-        # a blanket ban on URLs and the fix it is meant to protect would fail it.
-        # CONTROL: loopback AND the reserved non-resolving TLDs must all pass, or the check is a
-        # blanket ban and the arms written to avoid egress would fail it.
-        w("e-battery.py",
-          'A = "http://127.0.0.1:8080/"\nB = "https://localhost/x"\n'
+        # --- AUGUR'S CONDITION: the checker DETECTS, it does not read the field ---
+        # CONTROL: loopback and the reserved non-resolving TLDs must NOT trip, or the check is
+        # a blanket ban and the arms written to avoid egress (agos-web 2a/2b) would fail it.
+        w("f-battery.py",
+          'SIDE_EFFECTS = []\nA = "http://127.0.0.1:8080/"\nB = "https://localhost/x"\n'
           'C = "http://127.0.0.1:%d/"\nD = "https://host.inv' + 'alid/x"\n')
-        if outbound_url_literals(d):
+        if side_effect_declarations(d):
             failures.append("selftest: a loopback-only battery was flagged — the check would "
                             "fail the very arms written to avoid egress (agos-web 2a/2b)")
-        w("f-battery.py", 'U = "https://" + "cdn." + ("rea" + "lhost.net") + "/x"\n')
-        if outbound_url_literals(d):
+        w("g-battery.py",
+          'SIDE_EFFECTS = []\nU = "https://" + "cdn." + ("rea" + "lhost.net") + "/x"\n')
+        if side_effect_declarations(d):
             failures.append("selftest: a CONCATENATED host tripped the literal scan — that is "
                             "not what this check claims to catch and a false positive here "
                             "teaches people to disable it")
-        os.remove(os.path.join(d, "f-battery.py"))
-        w("g-battery.py", 'U = "https://cdn.' + 'rea' + 'lhost.net/x"\n')
-        if not any("non-loopback host" in p for p in outbound_url_literals(d)):
-            failures.append("selftest: a literal non-loopback host was NOT reported — the "
-                            "check is vacuous and every green it prints is meaningless")
+        os.remove(os.path.join(d, "g-battery.py"))
+        # THE ARM. This is the pre-#279 agos-web-battery in miniature: an honest [] beside a
+        # source line that reaches the network. The boolean predecessor PASSED this exact
+        # shape, which is why it was replaced.
+        w("h-battery.py", 'SIDE_EFFECTS = []\nU = "https://cdn.' + 'rea' + 'lhost.net/x"\n')
+        if not any("does not declare 'egress'" in p for p in side_effect_declarations(d)):
+            failures.append("selftest: a battery declaring [] beside a literal non-loopback "
+                            "host was NOT reported — the check reads the field instead of "
+                            "detecting, which is the defect Augur named")
+        # ...and declaring it truthfully clears it. Without this the check is a ban on egress
+        # rather than a ban on UNDECLARED egress, and there would be no legal way to write one.
+        w("h-battery.py",
+          'SIDE_EFFECTS = ["egress"]\nSIDE_EFFECTS_OWNER = "own.nix"\n'
+          'U = "https://cdn.' + 'rea' + 'lhost.net/x"\n')
+        w("own.nix", "")
+        if side_effect_declarations(d):
+            failures.append("selftest: a TRUTHFULLY declared egress arm with a real owner was "
+                            "still rejected — there would be no legal way to write one")
+        os.remove(os.path.join(d, "h-battery.py"))
+        os.remove(os.path.join(d, "own.nix"))
+
+        # Same two directions for the verb detector — the notes case, in miniature.
+        # THE REAL SHAPE, not a shape written to suit the detector: bind the tool once, call
+        # it through the alias. v1 of the detector passed a fixture with `# agos-notes` in a
+        # comment on the call line and found NOTHING in the actual pre-fix battery.
+        w("i-battery.py", 'SIDE_EFFECTS = []\n'
+                          'ncli = shutil.which("agos-notes")\nrun([ncli, "new", slug])\n')
+        if not any("shared-state" in p and "agos-notes new" in p
+                   for p in side_effect_declarations(d)):
+            failures.append("selftest: `agos-notes new` beside [] was NOT reported — the verb "
+                            "detector is vacuous and the founding case would still pass")
+        w("i-battery.py", 'SIDE_EFFECTS = []\n'
+                          'ncli = shutil.which("agos-notes")\nrun([ncli, "read", slug])\n')
+        if side_effect_declarations(d):
+            failures.append("selftest: a NON-mutating notes verb tripped the detector — the "
+                            "table would be a ban on naming agos-notes at all, and the "
+                            "read-only arms that replaced the mutating ones would fail")
+        os.remove(os.path.join(d, "i-battery.py"))
     return failures
 
 
@@ -1453,7 +1637,7 @@ class Findings:
 REQUIRED_CHECKS = {
     "unlisted", "dangling", "unwired", "vacuous", "stale",
     "debt_added", "debt_removed", "unarmed", "wired_disarming", "flake_wired_disarming",
-    "ruling_table", "mutation_decls", "outbound_urls", "stale_mut_debt",
+    "ruling_table", "side_effects", "stale_se_debt",
 }
 
 
@@ -1539,7 +1723,7 @@ SELFTESTS = (
     wired_disarm_selftest,
     flake_wired_disarm_selftest,
     findings_selftest,
-    mutation_declaration_selftest,
+    side_effect_declaration_selftest,
 )
 
 # SELFTESTS ONLY, now that `ruling_table` has moved to the checks registry where it belongs.
@@ -1550,7 +1734,7 @@ SELFTESTS = (
 REQUIRED_RULING = {
     "exemption_staleness_selftest", "ruling_conditions_selftest", "strict_caller_selftest",
     "wired_disarm_selftest", "flake_wired_disarm_selftest", "findings_selftest",
-    "mutation_declaration_selftest",
+    "side_effect_declaration_selftest",
 }
 
 
@@ -1605,9 +1789,8 @@ def main():
     ruling_table = f.add("ruling_table",
                          check_ruling_conditions(open(args.flake).read(), args.tests_dir))
     # Geist's law, as data (2026-09-05), and Augur's trigger point for the egress sweep.
-    mutation_decls = f.add("mutation_decls", mutation_declarations(args.tests_dir))
-    outbound_urls = f.add("outbound_urls", outbound_url_literals(args.tests_dir))
-    stale_mut_debt = f.add("stale_mut_debt", stale_mutation_debt(args.tests_dir))
+    side_effects = f.add("side_effects", side_effect_declarations(args.tests_dir))
+    stale_se_debt = f.add("stale_se_debt", stale_side_effect_debt(args.tests_dir))
 
     # ONE ITERATION, NOT A SUM. Each term's NAME comes from the object that gets called, so a
     # term cannot be dropped from the chain while still counting as having run.
@@ -1688,39 +1871,38 @@ def main():
               file=sys.stderr)
         print("     table entry is discharged by prose, which is what this table is FOR.",
               file=sys.stderr)
-    if f["mutation_decls"]:
-        print("FAIL: MUTATES_SHARED_STATE — a battery does not declare what it mutates, or",
+    if f["side_effects"]:
+        print("FAIL: SIDE_EFFECTS — a battery does not declare what it does, declares it",
               file=sys.stderr)
-        print("      declares it illegally:", file=sys.stderr)
-        for problem in mutation_decls:
+        print("      illegally, or DOES something its declaration denies:", file=sys.stderr)
+        for problem in side_effects:
             print(f"  {problem}", file=sys.stderr)
-        print("  -> Geist 2026-09-05: a box-runnable battery never mutates human-shared state.",
+        print("  -> Geist 2026-09-05 (amended 13:05Z): a box-runnable battery never leaves the",
               file=sys.stderr)
-        print("     Declare False, or move the mutating arms into a VM test and name it. This",
+        print("     machine and never outlives its run. Declare [], or move the arms into a VM",
               file=sys.stderr)
-        print("     check reads the DECLARATION, not the behaviour — it makes the claim",
+        print("     test and name it in SIDE_EFFECTS_OWNER.", file=sys.stderr)
+        print("  -> The two halves are not equally strong, and the difference is the point.",
               file=sys.stderr)
-        print("     attributable, it does not make it true.", file=sys.stderr)
-    if f["stale_mut_debt"]:
-        print("FAIL: MUTATION_DEBT names a battery the debt no longer describes:", file=sys.stderr)
-        for problem in stale_mut_debt:
+        print("     Undeclared-but-DETECTED is a real finding: the source shows the effect.",
+              file=sys.stderr)
+        print("     Declared-but-undetected is deliberately NOT a finding: the detectors read",
+              file=sys.stderr)
+        print("     literal strings and a known table of verbs, so they are floors, and a file",
+              file=sys.stderr)
+        print("     is allowed to know more about itself than they can see. A clean run here",
+              file=sys.stderr)
+        print("     means 'no battery visibly contradicts its declaration', which is strictly",
+              file=sys.stderr)
+        print("     weaker than 'no battery has undeclared side effects'.", file=sys.stderr)
+    if f["stale_se_debt"]:
+        print("FAIL: SIDE_EFFECT_DEBT names a battery the debt no longer describes:",
+              file=sys.stderr)
+        for problem in stale_se_debt:
             print(f"  {problem}", file=sys.stderr)
         print("  -> remove the entry. A debt ledger that keeps paid entries stops being a count",
               file=sys.stderr)
         print("     anyone can watch go down, which is the only thing it was for.", file=sys.stderr)
-    if f["outbound_urls"]:
-        print("FAIL: a battery names a literal NON-LOOPBACK host. It reaches out on every box",
-              file=sys.stderr)
-        print("      where its binary exists, and is green-by-accident everywhere it does not:",
-              file=sys.stderr)
-        for problem in outbound_urls:
-            print(f"  {problem}", file=sys.stderr)
-        print("  -> serve the fixture on loopback, or drive the failure envelope against a",
-              file=sys.stderr)
-        print("     refused loopback port. This scan counts STRINGS: a host built at runtime or",
-              file=sys.stderr)
-        print("     read from env is invisible to it, so its green is a floor, not a proof.",
-              file=sys.stderr)
     if f["wired_disarming"]:
         print("FAIL: a WIRED battery still SELF-DISARMS. It exits 0 announcing SKIP when its",
               file=sys.stderr)

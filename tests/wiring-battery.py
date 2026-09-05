@@ -13,9 +13,10 @@
 # missing pyyaml would HIDE that exact regression (the old SKIP branches were dead code for
 # this reason). So: we FAIL LOUD if pyyaml is absent. Same genesis-lock parity the runtime now
 # has via ps.pyyaml in brainPython.
-# MUTATES_SHARED_STATE — Geist's law, 2026-09-05: a box-runnable battery never mutates
-# human-shared state. Read as DATA by tests/vm-matrix-contract.py, not as a comment.
-MUTATES_SHARED_STATE = False
+# SIDE_EFFECTS — Geist's law as amended 2026-09-05T13:05Z: a box-runnable battery declares
+# every effect that leaves the machine or outlives the run. Read as DATA by
+# tests/vm-matrix-contract.py, not as a comment.
+SIDE_EFFECTS = []
 
 import importlib.util, os, sys, tempfile, textwrap, py_compile
 
