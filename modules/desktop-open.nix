@@ -411,7 +411,30 @@ in
       # ${"$"}{agent-brain} is not in scope here — /run/current-system/sw/bin is the seam, and it is
       # a guaranteed one: flake.nix's agentos-open-imports guard asserts genesis-open puts
       # agent-brain in systemPackages, so this path exists on any system that has this module.
-      ExecStart = "${pkgs.kitty}/bin/kitty --class brain-home -e ${pkgs.bash}/bin/sh -c 'while :; do /run/current-system/sw/bin/agent-brain; sleep 1; done'";
+      # The brain's stderr is TEE'd to the journal, not redirected to it.
+      #
+      # WHY THE UNIT AND NOT THE BRAIN: this unit's ExecStart is kitty, and the brain is a
+      # grandchild on kitty's pty, so everything it writes to stderr dies on that pty and reaches
+      # no log. Geist posed "is the deployed brain warning about X?" as a journal-vs-harness test
+      # and the journal branch was structurally unfireable -- three days of this unit's journal is
+      # 17 lines and every one is kitty's own stderr. An instrument that cannot see the thing it
+      # is asked about must be fixed, not read as a pass.
+      #
+      # WHY TEE AND NOT `2>`: stderr is not a log channel here, it is ALSO the user-visible one.
+      # agent-brain writes its latency lines there -- `[front-door 26.3s]`, `[187.7s, 4 tok/s]`,
+      # the cloud-route line -- and those are what Dillon reads off the screen and what the
+      # router-leg measurement is timed from. A plain redirect would make the journal an
+      # instrument by taking away a display someone is already using. So: fd 3 holds the
+      # terminal, tee writes the journal copy and hands the original back to it.
+      #
+      # Every binary is a STORE PATH, `tee` included. A bare `tee` here would be the exact
+      # defect #277 and #282 spent a week closing: this unit's PATH is narrow by construction,
+      # and a name-lookup that fails inside a redirect fails SILENTLY -- the brain would keep
+      # running with its stderr going nowhere, which is the state this commit exists to end.
+      #
+      # bash, not sh: `>(...)` is a bashism. `_PTK` keys on stdin+stdout isatty (agent-brain.py:17)
+      # and stdout is untouched, so the prompt toolkit is unaffected -- checked, not assumed.
+      ExecStart = "${pkgs.kitty}/bin/kitty --class brain-home -e ${pkgs.bash}/bin/bash -c 'exec 3>&2; while :; do /run/current-system/sw/bin/agent-brain 2> >(${pkgs.coreutils}/bin/tee >(${pkgs.systemd}/bin/systemd-cat -t agent-brain) >&3); sleep 1; done'";
       Restart = "always";
       RestartSec = 2;
     };
