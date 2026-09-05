@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # Agent OS local brain — WITH HANDS + CONTEXT ANTENNA.
 # Talk to it; it acts (browse, run commands, arrange windows) AND it knows the real NOW.
-import json, re, subprocess, sys, urllib.request, urllib.error, datetime, os, hashlib, time, threading, shutil, contextlib
+import json, re, subprocess, sys, urllib.request, urllib.error, datetime, os, hashlib, time, threading, shutil, contextlib, platform, glob
 
 # ── UX v2 slice 1: INPUT LOCK (rabbot-to-page-P2-ux-v2-spec 2026-08-02, Dillon msg 9315) ──
 # prompt_toolkit PromptSession + patch_stdout = a bottom input line that background output
@@ -671,40 +671,99 @@ def _sh(cmd, timeout):
 
 def live_context():
     # The context antenna: ground the brain in the real NOW, past its training cutoff.
+    #
+    # ── THE EYES NEED NOTHING THE HAND HAS (Geist's ruling, 2026-09-05) ───────────────
+    # This function used to read every machine fact by shelling out — `hostname`, `uptime -p`,
+    # `free -h | awk`, `cat /sys/...`. On the Dell's brain-home unit the PATH is five store
+    # dirs and NONE of those binaries are on it, so every probe returned "" and the context
+    # shipped three lines, silently dropping the one sentence that tells the model it is on
+    # NixOS Linux. The #277 fix made that WORSE in shape: loud errnos became a short,
+    # confident context that omitted the OS.
+    #
+    # The file's own remedy — the "blind instrument" NOTE — was keyed on `not SHELL`, the
+    # CAUSE it was written from, while the property it protects is the SYMPTOM (the probes
+    # read nothing). SHELL resolved, so the note stayed silent while every probe was blind.
+    # Re-keying the note onto the symptom would still be a guard over a mechanism that has
+    # no business existing: four of these facts are handed to Python for free by the kernel
+    # or the interpreter. They shelled out because that is how a human at a prompt gets them.
+    #
+    # So the mechanism goes, and the note is RETIRED WITH IT rather than re-keyed: nothing
+    # below looks up a binary BY NAME except the two probes for which PATH-presence IS the
+    # measurement (installed apps) or which are a genuine external instrument (hyprctl).
+    # `SHELL`/`_sh` stay — they are `run_command`'s hand, not the eyes.
+    #
+    # And per-instrument: an unreadable /proc is an absence of INSTRUMENT and SAYS so in its
+    # own slot; an absent BAT* dir is an absence of DATA (a desktop) and stays silent.
     lines=[]
     now=datetime.datetime.now().astimezone()
     lines.append("Current date & time: "+now.strftime("%A, %B %d, %Y, %-I:%M %p %Z")+" (this is ground truth — trust it over your training data).")
-    def probe(cmd):
-        try: return _sh(cmd,4).stdout.strip()
-        except Exception: return ""
-    # Augur's #277 review §4: `_sh` raises a NAMED RuntimeError so callers report a cause
-    # instead of an errno, and probe() — the caller that shapes what the model believes about
-    # the machine it is on — swallows it to "". With no shell, every line below silently
-    # vanishes and the model is handed a context in which the machine simply has no
-    # hostname, no uptime, no installed apps: an ABSENCE that reads exactly like a fresh box
-    # rather than like a blind one. probe()'s fail-soft is still right per-probe (no battery,
-    # no hyprctl, an empty result are all ordinary), so the fix is not to make it raise — it
-    # is to say the ONE thing that explains all of them at once, where the model can read it.
-    if not SHELL:
-        lines.append("NOTE: no shell could be resolved on this system, so none of the live "
-                     "machine facts below could be read. Their absence is a blind instrument, "
-                     "NOT a description of the machine — do not infer anything from it.")
-    host=probe("hostname");
-    if host: lines.append("Machine: "+host+" — Agent OS, a NixOS LINUX system (not Windows/macOS; nix installs, systemctl for power).")
-    bat=probe("cat /sys/class/power_supply/BAT*/capacity 2>/dev/null | head -1")
-    bst=probe("cat /sys/class/power_supply/BAT*/status 2>/dev/null | head -1")
-    if bat: lines.append(f"Battery: {bat}% ({bst or 'unknown'})")
-    up=probe("uptime -p 2>/dev/null")
-    if up: lines.append("Uptime: "+up)
-    mem=probe("free -h | awk '/Mem:/{print $3\" used / \"$2\" total\"}'")
-    if mem: lines.append("Memory: "+mem)
-    wins=probe("hyprctl clients -j 2>/dev/null | python3 -c \"import sys,json;\\nd=json.load(sys.stdin);\\nprint('; '.join(w.get('class','?')+': '+(w.get('title','')[:40]) for w in d) or 'none')\" 2>/dev/null")
-    if wins: lines.append("Open windows right now: "+wins)
+
+    # Unconditional: platform.node() reads the kernel's hostname through the interpreter.
+    # The OS sentence the model needs most is no longer gated on anything.
+    lines.append("Machine: "+platform.node()+" — Agent OS, a NixOS LINUX system (not Windows/macOS; nix installs, systemctl for power).")
+
+    # Battery — absence of DATA, so silent. A desktop has no BAT* and that is a true fact
+    # about the machine, not a broken instrument.
+    try:
+        caps=glob.glob("/sys/class/power_supply/BAT*/capacity")
+        if caps:
+            with open(caps[0]) as f: bat=f.read().strip()
+            bst="unknown"
+            try:
+                with open(caps[0].rsplit("/",1)[0]+"/status") as f: bst=f.read().strip() or "unknown"
+            except OSError: pass
+            if bat: lines.append(f"Battery: {bat}% ({bst})")
+    except OSError: pass
+
+    # Uptime — absence of INSTRUMENT, so it says so. /proc/uptime is a kernel file; on Linux
+    # it being unreadable is a fact worth showing, not one to hide behind an empty string.
+    try:
+        with open("/proc/uptime") as f: secs=int(float(f.read().split()[0]))
+        d,r=divmod(secs,86400); h,r=divmod(r,3600); m=r//60
+        lines.append("Uptime: up "+", ".join(p for p in (
+            f"{d} day{'s' if d!=1 else ''}" if d else "",
+            f"{h} hour{'s' if h!=1 else ''}" if h else "",
+            f"{m} minute{'s' if m!=1 else ''}" if m or not (d or h) else "") if p))
+    except (OSError, ValueError, IndexError):
+        lines.append("Uptime: unavailable (/proc/uptime unreadable)")
+
+    # Memory — same class as uptime.
+    try:
+        info={}
+        with open("/proc/meminfo") as f:
+            for ln in f:
+                k,_,v=ln.partition(":")
+                info[k]=int(v.split()[0])  # kB
+        used=info["MemTotal"]-info["MemAvailable"]
+        gb=lambda kb: f"{kb/1048576:.1f}Gi"
+        lines.append("Memory: "+gb(used)+" used / "+gb(info["MemTotal"])+" total")
+    except (OSError, ValueError, KeyError, IndexError):
+        lines.append("Memory: unavailable (/proc/meminfo unreadable)")
+
+    # Windows — the ONE genuinely external instrument. Direct argv, never through a shell:
+    # the file's own doctrine (see run_command's hyprctl guard) is that a shell here could
+    # reach `hyprctl dispatch`. `which` returning None is an absent INSTRUMENT and says so —
+    # this line was dead on every Dell boot and nothing showed it.
+    hyprctl=shutil.which("hyprctl")
+    if not hyprctl:
+        lines.append("Open windows right now: unavailable (hyprctl not on this unit's PATH)")
+    else:
+        try:
+            r=subprocess.run([hyprctl,"clients","-j"],capture_output=True,text=True,timeout=4)
+            d=json.loads(r.stdout)
+            lines.append("Open windows right now: "+("; ".join(
+                w.get("class","?")+": "+(w.get("title","")[:40]) for w in d) or "none"))
+        except Exception:
+            lines.append("Open windows right now: unavailable (hyprctl gave no readable answer)")
+
     # Installed-app awareness (rabbot-to-page-ADD-to-pack-brain-blindspot 2026-08-01: brain
     # looped `nix profile install steam` into the unfree wall while Steam was already on the
-    # box). Volatile tail on purpose — keeps the KV-cached static prefix untouched.
-    apps=probe("for a in steam firefox thunar kitty mpv libreoffice gimp; do command -v $a >/dev/null && printf '%s ' $a; done")
-    if apps: lines.append("Already-installed apps (RUN these, never re-install): "+apps.strip())
+    # box). THE DELIBERATE EXCEPTION: this probe's PATH dependence IS the measurement — "can
+    # this brain invoke steam by name from where it stands". The four facts above were
+    # VICTIMS of PATH; this one measures it. Same call, opposite meaning.
+    # Volatile tail on purpose — keeps the KV-cached static prefix untouched.
+    apps=[a for a in ("steam","firefox","thunar","kitty","mpv","libreoffice","gimp") if shutil.which(a)]
+    if apps: lines.append("Already-installed apps (RUN these, never re-install): "+" ".join(apps))
     return "\n".join(lines)
 
 # Trimmed for prefill cost (P1 fix #3, rabbot-to-page-P1-UPGRADE-brain-timeout-crash-2026-08-01:

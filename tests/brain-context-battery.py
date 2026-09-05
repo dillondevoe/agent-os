@@ -141,57 +141,84 @@ brain.trim_history(huge)
 check("D an oversized single group is kept whole, not cut mid-group",
       huge == kept)
 
-# ── H — A BLIND INSTRUMENT MUST NOT READ AS A DESCRIPTION (Augur, #277 review §4) ───
-# `_sh` raises a NAMED RuntimeError when no shell resolves, precisely so callers report a
-# cause instead of an errno. live_context's `probe()` swallows it to "", so with no shell
-# every machine fact below it silently vanishes and the model is handed a context in which
-# the box simply HAS no hostname, no uptime, no installed apps. That absence reads exactly
-# like a fresh machine rather than like a blind one, and it is the context that shapes what
-# the model believes about the machine it is standing on.
+# ── H — THE EYES NEED NOTHING THE HAND HAS (Geist ruling 2026-09-05; was #277 review §4) ──
+# REWRITTEN, NOT PATCHED, AND THE OLD ARM IS WHY. It read:
 #
-# probe()'s per-probe fail-soft is still correct and is deliberately NOT changed here — no
-# battery, no hyprctl and an empty result are all ordinary. What is armed is the one line
-# that explains all of them at once.
+#     check("H the machine facts are genuinely gone, so the note is load-bearing",
+#           "Machine: " not in blind)
+#
+# That arm ASSERTED THE DEFECT as the expected behaviour. A green H meant "the sentence
+# telling the model it is on NixOS Linux vanishes when the instrument is blind" — and on the
+# Dell it did vanish, on every boot, because the unit's PATH carries no `hostname`. The arm
+# was green the whole time. Inverted below: with NO shell at all, the machine/uptime/memory
+# lines must still be PRESENT, because none of them needs one.
 _real_shell = brain.SHELL
 try:
     brain.SHELL = None
     blind = brain.live_context()
-    check("H no shell -> the context SAYS the instrument is blind",
-          "no shell could be resolved" in blind)
-    check("H and tells the model not to infer from the absence",
-          "do not infer" in blind.lower())
-    check("H the machine facts are genuinely gone, so the note is load-bearing",
-          "Machine: " not in blind)
-    check("H the date line survives — it needs no shell, so the context is degraded, not empty",
+    check("H no shell -> the Machine line (and the OS sentence) survives",
+          "Machine: " in blind and "NixOS LINUX" in blind)
+    check("H no shell -> uptime survives, read from /proc",
+          "Uptime: " in blind and "unavailable" not in blind.split("Uptime: ")[1].split("\n")[0])
+    check("H no shell -> memory survives, read from /proc",
+          "Memory: " in blind and "unavailable" not in blind.split("Memory: ")[1].split("\n")[0])
+    check("H the retired blind-instrument note is gone with the mechanism it guarded",
+          "no shell could be resolved" not in blind)
+    check("H the date line survives — it needs no shell either",
           "Current date & time:" in blind)
-
-    # H2 — PERMITTING TWIN. Without it a live_context that emitted the blind note
-    # unconditionally would pass every arm above while lying on every healthy box.
-    #
-    # THE PROBE IS STUBBED, AND CI IS WHY. The first version of this arm asserted
-    # `"Machine: " in sighted` against the REAL environment — which reads `hostname`, a
-    # binary nixpkgs ships in inetutils/nettools, NOT coreutils. The nix check declares only
-    # a Python interpreter in nativeBuildInputs, so `hostname` is absent from the sandbox
-    # PATH: the arm went green on DVo, where I wrote it, and RED in flake-check, where it
-    # runs. The authoring machine is not a control arm.
-    #
-    # Stubbing `_sh` is also the stronger control, not merely the portable one. What H2 must
-    # discriminate is "the note is absent BECAUSE a shell was resolved" from "the facts are
-    # absent because this box happens to be bare" — and only a probe with a known answer can
-    # tell those apart. The ambient version could not, in either direction.
-    brain.SHELL = _real_shell
-    _real_sh = brain._sh
-    brain._sh = lambda cmd, timeout: types.SimpleNamespace(stdout="stubhost\n")
-    try:
-        sighted = brain.live_context()
-    finally:
-        brain._sh = _real_sh
-    check("H2 with a shell, no blind note is emitted",
-          "no shell could be resolved" not in sighted)
-    check("H2 and the machine line really is present, so H2 is not passing on an empty probe",
-          "Machine: stubhost" in sighted)
 finally:
     brain.SHELL = _real_shell
+
+# H2 — THE WINDOWS LINE, the one genuinely external instrument. Both directions, because an
+# `unavailable` emitted unconditionally would pass the absent arm while lying on a Hyprland box.
+_real_which = brain.shutil.which
+try:
+    brain.shutil.which = lambda name: None
+    nohypr = brain.live_context()
+    check("H2 hyprctl absent -> the line SAYS unavailable rather than being omitted",
+          "Open windows right now: unavailable (hyprctl not on this unit's PATH)" in nohypr)
+    check("H2 and the apps line is omitted, not faked — absence of DATA stays silent",
+          "Already-installed apps" not in nohypr)
+
+    brain.shutil.which = lambda name: "/stub/bin/" + name
+    _real_run = brain.subprocess.run
+    seen_argv = []
+    def _rec(cmd, *a, **k):
+        seen_argv.append(cmd)
+        return types.SimpleNamespace(stdout='[{"class":"kitty","title":"a terminal"}]')
+    brain.subprocess.run = _rec
+    try:
+        seen = brain.live_context()
+    finally:
+        brain.subprocess.run = _real_run
+    check("H2 hyprctl present -> the line carries content and does NOT say unavailable",
+          "Open windows right now: kitty: a terminal" in seen)
+    # THE ARM RECORDS ARGV, BECAUSE THE OUTPUT CANNOT SEE THE ROUTING (geist, 2026-09-05).
+    # This arm used to assert `"unavailable (hyprctl" not in seen` and call that "never through
+    # a shell". Geist crippled the head to `[SHELL,"-c",hyprctl+" clients -j"]` -- the exact
+    # routing hyprland.lua's doctrine forbids, since a shell here could reach `hyprctl dispatch`
+    # -- and the arm stayed PASS. A label disagreeing with its verdict: the shell-routed and the
+    # argv-routed brain produce byte-identical output, so no assertion over `seen` can ever tell
+    # them apart. The claim is about the CALL, so the arm has to watch the call.
+    check("H2 and hyprctl is invoked by resolved argv, never routed through a shell",
+          seen_argv == [["/stub/bin/hyprctl", "clients", "-j"]])
+finally:
+    brain.shutil.which = _real_which
+
+# H3 — THE CONTROL ARM KEYED ON THE DELL MEASUREMENT (Mirror, 2026-09-05). The unit's PATH is
+# five store dirs and carries no hostname/free/awk; the deployed vantage is what CI's own
+# missing-`hostname` red was pointing at a week earlier and nobody followed. An EMPTY PATH is
+# that vantage taken to its limit — and it must change nothing about these three lines.
+_real_path = os.environ.get("PATH", "")
+try:
+    os.environ["PATH"] = ""
+    bare = brain.live_context()
+    check("H3 PATH='' -> Machine, Uptime and Memory are all still present",
+          "Machine: " in bare and "Uptime: " in bare and "Memory: " in bare)
+    check("H3 PATH='' -> and none of them reports an unreadable instrument",
+          "/proc/uptime unreadable" not in bare and "/proc/meminfo unreadable" not in bare)
+finally:
+    os.environ["PATH"] = _real_path
 
 print()
 if fails:
