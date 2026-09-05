@@ -208,7 +208,60 @@ ab.SUMMON_CONSENT = ab._SummonConsent()
 out = ab._summon_claude("do a thing", "ctx")
 check("N a consent-less refusal does not claim a surviving grant", "still good" in out, False)
 
-WANT_ARMS = 15 + 18
+# O — THE RESTORE BUDGET. "Give the grant back on every failure" is unbounded on its own:
+# the TTL bounds how LONG a grant lives, and nothing bounded how many subprocesses could be
+# spawned inside it. A `claude` that fails in milliseconds lets a model loop summon_claude
+# dozens of times in one 300s window. Three answerless attempts, then re-consent.
+c = ab._SummonConsent(); c.arm()
+for i in range(ab._SUMMON_MAX_RESTORES):
+    ab.ok_to_summon(c)
+    check(f"O restore {i+1} of {ab._SUMMON_MAX_RESTORES} is granted", ab.restore_summon_grant(c), True)
+ab.ok_to_summon(c)
+check("O the attempt AFTER the budget is not restored", ab.restore_summon_grant(c), False)
+ok, _ = ab.ok_to_summon(c)
+check("O and the grant is genuinely gone, not merely unreported", ok, False)
+
+# O2 — CONTROL FOR O, and it is what stops the budget from being a way of getting green: the
+# loop above must have been doing real work, so a grant restored INSIDE the budget is usable.
+# Without this, a restore() that returned True while restoring nothing would satisfy O.
+c = ab._SummonConsent(); c.arm()
+ab.ok_to_summon(c); ab.restore_summon_grant(c)
+ok, _ = ab.ok_to_summon(c)
+check("O2 a grant restored inside the budget still buys a summon", ok, True)
+
+# O3 — the budget is PER GRANT, not per process. A fresh `:summon` starts over, or the
+# operator would be locked out of the feature after three failures ever.
+c = ab._SummonConsent(); c.arm()
+for _ in range(ab._SUMMON_MAX_RESTORES + 1):
+    ab.ok_to_summon(c); ab.restore_summon_grant(c)
+c.arm()
+ab.ok_to_summon(c)
+check("O3 a fresh arm() resets the budget", ab.restore_summon_grant(c), True)
+
+# P — THE MALFORMED CALL. This return sat ABOVE `_kept` and was the ONE non-success path that
+# still ate the grant, under a comment claiming "every return below this point" restores —
+# true only because this one was not below it. A model emitting a blank task burned the
+# operator's consent act for a validation error.
+ab.SUMMON_CONSENT = ab._SummonConsent(); ab.SUMMON_CONSENT.arm()
+out = ab._summon_claude("", "ctx")
+check("P an empty task returns an error", "no task given" in out, True)
+check("P and does NOT eat the grant", ab.SUMMON_CONSENT.armed(), True)
+
+# P2 — CONTROL FOR P: the empty-task guard still FIRES. Without it, deleting the guard
+# entirely would leave the grant armed on some other path and pass P.
+check("P2 the empty-task guard still short-circuits before the CLI", "summon error" in out, True)
+
+# Q — the kept-message makes NO claim about the operator's cloud SPEND. It said "nothing was
+# spent", which this code cannot observe and which is close to false on the 180s timeout path:
+# a timeout means the request was in flight and most likely billed. The grant and the billing
+# are two different facts, and only one of them is ours to report.
+check("Q the kept-message does not claim nothing was spent", "was spent" in ab._SUMMON_KEPT, False)
+check("Q and still says the grant survived", "still good" in ab._SUMMON_KEPT, True)
+
+# DERIVED, not retyped: arm O runs one check per unit of budget, so a change to
+# _SUMMON_MAX_RESTORES changes the arm count. Hard-coding the total would make the guard
+# fail on a legitimate edit — which is how an arm-count guard gets deleted.
+WANT_ARMS = 15 + 18 + 9 + ab._SUMMON_MAX_RESTORES
 ran = passed + failed
 if ran != WANT_ARMS:
     print(f"FAIL arm count: {ran} arms ran, expected {WANT_ARMS} -- an arm was added or silently lost")

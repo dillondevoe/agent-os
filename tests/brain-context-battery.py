@@ -20,6 +20,7 @@ description of it:
 
 Run standalone (tests/run-local.sh) and in the flake (brain-context-contract).
 """
+import types
 import importlib.util, json, os, sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -161,12 +162,29 @@ try:
 
     # H2 — PERMITTING TWIN. Without it a live_context that emitted the blind note
     # unconditionally would pass every arm above while lying on every healthy box.
+    #
+    # THE PROBE IS STUBBED, AND CI IS WHY. The first version of this arm asserted
+    # `"Machine: " in sighted` against the REAL environment — which reads `hostname`, a
+    # binary nixpkgs ships in inetutils/nettools, NOT coreutils. The nix check declares only
+    # a Python interpreter in nativeBuildInputs, so `hostname` is absent from the sandbox
+    # PATH: the arm went green on DVo, where I wrote it, and RED in flake-check, where it
+    # runs. The authoring machine is not a control arm.
+    #
+    # Stubbing `_sh` is also the stronger control, not merely the portable one. What H2 must
+    # discriminate is "the note is absent BECAUSE a shell was resolved" from "the facts are
+    # absent because this box happens to be bare" — and only a probe with a known answer can
+    # tell those apart. The ambient version could not, in either direction.
     brain.SHELL = _real_shell
-    sighted = brain.live_context()
+    _real_sh = brain._sh
+    brain._sh = lambda cmd, timeout: types.SimpleNamespace(stdout="stubhost\n")
+    try:
+        sighted = brain.live_context()
+    finally:
+        brain._sh = _real_sh
     check("H2 with a shell, no blind note is emitted",
           "no shell could be resolved" not in sighted)
     check("H2 and the machine line really is present, so H2 is not passing on an empty probe",
-          "Machine: " in sighted)
+          "Machine: stubhost" in sighted)
 finally:
     brain.SHELL = _real_shell
 

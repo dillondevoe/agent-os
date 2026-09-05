@@ -9,6 +9,7 @@
 # discarded with NOTHING fired. No ollama needed — the decision layer is pure.
 #
 # Usage: python3 tests/frontdoor-kick-battery.py [path-to-agent-brain.py]
+import types
 import importlib.util, json, sys, os
 
 path = sys.argv[1] if len(sys.argv) > 1 else os.path.join(
@@ -137,8 +138,24 @@ check("summon without operator consent is refused",
 # 12b. CONTROL FOR 12, and it is what makes the reset above evidence rather than a way of
 # getting green: with a grant armed, this same call must NOT be refused. Without it, a
 # reset that broke the consent object outright would satisfy arm 12 forever.
-brain.SUMMON_CONSENT.arm()
-check("...and IS allowed through once the operator has consented",
-      "refused" not in brain._summon_claude("test task", "ctx"))
+#
+# AND THE CLI IS STUBBED, WHICH IS NOT HYGIENE — IT IS THE WHOLE ARM BEING SAFE TO RUN.
+# Arm 12 is refused at the gate and never reaches a subprocess; arm 11 forces
+# FileNotFoundError with PATH=/nonexistent. This arm has neither protection: it arms a real
+# grant and calls the real `_summon_claude`. On any box where `claude` IS installed — the
+# dev box, and the Agent OS target itself, where claude-code is in the closure — running
+# `tests/run-local.sh` would make a real, billed cloud call with the brief "test task", and
+# could block for the full 180s timeout. It passes in CI only because `claude` is absent
+# there, so the vacuous-pass path is exactly the one CI exercises and the billed path is the
+# one only a human ever hits. A test may not spend the operator's account to prove a gate
+# lets things through.
+_real_run = brain.subprocess.run
+brain.subprocess.run = lambda *a, **k: types.SimpleNamespace(returncode=0, stdout="stub", stderr="")
+try:
+    brain.SUMMON_CONSENT.arm()
+    check("...and IS allowed through once the operator has consented",
+          "refused" not in brain._summon_claude("test task", "ctx"))
+finally:
+    brain.subprocess.run = _real_run
 
 print(f"frontdoor-kick-battery: PASS ({PASS} properties)")

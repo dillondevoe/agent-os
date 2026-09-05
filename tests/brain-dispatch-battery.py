@@ -287,10 +287,14 @@ while _i >= 0 and _lines[_i].lstrip().startswith("#"):
 # so joining it as-collected yields the note line-reversed and any multi-line phrase match
 # fails on prose that plainly contains it. Caught by this arm going red against a note that
 # says exactly what it asks for.
+_nlines = len(_block)          # captured BEFORE the collapse: the diagnostic below reported
+                              # `len(_block.split("\n"))` on an already-single-line string, so a
+                              # red arm always announced "1 contiguous comment lines" — a number
+                              # that is constant by construction and tells the reader nothing.
 _block = " ".join(l.lstrip().lstrip("#") for l in reversed(_block))
 _block = " ".join(_block.split()).lower()
 check("I5 the transport assumption is named in the comment block AT the table",
-      "typed transport" in _block, "not in the %d contiguous comment lines above" % len(_block.split("\n")))
+      "typed transport" in _block, "not in the %d contiguous comment lines above" % _nlines)
 check("I5 and it names the trigger that must send a reader here",
       ("voice" in _block or "asr" in _block) and "revisit here" in _block,
       "the note states an assumption but no moment at which to revisit it")

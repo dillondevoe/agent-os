@@ -215,14 +215,17 @@ class _SummonConsent:
         self._at = None
         self._ttl = ttl
         self._spent_at = None   # the stamp the last consume took, so restore() can put THAT back
+        self._restores = 0      # how many times THIS grant has been given back (see _MAX)
     def arm(self):
         """Called ONLY from the operator's own input line. Never from a tool, a model
         response, or anything parsed out of model output."""
         self._at = time.time()
         self._spent_at = None
+        self._restores = 0
     def check_and_consume(self, now=None):
         """(True, None) if a summon may proceed, else (False, reason). Single-use: a
-        successful check disarms the grant, so one `:summon` buys exactly one summon."""
+        successful check disarms the grant, so one `:summon` buys exactly one ANSWER — and
+        at most `_SUMMON_MAX_RESTORES` further attempts that produced no answer at all."""
         now = time.time() if now is None else now
         if self._at is None:
             return False, "no operator consent — summon_claude is cloud and uses the user's account"
@@ -251,9 +254,18 @@ class _SummonConsent:
         give back a grant that was armed from the `:summon` input line (arm() is the sole
         writer of `_at`, asserted structurally by arm F of the battery) — it can never
         manufacture one, and it cannot outlive the TTL.
+
+        BOUNDED TWICE, and the second bound is not the clock. The TTL says how long a grant
+        may live; `_SUMMON_MAX_RESTORES` says how many answerless attempts may be made inside
+        it. Without the second, a CLI that fails in milliseconds turns one consent act into an
+        unbounded run of real subprocesses — the TTL never expires early enough to stop it.
         """
         if self._spent_at is None:
             return False
+        if self._restores >= _SUMMON_MAX_RESTORES:
+            self._spent_at = None
+            return False
+        self._restores += 1
         self._at, self._spent_at = self._spent_at, None
         return True
     def armed(self, now=None):
@@ -279,7 +291,22 @@ def restore_summon_grant(consent=None):
 # Appended to every summon failure that gave the operator nothing, so the surviving grant is
 # stated rather than left for them to discover by guessing. Silence here would be the same
 # defect one level down: a consent act whose fate only the code knows.
-_SUMMON_KEPT = " (Your `:summon` is still good — nothing was spent, so you can retry without re-consenting.)"
+# DELIBERATELY SAYS NOTHING ABOUT SPEND. The first draft read "nothing was spent, so you can
+# retry" — an unconditional claim about the operator's cloud ACCOUNT, made by code that cannot
+# observe it. On the FileNotFoundError path it is true; on the 180s-timeout path it is close to
+# the opposite, since a timeout means the request was in flight and most likely billed. The
+# grant and the billing are two different facts and only one of them is ours to report: the
+# restore is about the CONSENT ACT, which is genuinely intact because no answer came back.
+# A RESTORE BUDGET, because "give the grant back on every failure" is unbounded on its own.
+# The TTL bounds how LONG a grant lives; nothing bounded how many subprocesses could be spawned
+# inside it. A fast-failing `claude` (rate limit, transient network error) returns in
+# milliseconds, so a model could loop summon_claude dozens of times in one 300s window, each
+# iteration a real process. Worse, `_SUMMON_KEPT` is a TOOL RESULT — it is read by the model,
+# the party this gate exists to constrain, not by the operator. So the retry affordance is
+# finite: three attempts that produced no answer, then the operator consents again.
+_SUMMON_MAX_RESTORES = 3
+
+_SUMMON_KEPT = " (Your `:summon` is still good — this attempt returned no answer, so you can retry without re-consenting.)"
 
 def _log_summon_attempt(allowed, reason=None):
     """A refused summon is LOUD. A legitimate summon blocked by this gate must show up as a
@@ -1288,10 +1315,6 @@ def _summon_claude(task,context_summary):
                 "prompt — saying yes in conversation is not enough, because this path spends "
                 "their cloud account.")
     _log_summon_attempt(True, None)
-    if not task: return "summon error: no task given"
-    brief=(f"Task from Agent OS's local brain (relay your answer to the user through it):\n{task}\n\n"
-           f"Conversation context:\n{context_summary}\n\n"
-           f"Machine: NixOS Linux (Agent OS, flake-built — system changes go in the OS repo).")
     # A GRANT BUYS AN ANSWER, NOT AN ATTEMPT. Every return below this point that hands the
     # operator an error instead of a reply gives the grant back on its ORIGINAL clock, so a
     # box whose `claude` has never been logged in does not eat one consent act per retry.
@@ -1300,6 +1323,15 @@ def _summon_claude(task,context_summary):
     # account was touched. The success path is the only path that consumes.
     def _kept(msg):
         return msg + _SUMMON_KEPT if restore_summon_grant() else msg
+    # A MALFORMED CALL IS AN ATTEMPT THAT RETURNED NOTHING, so it restores like any other.
+    # This return used to sit ABOVE `_kept` and was the single non-success path that still
+    # ate the grant — the comment directly above said "every return below this point", and
+    # it was true only because this one was not below it. A model emitting `summon_claude`
+    # with a blank task burned the operator's consent act for a validation error.
+    if not task: return _kept("summon error: no task given")
+    brief=(f"Task from Agent OS's local brain (relay your answer to the user through it):\n{task}\n\n"
+           f"Conversation context:\n{context_summary}\n\n"
+           f"Machine: NixOS Linux (Agent OS, flake-built — system changes go in the OS repo).")
     try:
         o=subprocess.run(["claude","-p",brief,"--output-format","text"],
                          capture_output=True,text=True,timeout=180)
