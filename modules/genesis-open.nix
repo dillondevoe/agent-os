@@ -22,10 +22,10 @@
 #                the baked path and refuses anything not hashing to the baked value.
 #                @SH@ is the same discipline pointed at the brain's HAND. `run_command` used
 #                to reach `bash` by NAME; brain-home.service's explicit PATH carries no shell,
-#                so every shell-out on the Dell died `FileNotFoundError: 'bash'` (measured
-#                2026-09-05) — an errno raised before any process started, not an rc a caller
-#                could read. Baking the store path means the built brain resolves no name at
-#                all. tests/shell-resolve-battery.py arms both halves, D against the Dell's
+#                so every shell-out on a running deployment died `FileNotFoundError: 'bash'`
+#                (measured 2026-09-05) — an errno raised before any process started, not an rc
+#                a caller could read. Baking the store path means the built brain resolves no
+#                name at all. tests/shell-resolve-battery.py arms both halves, D against a
 #                real measured unit PATH.
 #
 # HONEST CLAIM (never "untamperable"): no runtime edit/repoint path; tampering is loud;

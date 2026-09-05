@@ -8,7 +8,7 @@ SIDE_EFFECTS = []
 
 `run_command` is the brain's only hand, and it reached it through
 `subprocess.run(["bash", "-c", ...])` — a NAME, resolved against the PATH of
-whatever process happens to be running. Measured on the Dell 2026-09-05, twice:
+whatever process happens to be running. Measured twice on a running deployment:
 `brain-home.service` carries an explicit five-store-dir PATH with NO shell on it,
 so every shell-out died `FileNotFoundError: 'bash'`. Note the mode — an errno
 raised out of `subprocess.run` before any process starts, NOT an rc=127 a caller
@@ -31,9 +31,9 @@ Both halves have to be armed, because each one passes the other's test:
      not a shell, and returning it would move the ENOENT from resolve-time to run-time
      — a worse place, because by then the caller has been told it has a hand.
   D  PRE-FIX ARM — the resolver as it stood BEFORE the build literal, run against the
-     Dell's real measured unit PATH, returns nothing findable by name. Without this
-     arm, A and B could both be passing on a machine where `bash` is on every PATH and
-     the whole defect is invisible. This is the arm that shows the fix was needed.
+     real measured unit PATH recorded below, returns nothing findable by name. Without
+     this arm, A and B could both be passing on a machine where `bash` is on every PATH
+     and the whole defect is invisible. This is the arm that shows the fix was needed.
   E  NO SHELL AT ALL is reported as a cause, not an errno: `_sh` raises RuntimeError
      and never FileNotFoundError. The failure mode is the finding — an errno is what
      the model then narrates at 20s a turn.
@@ -52,11 +52,13 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 MOD  = os.path.join(os.path.dirname(HERE), "modules", "agent-brain.py")
 NIX  = os.path.join(os.path.dirname(HERE), "modules", "genesis-open.nix")
 
-# The Dell's brain-home.service PATH, measured 2026-09-05 (tick 1598 and re-measured
-# independently at tick 1622 from root@192.168.1.253 via `systemctl --user --machine=agent@
-# show brain-home -p Environment`). Store hashes are pinned deliberately: this is a RECORD of
-# a measured environment, not a live lookup. Not one of these five dirs carries a shell —
-# which is the entire defect, and D asserts it rather than describing it.
+# A real brain-home.service PATH, read off a running deployment with
+# `systemctl --user --machine=agent@ show brain-home -p Environment` and measured twice,
+# independently, on 2026-09-05. Store hashes are pinned deliberately: this is a RECORD of an
+# environment that existed, not a live lookup, and a live lookup would defeat the arm anyway
+# by asking the machine running the tests instead of the machine that had the defect. Not one
+# of these five dirs carries a shell — which is the entire defect, and D asserts it rather
+# than describing it.
 DELL_UNIT_PATH = ":".join([
     "/nix/store/mp8s10fwm685azvvv1qq7zyf7iajjlj8-coreutils-9.11/bin",
     "/nix/store/m1p6gxgxis75rn0d549ny2y8gpxjv9pd-findutils-4.10.0/bin",
@@ -125,11 +127,11 @@ def main():
         c = with_path("", lambda: mod._resolve_shell(build=gone))
         check("C  substituted-but-ABSENT path is not returned", c != gone, "got %r" % (c,))
 
-    # D — PRE-FIX ARM. The name-only resolver, against the Dell's real unit PATH.
+    # D — PRE-FIX ARM. The name-only resolver, against the recorded unit PATH.
     import shutil
     pre_fix = with_path(DELL_UNIT_PATH,
                         lambda: shutil.which("bash") or shutil.which("sh"))
-    check("D  PRE-FIX: name-only resolution finds NO shell on the Dell's unit PATH",
+    check("D  PRE-FIX: name-only resolution finds NO shell on the recorded unit PATH",
           pre_fix is None, "found %r — if this is not None the defect is not reproduced here" % (pre_fix,))
 
     # E — no shell anywhere is a cause, not an errno.
