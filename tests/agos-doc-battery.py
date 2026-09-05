@@ -4,6 +4,10 @@
 # fixture needed); if pdfinfo isn't present the CLI is absent and we SKIP. The contract
 # is: info <path> -> {ok,path,pages,title,author,pdf_version,page_size,bytes}.
 # Run: PYTHONPATH=modules python3 tests/agos-doc-battery.py
+# MUTATES_SHARED_STATE — Geist's law, 2026-09-05: a box-runnable battery never mutates
+# human-shared state. Read as DATA by tests/vm-matrix-contract.py, not as a comment.
+MUTATES_SHARED_STATE = False
+
 import subprocess, json, shutil, sys, tempfile, os
 
 EX = 0

@@ -5,6 +5,10 @@
 # so: if AGOS_MEDIA_FIXTURE is set, use it; else SKIP with a clear note. (The Dell gate
 # or CI can pass a fixture, e.g. a sample PNG/mp4, to exercise the real ffprobe reshape.)
 # Run: AGOS_MEDIA_FIXTURE=/path/to/sample.png PYTHONPATH=modules python3 tests/agos-media-battery.py
+# MUTATES_SHARED_STATE — Geist's law, 2026-09-05: a box-runnable battery never mutates
+# human-shared state. Read as DATA by tests/vm-matrix-contract.py, not as a comment.
+MUTATES_SHARED_STATE = False
+
 import subprocess, json, shutil, sys, os
 
 EX = 0

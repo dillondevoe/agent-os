@@ -30,6 +30,10 @@
 #
 # Usage: PYTHONPATH=modules python3 tests/mem-battery.py
 
+# MUTATES_SHARED_STATE — Geist's law, 2026-09-05: a box-runnable battery never mutates
+# human-shared state. Read as DATA by tests/vm-matrix-contract.py, not as a comment.
+MUTATES_SHARED_STATE = False
+
 import os
 import re
 import shutil

@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# MUTATES_SHARED_STATE — Geist's law, 2026-09-05: a box-runnable battery never mutates
+# human-shared state. Read as DATA by tests/vm-matrix-contract.py, not as a comment.
+MUTATES_SHARED_STATE = False
+
 """brain-context-battery.py — the R1 context bound, armed.
 
 Tier-0 item 3 (Rabbot's runtime-config lane) asked for `num_ctx 8192` and a

@@ -40,6 +40,10 @@
 # __file__ and loaded via spec_from_file_location, so the environment never mattered. Fixed in
 # the wiring commit rather than after it: per PR #189, a Run: header can only diverge from the
 # workflow once the file is WIRED, so that is the moment to make them agree.
+# MUTATES_SHARED_STATE — Geist's law, 2026-09-05: a box-runnable battery never mutates
+# human-shared state. Read as DATA by tests/vm-matrix-contract.py, not as a comment.
+MUTATES_SHARED_STATE = False
+
 import importlib.util, io, json, os, subprocess, sys, tempfile, textwrap, urllib.error
 
 MOD = os.path.join(os.path.dirname(__file__), "..", "modules", "agent-brain.py")

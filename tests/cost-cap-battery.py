@@ -14,6 +14,10 @@
 # same K6 rule as wiring-battery: a SKIP would hide the silent-degrade regression).
 #
 # Run: PYTHONPATH=modules python3 tests/cost-cap-battery.py
+# MUTATES_SHARED_STATE — Geist's law, 2026-09-05: a box-runnable battery never mutates
+# human-shared state. Read as DATA by tests/vm-matrix-contract.py, not as a comment.
+MUTATES_SHARED_STATE = False
+
 import importlib.util, json, os, sys, tempfile, textwrap, py_compile
 
 try:

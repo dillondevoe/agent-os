@@ -40,6 +40,10 @@
 #      floor); nothing prevented the next transport from doing the same. This pins the CLASS,
 #      not the instance: a new transport that configures itself from a global fails here at
 #      registration time rather than on the first escalate-role turn.
+# MUTATES_SHARED_STATE — Geist's law, 2026-09-05: a box-runnable battery never mutates
+# human-shared state. Read as DATA by tests/vm-matrix-contract.py, not as a comment.
+MUTATES_SHARED_STATE = False
+
 import importlib.util, inspect, io, os, py_compile, sys, tempfile
 
 MOD = "modules/agent-brain.py"

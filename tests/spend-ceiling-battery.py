@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# MUTATES_SHARED_STATE — Geist's law, 2026-09-05: a box-runnable battery never mutates
+# human-shared state. Read as DATA by tests/vm-matrix-contract.py, not as a comment.
+MUTATES_SHARED_STATE = False
+
 """spend-ceiling-battery.py — the cumulative spend ceilings, armed in BOTH directions.
 
 Rabbot's contract (2026-08-31, GO on item 3) asked for armed-red both ways: the ceiling

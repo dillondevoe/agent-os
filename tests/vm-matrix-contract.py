@@ -43,6 +43,7 @@ Control arms (each MUST fail — if one does not, that check is not a check):
     touch tests/orphan.nix && python3 tests/vm-matrix-contract.py ; rm tests/orphan.nix
 """
 import argparse
+import ast
 import glob
 import re
 import json
@@ -1137,6 +1138,255 @@ def ruling_conditions_selftest():
     return failures
 
 
+
+# ---------------------------------------------------------------------------
+# GEIST'S LAW (2026-09-05, P2 ACTION): A BOX-RUNNABLE BATTERY NEVER MUTATES
+# HUMAN-SHARED STATE — AND IT IS DATA, NOT A COMMENT.
+#
+# The occasion: agos-notes-battery ran `agos-notes new` against /var/lib/agos-notes, the store
+# notes-open.nix documents as shared with the human, with no delete verb to undo it. Every run
+# left a note behind permanently. It was found by hand, in a one-off sweep, because Augur made
+# a remark on a different PR. Nothing in the repo would have found the next one.
+#
+# Geist's ruling was explicit that a comment does not discharge this: each battery DECLARES
+# `MUTATES_SHARED_STATE`, and the declaration is read by a check. Three legal values:
+#
+#   False        the battery mutates nothing outside its own temp dirs. Box-runnable.
+#   "<path>"     it HAS mutating arms, and they live in the named VM test, which must exist.
+#   True         always a failure. True means "I mutate shared state and nothing owns that",
+#                which is the condition being outlawed, so it is not a way to opt out.
+#
+# WHAT THIS CHECK IS: a floor. It reads a declaration; it cannot read behaviour. A battery
+# declaring False while shelling out to something that writes /var is green here and wrong.
+# The declaration makes the claim ATTRIBUTABLE and reviewable, which the absence of one did
+# not — it does not make it true. Do not read this green as "no battery mutates anything".
+_MUT_LEGAL = "False, or a string naming the VM test that owns the mutating arms"
+
+# DEBT, NOT DESIGN — same rule as KNOWN_UNWIRED_DEBT above, and for the same reason.
+#
+# A battery here has a REAL mutating arm covering a REAL product verb, and the VM test that
+# should own it does not exist yet. It may declare True; nothing else may. That keeps `True`
+# meaningful — it reads "known, ledgered, and someone is watching the count" rather than
+# "opted out" — and it keeps the ruling's default (False or an owner) intact for every file
+# that is not named here. THIS LIST MAY ONLY SHRINK.
+#
+# calendar-battery is NOT the notes case and the difference decided the remedy. Geist's notes
+# ruling removed the write arms because the brain's notes hand is list|read only, so they
+# covered verbs the product never advertises — cost zero. But the brain DOES advertise
+# `calendar.add` (agent-brain.py:1386), so `cal("add", start, "battery-test-event")` covers a
+# verb an agent can actually reach. Deleting it would trade a mutation for a coverage hole in
+# a shipped verb. It moves to the VM arm instead, and waits for that arm to exist.
+#
+# Found 2026-09-05 while writing the declarations this check reads — which is the argument for
+# the check. The notes case was found by hand; this one was found because something finally
+# forced every battery to be looked at. Not confirmed by running it: agos-cal IS on the Dell,
+# so running it to "prove" the mutation IS the mutation.
+MUTATION_DEBT = {
+    "calendar-battery.py":
+        'cal("add", start, "battery-test-event") — creates an event in the human calendar on '
+        "any box with agos-cal (the Dell has it). Covers the real calendar.add verb, so it "
+        "moves to tests/verb-battery.nix rather than being deleted; that file is not built yet.",
+}
+
+
+def _module_assign(path, name):
+    """Module-level assignment of `name`, as a literal. None if absent/not a literal.
+
+    ast, not import: importing a battery RUNS it, and running batteries is what this file
+    exists to have opinions about.
+    """
+    try:
+        tree = ast.parse(open(path, encoding="utf-8").read())
+    except Exception:
+        return ("__unparseable__", None)
+    for node in tree.body:
+        if isinstance(node, ast.Assign):
+            for t in node.targets:
+                if isinstance(t, ast.Name) and t.id == name:
+                    try:
+                        return ("ok", ast.literal_eval(node.value))
+                    except Exception:
+                        return ("__notliteral__", None)
+    return ("__absent__", None)
+
+
+def mutation_declarations(tests_dir):
+    """Every *-battery.py declares MUTATES_SHARED_STATE, legally. Returns a list of problems."""
+    problems = []
+    for path in sorted(glob.glob(os.path.join(tests_dir, "*-battery.py"))):
+        base = os.path.basename(path)
+        state, value = _module_assign(path, "MUTATES_SHARED_STATE")
+        if state == "__unparseable__":
+            problems.append(f"{base}: could not be parsed to read its declaration")
+        elif state == "__absent__":
+            problems.append(f"{base}: no MUTATES_SHARED_STATE declaration ({_MUT_LEGAL})")
+        elif state == "__notliteral__":
+            problems.append(f"{base}: MUTATES_SHARED_STATE is computed, not a literal — a "
+                            f"declaration a reader cannot evaluate is not a declaration")
+        elif value is True:
+            if base not in MUTATION_DEBT:
+                problems.append(f"{base}: declares MUTATES_SHARED_STATE = True and is not in "
+                                f"MUTATION_DEBT. True is not an opt-out — move the mutating "
+                                f"arms into a VM test and name it, or ledger the debt")
+        elif value is False:
+            pass
+        elif isinstance(value, str):
+            owner = os.path.join(tests_dir, value)
+            if not os.path.exists(owner):
+                problems.append(f"{base}: names {value!r} as the owner of its mutating arms, "
+                                f"but {owner} does not exist")
+        else:
+            problems.append(f"{base}: MUTATES_SHARED_STATE = {value!r} ({_MUT_LEGAL})")
+    return problems
+
+
+# ---------------------------------------------------------------------------
+# AUGUR'S ARM (2026-09-05): NO BATTERY NAMES A NON-LOOPBACK HOST.
+#
+# agos-web-battery fetched a third-party host on every run — from the operator's IP, for a
+# property the failure envelope satisfied anyway. It passed CI only because CI lacks the
+# binary and the battery SKIPs. Augur's point on #279 is the one that matters: I fixed the
+# arm and then wrote a comment accommodating "a future sweep grepping for non-loopback URLs",
+# and THERE WAS NO SUCH SWEEP. The sweep was me, by hand, once. A rule with no trigger point
+# does not fire at an unfamiliar surface. This is the trigger point.
+#
+# WHAT THIS CHECK IS: a floor, and a smaller one than it looks. It counts STRINGS, not facts.
+# A host assembled at runtime, read from env, or built by concatenation is invisible to it —
+# the same defect class as the independence gate that counted strings. A green here means
+# "no battery contains a literal non-loopback URL", which is strictly weaker than "no battery
+# reaches the network". Do not promote the one into the other.
+_URL_RE = re.compile(r"\bhttps?://([A-Za-z0-9_.\-\[\]:]+)")
+_LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "[::1]", "::1")
+# RFC 6761/2606 reserve these so they can never resolve to a real server, which is a stronger
+# guarantee than "we agreed not to fetch it". example.com is NOT here on purpose: it is reserved
+# for DOCUMENTATION but it genuinely resolves and genuinely serves content, so a fixture using it
+# is one refactor away from a live fetch. Fixtures were moved to .invalid rather than exempted —
+# an allowlist entry retires the file from scrutiny, a non-resolving host retires the hazard.
+_UNRESOLVABLE_TLDS = (".invalid", ".test", ".example", ".localhost")
+
+
+def outbound_url_literals(tests_dir):
+    """Literal non-loopback http(s) hosts in any battery. Returns a list of problems."""
+    problems = []
+    for path in sorted(glob.glob(os.path.join(tests_dir, "*-battery.py"))):
+        base = os.path.basename(path)
+        try:
+            lines = open(path, encoding="utf-8").read().splitlines()
+        except Exception as exc:
+            problems.append(f"{base}: unreadable ({exc!r})")
+            continue
+        for i, line in enumerate(lines, 1):
+            for host in _URL_RE.findall(line):
+                bare = host.split(":")[0] if not host.startswith("[") else host
+                if bare in _LOOPBACK_HOSTS or host in _LOOPBACK_HOSTS:
+                    continue
+                if bare.lower().endswith(_UNRESOLVABLE_TLDS):
+                    continue
+                if "." not in bare:
+                    # A bare single label ("x") has no TLD and cannot be resolved by a stub
+                    # resolver; these appear as HTTPError() constructor args, never as targets.
+                    continue
+                problems.append(f"{base}:{i}: literal non-loopback host {host!r} — a battery "
+                                f"that reaches out is armed on every box where its binary "
+                                f"exists and green-by-accident everywhere it does not")
+    return problems
+
+
+def stale_mutation_debt(tests_dir):
+    """MUTATION_DEBT entries that no longer apply — the list must shrink, and be seen to."""
+    stale = []
+    for base in sorted(MUTATION_DEBT):
+        path = os.path.join(tests_dir, base)
+        if not os.path.exists(path):
+            stale.append(f"{base}: named in MUTATION_DEBT but the file is gone")
+            continue
+        state, value = _module_assign(path, "MUTATES_SHARED_STATE")
+        if value is not True:
+            stale.append(f"{base}: in MUTATION_DEBT but no longer declares True — the debt was "
+                         f"paid and the ledger entry outlived it")
+    return stale
+
+
+def mutation_declaration_selftest():
+    """Drive both new checks against fixtures. Without these the checks are assertions."""
+    failures = []
+    import tempfile
+    with tempfile.TemporaryDirectory() as d:
+        def w(name, text):
+            with open(os.path.join(d, name), "w") as fh:
+                fh.write(text)
+
+        # --- MUTATES_SHARED_STATE ---
+        w("a-battery.py", "MUTATES_SHARED_STATE = False\n")
+        if mutation_declarations(d):
+            failures.append("selftest: a clean False declaration was reported as a problem — "
+                            "the check would be red on every correct battery")
+        w("b-battery.py", "x = 1\n")
+        if not any("no MUTATES_SHARED_STATE" in p for p in mutation_declarations(d)):
+            failures.append("selftest: an UNDECLARED battery was not reported — the check "
+                            "cannot see the condition it exists for")
+        os.remove(os.path.join(d, "b-battery.py"))
+        w("c-battery.py", "MUTATES_SHARED_STATE = True\n")
+        if not any("not in MUTATION_DEBT" in p for p in mutation_declarations(d)):
+            failures.append("selftest: True was accepted — True would become the opt-out the "
+                            "ruling forbids")
+        os.remove(os.path.join(d, "c-battery.py"))
+        w("d-battery.py", "MUTATES_SHARED_STATE = 'no-such-vm-test.nix'\n")
+        if not any("does not exist" in p for p in mutation_declarations(d)):
+            failures.append("selftest: a battery naming a NON-EXISTENT owner passed — the "
+                            "string form would be a way to name anything and be believed")
+        w("no-such-vm-test.nix", "")
+        if mutation_declarations(d):
+            failures.append("selftest: naming an EXISTING owner still failed — the legal "
+                            "string form is unusable, so batteries would be pushed to False")
+        os.remove(os.path.join(d, "d-battery.py"))
+        os.remove(os.path.join(d, "no-such-vm-test.nix"))
+
+        # --- MUTATION_DEBT: True is legal ONLY for a ledgered file ---
+        w("z-battery.py", "MUTATES_SHARED_STATE = True\n")
+        if not any("not in MUTATION_DEBT" in p for p in mutation_declarations(d)):
+            failures.append("selftest: an UNLEDGERED True was accepted — True would be the "
+                            "opt-out the ruling forbids")
+        MUTATION_DEBT["z-battery.py"] = "selftest fixture"
+        try:
+            if mutation_declarations(d):
+                failures.append("selftest: a LEDGERED True was still rejected — the debt ledger "
+                                "is unusable, so real mutating arms would go undeclared instead")
+            if any("z-battery" in x for x in stale_mutation_debt(d)):
+                failures.append("selftest: a live debt entry was called stale — the ratchet "
+                                "would demand deletion of debt that still exists")
+            w("z-battery.py", "MUTATES_SHARED_STATE = False\n")
+            if not any("debt was paid" in p and "z-battery" in p for p in stale_mutation_debt(d)):
+                failures.append("selftest: a PAID debt entry was not reported stale — the "
+                                "ledger could only ever grow")
+        finally:
+            del MUTATION_DEBT["z-battery.py"]
+        os.remove(os.path.join(d, "z-battery.py"))
+
+        # --- non-loopback URL literals ---
+        # CONTROL FIRST: loopback and the ephemeral-port form must NOT trip, or the check is
+        # a blanket ban on URLs and the fix it is meant to protect would fail it.
+        # CONTROL: loopback AND the reserved non-resolving TLDs must all pass, or the check is a
+        # blanket ban and the arms written to avoid egress would fail it.
+        w("e-battery.py",
+          'A = "http://127.0.0.1:8080/"\nB = "https://localhost/x"\n'
+          'C = "http://127.0.0.1:%d/"\nD = "https://host.inv' + 'alid/x"\n')
+        if outbound_url_literals(d):
+            failures.append("selftest: a loopback-only battery was flagged — the check would "
+                            "fail the very arms written to avoid egress (agos-web 2a/2b)")
+        w("f-battery.py", 'U = "https://" + "cdn." + ("rea" + "lhost.net") + "/x"\n')
+        if outbound_url_literals(d):
+            failures.append("selftest: a CONCATENATED host tripped the literal scan — that is "
+                            "not what this check claims to catch and a false positive here "
+                            "teaches people to disable it")
+        os.remove(os.path.join(d, "f-battery.py"))
+        w("g-battery.py", 'U = "https://cdn.' + 'rea' + 'lhost.net/x"\n')
+        if not any("non-loopback host" in p for p in outbound_url_literals(d)):
+            failures.append("selftest: a literal non-loopback host was NOT reported — the "
+                            "check is vacuous and every green it prints is meaningless")
+    return failures
+
+
 class Findings:
     """One place every check's output goes, so the OK verdict cannot forget a check.
 
@@ -1203,7 +1453,7 @@ class Findings:
 REQUIRED_CHECKS = {
     "unlisted", "dangling", "unwired", "vacuous", "stale",
     "debt_added", "debt_removed", "unarmed", "wired_disarming", "flake_wired_disarming",
-    "ruling_table",
+    "ruling_table", "mutation_decls", "outbound_urls", "stale_mut_debt",
 }
 
 
@@ -1289,6 +1539,7 @@ SELFTESTS = (
     wired_disarm_selftest,
     flake_wired_disarm_selftest,
     findings_selftest,
+    mutation_declaration_selftest,
 )
 
 # SELFTESTS ONLY, now that `ruling_table` has moved to the checks registry where it belongs.
@@ -1299,6 +1550,7 @@ SELFTESTS = (
 REQUIRED_RULING = {
     "exemption_staleness_selftest", "ruling_conditions_selftest", "strict_caller_selftest",
     "wired_disarm_selftest", "flake_wired_disarm_selftest", "findings_selftest",
+    "mutation_declaration_selftest",
 }
 
 
@@ -1352,6 +1604,10 @@ def main():
     # with the checks, not with the selftests that prove the checker can go red.
     ruling_table = f.add("ruling_table",
                          check_ruling_conditions(open(args.flake).read(), args.tests_dir))
+    # Geist's law, as data (2026-09-05), and Augur's trigger point for the egress sweep.
+    mutation_decls = f.add("mutation_decls", mutation_declarations(args.tests_dir))
+    outbound_urls = f.add("outbound_urls", outbound_url_literals(args.tests_dir))
+    stale_mut_debt = f.add("stale_mut_debt", stale_mutation_debt(args.tests_dir))
 
     # ONE ITERATION, NOT A SUM. Each term's NAME comes from the object that gets called, so a
     # term cannot be dropped from the chain while still counting as having run.
@@ -1431,6 +1687,39 @@ def main():
         print("     or downgrade the row to 'half'/'prose'. A ruling condition discharged by a",
               file=sys.stderr)
         print("     table entry is discharged by prose, which is what this table is FOR.",
+              file=sys.stderr)
+    if f["mutation_decls"]:
+        print("FAIL: MUTATES_SHARED_STATE — a battery does not declare what it mutates, or",
+              file=sys.stderr)
+        print("      declares it illegally:", file=sys.stderr)
+        for problem in mutation_decls:
+            print(f"  {problem}", file=sys.stderr)
+        print("  -> Geist 2026-09-05: a box-runnable battery never mutates human-shared state.",
+              file=sys.stderr)
+        print("     Declare False, or move the mutating arms into a VM test and name it. This",
+              file=sys.stderr)
+        print("     check reads the DECLARATION, not the behaviour — it makes the claim",
+              file=sys.stderr)
+        print("     attributable, it does not make it true.", file=sys.stderr)
+    if f["stale_mut_debt"]:
+        print("FAIL: MUTATION_DEBT names a battery the debt no longer describes:", file=sys.stderr)
+        for problem in stale_mut_debt:
+            print(f"  {problem}", file=sys.stderr)
+        print("  -> remove the entry. A debt ledger that keeps paid entries stops being a count",
+              file=sys.stderr)
+        print("     anyone can watch go down, which is the only thing it was for.", file=sys.stderr)
+    if f["outbound_urls"]:
+        print("FAIL: a battery names a literal NON-LOOPBACK host. It reaches out on every box",
+              file=sys.stderr)
+        print("      where its binary exists, and is green-by-accident everywhere it does not:",
+              file=sys.stderr)
+        for problem in outbound_urls:
+            print(f"  {problem}", file=sys.stderr)
+        print("  -> serve the fixture on loopback, or drive the failure envelope against a",
+              file=sys.stderr)
+        print("     refused loopback port. This scan counts STRINGS: a host built at runtime or",
+              file=sys.stderr)
+        print("     read from env is invisible to it, so its green is a floor, not a proof.",
               file=sys.stderr)
     if f["wired_disarming"]:
         print("FAIL: a WIRED battery still SELF-DISARMS. It exits 0 announcing SKIP when its",

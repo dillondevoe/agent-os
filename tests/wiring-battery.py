@@ -13,6 +13,10 @@
 # missing pyyaml would HIDE that exact regression (the old SKIP branches were dead code for
 # this reason). So: we FAIL LOUD if pyyaml is absent. Same genesis-lock parity the runtime now
 # has via ps.pyyaml in brainPython.
+# MUTATES_SHARED_STATE — Geist's law, 2026-09-05: a box-runnable battery never mutates
+# human-shared state. Read as DATA by tests/vm-matrix-contract.py, not as a comment.
+MUTATES_SHARED_STATE = False
+
 import importlib.util, os, sys, tempfile, textwrap, py_compile
 
 # ── pre-flight: pyyaml required, not optional ──

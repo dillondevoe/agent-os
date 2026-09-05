@@ -18,6 +18,10 @@
 #   C. every official vector verifies to its published result (TRUE and FALSE alike)
 #   D. malformed inputs raise rather than returning a verdict
 #   I. control arm: a deliberately broken verifier is CAUGHT by the must-fail vectors
+# MUTATES_SHARED_STATE — Geist's law, 2026-09-05: a box-runnable battery never mutates
+# human-shared state. Read as DATA by tests/vm-matrix-contract.py, not as a comment.
+MUTATES_SHARED_STATE = False
+
 import csv, os, py_compile, sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))

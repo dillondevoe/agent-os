@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# MUTATES_SHARED_STATE — Geist's law, 2026-09-05: a box-runnable battery never mutates
+# human-shared state. Read as DATA by tests/vm-matrix-contract.py, not as a comment.
+MUTATES_SHARED_STATE = False
+
 """audit-signing-battery.py — properties for SIGNED audit records (task 287, slice 3).
 
 Usage: audit-signing-battery.py [<path-to-bin/audit>] [<scratch-dir>]

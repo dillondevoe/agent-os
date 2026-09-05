@@ -5,6 +5,10 @@
 # gracefully (ok:false) — we assert the JSON contract either way, and SKIP the
 # write-path detail if the store isn't writable (Dell gate owns the real store).
 # Run: PYTHONPATH=modules python3 tests/agos-notes-battery.py
+# MUTATES_SHARED_STATE — Geist's law, 2026-09-05: a box-runnable battery never mutates
+# human-shared state. Read as DATA by tests/vm-matrix-contract.py, not as a comment.
+MUTATES_SHARED_STATE = False
+
 import subprocess, json, shutil, sys
 
 EX = 0
@@ -36,25 +40,36 @@ try:
 except Exception as e:
     check("list parses", False, str(e))
 
-# new -> attempts create; assert it returns valid JSON with ok bool
-rc, out, err = run([ncli, "new", "Battery Test Note"])
+# The OTHER half of the product's hand, covered without mutating anything. `read` on a slug
+# that does not exist returns {ok:false,error:"no such note",slug} and creates NOTHING
+# (notes-open.nix cmd_read: it stats the path and returns before any write). So the second of
+# the brain's two notes verbs keeps real coverage here — the write arms were removed because
+# they mutated, not because coverage was expendable.
+MISSING = "battery-slug-that-does-not-exist"
+rc, out, err = run([ncli, "read", MISSING])
 try:
     d = json.loads(out)
-    check("new -> valid JSON {ok:bool}", d.get("ok") in (True, False), out[:60])
-    slug = d.get("slug")
-    if d.get("ok") is True and slug:
-        # read -> body contains the title
-        rc, out, err = run([ncli, "read", slug])
-        rd = json.loads(out)
-        check("read -> ok:true + body", rd.get("ok") is True and "Battery" in str(rd.get("body","")), out[:60])
-        # append -> ok true
-        rc, out, err = run([ncli, "append", slug, "appended line"])
-        ad = json.loads(out)
-        check("append -> ok:true", ad.get("ok") is True, out[:60])
-    else:
-        print("  SKIP write-path detail: store not writable here (Dell gate owns /var/lib/agos-notes)")
+    check("read <missing> -> ok:false + no-such-note", d.get("ok") is False and "no such note" in str(d.get("error","")), out[:80])
+    check("read <missing> -> echoes the slug", d.get("slug") == MISSING, str(d.get("slug")))
 except Exception as e:
-    check("new parses", False, str(e))
+    check("read parses", False, str(e) + " | out=" + out[:60])
+
+# THE WRITE ARMS ARE GONE, AND THEY WERE NEVER COVERING THE PRODUCT.
+# This battery used to run `agos-notes new` and `agos-notes append` against the hard-coded
+# /var/lib/agos-notes — the store notes-open.nix documents as SHARED WITH THE HUMAN — with no
+# delete verb in the CLI to undo it. Every run left a note behind, permanently, in the
+# operator's real notes. Found in the absent-binary sweep (Mirror, 2026-09-05); the store was
+# still empty on the Dell, so it was armed but had not yet fired.
+#
+# Geist ruled (2026-09-05, P2 ACTION): remove the arms, and NO env override on the store — a
+# caller-supplied store path on a shipped module is the 08-14 fs-confinement class and Phase S
+# would pay for it forever. The arms cost nothing to lose: the brain's `notes` hand is
+# list|read ONLY (agent-brain.py:1306-1310, which answers "use list|read" to anything else),
+# so `new`/`append` were testing verbs the product does not advertise to the agent. Verified
+# by reading that dispatch, not by taking the ruling's word for it.
+#
+# Mutating arms belong in the VM arm of tests/verb-battery.nix, where the store is disposable.
+# That is now law rather than preference, and it is enforced as DATA below, not as this comment.
 
 print("agos-notes-battery: " + ("ALL PASS" if EX == 0 else "FAILURES"))
 sys.exit(EX)

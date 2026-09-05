@@ -18,6 +18,10 @@
 # means "this file asserted nothing at all" and is what the vm-matrix contract's
 # self_disarms() heuristic looks for near a sys.exit(0). An arm-level skip is a
 # different claim, and one grep should not return two meanings.
+# MUTATES_SHARED_STATE — Geist's law, 2026-09-05: a box-runnable battery never mutates
+# human-shared state. Read as DATA by tests/vm-matrix-contract.py, not as a comment.
+MUTATES_SHARED_STATE = False
+
 import subprocess, json, os, shutil, sys
 
 EX = 0

@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# MUTATES_SHARED_STATE — Geist's law, 2026-09-05: a box-runnable battery never mutates
+# human-shared state. Read as DATA by tests/vm-matrix-contract.py, not as a comment.
+MUTATES_SHARED_STATE = False
+
 """xml-toolcall-battery.py — a tool call that renders as prose is a CLAIM.
 
 Rabbot's P1 item 2 (2026-08-31, from Dillon's photo of the Dell TUI at 06:44 CDT):

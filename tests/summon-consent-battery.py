@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# MUTATES_SHARED_STATE — Geist's law, 2026-09-05: a box-runnable battery never mutates
+# human-shared state. Read as DATA by tests/vm-matrix-contract.py, not as a comment.
+MUTATES_SHARED_STATE = False
+
 """Battery for the summon_claude consent gate (Rabbot door (i), 2026-09-02).
 
 WHAT WAS WRONG. `_summon_claude` spawns the operator's Claude CLI as a subprocess — their

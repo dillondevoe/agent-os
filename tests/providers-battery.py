@@ -22,6 +22,10 @@
 # Run:  PYTHONPATH=modules python3 tests/providers-battery.py
 # (pyyaml ships with the Nix closure; locally ensure pyyaml is importable.)
 
+# MUTATES_SHARED_STATE — Geist's law, 2026-09-05: a box-runnable battery never mutates
+# human-shared state. Read as DATA by tests/vm-matrix-contract.py, not as a comment.
+MUTATES_SHARED_STATE = False
+
 import os
 import sys
 import tempfile
