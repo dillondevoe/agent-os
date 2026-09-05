@@ -639,7 +639,21 @@ TOOLS=[
 # then the two absolute paths that exist on a NixOS system even when PATH is empty. If none
 # resolve, SHELL is None and every shell-out reports that as data rather than raising an
 # errno the model has to interpret.
-def _resolve_shell():
+#
+# BUILD-TIME LITERAL, same discipline as @GENESIS_PATH@ above: genesis-open.nix substitutes
+# @SH@ with ${pkgs.bash}/bin/bash, so the LOCKED build carries the store path of the exact
+# bash it was built against and asks the machine nothing. Until substituted (hand-deployed
+# dev) it starts with "@" and the fallback below runs — running from source must keep working.
+# The fallback stays as DEPTH, not as the mechanism: it is a second name-resolution
+# assumption, and the whole finding was that name resolution is what failed.
+SH_BUILD = "@SH@"
+
+def _resolve_shell(build=None):
+    b = SH_BUILD if build is None else build
+    # `os.path.exists` and not a bare truth test: a baked path that is not installed is not
+    # a shell, and returning it would only move the ENOENT to the first run_command — after
+    # the caller has already been told it has a hand.
+    if not b.startswith("@") and os.path.exists(b): return b
     for c in ("bash", "sh"):
         p = shutil.which(c)
         if p: return p

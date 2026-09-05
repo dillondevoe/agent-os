@@ -2333,6 +2333,25 @@
               touch $out
             '';
 
+        # The brain's HAND, resolved at build time rather than by name. A battery with no
+        # runner is four batteries and no runner — the arms exist here or they are prose.
+        shell-resolve-contract =
+          let
+            pkgs = nixpkgs.legacyPackages.${system};
+            pyWithYaml = pkgs.python3.withPackages (ps: [ ps.pyyaml ]);
+          in pkgs.runCommand "shell-resolve-contract-check"
+            { nativeBuildInputs = [ pyWithYaml ]; } ''
+              work="$(mktemp -d)"
+              mkdir -p "$work/modules" "$work/tests"
+              cp ${./modules/agent-brain.py} "$work/modules/agent-brain.py"
+              cp ${./modules/providers.py} "$work/modules/providers.py"
+              cp ${./modules/genesis-open.nix} "$work/modules/genesis-open.nix"
+              cp ${./tests/shell-resolve-battery.py} "$work/tests/shell-resolve-battery.py"
+              cd "$work"
+              python3 tests/shell-resolve-battery.py
+              touch $out
+            '';
+
         # A tool call that renders as prose is a CLAIM — the model asked to act, nothing
         # acted, and the next turn narrated a result it never produced. Observed live on
         # qwen3.5:9b (Dillon's Dell TUI photo, 2026-08-31): an XML/Hermes `<tool_call>` block
