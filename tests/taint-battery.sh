@@ -145,13 +145,14 @@ H1="$(sha 'key1 blessed body')"
 out="$(t stamp trusted/key1 --content-hash "$H1")" || fail "stamp trusted/key1 failed"
 case "$out" in *"origin=TRUSTED"*) : ;; *) fail "clean-session stamp not TRUSTED: $out";; esac
 t set "poisoned page" >/dev/null || fail "set before untrusted stamp failed"
-out="$(t stamp untrusted/key2)" || fail "stamp untrusted/key2 failed"
+H2="$(sha 'key2 poisoned body')"                  # REQUIRED mode: every stamp/recall carries a hash
+out="$(t stamp untrusted/key2 --content-hash "$H2")" || fail "stamp untrusted/key2 failed"
 case "$out" in *"origin=UNTRUSTED"*) : ;; *) fail "tainted-session stamp not UNTRUSTED: $out";; esac
 
 # 5. UNTRUSTED is ABSORBING (§6 "permanently"). Re-stamping an UNTRUSTED entry from a
 #    CLEAN session must NOT downgrade it. Provenance only ratchets toward untrusted.
 reset_clean >/dev/null || fail "reset before re-stamp failed"
-out="$(t stamp untrusted/key2)" || fail "re-stamp untrusted/key2 failed"
+out="$(t stamp untrusted/key2 --content-hash "$H2")" || fail "re-stamp untrusted/key2 failed"
 case "$out" in *"origin=UNTRUSTED"*) : ;; *) fail "UNTRUSTED downgraded to TRUSTED (laundering!): $out";; esac
 
 # 6. RECALL of an UNTRUSTED entry RE-TAINTS — the headline cross-session anti-laundering
@@ -159,7 +160,7 @@ case "$out" in *"origin=UNTRUSTED"*) : ;; *) fail "UNTRUSTED downgraded to TRUST
 #    it in a fresh CLEAN session must re-taint. Poison cannot be washed by a reset.
 reset_clean >/dev/null || fail "reset before untrusted recall failed"
 status_is clean
-out="$(t recall untrusted/key2)" || fail "recall untrusted/key2 failed"
+out="$(t recall untrusted/key2 --content-hash "$H2")" || fail "recall untrusted/key2 failed"
 case "$out" in *"RE-TAINTED"*) : ;; *) fail "recall of UNTRUSTED did not re-taint: $out";; esac
 status_is TAINTED
 
@@ -173,7 +174,7 @@ status_is clean
 # 8. RECALL of an UNKNOWN-origin key FAILS CLOSED (§8). No origin record == unknown
 #    provenance == untrusted; recalling it must re-taint, not silently pass.
 reset_clean >/dev/null || fail "reset before unknown recall failed"
-out="$(t recall never/stamped)" || fail "recall of unknown key errored"
+out="$(t recall never/stamped --content-hash "$(sha 'whatever bytes')")" || fail "recall of unknown key errored"
 case "$out" in *"RE-TAINTED"*) : ;; *) fail "recall of UNKNOWN origin did not fail-closed: $out";; esac
 status_is TAINTED
 
@@ -230,22 +231,24 @@ done
 NL="$SCRATCH/taint-nolog"; mkdir -p "$NL"
 ( export AGENT_OS_TAINT_DIR="$NL"                   # setup under the REAL audit
   reset_clean >/dev/null || exit 41
-  "$PY" "$TAINT" stamp seed/key >/dev/null || exit 42
+  "$PY" "$TAINT" stamp seed/key --content-hash "$(sha seed)" >/dev/null || exit 42
 ) || fail "test-12 setup (live audit) failed"
 SNAP_S="$(cat "$NL/session.json")"; SNAP_O="$(cat "$NL/origins.json")"
 # Every mutating op under a DEAD audit: must fail closed AND leave state byte-identical.
 while IFS= read -r op; do
   [ -n "$op" ] || continue
   ( export AUDIT_BIN="$SCRATCH/nonexistent-audit"; export AGENT_OS_TAINT_DIR="$NL"
-    "$PY" "$TAINT" $op >/dev/null 2>&1 ) \
-    && fail "taint '$op' SUCCEEDED under unreachable audit (no-log->no-execute violated)"
+    "$PY" "$TAINT" $op >/dev/null 2>&1 ); rc=$?
+  # exactly 3 (audit-unreachable): a 0 is the no-log->no-execute violation; a 2 would mean the
+  # REQUIRED-mode hash refusal fired FIRST (broken $(sha) fixture) and this row never reached the gate.
+  [ "$rc" -eq 3 ] || fail "taint '$op' under unreachable audit: rc=$rc, expected 3 (0 = no-log->no-execute violated; 2 = hash fixture broke, gate never exercised)"
   [ "$(cat "$NL/session.json")" = "$SNAP_S" ] || fail "taint '$op' MUTATED session.json under dead audit"
   [ "$(cat "$NL/origins.json")" = "$SNAP_O" ] || fail "taint '$op' MUTATED origins.json under dead audit"
-done <<'OPS'
+done <<OPS
 set poison
 reset --confirm-human --break-glass
-stamp new/key
-recall seed/key
+stamp new/key --content-hash $(sha new)
+recall seed/key --content-hash $(sha seed)
 boot
 OPS
 
@@ -263,20 +266,21 @@ case "$o" in *"taint: TAINTED"*) : ;; *) fail "corrupt session.json did not read
 ( export AGENT_OS_TAINT_DIR="$CS"
   reset_clean >/dev/null || exit 51
   printf '{ broken origins ' > "$CS/origins.json"; BEFORE="$(cat "$CS/origins.json")"
-  if "$PY" "$TAINT" stamp launder/key >/dev/null 2>&1; then exit 52; fi  # must FAIL, not stamp TRUSTED
+  # (hash supplied so the refusal is the CORRUPT-LEDGER one, not REQUIRED-mode's hash-less deny)
+  if "$PY" "$TAINT" stamp launder/key --content-hash "$(sha l)" >/dev/null 2>&1; then exit 52; fi  # must FAIL, not stamp TRUSTED
   [ "$(cat "$CS/origins.json")" = "$BEFORE" ] || exit 53                 # must NOT rebuild the ledger
 ) || fail "corrupt origins.json: stamp did not fail-closed without rebuilding (FIX-2 laundering hole)"
 # (c) valid JSON but structurally wrong (tags not a dict) is ALSO corrupt -> stamp refuses.
 ( export AGENT_OS_TAINT_DIR="$CS"
   reset_clean >/dev/null || exit 54
   printf '{"tags":"not-a-dict"}' > "$CS/origins.json"
-  if "$PY" "$TAINT" stamp x/y >/dev/null 2>&1; then exit 55; fi
+  if "$PY" "$TAINT" stamp x/y --content-hash "$(sha xy)" >/dev/null 2>&1; then exit 55; fi
 ) || fail "structurally-wrong origins.json: stamp did not fail-closed"
 # (d) corrupt origins.json -> recall fails closed (re-taints) and boot taints.
 ( export AGENT_OS_TAINT_DIR="$CS"
   reset_clean >/dev/null || exit 56
   printf '{ broken origins ' > "$CS/origins.json"
-  r="$("$PY" "$TAINT" recall anything)" || exit 57
+  r="$("$PY" "$TAINT" recall anything --content-hash "$(sha a)")" || exit 57
   case "$r" in *"RE-TAINTED"*) : ;; *) exit 58;; esac
   reset_clean >/dev/null || exit 59
   printf '{ broken origins ' > "$CS/origins.json"
@@ -430,6 +434,58 @@ printf 'clean body\n' > "$G4BMEM/domain/n2.md"
   o="$("$PY" "$TAINT" boot --mem-root "$G4BMEM")" || exit 115
   case "$o" in *"content-hash mismatch on trusted mem"*) : ;; *) exit 116;; esac
 ) || fail "GAP-4 boot hash-mismatch on a never-recalled TRUSTED tag not caught — rc $?"
+
+# (f) REQUIRED mode (task 276) + verdict row "TRUSTED / hash-H / recall-hash ABSENT" (task 278 #1).
+#     A hash-stamped TRUSTED key recalled WITHOUT --content-hash is a HARD DENY: exit 2, nothing
+#     honored, nothing released (the broker withholds on non-zero), and NO state change — the session
+#     stays clean and the ledger is byte-identical. Same for a MALFORMED hash and for a hash-less
+#     stamp. The optional-era row re-tainted silently; this is the loud tripwire that replaced it.
+G4R="$SCRATCH/taint-gap4-required"; mkdir -p "$G4R"
+( export AGENT_OS_TAINT_DIR="$G4R"
+  reset_clean >/dev/null || exit 131
+  H_R="$(sha 'required body')"
+  "$PY" "$TAINT" stamp req/key --content-hash "$H_R" >/dev/null || exit 132
+  S0="$(cat "$G4R/session.json")"; O0="$(cat "$G4R/origins.json")"
+  # absent flag on recall -> exit 2, no honor
+  o="$("$PY" "$TAINT" recall req/key 2>&1)"; rc=$?
+  [ "$rc" -eq 2 ] || exit 133
+  case "$o" in *"REQUIRED"*"absent"*) : ;; *) exit 134;; esac
+  case "$o" in *"no change"*|*"RE-TAINTED"*) exit 135;; esac      # neither honored nor re-tainted: refused
+  # malformed value on recall -> exit 2, distinguished as malformed
+  o="$("$PY" "$TAINT" recall req/key --content-hash sha256:nothex 2>&1)"; rc=$?
+  [ "$rc" -eq 2 ] || exit 136
+  case "$o" in *"REQUIRED"*"malformed"*) : ;; *) exit 137;; esac
+  # absent flag on stamp -> exit 2, no tag written
+  o="$("$PY" "$TAINT" stamp req/other 2>&1)"; rc=$?
+  [ "$rc" -eq 2 ] || exit 138
+  case "$o" in *"REQUIRED"*"absent"*) : ;; *) exit 139;; esac
+  # state untouched by all three refusals
+  [ "$(cat "$G4R/session.json")" = "$S0" ] || exit 140
+  [ "$(cat "$G4R/origins.json")" = "$O0" ] || exit 141
+  o="$("$PY" "$TAINT" status)" || exit 142
+  case "$o" in *"taint: clean"*) : ;; *) exit 143;; esac
+  # the SAME key with the RIGHT hash still honors -> the refusal was about the flag, not the tag
+  o="$("$PY" "$TAINT" recall req/key --content-hash "$H_R")" || exit 144
+  case "$o" in *"no change"*) : ;; *) exit 145;; esac
+) || fail "REQUIRED-mode --content-hash tripwire (absent/malformed recall, hash-less stamp) — rc $?"
+grep -q '"refused":"no-content-hash"' "$LOG" || fail "REQUIRED-mode refusal not audited"
+
+# (g) Verdict row "LEGACY STRING TAG" (task 278 #2). A hand-written pre-GAP-4 ledger entry
+#     {"k":"TRUSTED"} carries no hash -> unverifiable -> recall (with a hash) must RE-TAINT, never
+#     honor; and a legacy "UNTRUSTED" string stays absorbing across the tag-shape migration (a clean
+#     re-stamp cannot launder it to TRUSTED). Pins _tag_origin/_tag_hash against a refactor.
+G4L="$SCRATCH/taint-gap4-legacy"; mkdir -p "$G4L"
+( export AGENT_OS_TAINT_DIR="$G4L"
+  reset_clean >/dev/null || exit 151
+  printf '{"schema":"taint-shadow-v1","tags":{"legacy/trusted":"TRUSTED","legacy/untrusted":"UNTRUSTED"}}' > "$G4L/origins.json"
+  o="$("$PY" "$TAINT" recall legacy/trusted --content-hash "$(sha 'any bytes')")" || exit 152
+  case "$o" in *"RE-TAINTED"*) : ;; *) exit 153;; esac
+  o="$("$PY" "$TAINT" status)" || exit 154
+  case "$o" in *"taint: TAINTED"*) : ;; *) exit 155;; esac
+  reset_clean >/dev/null || exit 156
+  o="$("$PY" "$TAINT" stamp legacy/untrusted --content-hash "$(sha 'fresh bytes')")" || exit 157
+  case "$o" in *"origin=UNTRUSTED"*) : ;; *) exit 158;; esac   # absorbing across the legacy shape
+) || fail "legacy string-tag verdict row (TRUSTED-string re-taints on recall / UNTRUSTED-string absorbing) — rc $?"
 
 # 16. REC-A --key-prefix boot derivation (task-279 gate 7). Under Rec A the seam stamps the DOTTED
 #     runtime key `<leaf>.<slug>.md` (cap-invoke _meta_key_ok forbids '/'), while storage is flat at

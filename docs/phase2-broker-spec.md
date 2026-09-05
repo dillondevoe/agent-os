@@ -113,7 +113,7 @@ For a `tools/call` verdict, in this exact order — the first failing stage deni
    the result's origin from **broker policy** (§4.5a — never the impl's self-report).
    Then, depending on the capability, a taint effect **must commit first**:
    - result `origin:UNTRUSTED` (e.g. a `net.fetch` body, success *or* error) → `taint set`;
-   - `mem.recall` → `taint recall <key>` (re-taints if the stored entry is UNTRUSTED-origin);
+   - `mem.recall` → `taint recall <key> --content-hash <sha256>` per entry (re-taints if the stored entry is UNTRUSTED-origin or the hash no longer matches; the hash is REQUIRED — task 276);
    - `mem.remember` invoke-success → `taint stamp <key>` (**MUST-FIX #2** — the Step-7 impl
      *cannot* stamp; `/var/lib/agent-os/taint` is a protected path no impl sandbox may write,
      so the **broker** owns the stamp).
@@ -273,10 +273,10 @@ mechanisms, in strict priority order:
    effect must commit first:
    - `origin: UNTRUSTED` (success OR error body) → `taint set "<why>"` — the monotonic bit
      rises for the rest of the session;
-   - `mem.recall` → `taint recall <key>` — an UNTRUSTED-origin stored entry re-taints on read
+   - `mem.recall` → `taint recall <key> --content-hash <sha256>` — an UNTRUSTED-origin stored entry re-taints on read
      (already Step-3 behavior; the broker MUST call it — T0 "runs even under taint" means
      *authorization* runs, NOT that the provenance side-effect is skipped);
-   - `mem.remember` success → `taint stamp <key>` — the **broker** records the write's origin
+   - `mem.remember` success → `taint stamp <key> --content-hash <sha256>` — the **broker** records the write's origin
      (the Step-7 impl can't: the taint dir is a protected path no impl sandbox may write), so
      a **later-session `mem.recall` of it re-taints** — this is what closes cross-session
      laundering. taint's recall-of-unknown→UNTRUSTED covers a missing stamp only *by
@@ -387,7 +387,7 @@ Property + hostile battery, same bar as Steps 1–4, driven by a flake `broker-c
   `mem.recall` and `taint stamp` fail on `mem.remember`.
 - **Origin is broker-derived, not impl-reported:** an invoke stub that *claims* `TRUSTED`
   for `net.fetch` → broker still taints (origin from policy, §4.5a); unmapped cap → UNTRUSTED.
-- **`mem.remember` stamps:** on success the broker calls `taint stamp <key>` (assert the
+- **`mem.remember` stamps:** on success the broker calls `taint stamp <key> --content-hash <sha256>` (assert the
   audit event) — the impl never does.
 - **DATA envelope:** results wrapped `content_type:"data"` (advisory; assert present, but the
   taint assertions above are the load-bearing ones).
