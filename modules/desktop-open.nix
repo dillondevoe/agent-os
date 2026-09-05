@@ -411,7 +411,53 @@ in
       # ${"$"}{agent-brain} is not in scope here — /run/current-system/sw/bin is the seam, and it is
       # a guaranteed one: flake.nix's agentos-open-imports guard asserts genesis-open puts
       # agent-brain in systemPackages, so this path exists on any system that has this module.
-      ExecStart = "${pkgs.kitty}/bin/kitty --class brain-home -e ${pkgs.bash}/bin/sh -c 'while :; do /run/current-system/sw/bin/agent-brain; sleep 1; done'";
+      # The brain's stderr is TEE'd to the journal, not redirected to it.
+      #
+      # WHY THE UNIT AND NOT THE BRAIN: this unit's ExecStart is kitty, and the brain is a
+      # grandchild on kitty's pty, so everything reaching fd 2 dies on that pty and is logged
+      # nowhere. Three days of this unit's journal is 17 lines and every one is kitty's own
+      # stderr. "Is the deployed brain warning about X?" had no fireable answer.
+      #
+      # WHAT IS ACTUALLY ON fd 2, WHICH IS NOT WHAT IT LOOKS LIKE. agent-brain runs its whole
+      # turn loop inside `patch_stdout(raw=True)` (agent-brain.py:1852-1859) when _PTK holds,
+      # and prompt_toolkit's patch_stdout replaces sys.stdOUT *and* sys.stdERR with a proxy that
+      # writes through the app output. Verified against ptk 3.0.52 on the Dell's own interpreter:
+      # `original_stderr = sys.stderr` / `sys.stderr = cast(TextIO, proxy)`. So:
+      #   - IN-loop writes -- the latency lines (1169/1172/1777: `[front-door 26.3s]`,
+      #     `[187.7s, 4 tok/s]`, the cloud route) -- never reach fd 2 at all. They are on the
+      #     screen via stdout and this tee does NOT put them in the journal. Getting them there
+      #     is a change in the BRAIN (copy to sys.__stderr__, which patch_stdout leaves alone),
+      #     not here, and it is the stream worth having: the router-leg numbers live in it.
+      #   - PRE-loop writes -- the provider warning (64) and every "I am not starting" refusal
+      #     (58/69/339/428/597) -- run before the guard is entered, so they DO reach fd 2. Those
+      #     are what this line captures, and they are exactly the class the two-way test asked
+      #     about.
+      #
+      # WHY TEE AND NOT `2>`: the display being protected is the STARTUP-REFUSAL display. A
+      # refusal that stops the brain must stay on the screen in front of Dillon, not move
+      # silently into a journal he is not reading. fd 3 holds the terminal; tee writes the
+      # journal copy and hands the original back.
+      #
+      # (An earlier draft of this comment claimed the tee protected the LATENCY display. It was
+      # written from a standalone `sys.stderr.write` with no prompt_toolkit around it -- the
+      # right mechanism measured from the wrong vantage, which is the same error as reading a
+      # module back through a loader that does not build the sys.path the real invocation has.
+      # Geist caught it and reproduced the proxy behaviour under a pty; the correction is here
+      # rather than in a follow-up because a comment describing a path the code does not take is
+      # worse than no comment.)
+      #
+      # `tee -i` ignores SIGINT: ^C during generation reaches the whole foreground pgrp, the
+      # brain catches it and continues (l.1913), and without -i the tee would die and take the
+      # journal copy with it for the rest of that session.
+      #
+      # Every binary is a STORE PATH, `tee` included. A bare `tee` here would be the exact
+      # defect #277 and #282 spent a week closing: this unit's PATH is narrow by construction,
+      # and a name-lookup that fails inside a redirect fails SILENTLY -- the brain would keep
+      # running with its stderr going nowhere, which is the state this commit exists to end.
+      #
+      # bash, not sh: `>(...)` is a bashism. `_PTK` keys on stdin+stdout isatty (agent-brain.py:17)
+      # and stdout is untouched, so the prompt toolkit is unaffected -- checked, not assumed.
+      ExecStart = "${pkgs.kitty}/bin/kitty --class brain-home -e ${pkgs.bash}/bin/bash -c 'exec 3>&2; while :; do /run/current-system/sw/bin/agent-brain 2> >(${pkgs.coreutils}/bin/tee -i >(${pkgs.systemd}/bin/systemd-cat -t agent-brain) >&3); sleep 1; done'";
       Restart = "always";
       RestartSec = 2;
     };
