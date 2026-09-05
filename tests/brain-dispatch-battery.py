@@ -48,6 +48,9 @@ spec.loader.exec_module(brain)
 
 # ── stub the process layer; record every invocation verbatim ──
 CALLS = []
+_REAL_RUN = brain.subprocess.run       # captured BEFORE the stubs below; G1 needs the genuine ones
+_REAL_POPEN = brain.subprocess.Popen   # subprocess.run() is implemented ON Popen, so restoring
+                                       # run alone leaves the real one driving a stubbed Popen
 class _Done:
     returncode = 0; stdout = ""; stderr = ""
 def _popen(argv, *a, **kw):
@@ -158,6 +161,103 @@ _code = "".join(
 check("F no residual hyprlang dispatch verbs in the executing code",
       not any(v in _code for v in ("killactive", "cyclenext", "layoutmsg orientationcycle")),
       "a hyprlang verb survives; under a .lua config it is evaluated, not parsed")
+
+
+# ══ G: THE SHELL THE BOX ACTUALLY HAS (P0, 2026-09-05) ═══════════════════════════════════
+# rabbot-to-mirror P0: every run_command on the Dell died `[Errno 2] ... 'bash'`. NixOS has
+# no /bin/bash and the brain service's PATH is not a login shell's. The ask was explicit —
+# "add a battery arm on NixOS that runs `true` through it; a tool that has never run on the
+# target is a claim." So G1 is an END-TO-END arm with the process layer UNSTUBBED: it runs a
+# real command through the real resolved shell inside the nix build sandbox, which is the
+# closest thing to the target this check can reach.
+brain.subprocess.run = _REAL_RUN
+brain.subprocess.Popen = _REAL_POPEN
+check("G0 a shell resolved at import", bool(brain.SHELL) and os.path.exists(brain.SHELL or ""),
+      "SHELL=" + repr(brain.SHELL))
+_out = brain.do_tool("run_command", {"command": "printf hello-from-the-hand"})
+check("G1 run_command executes for real and returns its stdout", _out == "hello-from-the-hand",
+      "saw: " + repr(_out))
+# G2: a failing command is DATA, not an exception the model has to narrate.
+_out = brain.do_tool("run_command", {"command": "echo boom >&2; exit 3"})
+check("G2 a failing command returns its stderr as data", "boom" in _out, "saw: " + repr(_out))
+# G3 CONTROL/VACUITY ARM. Without it, G1 would also pass on a build that happened to have
+# `bash` on PATH while the code still hardcoded the name — which is exactly the Dell's
+# failure, invisible from any machine that has one. Force the no-shell world and assert the
+# branch REPORTS rather than raising a FileNotFoundError.
+_saved_shell = brain.SHELL
+brain.SHELL = None
+_out = brain.do_tool("run_command", {"command": "true"})
+check("G3 no shell on the box -> reported as data, never an errno",
+      _out.startswith("error:") and "no shell" in _out, "saw: " + repr(_out))
+brain.SHELL = _saved_shell
+# G4: the executing code must not name a shell binary literally. Comments may (the block
+# above _resolve_shell explains the bug by naming `bash`), so read the stripped token stream.
+# The name `bash` DOES legitimately appear in the executing code — inside _resolve_shell's
+# candidate list, which is the fix. What must not survive is a shell-OUT that names a binary
+# instead of using the resolved one, i.e. the `[<literal>, "-c", ...]` argv shape.
+check("G4 no shell-out names its interpreter literally",
+      not any(sig in _code for sig in ('"bash" , "-c"', '"sh" , "-c"', '"/bin/bash" , "-c"')),
+      "a hardcoded `[<shell>, '-c', ...]` argv survives; it is resolved at import for a reason")
+brain.subprocess.run = _run       # re-stub both for everything below
+brain.subprocess.Popen = _popen
+
+# ══ H: POWER IS A CAPABILITY (P0 ask b) ══════════════════════════════════════════════════
+def agos_calls():
+    return [list(a) for _k, a, _kw in CALLS
+            if isinstance(a, (list, tuple)) and a and "agos-sys" in str(a[0])]
+for verb, expect in (("reboot", "reboot"), ("poweroff", "poweroff")):
+    CALLS.clear()
+    brain.do_tool("system", {"action": "power", "value": verb})
+    ac = agos_calls()
+    check("H1 power " + verb + " -> exactly one agos-sys invocation", len(ac) == 1, repr(ac))
+    if len(ac) == 1:
+        check("H1 power " + verb + " -> argv is the fixed enum word", ac[0][1:] == ["power", expect],
+              repr(ac[0]))
+# H2 CONTROL ARM. Without it, a dispatcher that shelled out on ANY value would pass H1.
+for bogus in ("halt", "", "reboot; id", "REBOOT --now"):
+    CALLS.clear()
+    r = brain.do_tool("system", {"action": "power", "value": bogus})
+    check("H2 power " + repr(bogus) + " dispatches NOTHING", agos_calls() == [], repr(agos_calls()))
+    check("H2 power " + repr(bogus) + " returns the refusal as data", "power takes" in r, repr(r))
+# H3: the model must be TOLD the hand exists. An enum the dispatcher accepts but the schema
+# hides is how "reboot is not a capability" was true while the code could do it.
+_sys_line = [l for l in src.splitlines() if '"name":"system"' in l]
+check("H3 system tool schema found", len(_sys_line) == 1)
+if len(_sys_line) == 1:
+    check("H3 'power' is in the description the model reads", "power" in _sys_line[0], _sys_line[0][:240])
+
+# ══ I: LITERAL VERBS DO NOT REACH A MODEL (P1 ask 2) ═════════════════════════════════════
+for text, want in (("reboot", "reboot"), ("Reboot.", "reboot"), ("  RESTART  ", "reboot"),
+                   ("shut down", "poweroff"), ("poweroff!", "poweroff")):
+    lv = brain.literal_verb(text)
+    check("I1 " + repr(text) + " -> power " + want,
+          lv is not None and lv[1].get("value") == want, repr(lv))
+# I2 CONTROL ARM, and it is the load-bearing one: without it a matcher that returned `reboot`
+# for everything passes every arm in I1. Exact-whole-utterance is the whole safety property.
+for text in ("reboot the router when you get a chance", "rebooting", "why did it reboot",
+             "", "reboot now", "shut down the vm"):
+    check("I2 " + repr(text) + " is NOT a literal verb", brain.literal_verb(text) is None,
+          repr(brain.literal_verb(text)))
+# I3/I4: end to end through frontdoor_turn, with the HTTP layer recorded. I3 asserts a literal
+# makes ZERO model calls; I4 is its control — a non-literal must still reach one, or I3 would
+# pass on a front door that had stopped calling models at all.
+HTTP = []
+def _urlopen(req, *a, **kw):
+    HTTP.append(getattr(req, "full_url", str(req)))
+    raise OSError("no ollama in the battery")
+brain.urllib.request.urlopen = _urlopen
+CALLS.clear(); HTTP.clear()
+_msgs = [{"role": "user", "content": "reboot"}]
+brain.frontdoor_turn(_msgs)
+check("I3 a literal verb makes NO model call", HTTP == [], repr(HTTP))
+check("I3 a literal verb dispatches the capability", len(agos_calls()) == 1, repr(agos_calls()))
+CALLS.clear(); HTTP.clear()
+try:
+    brain.frontdoor_turn([{"role": "user", "content": "reboot the router when you get a chance"}])
+except Exception:
+    pass
+check("I4 CONTROL: a non-literal turn DOES reach a model", len(HTTP) >= 1, repr(HTTP))
+check("I4 CONTROL: a non-literal turn dispatches no power", agos_calls() == [], repr(agos_calls()))
 
 print(("  brain-dispatch: FAIL" if EX else "  brain-dispatch: all checks passed"))
 sys.exit(EX)
