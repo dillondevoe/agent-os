@@ -243,11 +243,23 @@ if [ "${1:-}" = "--selftest" ]; then
     case "$pd" in *"against main $fixshort"*) echo "  ok   BD2 CONTROL: the stamped sha is the base actually measured ($fixshort)" ;;
       *) echo "  FAIL BD2 CONTROL: header sha is not the measured base $fixshort; got [$pd]"; fail=1 ;; esac
   fi
-  # BD3: the base must be DATED, not merely named -- see the header comment. Without it the header
-  # satisfies BD1/BD2 while carrying a stale ref no reader can detect. The fixture's base is committed
-  # during this run, so requiring a parseable Z date here also rejects a literal '?' fallback.
-  case "$pd" in *"(base dated "*"Z)"*) echo "  ok   BD3 the stamped base carries its own commit date" ;;
+  # BD3 asserts a FORMAT, and Augur's review is right that this is its ceiling: the fixture's base is
+  # committed during the run, so its date is always ~now and always parseable. There is no run here in
+  # which a stale base makes BD3 go red. It proves the field is PRINTED; it cannot prove the field
+  # DISCRIMINATES -- and the incident that motivated the header was eight minutes wide, where a date is
+  # visibly fresh and still wrong. That limit belongs in the arm, not in a comment above it. BD4/BD5 are
+  # what carry the discrimination, by asserting the FETCH STATE is reported and is not a blanket claim.
+  case "$pd" in *"(base dated "*)  echo "  ok   BD3 the stamped base carries its own commit date (format only -- see above)" ;;
     *) echo "  FAIL BD3: base named but not dated -- a stale ref is undetectable; got [$pd]"; fail=1 ;; esac
+  case "$pd" in *"never fetched"*|*"fetched just now"*|*"FETCH FAILED"*)
+      echo "  ok   BD4 the header states the base's FETCH state, not just its date" ;;
+    *) echo "  FAIL BD4: no fetch state -- staleness is the default and goes unreported; got [$pd]"; fail=1 ;; esac
+  # BD5 CONTROL, and it is the one that stops BD4 being satisfied by a lie: the fixture measures against a
+  # LOCAL ref, so a header that claimed "fetched just now" unconditionally -- the flattering answer, and
+  # the one that reproduces the defect -- must fail here.
+  case "$pd" in *"fetched just now"*) echo "  FAIL BD5 CONTROL: claimed a fetch for a purely local base"; fail=1 ;;
+    *"never fetched"*) echo "  ok   BD5 CONTROL: a local base is reported as never fetched, not as fresh" ;;
+    *) echo "  FAIL BD5 CONTROL: no fetch state at all; got [$pd]"; fail=1 ;; esac
   rm -rf "$nog" "$FIX"
   [ "$fail" = 0 ] && echo "ALL GREEN" || echo "SELFTEST FAILED"
   exit "$fail"
@@ -267,17 +279,28 @@ if [ -z "$prs" ]; then echo "no open PRs"; exit 0; fi
 # 703d930 with no change to the regex that matches it, because flake-check builds `checks` unfiltered.
 # The stamp does not stop the reuse. It makes the reuse checkable, which is the most a printed line can do.
 board_at="$(TZ=UTC date -u +%Y-%m-%dT%H:%M:%SZ)"
+# STALE IS THE DEFAULT, NOT THE EDGE CASE (Augur's #275 review, 2026-09-05). `origin/main` is a LOCAL
+# ref that moves only when someone runs `git fetch`; nothing in this file ever did. So the board did not
+# *risk* measuring against a stale base -- absent an unrelated fetch it always did, by an amount that is
+# a property of the operator's shell history. Augur hit it in this repo the same morning: his origin/main
+# sat at 5d4e475 while 703d930 was already merged. Fetch, and SAY whether the fetch worked -- a board that
+# could not reach the network and says so is honest; one that silently reports a week-old base is the
+# exact thing this header exists to prevent.
+case "$BASE" in
+  origin/*|upstream/*)
+    if git fetch -q "${BASE%%/*}" 2>/dev/null; then board_fresh="fetched just now"
+    else board_fresh="FETCH FAILED -- base is as of this checkout's last fetch, age unknown"; fi ;;
+  *) board_fresh="local ref, never fetched -- age is this checkout's" ;;
+esac
 board_base="$(git rev-parse --short "$BASE" 2>/dev/null || echo '?')"
-# ...AND THE STAMP MUST DATE THE BASE, NOT JUST NAME IT. `$BASE` is `origin/main` AS THIS CHECKOUT LAST
-# FETCHED IT, so a stale ref lets the board date itself honestly against something that is not what the
-# world calls main -- and the reader cannot tell, because a sha looks equally authoritative either way.
-# That is this change's own defect reproduced one level up: a named-but-undated base is a measurement
-# being read as a property. The base's committer date costs no network and is the discriminator: a
-# board computed "now" against a base from yesterday is visibly a board with a stale ref.
-board_bdate="$(TZ=UTC git log -1 --format=%cd --date=format-local:%Y-%m-%dT%H:%M:%SZ "$BASE" 2>/dev/null || echo '?')"
-echo "board    : computed $board_at against $BASE $board_base (base dated $board_bdate)"
-echo "           a reading AT THAT BASE, not a property of any PR or path. Re-measure before reusing;"
-echo "           a path becomes criteria-bearing the moment a workflow starts building it."
+# ...AND THE STAMP MUST DATE THE BASE, NOT JUST NAME IT: a sha looks equally authoritative fresh or stale.
+# %cI carries a REAL OFFSET rather than a hand-appended `Z`. The earlier form put the Z literal in the
+# format string with `format-local`, the one directive that reads the environment -- so its correctness
+# lived entirely in a `TZ=UTC` prefix, and Augur reproduced the failure by dropping it while reviewing:
+# 703d930 printed as 01:11:31Z for a commit made at 06:11:31Z. CDT wearing a Z, no diagnostic. A format
+# that cannot lie about its offset beats a prefix that has to be remembered.
+board_bdate="$(git log -1 --format=%cI "$BASE" 2>/dev/null || echo '?')"
+echo "board    : computed $board_at against $BASE $board_base (base dated $board_bdate; $board_fresh)"
 
 rc=0
 for pr in $prs; do
