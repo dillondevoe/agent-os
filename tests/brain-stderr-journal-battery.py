@@ -171,20 +171,29 @@ check("A8 the tee is what makes the difference", teed_jrn.getvalue() == "[front-
       "a tee that stopped emitting would be caught here, which the fixture-only version could not do: "
       + repr(teed_jrn.getvalue()))
 
-# ── A10 (concurrency — SHOWN FIRING: 550/600 lines spliced against a shared buffer) ──
-# The `time.sleep(0)` between the partial write and its newline is not a trick to manufacture a
-# failure: it is what makes the interleave OBSERVABLE at a 200-iteration scale instead of a
-# 200,000 one. Without it this arm passes against the broken implementation too, which is how
-# the first version of it was unreachable-red — the same class as A8's first version.
+# ── A10 (concurrency — red is now DETERMINISTIC: 600/600 spliced on a shared buffer, 0/600 here) ──
+# The first version yielded with `time.sleep(0)` between the partial write and its newline. That
+# made the interleave LIKELY, not certain: on DVo it spliced 550/600 and looked decisive, but Geist
+# ran the same arm twenty times against the broken shape on the Air and got 9,9,9,6,6,10,10,0,4,5,
+# 12,5,3,10,10,0,0,0,12,12 — FOUR RUNS FULLY GREEN against the implementation this arm exists to
+# catch (his #287 LOOKED, 2026-09-05). An arm whose red is a scheduler RATE is a flake on a fast
+# host and an unreachable red on a slow one, and neither is a control. So: a Barrier HANDOFF, not
+# a yield. Both threads must have written their partial before either writes its newline, which
+# makes the interleave a property of the program instead of a property of the machine running it.
 import threading, time
 cproxy, cjrn = Proxy(), Journal()
 tee = brain._JournalTee(cproxy, cjrn)
+gate = threading.Barrier(2)
 def hammer(tag):
     for _ in range(300):
-        tee.write(tag * 8); time.sleep(0); tee.write(tag * 8 + "\n")
+        tee.write(tag * 8)
+        gate.wait()          # both partials are in flight before either newline lands
+        tee.write(tag * 8 + "\n")
+        gate.wait()
 ths = [threading.Thread(target=hammer, args=(t,)) for t in ("a", "b")]
 for t in ths: t.start()
-for t in ths: t.join()
+for t in ths: t.join(30)
+check("A10 both writers finished (the barrier did not deadlock)", not any(t.is_alive() for t in ths))
 lines = [l for l in cjrn.getvalue().split("\n") if l]
 spliced = [l for l in lines if len(set(l)) != 1 or len(l) != 16]
 check("A10 no journal line is spliced from two writers", not spliced,
