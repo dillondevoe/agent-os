@@ -1439,13 +1439,22 @@ def stale_side_effect_debt(tests_dir):
 #   be1769b  the pre-#279 agos-web-battery — fetched a third-party host every run (egress)
 #   53f1b8a  the pre-fix agos-notes-battery — `agos-notes new` / `append` (shared-state)
 #
+# THE SHAS ARE 40 CHARACTERS AND THAT IS LOAD-BEARING, not tidiness. An abbreviation is a lookup
+# key against a LOCAL object store; it is not an identifier a remote will serve. `git fetch
+# --depth=1 origin be1769b` is refused by GitHub while the same fetch of the full sha succeeds.
+# I originally wrote the 7-char forms, watched CI report "0 of 2 arms ran", and concluded the
+# by-sha fetch itself was refused — the wrong mechanism, and I put it in a workflow comment as
+# "proven, not assumed". Geist tested both forms from a pristine shallow clone and found the
+# abbreviation was the whole of it. A wrong mechanism written down confidently is worse than an
+# open question: the next reader builds on it.
+#
 # Each is replayed with `SIDE_EFFECTS = []` PREPENDED: the honest-looking declaration that the
 # boolean predecessor accepted. The arm asserts the checker goes RED anyway. The post-fix tree
 # is the green arm — it is the whole rest of this check.
 HISTORY_CONTROLS = (
-    ("be1769b", "tests/agos-web-battery.py", "does not declare 'egress'",
+    ("be1769ba35cb31bdf78583c515600e1cc54884e4", "tests/agos-web-battery.py", "does not declare 'egress'",
      "pre-#279 agos-web-battery reached a third-party host on every run"),
-    ("53f1b8a", "tests/agos-notes-battery.py", "agos-notes new",
+    ("53f1b8a456d9e30b0313f6c8e80fc979216d6519", "tests/agos-notes-battery.py", "agos-notes new",
      "pre-fix agos-notes-battery created a note in the human's notes dir"),
 )
 
@@ -1471,6 +1480,11 @@ def _git_show(repo_root, sha, path):
     return None
 
 
+def _history_root():
+    """The checker's own repo. ONE expression, because two call sites once had two."""
+    return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
 def _is_git_repo(path):
     try:
         return subprocess.run(["git", "rev-parse", "--git-dir"], cwd=path, check=True,
@@ -1489,17 +1503,9 @@ def history_control_arms(repo_root, in_ci):
     """
     problems, ran = [], 0
     import tempfile
-    # AGENT_OS_GIT_REPO exists for the call-site harness, which copies the tree to a temp dir to
-    # prove main() uses its checks. That copy has no .git, so the arms cannot run there on their
-    # own -- and "not a repository" is a DIFFERENT condition from "sha missing in a repository".
-    # A shallow clone is a defect to fail on; a tree with no history at all cannot be asked. The
-    # env var lets the harness point the arms at the real clone so they run there too, rather
-    # than the two conditions being collapsed and the weaker one governing both.
-    repo_root = os.environ.get("AGENT_OS_GIT_REPO") or repo_root
     if not _is_git_repo(repo_root):
         return ([f"SKIP-ARM: {repo_root!r} is not a git repository, so the {len(HISTORY_CONTROLS)}"
-                 f" history controls have no history to read. Set AGENT_OS_GIT_REPO to a real "
-                 f"clone if this tree is a copy."], 0)
+                 f" history controls have no history to read"], 0)
     for sha, path, expect, what in HISTORY_CONTROLS:
         blob = _git_show(repo_root, sha, path)
         if blob is None:
@@ -1548,26 +1554,21 @@ def history_control_selftest():
                             "shallow clone would make the checker unrunnable off CI")
     finally:
         globals()["HISTORY_CONTROLS"] = saved
-    # A tree with no history at all is a DIFFERENT condition, and it must still be loud: a copy
-    # that quietly reports zero arms is exactly the byte-identical pass these controls exist
-    # against. The call-site harness sets AGENT_OS_GIT_REPO rather than being exempted.
+    # A tree with no history at all must still be LOUD: a root that quietly reports zero arms is
+    # exactly the byte-identical pass these controls exist against. The second arm pins the root
+    # main() actually uses, so the two call sites cannot drift apart again.
     import tempfile
     with tempfile.TemporaryDirectory() as d:
-        seen = os.environ.pop("AGENT_OS_GIT_REPO", None)
-        try:
-            probs, ran = history_control_arms(d, in_ci=True)
-            if ran or not any("not a git repository" in p for p in probs):
-                failures.append("selftest: a NON-REPOSITORY tree did not report its skipped "
-                                "arms — a copied tree would pass with zero controls run")
-            os.environ["AGENT_OS_GIT_REPO"] = os.path.dirname(os.path.dirname(
-                os.path.abspath(__file__)))
-            if history_control_arms(d, in_ci=True)[1] != len(HISTORY_CONTROLS):
-                failures.append("selftest: AGENT_OS_GIT_REPO did not redirect the arms to a "
-                                "real clone — the harness lane would have no way to run them")
-        finally:
-            os.environ.pop("AGENT_OS_GIT_REPO", None)
-            if seen is not None:
-                os.environ["AGENT_OS_GIT_REPO"] = seen
+        probs, ran = history_control_arms(d, in_ci=True)
+        if ran or not any("not a git repository" in p for p in probs):
+            failures.append("selftest: a NON-REPOSITORY tree did not report its skipped arms "
+                            "— a copied tree would pass with zero controls run")
+    # THE ROOT main() ACTUALLY USES, asserted here rather than a root this selftest picks for
+    # itself. That distinction is the whole finding: anchoring on __file__ here while main()
+    # anchored on --tests-dir made this arm green against a path main() never took.
+    if history_control_arms(_history_root(), in_ci=True)[1] != len(HISTORY_CONTROLS):
+        failures.append("selftest: the arms did not run against the checker's OWN repo — that "
+                        "is the root main() uses, so a failure here is a failure there")
     return failures
 
 
@@ -1939,7 +1940,15 @@ def main():
     side_effects = f.add("side_effects", side_effect_declarations(args.tests_dir))
     stale_se_debt = f.add("stale_se_debt", stale_side_effect_debt(args.tests_dir))
     # THE HISTORY CONTROLS run against the repo, not the fixtures — that is their whole point.
-    _root = os.path.dirname(os.path.abspath(args.tests_dir.rstrip("/"))) or "."
+    # THE ROOT IS THE CHECKER'S OWN REPO, NOT THE TREE UNDER TEST, and the two are not the same
+    # thing. The subject of a history control is the DETECTOR -- the code in this process --
+    # replaying blobs out of history; the tree it happens to be pointed at has nothing to do with
+    # it. I first derived this from --tests-dir, which made main() and history_control_selftest()
+    # compute DIFFERENT roots for one arm: the selftest anchored on __file__ and passed, while
+    # main() anchored on the copy the call-site harness builds (no .git) and reported 0 of 2.
+    # A green selftest beside a check main() cannot run -- caught by step 163, which exists for
+    # exactly that, and found by Geist rather than by me.
+    _root = _history_root()
     _in_ci = bool(os.environ.get("CI"))
     hist, _hist_ran = history_control_arms(_root, _in_ci)
     history_controls = f.add("history_controls", hist)
