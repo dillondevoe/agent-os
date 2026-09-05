@@ -798,6 +798,34 @@
               touch $out
             '';
 
+        # pr-currency-selftest -- 18 arms, 6 of them controls.
+        #
+        # It ran BY HAND ONLY until 2026-09-05, and that is the exact shape the tool it tests was
+        # written about: a battery nothing executes is prose with a shell prompt, and its green is a
+        # claim about the day someone last typed the command. The blocker was real, not neglect --
+        # the gate-strength and paths arms read the surrounding checkout via `git rev-parse HEAD~6`,
+        # so they could not run in a sandbox with no history, AND their inputs changed on every push
+        # here, so a green was never reproducible twice. Both are fixed by a synthetic fixture repo
+        # the arms build themselves; FX2 is what licenses this wiring, asserting the battery gives
+        # the same answer from a cwd that is not a git repo at all.
+        #
+        # `gh` is deliberately NOT an input: every arm that needs it uses a stub on PATH, so a
+        # derivation that could reach GitHub would be testing the network rather than the parser.
+        pr-currency-selftest =
+          nixpkgs.legacyPackages.${system}.runCommand "pr-currency-selftest"
+            {
+              nativeBuildInputs = [
+                nixpkgs.legacyPackages.${system}.git
+                nixpkgs.legacyPackages.${system}.gawk
+              ];
+            } ''
+              cp -r ${./.}/. src && chmod -R u+w src
+              cd src
+              export HOME=$TMPDIR
+              bash tools/pr-currency.sh --selftest
+              touch $out
+            '';
+
         # bip340-contract -- ruling condition 2, and this one is NOT routine debt repayment.
         #
         # tests/bip340-battery.py opens by stating, as settled fact:

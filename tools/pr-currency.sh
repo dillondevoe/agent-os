@@ -112,6 +112,32 @@ classify_checks() {
 # fixtures are tab-separated on purpose -- SP1 is the exact shape that defeated v1.
 if [ "${1:-}" = "--selftest" ]; then
   fail=0
+  # ABSOLUTE, because the fixture arms below re-run this script from a DIFFERENT cwd and `$0` is
+  # whatever the caller typed. A relative `$0` would make those arms silently run nothing.
+  SELF="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
+
+  # The fixture repo. Added 2026-09-05 to close the gap disclosed in f01ebba's commit message: the
+  # gate-strength and paths arms read the REAL repo via `git rev-parse HEAD~6`, so they could not run
+  # inside a nix check derivation (no history there), and this whole battery therefore ran by hand
+  # only -- an arm nothing runs is prose with a shell prompt. A synthetic repo makes the arms depend
+  # on commits THEY create rather than on whatever this branch happens to be sitting on, which also
+  # removes a second, quieter defect: those arms' inputs changed every time anyone pushed here, so a
+  # green was never reproducible twice.
+  #
+  # Layout: base -> W (a workflow) -> T (a tool). "The PR" forked at `base`, so W and T are exactly
+  # the criteria commits in its gap, and the arms can assert on paths they wrote themselves.
+  mk_fixture() {
+    f="$(mktemp -d)"
+    ( cd "$f" || exit 1
+      git init -q -b main .
+      git config user.email t@t; git config user.name t; git config commit.gpgsign false
+      mkdir -p .github/workflows tools
+      echo base > README; git add -A; git commit -qm base
+      echo "on: [pull_request]" > .github/workflows/fixture.yml; git add -A; git commit -qm "ci: fixture workflow"
+      echo "# tool"          > tools/fixture.sh;                 git add -A; git commit -qm "tools: fixture tool"
+    ) >/dev/null 2>&1 || return 1
+    echo "$f"
+  }
   arm() { got="$(printf '%b' "$2" | classify_checks)"
           case "$got" in $3) echo "  ok   $1" ;; *) echo "  FAIL $1: got [$got] want [$3]"; fail=1 ;; esac; }
   echo "pr-currency selftest"
@@ -143,7 +169,8 @@ if [ "${1:-}" = "--selftest" ]; then
       echo '  "run view") echo "${STUB_DATE:-2026-09-03T00:00:00Z}" ;;'
       echo 'esac'; } > "$d/gh"
     chmod +x "$d/gh"
-    STUB_ROWS="$1" PATH="$d:$PATH" bash "$0" ${2:-} 2>&1
+    ( [ -n "${FIXTURE:-}" ] && cd "$FIXTURE"
+      STUB_ROWS="$1" BASE="${BASE_OVERRIDE:-$BASE}" PATH="$d:$PATH" bash "$SELF" ${2:-} 2>&1 )
     rm -rf "$d"
   }
   o="$(ord_run 'codecov/patch\tfail\t3s\thttps://codecov.io/x\n')"
@@ -160,7 +187,9 @@ if [ "${1:-}" = "--selftest" ]; then
   # GS arms: --gate-strength annotates each counted commit with the gate its OWN PR passed.
   # The stub answers `pr checks` with one row, so an annotated commit must read "(1ck)".
   echo "GS arms: gate strength of the commits that devalue the green"
-  gs="$(STUB_DATE=2026-01-01T00:00:00Z STUB_HEAD="$(git rev-parse HEAD~6 2>/dev/null)" ord_run 'gate\tpass\t3s\thttps://github.com/o/r/actions/runs/1/job/2\n' --gate-strength)"
+  FIX="$(mk_fixture)" || { echo "  FAIL FX0: could not build the fixture repo"; fail=1; FIX=""; }
+  if [ -n "$FIX" ]; then FIXBASE="$(git -C "$FIX" rev-parse main)"; FIXFORK="$(git -C "$FIX" rev-parse main~2)"; fi
+  gs="$(FIXTURE="$FIX" BASE_OVERRIDE=main STUB_DATE=2026-01-01T00:00:00Z STUB_HEAD="$FIXFORK" ord_run 'gate\tpass\t3s\thttps://github.com/o/r/actions/runs/1/job/2\n' --gate-strength)"
   case "$gs" in *"ck)"*) echo "  ok   GS1 counted commits carry their own PR's check count" ;;
     *) echo "  FAIL GS1: no gate annotation under --gate-strength; got [$gs]"; fail=1 ;; esac
   # GS2 is the control arm and it is the one that matters: without it, a script that annotated
@@ -173,7 +202,7 @@ if [ "${1:-}" = "--selftest" ]; then
   # the control. The detail block is the whole point of that change: a COUNT cannot say what is in
   # the gap, so an arm that only checks the count would have gone green over its removal.
   echo "PD arms: the counted commits' PATHS, not just their count"
-  pd="$(STUB_DATE=2026-01-01T00:00:00Z STUB_HEAD="$(git rev-parse HEAD~6 2>/dev/null)" ord_run 'gate\tpass\t3s\thttps://github.com/o/r/actions/runs/1/job/2\n')"
+  pd="$(FIXTURE="$FIX" BASE_OVERRIDE=main STUB_DATE=2026-01-01T00:00:00Z STUB_HEAD="$FIXFORK" ord_run 'gate\tpass\t3s\thttps://github.com/o/r/actions/runs/1/job/2\n')"
   if printf '%s\n' "$pd" | grep -qE "^ +(\.github/workflows/|flake\.nix|tests/|tools/)"; then
     echo "  ok   PD1 a counted commit prints the criteria path it touched"
   else echo "  FAIL PD1: counted commits but printed no paths; got [$pd]"; fail=1; fi
@@ -183,6 +212,20 @@ if [ "${1:-}" = "--selftest" ]; then
   if printf '%s\n' "$o3" | grep -qE "^ +(\.github/workflows/|flake\.nix|tests/|tools/)"; then
     echo "  FAIL PD2 CONTROL: printed paths for a PR with 0 criteria commits"; fail=1
   else echo "  ok   PD2 CONTROL: no counted commits, no path block"; fi
+  # FX1 is the fixture's own control arm, and without it every arm above that uses $FIX is
+  # vacuous: a fixture that produced ZERO criteria commits would make PD2's "no path block"
+  # assertion pass for the wrong reason and PD1 fail for a reason that has nothing to do with
+  # the code under test. Assert the fixture really does put two criteria commits in the gap.
+  case "$pd" in *"currency : 2 criteria commit"*) echo "  ok   FX1 CONTROL: the fixture puts exactly 2 criteria commits in the gap" ;;
+    *) echo "  FAIL FX1 CONTROL: fixture gap is not 2 commits -- arms above are not measuring what they say; got [$pd]"; fail=1 ;; esac
+  # FX2: the arms must no longer depend on THIS repo. Run the fixture arm from a directory that is
+  # not a git repo at all -- which is what a nix check derivation looks like -- and require the same
+  # answer. This is the arm that licenses wiring the battery into CI.
+  nog="$(mktemp -d)"
+  pdx="$(cd "$nog" && FIXTURE="$FIX" BASE_OVERRIDE=main STUB_DATE=2026-01-01T00:00:00Z STUB_HEAD="$FIXFORK" ord_run 'gate\tpass\t3s\thttps://github.com/o/r/actions/runs/1/job/2\n')"
+  case "$pdx" in *"currency : 2 criteria commit"*) echo "  ok   FX2 no ambient repo needed -- runs from a non-repo cwd" ;;
+    *) echo "  FAIL FX2: depends on the ambient checkout; got [$pdx]"; fail=1 ;; esac
+  rm -rf "$nog" "$FIX"
   [ "$fail" = 0 ] && echo "ALL GREEN" || echo "SELFTEST FAILED"
   exit "$fail"
 fi
