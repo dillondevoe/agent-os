@@ -38,6 +38,14 @@ jobs:
       - name: Checkout
         # SHA-pinned (Fable fold a): immutable commit of the newest v* release tag.
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          # FULL history, because tests/vm-matrix-contract.py replays two pre-fix shas
+          # (be1769b, 53f1b8a) through the live checker as control arms. The default shallow
+          # clone does not contain them, and `git fetch --depth=1 origin <sha>` is refused
+          # here -- proven, not assumed: run 33970457370 failed with "0 of 2 arms ran under
+          # CI". The arm is built so that unreachable == FAILURE rather than skip, which is
+          # why this shows up as a red run and not as a green one missing two controls.
+          fetch-depth: 0
 
       - name: Install Nix (flakes + sandbox)
         # SHA-pinned (Fable fold a): DeterminateSystems kept — it marks the runner user
