@@ -1497,21 +1497,28 @@ def history_control_arms(repo_root, in_ci):
     """Replay the pre-fix shas through the live checker. Returns (problems, ran).
 
     `ran` is returned rather than kept private BECAUSE A SKIPPED ARM IS INVISIBLE OTHERWISE:
-    an unreachable sha would turn this into a byte-identical pass. Under CI a sha that cannot
-    be fetched is a FAILURE; locally it is a loud skip, and either way the arm count is part
-    of the verdict rather than a thing the reader is trusted to notice.
+    an unreachable sha would turn this into a byte-identical pass. An arm that could not run is
+    a FAILURE in BOTH modes — `main()` returns 1 on any non-empty finding, so a label promising
+    a softer local outcome would describe behaviour that does not exist (Geist, 2026-09-05, on
+    #280 after merge). The local message differs only in naming the remedy. Making the local
+    path genuinely exit 0 was the other option and is the wrong one: it would hand a shallow or
+    offline clone a green run with zero controls executed, which is the exact byte-identical
+    pass these arms were built against.
     """
     problems, ran = [], 0
     import tempfile
     if not _is_git_repo(repo_root):
-        return ([f"SKIP-ARM: {repo_root!r} is not a git repository, so the {len(HISTORY_CONTROLS)}"
-                 f" history controls have no history to read"], 0)
+        return ([f"ARM-DID-NOT-RUN: {repo_root!r} is not a git repository, so the "
+                 f"{len(HISTORY_CONTROLS)} history controls have no history to read"], 0)
     for sha, path, expect, what in HISTORY_CONTROLS:
         blob = _git_show(repo_root, sha, path)
         if blob is None:
             msg = (f"history control {sha}:{path} could not be read — the arm did not run, and "
                    f"an arm that does not run passes")
-            problems.append(msg if in_ci else f"SKIP-ARM (local, not CI): {msg}")
+            problems.append(msg if in_ci else (
+                f"ARM-DID-NOT-RUN: {msg}. Local run: this is still a failure, not a skip. "
+                f"Fetch the sha (`git fetch --depth=1 origin <40-char sha>`) or run against "
+                f"a full clone"))
             continue
         ran += 1
         with tempfile.TemporaryDirectory() as d:
@@ -1534,9 +1541,10 @@ def history_control_arms(repo_root, in_ci):
 def history_control_selftest():
     """The controls control the controls: a broken detector must make the arms go RED."""
     failures = []
-    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    # A sha that does not exist must FAIL under CI and SKIP locally. Both directions, because
-    # a function that always fails and a function that always skips each pass one of them.
+    root = _history_root()
+    # A sha that does not exist must FAIL in BOTH modes, and the local message must not call
+    # itself a skip. Three arms, because a function that always fails would pass the first one
+    # alone and a label check alone would pass a function that never fails.
     bogus = (("0" * 40, "tests/nope.py", "x", "does not exist"),)
     saved = globals()["HISTORY_CONTROLS"]
     globals()["HISTORY_CONTROLS"] = bogus
@@ -1546,12 +1554,19 @@ def history_control_selftest():
             failures.append("selftest: an UNREACHABLE sha did not fail under CI — the controls "
                             "would silently vanish in the one place nobody watches them run")
         probs, ran = history_control_arms(root, in_ci=False)
-        if not any(p.startswith("SKIP-ARM") for p in probs):
-            failures.append("selftest: an unreachable sha was not reported as a loud skip "
-                            "locally — a skipped arm would be invisible")
-        if any(not p.startswith("SKIP-ARM") for p in probs):
-            failures.append("selftest: an unreachable sha was a hard failure LOCALLY — a "
-                            "shallow clone would make the checker unrunnable off CI")
+        if ran or not probs:
+            failures.append("selftest: an unreachable sha produced no local finding — "
+                            "`main()` would exit 0 with zero controls run, which is the "
+                            "byte-identical pass these arms exist against")
+        if any("SKIP" in p for p in probs):
+            failures.append("selftest: a local unreachable-sha finding still calls itself a "
+                            "SKIP. It is appended to `problems` like every other finding and "
+                            "`main()` returns 1 on any of them, so the label promises a softer "
+                            "outcome than the exit code delivers (Geist, #280)")
+        if not any("ARM-DID-NOT-RUN" in p for p in probs):
+            failures.append("selftest: the local unreachable-sha finding does not carry the "
+                            "ARM-DID-NOT-RUN label — the reader cannot tell a red run caused "
+                            "by a defect from one caused by an arm that never executed")
     finally:
         globals()["HISTORY_CONTROLS"] = saved
     # A tree with no history at all must still be LOUD: a root that quietly reports zero arms is
@@ -1561,8 +1576,12 @@ def history_control_selftest():
     with tempfile.TemporaryDirectory() as d:
         probs, ran = history_control_arms(d, in_ci=True)
         if ran or not any("not a git repository" in p for p in probs):
-            failures.append("selftest: a NON-REPOSITORY tree did not report its skipped arms "
+            failures.append("selftest: a NON-REPOSITORY tree did not report its unrun arms "
                             "— a copied tree would pass with zero controls run")
+        if any("SKIP" in p for p in probs):
+            failures.append("selftest: the non-repository finding calls itself a SKIP while "
+                            "still returning 1 — same label/exit-code disagreement as above, "
+                            "and it was the second site with that shape")
     # THE ROOT main() ACTUALLY USES, asserted here rather than a root this selftest picks for
     # itself. That distinction is the whole finding: anchoring on __file__ here while main()
     # anchored on --tests-dir made this arm green against a path main() never took.
@@ -2071,9 +2090,11 @@ def main():
               file=sys.stderr)
         print("     and one already hid a detector that found NOTHING in the founding case.",
               file=sys.stderr)
-        print("     A SKIP-ARM line means the sha was unreachable: the arm did not run, and an",
+        print("     An ARM-DID-NOT-RUN line means the sha was unreachable: the arm did not",
               file=sys.stderr)
-        print("     arm that does not run passes. That is a hard failure under CI.",
+        print("     run, and an arm that does not run passes. That is a hard failure in BOTH",
+              file=sys.stderr)
+        print("     modes — locally it names the fetch, it does not excuse the red.",
               file=sys.stderr)
     if f["stale_se_debt"]:
         print("FAIL: SIDE_EFFECT_DEBT names a battery the debt no longer describes:",
