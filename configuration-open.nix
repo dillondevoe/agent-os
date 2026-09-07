@@ -467,8 +467,30 @@ in {
     ethtool                                # NIC/WoL introspection — see note below
     # Claude Code CLI (Dillon msg 9280: "talk claude through this box"). Unfree —
     # whitelisted in gaming-open.nix's allowUnfreePredicate (single shared predicate;
-    # a second definition elsewhere would conflict). Auth is per-user OAuth (`claude`
-    # → browser login with the Max account) — no secrets baked into the image.
+    # a second definition elsewhere would conflict). No secrets are baked into the
+    # image, so the CLI arrives UNAUTHENTICATED and someone has to log it in.
+    #
+    # THAT LOGIN CANNOT USE A BROWSER ON THIS VARIANT, and the reason is structural
+    # rather than a missing package: agentos-open imports configuration-open.nix
+    # only — desktop-open.nix (Hyprland) is not in it — and xserver is disabled a
+    # few lines below, so no compositor and no display manager exist here at all.
+    # Measured on the deployed Dell 2026-09-07: getty@tty1 is the only session,
+    # DISPLAY and WAYLAND_DISPLAY are both empty, and there are ZERO display-manager
+    # unit files (absent, not stopped).
+    #
+    # The trap is that every binary the browser flow names IS present — `firefox`
+    # and `xdg-open` are both on PATH — so probing for the pieces finds them all.
+    # The only missing component is the display itself, which has no binary to
+    # probe for, and switching VTs does not conjure one: a browser could never
+    # have opened on tty1 either. This comment used to promise the browser flow,
+    # which is worse than saying nothing, because it sends the reader looking for
+    # a broken package instead of an absent subsystem.
+    #
+    # What the working flow IS remains unconfirmed and is deliberately not asserted
+    # here. `claude setup-token` exists on the deployed CLI and is the candidate,
+    # but probed headless it printed nothing and exited 0, so it wants a real TTY
+    # and an attended sitting. When that is actually run and seen to work, name it
+    # here — and not before.
     claude-code
   ];
 
