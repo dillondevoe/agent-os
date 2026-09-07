@@ -202,6 +202,24 @@ in {
       # HTTP-only against the loopback Ollama API — no ollama store access needed, so this
       # unit does NOT need agos-seed-model's DynamicUser+StateDirectory namespace join.
       DynamicUser = true;
+      # BOUND THE START, because this unit gates multi-user.target. systemd's default
+      # TimeoutStartSec for Type=oneshot is INFINITY, so without this line a wedged prefill
+      # holds multi-user.target (and graphical.target behind it) in `waiting` forever, with
+      # zero failed units and nothing reporting it — measured on the Dell at the WP-C1
+      # acceptance, where `systemctl is-system-running` read `starting` in two independent
+      # observations and was therefore not a usable readiness check on that box.
+      #
+      # 1800s is ~2.7x the measured prefill (~11 min, 10:45:41 -> 10:56:31), so it does not
+      # fire on a merely slow boot; when it DOES fire the unit goes `failed`, which
+      # `systemctl --failed` — already part of every deploy acceptance in this repo — reports
+      # immediately. The cost of the bound is a cold KV cache on that one boot (the
+      # in-process warmup in agent-brain.py stays as belt); the cost of no bound is a boot
+      # failure with no observable at all.
+      #
+      # NOT `0`: to systemd 0 means infinity, i.e. exactly as unbounded as omitting the line
+      # while looking bounded to a reader. The `prewarm-start-timeout-is-finite` flake check
+      # rejects absent / "infinity" / 0 with the same predicate it judges this value by.
+      TimeoutStartSec = 1800;
     };
     script = ''
       ${agent-brain}/bin/agent-brain --once "boot warmup — reply with one word" >/dev/null 2>&1 || true
