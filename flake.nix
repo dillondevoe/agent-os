@@ -1734,6 +1734,99 @@
               touch $out
             '';
 
+        # A UNIT THAT CANNOT TIME OUT IS A BOOT THAT CANNOT FAIL LOUDLY. agos-boot-prewarm is
+        # `Type=oneshot RemainAfterExit=yes wantedBy=multi-user.target`, and systemd's default
+        # TimeoutStartSec for a oneshot is INFINITY — so a WEDGED prewarm and a merely SLOW one
+        # are BYTE-IDENTICAL from every vantage: same `activating`, same empty
+        # `systemctl --failed`, forever, with nothing anywhere reporting it.
+        #
+        # This is not theoretical. It was MEASURED on the Dell during the WP-C1 acceptance
+        # (2026-08-29): `systemctl is-system-running` read `starting`, not `running`, in BOTH
+        # independent observations (Rabbot from the mini, Mirror from DVo), while the prewarm was
+        # still running ~11 minutes into the boot (10:45:41 -> 10:56:31 on the prior boot).
+        # Benign as observed — but that acceptance recorded `is-system-running` as NOT a valid
+        # readiness check on this box, which is the diagnosis of a boot that cannot report its
+        # own failure.
+        #
+        # CORRECTION, and it is the reason this comment is longer than the check: an earlier
+        # draft opened "A UNIT THAT GATES multi-user.target", and that mechanism is NOT
+        # SUPPORTED BY THE UNIT. `wantedBy` renders a `Wants=` edge with NO ordering, and this
+        # unit declares no `Before=`; the rendered [Unit] section is only
+        # `After=ollama.service agos-seed-model.service` / `Requires=ollama.service`. The
+        # observed `starting` is fully explained by a pending job in the initial transaction.
+        # Whether multi-user.target/graphical.target actually queue behind it is UNVERIFIED —
+        # the discriminator is `systemctl list-jobs` during a Dell boot window. The claim came
+        # from docs/log-console-spec.md:86, i.e. it was INHERITED FROM PROSE rather than read
+        # off the unit, which is exactly the failure this repo keeps naming. The symptom and
+        # the fix stand on their own; only the mechanism was over-claimed.
+        #
+        # A finite bound converts the silent hang into a FAILED UNIT, which `systemctl --failed`
+        # surfaces — a MANUAL observable: it appears in acceptance prose and in comments, and
+        # nothing in this repo runs it automatically (an earlier draft called it "the check every
+        # deploy already runs"; it is not). 1800s is ~2.7x the measured prefill, but that prefill
+        # is n=1, so the threshold is sized off a SINGLE observation. The unit sets no `Restart=`
+        # and `RemainAfterExit=yes`, so a fired timeout is sticky for that boot: a degraded brain,
+        # not a retry loop. The cost of the bound is a cold KV cache on the boot where it fires
+        # (the script swallows its own failure with `|| true`, and the in-process warmup remains
+        # as belt); the cost of no bound is the indistinguishability above.
+        #
+        # SIX pre-fix arms, and the zero-class ones are what matter. `0`, `"0s"`, `"0min"` and
+        # `infinity` are the SAME VALUE to systemd (all disable the timeout), so a predicate that merely asserts the
+        # attribute EXISTS accepts a unit that is exactly as unbounded as it was before — the
+        # "a control that lives only in a name is not a control" shape, in a config value.
+        prewarm-start-timeout-is-finite =
+          let
+            lib = nixpkgs.lib;
+            cfg = self.nixosConfigurations.agentos-open.config;
+            # ONE predicate, applied to the real config and to every arm — never paraphrased.
+            # Reject the EQUIVALENCE CLASS "systemd will not time this unit out", not two
+            # spellings of it. systemd time-spans accept a unit suffix ("0s", "0min", "0us"),
+            # so a literal comparison against "0" states the class in a comment and checks a
+            # spelling in the code. Normalise instead: a value is finite iff it is not
+            # "infinity", is not negative, and contains at least one NON-ZERO digit.
+            # That admits "1800", "30min", "0.5s" and rejects "0", "0s", "0min", "00", "".
+            finite = sc:
+              (sc ? TimeoutStartSec)
+              && (let
+                    v = toString sc.TimeoutStartSec;
+                    digits = lib.filter (c: builtins.match "[0-9]" c != null)
+                      (lib.stringToCharacters v);
+                  in
+                    v != "infinity"
+                    && ! (lib.hasPrefix "-" v)
+                    && digits != [ ]
+                    && lib.any (c: c != "0") digits);
+            realSc = cfg.systemd.services.agos-boot-prewarm.serviceConfig;
+            armAbsent   = { Type = "oneshot"; RemainAfterExit = true; };
+            armInfinity = { Type = "oneshot"; TimeoutStartSec = "infinity"; };
+            armZero     = { Type = "oneshot"; TimeoutStartSec = 0; };
+            armZeroSec  = { Type = "oneshot"; TimeoutStartSec = "0s"; };
+            armZeroMin  = { Type = "oneshot"; TimeoutStartSec = "0min"; };
+            armEmpty    = { Type = "oneshot"; TimeoutStartSec = ""; };
+          in
+            assert lib.assertMsg (finite realSc)
+              ("prewarm-start-timeout-is-finite: agos-boot-prewarm has no finite TimeoutStartSec "
+               + "(got " + (toString (realSc.TimeoutStartSec or "<unset -> oneshot default = infinity>"))
+               + "). It is wantedBy=multi-user.target, so an unbounded start blocks the target with "
+               + "no failed unit and no observable — a wedged prewarm is indistinguishable from a "
+               + "slow one, forever.");
+            assert lib.assertMsg (! (finite armAbsent))
+              "prewarm-start-timeout-is-finite: PRE-FIX ARM 1 (no TimeoutStartSec — the shape measured on the Dell) was ACCEPTED; the predicate cannot detect what it was written for.";
+            assert lib.assertMsg (! (finite armInfinity))
+              "prewarm-start-timeout-is-finite: PRE-FIX ARM 2 (explicit infinity) was ACCEPTED; the predicate is checking presence, not boundedness.";
+            assert lib.assertMsg (! (finite armZero))
+              "prewarm-start-timeout-is-finite: PRE-FIX ARM 3 (TimeoutStartSec=0) was ACCEPTED. To systemd 0 IS infinity, so this unit is exactly as unbounded as an absent value while LOOKING bounded to a reader.";
+            assert lib.assertMsg (! (finite armZeroSec))
+              "prewarm-start-timeout-is-finite: PRE-FIX ARM 4 (TimeoutStartSec=\"0s\") was ACCEPTED. `0s` is a legal systemd time-span spelling of the SAME disabled timeout as `0`, so a predicate matching the literal \"0\" states an equivalence class and checks a spelling.";
+            assert lib.assertMsg (! (finite armZeroMin))
+              "prewarm-start-timeout-is-finite: PRE-FIX ARM 5 (TimeoutStartSec=\"0min\") was ACCEPTED; same class as ARM 4 with a different unit suffix.";
+            assert lib.assertMsg (! (finite armEmpty))
+              "prewarm-start-timeout-is-finite: PRE-FIX ARM 6 (TimeoutStartSec=\"\") was ACCEPTED; an empty value carries no bound and systemd refuses it at parse time, so the unit would not even load.";
+            nixpkgs.legacyPackages.${system}.runCommand "prewarm-start-timeout-is-finite" { } ''
+              echo "agos-boot-prewarm TimeoutStartSec=${toString realSc.TimeoutStartSec} (finite); absent/infinity/0 arms all rejected"
+              touch $out
+            '';
+
         # The engine MANIFEST, read off the BUILT ARTIFACT — not off the comment that claims it.
         #
         # selfimprove-open.nix's header used to say it installs "every `agos_*` module". That was

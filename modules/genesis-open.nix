@@ -202,6 +202,39 @@ in {
       # HTTP-only against the loopback Ollama API — no ollama store access needed, so this
       # unit does NOT need agos-seed-model's DynamicUser+StateDirectory namespace join.
       DynamicUser = true;
+      # BOUND THE START. systemd's default TimeoutStartSec for Type=oneshot is INFINITY, so
+      # without this line a WEDGED prefill and a merely SLOW one are byte-identical from
+      # every vantage — both leave the unit `activating`, both leave `systemctl --failed`
+      # empty, and neither ever resolves. That is a boot-failure class with no observable.
+      #
+      # WHAT WAS MEASURED (Dell, WP-C1 acceptance 2026-08-29): `systemctl is-system-running`
+      # read `starting` in two independent observations while this unit was activating, so
+      # it was not a usable readiness check on that box; prefill took ~11 min (10:45:41 ->
+      # 10:56:31). That is the whole of the evidence.
+      #
+      # WHAT IS *NOT* ESTABLISHED, and an earlier draft of this comment asserted anyway:
+      # that this unit BLOCKS multi-user.target. It does not declare `Before=` anything —
+      # `wantedBy` creates a `Wants=` edge with NO ordering — so the rendered [Unit] section
+      # is only `After=ollama.service agos-seed-model.service` / `Requires=ollama.service`.
+      # The observed `starting` is fully explained by a pending job in the initial
+      # transaction. Whether targets actually queue behind it is UNVERIFIED and the
+      # discriminator is `systemctl list-jobs` during a Dell boot window. The claim was
+      # inherited from docs/log-console-spec.md:86 rather than read off the unit.
+      #
+      # 1800s is ~2.7x that prefill — but the prefill is n=1, so this threshold is sized
+      # from a single observation and should be revisited once a second boot is timed. When
+      # it DOES fire the unit goes `failed`, which `systemctl --failed` reports — note that
+      # is a MANUAL observable: nothing in this repo runs it automatically, it appears only
+      # in acceptance prose. The unit sets no `Restart=` and `RemainAfterExit=yes`, so a
+      # timeout is sticky for that boot: degraded brain, not a retry loop. The cost of the
+      # bound is a cold KV cache on that one boot (the in-process warmup in agent-brain.py
+      # stays as belt); the cost of no bound is the indistinguishability above.
+      #
+      # NOT `0`, and not `"0s"`/`"0min"`: to systemd all of those mean infinity, i.e. exactly
+      # as unbounded as omitting the line while looking bounded to a reader. The
+      # `prewarm-start-timeout-is-finite` flake check rejects that whole equivalence class
+      # with the same predicate it judges this value by.
+      TimeoutStartSec = 1800;
     };
     script = ''
       ${agent-brain}/bin/agent-brain --once "boot warmup — reply with one word" >/dev/null 2>&1 || true
