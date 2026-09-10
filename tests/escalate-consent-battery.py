@@ -198,7 +198,7 @@ check("H: and the stripped count reaches the audit record",
 ilog = os.path.join(tmp, "i.jsonl")
 bi = load_brain(consent="session", providers_yaml=cfg, turn_log=ilog)
 calls = []
-def _cs_429_then_floor(msgs, route=None):
+def _cs_429_then_floor(msgs, route=None, rules=None):
     calls.append(route["role"])
     if route["role"] == "escalate":
         raise urllib.error.HTTPError("https://api.example/", 429, "rate limited", {}, None)
@@ -218,7 +218,7 @@ check("I: _route never enters the history", hist and all("_route" not in m for m
 # ── J. NEGATIVE CONTROL: timeout-then-429 must not fall off the retry loop ───────────────
 bj = load_brain(consent="session", providers_yaml=cfg)
 seq = ["timeout", "429", "ok"]
-def _cs_seq(msgs, route=None):
+def _cs_seq(msgs, route=None, rules=None):
     s = seq.pop(0)
     if s == "timeout": raise TimeoutError("cold prefill")
     if s == "429": raise urllib.error.HTTPError("https://api.example/", 429, "rate limited", {}, None)
@@ -269,7 +269,7 @@ for code in (404, 500, 503):
 # and the escalate degrade this shares a handler with still works (no regression the other way)
 bk._ESCALATE_UNAVAILABLE.clear()
 _calls = []
-def _boom_then_ok(msgs, route=None):
+def _boom_then_ok(msgs, route=None, rules=None):
     _calls.append(route["role"])
     if route["role"] == "escalate":
         raise _ue.HTTPError("http://x", 429, "rate limited", {}, None)

@@ -152,7 +152,7 @@ with tempfile.TemporaryDirectory() as d:
 
 # ── seam sanity: the renderer no longer speaks the wire ──
 src = open(MOD).read()
-cs = src[src.index("\ndef chat_stream(msgs, route=None):"):src.index("\ndef chat(msgs):")]
+cs = src[src.index("\ndef chat_stream(msgs, route=None, rules=None):"):src.index("\ndef chat(msgs):")]
 check("seam: chat_stream contains no urlopen (wire protocol fully in transport)",
       "urlopen" not in cs)
 check("seam: chat_stream contains no json.loads of wire chunks",
