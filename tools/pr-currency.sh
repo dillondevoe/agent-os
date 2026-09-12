@@ -166,7 +166,15 @@ if [ "${1:-}" = "--selftest" ]; then
       echo '  "pr list") echo 999 ;;'
       echo '  "pr checks") printf %b "$STUB_ROWS" ;;'
       echo '  "pr view") echo "${STUB_HEAD:-deadbeef}" ;;'
-      echo '  "run view") echo "${STUB_DATE:-2026-09-03T00:00:00Z}" ;;'
+      # The stub must DISCRIMINATE ON THE FIELD, or the RR arms below are vacuous: a stub that
+      # answers one date to every `run view` cannot tell a script reading createdAt from one
+      # reading startedAt, and both would pass. Arm discrimination lives in the fixture.
+      # Real call shape: gh run view <id> --json <field> -q .<field>  ->  $5 is the field.
+      echo '  "run view")'
+      echo '    case "$5" in'
+      echo '      startedAt) echo "${STUB_STARTED:-${STUB_DATE:-2026-09-03T00:00:00Z}}" ;;'
+      echo '      *)         echo "${STUB_CREATED:-${STUB_DATE:-2026-09-03T00:00:00Z}}" ;;'
+      echo '    esac ;;'
       echo 'esac'; } > "$d/gh"
     chmod +x "$d/gh"
     ( [ -n "${FIXTURE:-}" ] && cd "$FIXTURE"
@@ -225,6 +233,47 @@ if [ "${1:-}" = "--selftest" ]; then
   pdx="$(cd "$nog" && FIXTURE="$FIX" BASE_OVERRIDE=main STUB_DATE=2026-01-01T00:00:00Z STUB_HEAD="$FIXFORK" ord_run 'gate\tpass\t3s\thttps://github.com/o/r/actions/runs/1/job/2\n')"
   case "$pdx" in *"currency : 2 criteria commit"*) echo "  ok   FX2 no ambient repo needed -- runs from a non-repo cwd" ;;
     *) echo "  FAIL FX2: depends on the ambient checkout; got [$pdx]"; fail=1 ;; esac
+  # RR arms: A RE-RUN IS THE REMEDY THIS FILE PRESCRIBES, SO THE FIELD IT MOVES IS THE FIELD TO READ.
+  # Measured on #232, 2026-09-12: the board said "15 criteria commits landed after its run
+  # (2026-09-05T06:03:39Z)", I re-ran all three workflow runs, every check completed 16:4xZ the same
+  # day -- and the board printed THE IDENTICAL LINE. `gh run rerun` re-runs the SAME run, so
+  # `createdAt` is the original attempt's creation and NEVER MOVES; `attempt` went 1 -> 2 and
+  # `startedAt` went 2026-09-05T06:03:39Z -> 2026-09-12T16:40:40Z.
+  #
+  # So this file's own closing sentence -- "a re-run repairs this and moves NO other number here" --
+  # was unobservable to the instrument that prints it. That is worse than an ordinary false positive:
+  # an alarm whose prescribed fix cannot clear it gets learned as noise, and the next PR that is
+  # genuinely stale is dismissed along with it. The direction is conservative (it over-reports
+  # staleness, never under-reports), which is exactly why it could survive -- nothing ever shipped
+  # wrong on the strength of it, so nothing ever forced a re-read.
+  #
+  # And note where the near-miss was. The comment at the `when=` line reasons carefully about WHICH
+  # RUN to take -- it caught `head -1` picking an arbitrary sibling and fixed it to the min. It never
+  # asked which FIELD. The half you are not staring at stays wrong.
+  #
+  # `sort | head -1` is unchanged and still correct: currency is a property of the STALEST run.
+  echo "RR arms: a re-run moves startedAt, not createdAt -- read the field the remedy moves"
+  rr="$(FIXTURE="$FIX" BASE_OVERRIDE=main STUB_CREATED=2026-01-01T00:00:00Z STUB_STARTED=2099-01-01T00:00:00Z \
+        STUB_HEAD="$FIXFORK" ord_run 'gate\tpass\t3s\thttps://github.com/o/r/actions/runs/1/job/2\n')"
+  case "$rr" in *"currency : 0 criteria commit"*|*"currency : 0 "*)
+      echo "  ok   RR1 a re-run (fresh startedAt, stale createdAt) reads as CURRENT" ;;
+    *) echo "  FAIL RR1: still counting against createdAt -- the prescribed remedy cannot clear the alarm; got [$rr]"; fail=1 ;; esac
+  # RR1b is the control arm and it is what stops RR1 passing on a script that lost currency
+  # altogether (or hard-coded 0). Same fixture, same createdAt, only startedAt moved back behind the
+  # criteria commits: the count MUST come back.
+  rrb="$(FIXTURE="$FIX" BASE_OVERRIDE=main STUB_CREATED=2026-01-01T00:00:00Z STUB_STARTED=2026-01-01T00:00:00Z \
+         STUB_HEAD="$FIXFORK" ord_run 'gate\tpass\t3s\thttps://github.com/o/r/actions/runs/1/job/2\n')"
+  case "$rrb" in *"currency : 2 criteria commit"*) echo "  ok   RR1b CONTROL: a genuinely stale startedAt still counts the gap" ;;
+    *) echo "  FAIL RR1b CONTROL: currency no longer discriminates at all; got [$rrb]"; fail=1 ;; esac
+  # RR2 asserts the DISPLAYED stamp is the one the arithmetic used. It is not a stub control -- I
+  # labelled it that on the first draft and it was wrong, which is this battery's own recurring
+  # defect (an arm that passes for a reason other than its name). It earns its place on a different
+  # axis: the currency line prints the run stamp in parentheses, and a reader who sees a 2026-09-05
+  # date next to "0 criteria commits" has been handed two facts that contradict each other. The
+  # count and the stamp must come from the same field or the line is self-refuting.
+  case "$rr" in *"(2026-01-01"*) echo "  FAIL RR2: the count moved but the printed stamp is still createdAt -- the line contradicts itself"; fail=1 ;;
+    *"(2099-01-01T00:00:00Z)"*) echo "  ok   RR2 the printed stamp is the same field the count used" ;;
+    *) echo "  FAIL RR2: no run stamp printed at all, so the count cannot be audited; got [$rr]"; fail=1 ;; esac
   # BD arms: the board must DATE ITSELF. Augur's law, 2026-09-05: a currency (or inertness) verdict is
   # a dated measurement of what CI DOES, not a property of a path -- valid for one PR, against one CI
   # configuration, at one timestamp. He proved the retroactive half on #168: his own "a662b0d is inert"
@@ -360,8 +409,12 @@ for pr in $prs; do
   # took whichever gh listed first. Today they share a timestamp (one push triggers all three), so it
   # cannot be wrong yet -- it breaks the first time someone re-runs one workflow alone, after which a
   # fresh sibling masks the stale gates. Currency is a property of the STALEST run, so take the min.
+  # `startedAt`, NOT `createdAt` -- see the RR arms. `gh run rerun` re-runs the SAME run, so
+  # createdAt is frozen at attempt 1 forever while startedAt tracks the latest attempt. Reading
+  # createdAt made this file's own prescribed remedy invisible to it: measured on #232, three runs
+  # re-run to attempt 2 and completed 2026-09-12T16:4xZ still printed createdAt 2026-09-05T06:03:39Z.
   when="$(for r in $(gh pr checks "$pr" 2>/dev/null | grep -oE 'runs/[0-9]+' | cut -d/ -f2 | sort -u); do
-            gh run view "$r" --json createdAt -q .createdAt 2>/dev/null; done | sort | head -1)"
+            gh run view "$r" --json startedAt -q .startedAt 2>/dev/null; done | sort | head -1)"
   run="$when"
   # OUTCOME IS COMPUTED BEFORE THE NO-RUN BRANCH, AND THAT ORDERING IS THE POINT (Augur, 2026-09-03).
   # It used to sit below a `rc=1; continue` that fired whenever `when` was empty -- so on any PR where
