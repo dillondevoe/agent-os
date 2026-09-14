@@ -12,8 +12,9 @@
 # THE PREDICATE, AND THE ONE THAT LOOKS RIGHT AND ISN'T. The obvious test is ancestry — is the
 # gate commit an ancestor of the PR head. That is WRONG and it over-reports. These workflows all
 # trigger on `pull_request`, and a `pull_request` run checks out the merge of the head into main
-# AS OF THE RUN. So a run carries main's criteria at run time: a branch forked months ago whose
-# checks re-ran ten minutes ago has every current gate, and ancestry flags it anyway. The correct
+# AS OF THE RUN'S CREATION. So a run carries main's criteria at creation time: a branch forked months
+# ago whose checks were freshly TRIGGERED (push, update-branch, reopen) ten minutes ago has every current
+# gate, and ancestry flags it anyway. A RE-RUN is not that -- see the RR arms. The correct
 # question is temporal — DID ANY CRITERIA-CHANGING COMMIT LAND AFTER THIS PR'S LATEST RUN? The two
 # agreed on #232 by coincidence, which is exactly how a wrong predicate survives.
 #
@@ -233,47 +234,43 @@ if [ "${1:-}" = "--selftest" ]; then
   pdx="$(cd "$nog" && FIXTURE="$FIX" BASE_OVERRIDE=main STUB_DATE=2026-01-01T00:00:00Z STUB_HEAD="$FIXFORK" ord_run 'gate\tpass\t3s\thttps://github.com/o/r/actions/runs/1/job/2\n')"
   case "$pdx" in *"currency : 2 criteria commit"*) echo "  ok   FX2 no ambient repo needed -- runs from a non-repo cwd" ;;
     *) echo "  FAIL FX2: depends on the ambient checkout; got [$pdx]"; fail=1 ;; esac
-  # RR arms: A RE-RUN IS THE REMEDY THIS FILE PRESCRIBES, SO THE FIELD IT MOVES IS THE FIELD TO READ.
-  # Measured on #232, 2026-09-12: the board said "15 criteria commits landed after its run
-  # (2026-09-05T06:03:39Z)", I re-ran all three workflow runs, every check completed 16:4xZ the same
-  # day -- and the board printed THE IDENTICAL LINE. `gh run rerun` re-runs the SAME run, so
-  # `createdAt` is the original attempt's creation and NEVER MOVES; `attempt` went 1 -> 2 and
-  # `startedAt` went 2026-09-05T06:03:39Z -> 2026-09-12T16:40:40Z.
+  # RR arms: A RE-RUN RE-EXECUTES THE ORIGINAL MERGE COMMIT. IT RE-ASKS THE OLD QUESTION; IT DOES NOT
+  # ASK THE NEW ONE. So `createdAt` -- the moment GitHub built that merge commit -- is the right anchor,
+  # and `startedAt`, which a re-run moves, is the wrong one.
   #
-  # So this file's own closing sentence -- "a re-run repairs this and moves NO other number here" --
-  # was unobservable to the instrument that prints it. That is worse than an ordinary false positive:
-  # an alarm whose prescribed fix cannot clear it gets learned as noise, and the next PR that is
-  # genuinely stale is dismissed along with it. The direction is conservative (it over-reports
-  # staleness, never under-reports), which is exactly why it could survive -- nothing ever shipped
-  # wrong on the strength of it, so nothing ever forced a re-read.
-  #
-  # And note where the near-miss was. The comment at the `when=` line reasons carefully about WHICH
-  # RUN to take -- it caught `head -1` picking an arbitrary sibling and fixed it to the min. It never
-  # asked which FIELD. The half you are not staring at stays wrong.
-  #
-  # `sort | head -1` is unchanged and still correct: currency is a property of the STALEST run.
-  echo "RR arms: a re-run moves startedAt, not createdAt -- read the field the remedy moves"
+  # History, kept because the wrong version was reasoned carefully. On #232, 2026-09-12, I re-ran all
+  # three workflow runs (attempt 1 -> 2, startedAt 2026-09-05T06:03:39Z -> 2026-09-12T16:40:40Z), the
+  # board printed the identical "15 criteria commits" line, and I "fixed" the board to read startedAt
+  # (PR #292). Geist pulled both attempts' checkout logs and they are the SAME commit:
+  #   attempt 1  2026-09-05T06:03:44Z  HEAD is now at d5122ee Merge c2437ce… into 5d4e475…
+  #   attempt 2  2026-09-12T16:40:47Z  HEAD is now at d5122ee Merge c2437ce… into 5d4e475…
+  # (re-verified from DVo 2026-09-14). The re-run exercised none of the 18 commits since. The board was
+  # RIGHT; the defect was this file's closing remedy sentence, which prescribed a re-run. The startedAt
+  # "fix" would have turned an over-reporting alarm into one that a re-run launders green -- the
+  # direction this tool must never fail in. The comment at `when=` asked which RUN, the fix asked which
+  # FIELD, and neither asked which COMMIT.
+  echo "RR arms: a re-run re-executes the original merge commit -- createdAt, not startedAt"
   rr="$(FIXTURE="$FIX" BASE_OVERRIDE=main STUB_CREATED=2026-01-01T00:00:00Z STUB_STARTED=2099-01-01T00:00:00Z \
         STUB_HEAD="$FIXFORK" ord_run 'gate\tpass\t3s\thttps://github.com/o/r/actions/runs/1/job/2\n')"
-  case "$rr" in *"currency : 0 criteria commit"*|*"currency : 0 "*)
-      echo "  ok   RR1 a re-run (fresh startedAt, stale createdAt) reads as CURRENT" ;;
-    *) echo "  FAIL RR1: still counting against createdAt -- the prescribed remedy cannot clear the alarm; got [$rr]"; fail=1 ;; esac
-  # RR1b is the control arm and it is what stops RR1 passing on a script that lost currency
-  # altogether (or hard-coded 0). Same fixture, same createdAt, only startedAt moved back behind the
-  # criteria commits: the count MUST come back.
-  rrb="$(FIXTURE="$FIX" BASE_OVERRIDE=main STUB_CREATED=2026-01-01T00:00:00Z STUB_STARTED=2026-01-01T00:00:00Z \
+  case "$rr" in *"currency : 2 criteria commit"*)
+      echo "  ok   RR1 a re-run (fresh startedAt, stale createdAt) STILL counts the gap -- no laundering" ;;
+    *) echo "  FAIL RR1: a re-run cleared the alarm while testing the stale base; got [$rr]"; fail=1 ;; esac
+  # RR1b is the control arm: without it RR1 passes on a script that counts EVERY commit regardless of
+  # the run. A genuinely new run (fresh createdAt) must read as current, even with an old startedAt,
+  # and only because the stub discriminates on the field (above) can this arm tell the two apart.
+  rrb="$(FIXTURE="$FIX" BASE_OVERRIDE=main STUB_CREATED=2099-01-01T00:00:00Z STUB_STARTED=2026-01-01T00:00:00Z \
          STUB_HEAD="$FIXFORK" ord_run 'gate\tpass\t3s\thttps://github.com/o/r/actions/runs/1/job/2\n')"
-  case "$rrb" in *"currency : 2 criteria commit"*) echo "  ok   RR1b CONTROL: a genuinely stale startedAt still counts the gap" ;;
-    *) echo "  FAIL RR1b CONTROL: currency no longer discriminates at all; got [$rrb]"; fail=1 ;; esac
-  # RR2 asserts the DISPLAYED stamp is the one the arithmetic used. It is not a stub control -- I
-  # labelled it that on the first draft and it was wrong, which is this battery's own recurring
-  # defect (an arm that passes for a reason other than its name). It earns its place on a different
-  # axis: the currency line prints the run stamp in parentheses, and a reader who sees a 2026-09-05
-  # date next to "0 criteria commits" has been handed two facts that contradict each other. The
-  # count and the stamp must come from the same field or the line is self-refuting.
-  case "$rr" in *"(2026-01-01"*) echo "  FAIL RR2: the count moved but the printed stamp is still createdAt -- the line contradicts itself"; fail=1 ;;
-    *"(2099-01-01T00:00:00Z)"*) echo "  ok   RR2 the printed stamp is the same field the count used" ;;
+  case "$rrb" in *"currency : 0 criteria commit"*) echo "  ok   RR1b CONTROL: a genuinely new run (fresh createdAt) reads as CURRENT" ;;
+    *) echo "  FAIL RR1b CONTROL: currency does not follow createdAt; got [$rrb]"; fail=1 ;; esac
+  # RR2 is a same-field assertion, not a control: the printed stamp must be the field the count used,
+  # or the line hands the reader two facts that contradict each other.
+  case "$rr" in *"(2099-01-01"*) echo "  FAIL RR2: the printed stamp is startedAt but the count used createdAt"; fail=1 ;;
+    *"(2026-01-01T00:00:00Z)"*) echo "  ok   RR2 the printed stamp is the same field the count used" ;;
     *) echo "  FAIL RR2: no run stamp printed at all, so the count cannot be audited; got [$rr]"; fail=1 ;; esac
+  # RM arm: the remedy line must not prescribe a re-run -- it cannot clear this, by the arms above.
+  case "$rr" in *"a re-run repairs"*) echo "  FAIL RM: the board still prescribes a re-run, which re-tests the stale base"; fail=1 ;;
+    *"update-branch"*) echo "  ok   RM the remedy names a NEW run (update-branch / push / reopen)" ;;
+    *) echo "  FAIL RM: no remedy line printed for a stale PR; got [$rr]"; fail=1 ;; esac
   # BD arms: the board must DATE ITSELF. Augur's law, 2026-09-05: a currency (or inertness) verdict is
   # a dated measurement of what CI DOES, not a property of a path -- valid for one PR, against one CI
   # configuration, at one timestamp. He proved the retroactive half on #168: his own "a662b0d is inert"
@@ -409,12 +406,10 @@ for pr in $prs; do
   # took whichever gh listed first. Today they share a timestamp (one push triggers all three), so it
   # cannot be wrong yet -- it breaks the first time someone re-runs one workflow alone, after which a
   # fresh sibling masks the stale gates. Currency is a property of the STALEST run, so take the min.
-  # `startedAt`, NOT `createdAt` -- see the RR arms. `gh run rerun` re-runs the SAME run, so
-  # createdAt is frozen at attempt 1 forever while startedAt tracks the latest attempt. Reading
-  # createdAt made this file's own prescribed remedy invisible to it: measured on #232, three runs
-  # re-run to attempt 2 and completed 2026-09-12T16:4xZ still printed createdAt 2026-09-05T06:03:39Z.
+  # `createdAt`, NOT `startedAt` -- see the RR arms. A re-run moves startedAt but re-executes the
+  # ORIGINAL merge commit, so only createdAt dates the base the run actually tested.
   when="$(for r in $(gh pr checks "$pr" 2>/dev/null | grep -oE 'runs/[0-9]+' | cut -d/ -f2 | sort -u); do
-            gh run view "$r" --json startedAt -q .startedAt 2>/dev/null; done | sort | head -1)"
+            gh run view "$r" --json createdAt -q .createdAt 2>/dev/null; done | sort | head -1)"
   run="$when"
   # OUTCOME IS COMPUTED BEFORE THE NO-RUN BRANCH, AND THAT ORDERING IS THE POINT (Augur, 2026-09-03).
   # It used to sit below a `rc=1; continue` that fired whenever `when` was empty -- so on any PR where
@@ -479,13 +474,14 @@ $(echo "$cp" | sed 's/^/                    /')"
   echo "    currency : $n criteria commit(s) landed after its run ($when)"
   [ "$n" -gt 0 ] && echo "               ->$which"
   [ "$n" -gt 0 ] && printf '%s\n' "${detail#?}"
-  [ "$n" -gt 0 ] && echo "               a re-run repairs this and moves NO other number here."
+  [ "$n" -gt 0 ] && echo "               a NEW run repairs this (gh pr update-branch $pr, a push, or close/reopen);"
+  [ "$n" -gt 0 ] && echo "               a re-run does NOT -- it re-executes the original merge commit."
   # The comparison Augur's finding is made of: this PR's gate against the gate its devaluers passed.
   [ "$n" -gt 0 ] && [ "$GATE_STRENGTH" = 1 ] && \
     echo "               (Nck = checks on the commit's OWN merged PR; compare against this PR's outcome count)"
 done
 
-# Deliberately NOT a merge gate. Currency is context for a human deciding whether to re-run; a
+# Deliberately NOT a merge gate. Currency is context for a human deciding whether to re-trigger; a
 # stale-criteria PR is not thereby wrong, and promoting this to blocking would need a labelled
 # false-positive measurement first. rc reflects OUTCOME failures only.
 exit "$rc"
