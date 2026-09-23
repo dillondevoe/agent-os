@@ -197,8 +197,11 @@ provenance-aware inference wrapper for v1. The strength is in the lifecycle, not
     TOCTOU; `taint boot` re-hashes the files independently). A TRUSTED verdict is honored on
     recall/boot **only while the content-hash still matches**; a detected swap **latches the key
     UNTRUSTED permanently (absorbing)**, so reverting the original bytes cannot re-honor it. The
-    hash strictly *adds* untrust — it can never launder. A missing/legacy hash is unverifiable →
-    UNTRUSTED (fail-closed, self-heals on the next stamp).
+    hash strictly *adds* untrust — it can never launder. A **stored** legacy/hash-less tag is
+    unverifiable → UNTRUSTED (fail-closed, self-heals on the next stamp). A **presented**
+    `--content-hash` is REQUIRED on stamp/recall (task 276): absent or malformed → the op is
+    **refused** (exit 2, no state change) and the broker withholds — a broker that stops passing
+    the hash trips loudly instead of silently over-tainting.
 - **Reset epoch high-water (GAP-5/CF-5) — residual, accepted.** Each human reset mints a strictly
   increasing `session_id` from a durable high-water mark in the protected taint dir, so a lost or
   corrupt `session.json` cannot roll the epoch back to a colliding id (which would replay a
