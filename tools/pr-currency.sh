@@ -170,10 +170,12 @@ if [ "${1:-}" = "--selftest" ]; then
       # The stub must DISCRIMINATE ON THE FIELD, or the RR arms below are vacuous: a stub that
       # answers one date to every `run view` cannot tell a script reading createdAt from one
       # reading startedAt, and both would pass. Arm discrimination lives in the fixture.
-      # Real call shape: gh run view <id> --json <field> -q .<field>  ->  $5 is the field.
+      # Key on the WHOLE argument list, not a position: a `$5` stub answers createdAt to any call
+      # whose field sits elsewhere (`-q .startedAt --json startedAt`), so a script reading the
+      # WRONG field passes every RR arm -- a permissive failure that lets a stale PR read current.
       echo '  "run view")'
-      echo '    case "$5" in'
-      echo '      startedAt) echo "${STUB_STARTED:-${STUB_DATE:-2026-09-03T00:00:00Z}}" ;;'
+      echo '    case "$*" in'
+      echo '      *startedAt*) echo "${STUB_STARTED:-${STUB_DATE:-2026-09-03T00:00:00Z}}" ;;'
       echo '      *)         echo "${STUB_CREATED:-${STUB_DATE:-2026-09-03T00:00:00Z}}" ;;'
       echo '    esac ;;'
       echo 'esac'; } > "$d/gh"
