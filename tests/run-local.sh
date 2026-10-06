@@ -46,6 +46,7 @@
 #                                 keypairs, NIP-19 npub, 0600/0700 preflight, boot self-test,
 #                                 name-namespace confinement; perms/markers/traversal/collision
 #                                 control-armed
+#   installer-honesty-battery.sh  install.sh never claims 'sealed' without the unsealed caveat + next step
 #   mem-battery.py                11 checks — bin/mem (memory-as-filesystem) contract
 #   agent-loop-dispatch-battery.py  8 checks — agent-loop tool-dispatch mechanics vs bin/mcp + broker-stub
 #
@@ -210,6 +211,11 @@ fi
 # and this one's whole job is to be noticed BEFORE a stale pin ships.
 if need "$ROOT/tests/pin-freshness.sh" pin-freshness; then
   run pin-freshness sh -c 'cd "$1" && bash tests/pin-freshness.sh' _ "$ROOT"
+fi
+
+# install.sh must not call the (unsealed) machine it installs "sealed", and must print the seal step.
+if need "$ROOT/tests/installer-honesty-battery.sh" installer-honesty; then
+  run installer-honesty bash "$ROOT/tests/installer-honesty-battery.sh" "$ROOT/install.sh"
 fi
 
 if need "$ROOT/bin/fetch-verified.sh" supply-chain; then
