@@ -1,0 +1,20 @@
+Agent OS
+Copyright (c) 2026 Dillon DeVoe. Licensed under the MIT License (see LICENSE).
+
+This repository contains code and configuration only. It does not redistribute model weights,
+but the installed system downloads or builds them, and they are NOT covered by the MIT license
+above. Each carries its publisher's license. As stated on the Hugging Face model cards
+(checked 2026-10-04):
+
+  Qwen3.5-9B (default brain, tag qwen3.5:9b)   Apache-2.0
+      https://huggingface.co/Qwen/Qwen3.5-9B
+  unsloth/Qwen3.5-9B-GGUF (quantization baked into the open variant)   Apache-2.0
+      https://huggingface.co/unsloth/Qwen3.5-9B-GGUF
+  Qwen2.5-7B-Instruct (referenced in older comments; not the default)   Apache-2.0
+      https://huggingface.co/Qwen/Qwen2.5-7B-Instruct
+  Qwen2.5-3B (family of the optional non-default tag qwen2.5:3b-augur)
+      Qwen Research License, non-commercial ("research or evaluation purposes only")
+      https://huggingface.co/Qwen/Qwen2.5-3B/blob/main/LICENSE
+
+The system also builds on NixOS/nixpkgs and the software packaged there, each under its own
+license. Check the licenses of anything you install before redistributing a built image.
