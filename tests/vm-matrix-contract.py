@@ -105,6 +105,9 @@ WIRED_VIA_WORKFLOW = {
     # THIS check on the commit that added it, exactly as the two entries above did; a check about
     # controls that never run, caught by the control that catches controls that never run.
     "pin-freshness.sh": "flake-check.yml",
+    # install.sh must not call the unsealed box it installs "sealed". Pure grep over one file,
+    # no nix and no VM, so it is a flake-check.yml job (installer-honesty), same lane as above.
+    "installer-honesty-battery.sh": "flake-check.yml",
     # The personal-data gate's battery (PR #222). Pure bash, no nix, no VM — same lane as the
     # two above. Wired into its OWN workflow rather than flake-check.yml because the gate is a
     # publication control: its workflow runs on pull_request AND on push to main, so the battery
