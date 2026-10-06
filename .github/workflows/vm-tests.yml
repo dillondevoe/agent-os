@@ -222,6 +222,7 @@ jobs:
           # test, because the property that matters (a restart does not rotate keys, orphaning
           # every prior signature) only exists across boots. Boots the SOVEREIGN image twice.
           - test-identity-boot
+          - test-installer-iso
     steps:
       - name: Checkout
         # SHA-pinned, matching flake-check.yml: immutable commit of the newest v* release tag.

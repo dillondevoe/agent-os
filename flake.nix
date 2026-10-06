@@ -128,10 +128,27 @@
       # (install.sh VARIANT=agentos-open bakes the mesh authorized_keys + TS_AUTHKEY).
       nixosConfigurations.agentos-open = mkOpenSystem [ ];
 
+      # Live installer image (M1a). Self-contained like the open variant; carries no model,
+      # secret or key. `nix build .#iso` -> result/iso/*.iso. See docs/installer-iso.md.
+      nixosConfigurations.installer = nixpkgs.lib.nixosSystem {
+        inherit system;
+        modules = [ ./modules/installer-iso.nix ];
+      };
+
       # Prove boot-and-talk in a VM BEFORE it ever touches the Dell:
       #   nix build .#vm && ./result/bin/run-*-vm       (unsealed: can pull a model)
       #   nix build .#vm-sealed                          (sealed: nixpkgs-only egress)
       packages.${system} = {
+        # Bootable live installer ISO: nix build .#iso --option sandbox true
+        iso = self.nixosConfigurations.installer.config.system.build.isoImage;
+
+        # Headless boot test of the installer's console: banner + `agentos-install` on PATH.
+        # Out of `checks` (boots a VM); ENFORCED by .github/workflows/vm-tests.yml.
+        test-installer-iso = import ./tests/installer-iso.nix {
+          pkgs = nixpkgs.legacyPackages.${system};
+          installerModule = ./modules/installer-iso.nix;
+        };
+
         vm        = self.nixosConfigurations.agentos.config.system.build.vm;
         vm-sealed = self.nixosConfigurations.agentos-sealed.config.system.build.vm;
         # Boot-sanity the open variant in a VM before it touches the Dell:
