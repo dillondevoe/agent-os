@@ -227,3 +227,13 @@ jobs:
         run: |
           git fetch --depth=200 origin main
           BASE=FETCH_HEAD ./tests/pin-freshness.sh
+
+  # install.sh installs the UNSEALED `agentos` target and must say so (see the battery header).
+  # Pure grep, no Nix needed.
+  installer-honesty:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: install.sh does not claim the box is sealed
+        run: bash tests/installer-honesty-battery.sh install.sh
