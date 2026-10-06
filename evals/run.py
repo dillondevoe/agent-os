@@ -37,7 +37,6 @@ def load_tasks(path, family=None):
             t["family"] = fam
             t.setdefault("tools", doc.get("tools", []))
             t.setdefault("system", doc.get("system", ""))
-            t["_file"] = os.path.basename(f)
             if "id" not in t or "expect" not in t or "prompt" not in t:
                 raise ValueError(f"{f}: task needs id/prompt/expect: {t.get('id')}")
             tasks.append(t)
