@@ -2611,6 +2611,25 @@
               touch $out
             '';
 
+        # evals/run.py — the model-agnostic eval runner the weekly model watch and the router
+        # experiment read (vision draft B, 2026-10-05). This check proves the INSTRUMENT, not a
+        # model: the fake backend scores 100% on every task file and the control arms (wrong
+        # tool, mutated argument, credential path, unrequested domain, backend exception) each
+        # score 0. No model, no network. A model run is `evals/run.py --backend ollama`, which is
+        # a measurement and never a gate.
+        evals-contract =
+          nixpkgs.legacyPackages.${system}.runCommand "evals-contract-check"
+            { nativeBuildInputs = [ nixpkgs.legacyPackages.${system}.python3 ]; } ''
+              work="$(mktemp -d)"
+              mkdir -p "$work/evals" "$work/tests"
+              cp -r ${./evals/tasks} "$work/evals/tasks"
+              cp ${./evals/run.py} "$work/evals/run.py"
+              cp ${./tests/evals-battery.py} "$work/tests/evals-battery.py"
+              cd "$work"
+              python3 tests/evals-battery.py
+              touch $out
+            '';
+
         mem-contract =
           nixpkgs.legacyPackages.${system}.runCommand "mem-contract-check"
             { nativeBuildInputs = [ nixpkgs.legacyPackages.${system}.python3 ]; } ''
