@@ -62,7 +62,10 @@ runner enforces the hard rules; the eval scores the judgment.
 ## 4. Approval
 
 Approval is the manifest's SHA-256 over its canonical JSON (sorted keys, no whitespace),
-recorded in `~/.local/state/agent-os/approvals.json`:
+recorded in `~/.local/state/agent-os/approvals.json` (or `$AGOS_APPROVALS`; apps likewise live in
+`$AGOS_APPS` when set). The sealed image compiles both paths into its copies of the tools and
+ignores the environment, so the agent account cannot redirect them
+(`docs/design/app-approval-confirm.md` §3.1):
 
 ```json
 {"<sha256>": {"name": "gym-spending", "approved_at": "2026-10-08T01:02:03Z"}}

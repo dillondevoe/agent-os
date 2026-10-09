@@ -259,7 +259,10 @@ def main(argv):
         h = R.home()
     except R.ManifestError as e:
         print("agos-build: %s" % e, file=sys.stderr); return 2
-    apps_root = os.path.join(h, R.APPS_REL)
+    try:
+        apps_root = R.apps_root(h)
+    except R.ManifestError as e:
+        print("agos-build: %s" % e, file=sys.stderr); return 2
     system, tools = load_contract()
     backend = fake_backend if a.backend == "fake" else make_ollama_backend(a.model)
     messages = [{"role": "system", "content": system}, {"role": "user", "content": "Request: " + request}]

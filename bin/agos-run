@@ -38,6 +38,13 @@ ALLOWED_KEYS = {"name", "version", "entry", "files", "network", "devices", "limi
 LIMIT_BOUNDS = {"cpu_pct": (1, 100, 50), "mem_mb": (16, 8192, 512), "wall_s": (1, 86400, 300)}
 
 
+# The sealed image substitutes these two constants at build time (docs/design/app-approval-confirm.md
+# §3.1). When set they win over everything: the environment is ignored and $HOME is never consulted,
+# so the agent account cannot point the runner at a store it can write. Empty on dev boxes.
+IMAGE_APPROVALS = ""
+IMAGE_APPS = ""
+
+
 class ManifestError(Exception):
     """Validation failure. The message names the rule (R<n>) so a refusal is actionable."""
 
@@ -49,12 +56,41 @@ def home():
     return os.path.realpath(h)
 
 
+def _abs_env(var):
+    v = os.environ.get(var, "")
+    if v and not os.path.isabs(v):
+        raise ManifestError("R0 %s must be an absolute path: %r" % (var, v))
+    return v
+
+
+def approvals_path(h):
+    """Where approvals are read (and, by agos-approve, written): the image constant, else
+    $AGOS_APPROVALS, else ~/.local/state/agent-os/approvals.json."""
+    if IMAGE_APPROVALS:
+        return IMAGE_APPROVALS
+    return _abs_env("AGOS_APPROVALS") or os.path.join(h, APPROVALS_REL)
+
+
+def apps_root(h):
+    """Where apps live: the image constant, else $AGOS_APPS, else ~/.local/share/agent-os/apps."""
+    if IMAGE_APPS:
+        return os.path.realpath(IMAGE_APPS)
+    return os.path.realpath(_abs_env("AGOS_APPS") or os.path.join(h, APPS_REL))  # ~/.local may be a symlink
+
+
 def canonical(m):
     return json.dumps(m, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
 
 
 def sha(m):
     return hashlib.sha256(canonical(m)).hexdigest()
+
+
+def field_json(v):
+    """The per-FIELD encoder for the app.approve call (docs/design/app-approval-confirm.md §3.2):
+    ASCII-only, so what agos-build prints and what the capability compares cannot disagree. The
+    manifest hash stays sha() over canonical(); this encoder never feeds a hash."""
+    return json.dumps(v, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
 
 
 def resolve_home_path(p, h, mode):
@@ -69,6 +105,11 @@ def resolve_home_path(p, h, mode):
         raise ManifestError("R4 files[].path is $HOME itself; the home directory is never bindable")
     if not real.startswith(h + os.sep):
         raise ManifestError("R4 files[].path resolves outside $HOME: %r" % p)
+    # The approvals store's directory and the apps root are private wherever they are configured:
+    # an app may not bind them, their contents, or an ancestor of them.
+    for d in (os.path.realpath(os.path.dirname(approvals_path(h))), apps_root(h)):
+        if real == d or real.startswith(d + os.sep) or d.startswith(real + os.sep):
+            raise ManifestError("R5 files[].path overlaps the approvals store or the apps root: %r" % p)
     rel = os.path.relpath(real, h)
     for d in DENY_PREFIXES + [APPROVALS_REL]:
         if rel == d or rel.startswith(d + os.sep):
@@ -104,10 +145,10 @@ def validate(m, appdir):
     e = m["entry"]
     if not isinstance(e, list) or not e or not all(isinstance(x, str) and x for x in e):
         raise ManifestError("R3 entry must be a non-empty list of non-empty strings (argv)")
-    apps_root = os.path.realpath(os.path.join(h, APPS_REL))  # ~/.local may itself be a symlink
+    root = apps_root(h)
     real_app = os.path.realpath(appdir)
-    if os.path.dirname(real_app) != apps_root or os.path.basename(real_app) != m["name"]:
-        raise ManifestError("R11 app dir must be $HOME/%s/<name> and <name> must equal manifest.name" % APPS_REL)
+    if os.path.dirname(real_app) != root or os.path.basename(real_app) != m["name"]:
+        raise ManifestError("R11 app dir must be %s/<name> and <name> must equal manifest.name" % root)
     files = m["files"]
     if not isinstance(files, list):
         raise ManifestError("R4 files must be a list")
@@ -167,7 +208,10 @@ def load_manifest(appdir):
 
 
 def approved(m, h):
-    p = os.path.join(h, APPROVALS_REL)
+    try:
+        p = approvals_path(h)
+    except ManifestError:
+        return False  # a bad AGOS_APPROVALS approves nothing
     try:
         with open(p) as fh:
             db = json.load(fh)
