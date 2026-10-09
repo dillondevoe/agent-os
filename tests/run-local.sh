@@ -50,6 +50,7 @@
 #   installer-honesty-battery.sh  install.sh never claims 'sealed' without the unsealed caveat + next step
 #   mem-battery.py                11 checks — bin/mem (memory-as-filesystem) contract
 #   evals-battery.py              9 criteria — evals/run.py model-agnostic eval runner, control-armed
+#   router-battery.py             10 criteria — evals/router.py router experiment: contract, thresholds, DANGEROUS, fake transport
 #   agos-run-battery.py           13 criteria — bin/agos-run app sandbox gate, control-armed (real bwrap arm if usable)
 #   agos-approve-battery.py       8 criteria — bin/agos-approve owner-side approval writer: tty/session/sha-prefix gates
 #   agos-build-battery.py         10 criteria — bin/agos-build app builder loop: fake model, B/R-rule retries, never approves/runs
@@ -156,6 +157,11 @@ need "$T/mem-battery.py" mem && \
 # only, no model, no network). Control-armed: wrong tool / wrong arg / credential path score 0.
 need "$T/evals-battery.py" evals && \
   run evals "$PY" "$T/evals-battery.py"
+
+# router-battery.py — contract battery for evals/router.py (fake transport; every arm paired
+# with a control; held-out exemplars and OpenJev's prompt contract pinned).
+need "$T/router-battery.py" router && \
+  run router "$PY" "$T/router-battery.py"
 
 # agos-run-battery.py — contract battery for bin/agos-run (locates ../bin itself; fake bwrap on
 # PATH for the dry-run arms, real bwrap for arm G when the host allows user namespaces).

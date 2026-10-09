@@ -2768,6 +2768,25 @@
               touch $out
             '';
 
+        # evals/router.py — the router experiment (cheap front stages vs the 9B, simulated
+        # cascades). This check proves the instrument can say "wrong" and "dangerous": held-out
+        # exemplars, OpenJev's published prompt contract, letter-only probabilities, threshold
+        # and abstain semantics, DANGEROUS counting. Fake transport; no model, no network.
+        router-contract =
+          nixpkgs.legacyPackages.${system}.runCommand "router-contract-check"
+            { nativeBuildInputs = [ nixpkgs.legacyPackages.${system}.python3 ]; } ''
+              work="$(mktemp -d)"
+              mkdir -p "$work/evals" "$work/tests"
+              cp -r ${./evals/tasks} "$work/evals/tasks"
+              cp -r ${./evals/router} "$work/evals/router"
+              cp ${./evals/run.py} "$work/evals/run.py"
+              cp ${./evals/router.py} "$work/evals/router.py"
+              cp ${./tests/router-battery.py} "$work/tests/router-battery.py"
+              cd "$work"
+              python3 tests/router-battery.py
+              touch $out
+            '';
+
         mem-contract =
           nixpkgs.legacyPackages.${system}.runCommand "mem-contract-check"
             { nativeBuildInputs = [ nixpkgs.legacyPackages.${system}.python3 ]; } ''
