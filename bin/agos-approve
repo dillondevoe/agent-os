@@ -68,9 +68,14 @@ def write_db(h, db):
             raise R.ManifestError("approvals directory %s is missing (the image provisions it)" % d)
     else:
         mode = 0o600
-        os.makedirs(d, mode=0o700, exist_ok=True); os.chmod(d, 0o700)
+        if not os.path.isdir(d):   # tighten only a directory we create, never a shared one ($HOME, /tmp)
+            os.makedirs(d, mode=0o700); os.chmod(d, 0o700)
     tmp = p + ".tmp.%d" % os.getpid()
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)
+    try:
+        os.unlink(tmp)             # a leftover from a crashed write by this pid number
+    except FileNotFoundError:
+        pass
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, mode)
     with os.fdopen(fd, "w") as fh:
         json.dump(db, fh, sort_keys=True, indent=1); fh.write("\n")
     os.chmod(tmp, mode); os.replace(tmp, p)

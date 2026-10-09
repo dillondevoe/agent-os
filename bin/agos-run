@@ -63,17 +63,25 @@ def _abs_env(var):
     return v
 
 
+def image_mode():
+    """Both constants or neither: a half-substituted build would let the other path fall back to
+    the environment, so it refuses everything instead."""
+    if bool(IMAGE_APPROVALS) != bool(IMAGE_APPS):
+        raise ManifestError("R0 image build sets only one of IMAGE_APPROVALS / IMAGE_APPS; refusing")
+    return bool(IMAGE_APPROVALS)
+
+
 def approvals_path(h):
     """Where approvals are read (and, by agos-approve, written): the image constant, else
     $AGOS_APPROVALS, else ~/.local/state/agent-os/approvals.json."""
-    if IMAGE_APPROVALS:
+    if image_mode():
         return IMAGE_APPROVALS
     return _abs_env("AGOS_APPROVALS") or os.path.join(h, APPROVALS_REL)
 
 
 def apps_root(h):
     """Where apps live: the image constant, else $AGOS_APPS, else ~/.local/share/agent-os/apps."""
-    if IMAGE_APPS:
+    if image_mode():
         return os.path.realpath(IMAGE_APPS)
     return os.path.realpath(_abs_env("AGOS_APPS") or os.path.join(h, APPS_REL))  # ~/.local may be a symlink
 
@@ -105,11 +113,17 @@ def resolve_home_path(p, h, mode):
         raise ManifestError("R4 files[].path is $HOME itself; the home directory is never bindable")
     if not real.startswith(h + os.sep):
         raise ManifestError("R4 files[].path resolves outside $HOME: %r" % p)
-    # The approvals store's directory and the apps root are private wherever they are configured:
-    # an app may not bind them, their contents, or an ancestor of them.
-    for d in (os.path.realpath(os.path.dirname(approvals_path(h))), apps_root(h)):
+    # The approvals store and the apps root are private wherever they are configured: an app may
+    # not bind them, their contents, or an ancestor of them. A store whose directory is $HOME or an
+    # ancestor of it (AGOS_APPROVALS=$HOME/approvals.json) protects the file itself, not all of $HOME.
+    store = os.path.realpath(approvals_path(h))
+    store_dir = os.path.dirname(store)
+    private = [apps_root(h), store]
+    if not (store_dir == h or h.startswith(store_dir.rstrip(os.sep) + os.sep)):
+        private.append(store_dir)
+    for d in private:
         if real == d or real.startswith(d + os.sep) or d.startswith(real + os.sep):
-            raise ManifestError("R5 files[].path overlaps the approvals store or the apps root: %r" % p)
+            raise ManifestError("R5 files[].path overlaps the approvals store or the apps root (%s): %r" % (d, p))
     rel = os.path.relpath(real, h)
     for d in DENY_PREFIXES + [APPROVALS_REL]:
         if rel == d or rel.startswith(d + os.sep):
@@ -291,6 +305,8 @@ def main(args):
         v = validate(m, appdir)
     except ManifestError as e:
         print("agos-run: REFUSED manifest: %s" % e, file=sys.stderr); return 3
+    if test_ok and IMAGE_APPROVALS:
+        print("agos-run: REFUSED: --approve-for-test does not exist in the image build", file=sys.stderr); return 2
     if test_ok:
         print("agos-run: WARNING --approve-for-test bypasses the owner's approval; tests only", file=sys.stderr)
     elif not approved(m, v["home"]):

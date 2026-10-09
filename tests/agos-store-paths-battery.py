@@ -24,17 +24,22 @@
 #      is the image runner beside it (A5).
 #   H. field_json: ASCII-only, sorted, compact; differs from canonical() on a non-ASCII value.
 #   I. agos-build writes into AGOS_APPS (fake backend), not the $HOME default.
+#   J. Image hardening: a copy with only ONE constant substituted refuses everything (no half
+#      fallback); --approve-for-test does not exist in an image copy (control: it works on dev).
+#   K. A store directly in $HOME protects the file, not all of $HOME (a normal file still binds;
+#      the store file itself is refused R5); a `$` in a store path reaches the unit single.
 #
 # stdlib only. Exits 0 on all-pass, non-zero (AssertionError) on any failure.
 
 SIDE_EFFECTS = []  # scratch dirs under mktemp, removed at exit
 
-import importlib.machinery, json, os, shutil, subprocess, sys, tempfile
+import atexit, importlib.machinery, json, os, shutil, subprocess, sys, tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.abspath(os.path.join(HERE, ".."))
 BIN = os.path.join(REPO, "bin")
 TMP = tempfile.mkdtemp(prefix="agos-store-paths-battery.")
+atexit.register(shutil.rmtree, TMP, True)   # removed even when an arm fails
 HOME = os.path.join(TMP, "home")
 FAKE = os.path.join(TMP, "fakebin")
 os.makedirs(FAKE)
@@ -97,7 +102,8 @@ def dry(binary, appdir, **env):
 
 
 def image_bin(store, apps):
-    """A copy of bin/ with the two constants substituted, the way the image build will do it."""
+    """A copy of bin/ with the constants substituted, the way the image build will do it. An empty
+    value leaves that constant unsubstituted (the half-built case arm J needs)."""
     d = os.path.join(TMP, "imagebin")
     shutil.rmtree(d, ignore_errors=True); os.makedirs(d)
     for tool in ("agos-run", "agos-approve", "agos-schedule", "agos-build"):
@@ -106,7 +112,8 @@ def image_bin(store, apps):
     for k, v in (("IMAGE_APPROVALS", store), ("IMAGE_APPS", apps)):
         line = '%s = ""' % k
         check(src.count(line) == 1, "agos-run must carry exactly one substitutable %s line" % k)
-        src = src.replace(line, '%s = %r' % (k, v))
+        if v:
+            src = src.replace(line, '%s = %r' % (k, v))
     open(os.path.join(d, "agos-run"), "w").write(src)
     return d
 
@@ -134,7 +141,7 @@ approve_in(envstore)
 rc, out = dry(os.path.join(BIN, "agos-run"), app, AGOS_APPROVALS=envstore)
 check(rc == 0, "B: env store approval must count, got %d: %s" % (rc, out))
 rc, out = dry(os.path.join(BIN, "agos-run"), app, AGOS_APPROVALS="relative/approvals.json")
-check(rc != 0, "B: a relative AGOS_APPROVALS must approve nothing")
+check(rc == 3 and "R0" in out, "B: a relative AGOS_APPROVALS must be refused R0, got %d: %s" % (rc, out))
 ok("B AGOS_APPROVALS: replaces the $HOME store; relative path approves nothing")
 
 # C ── image constants
@@ -174,12 +181,17 @@ storedir = os.path.join(HOME, "approvals-here"); os.makedirs(storedir)
 open(os.path.join(storedir, "approvals.json"), "w").write("{}")
 appsdir = os.path.join(HOME, "my-apps"); os.makedirs(appsdir)
 env = dict(AGOS_APPROVALS=os.path.join(storedir, "approvals.json"), AGOS_APPS=appsdir)
-for bad, why in ((storedir, "store dir"), (os.path.join(storedir, "approvals.json"), "store file"),
-                 (appsdir, "apps root"), (HOME + "/approvals-here/..", "ancestor")):
+deep = os.path.join(HOME, "a", "b"); os.makedirs(deep)
+open(os.path.join(deep, "approvals.json"), "w").write("{}")
+for bad, why, e in ((storedir, "store dir", env), (os.path.join(storedir, "approvals.json"), "store file", env),
+                    (appsdir, "apps root", env),
+                    (os.path.join(HOME, "a"), "ancestor of the store dir",
+                     dict(AGOS_APPROVALS=os.path.join(deep, "approvals.json"), AGOS_APPS=appsdir))):
     m = dict(GOOD, files=[{"path": bad, "mode": "r"}])
     a = mk_app(appsdir, m)
-    rc, out = dry(os.path.join(BIN, "agos-run"), a, AGOS_RUN_NO_SYSTEMD="1", **env)
-    check(rc == 3 and ("R5" in out or "R4" in out), "E: binding the %s must be refused, got %d: %s" % (why, rc, out))
+    rc, out = dry(os.path.join(BIN, "agos-run"), a, **e)
+    check(rc == 3 and "R5" in out and "overlaps the approvals store" in out,
+          "E: binding the %s must be refused by the new R5 rule, got %d: %s" % (why, rc, out))
 m = dict(GOOD); a = mk_app(appsdir, m)
 approve_in(env["AGOS_APPROVALS"], m)
 rc, out = dry(os.path.join(BIN, "agos-run"), a, **env)
@@ -196,6 +208,10 @@ A.write_db(HOME, {"x": {"name": "x"}})
 p = os.environ["AGOS_APPROVALS"]
 check(os.path.exists(p) and not os.path.exists(DEFAULT_STORE), "F: dev write must land in AGOS_APPROVALS only")
 check(os.stat(p).st_mode & 0o777 == 0o600 and os.stat(os.path.dirname(p)).st_mode & 0o777 == 0o700, "F: dev store 0600 in a 0700 dir")
+shared = os.path.join(TMP, "shared"); os.makedirs(shared); os.chmod(shared, 0o755)
+os.environ["AGOS_APPROVALS"] = os.path.join(shared, "approvals.json")
+A.write_db(HOME, {"x": {"name": "x"}})
+check(os.stat(shared).st_mode & 0o777 == 0o755, "F: an existing (shared) directory must not be tightened to 0700")
 os.environ.pop("AGOS_APPROVALS")
 imgstore = os.path.join(TMP, "image", "app-approvals", "approvals.json")
 ib = image_bin(imgstore, os.path.join(TMP, "image", "apps"))
@@ -260,5 +276,39 @@ check(p.returncode == 0 and built and not os.path.exists(DEFAULT_APPS),
       "I: agos-build must write into AGOS_APPS only (rc=%d built=%s): %s" % (p.returncode, built, (p.stdout + p.stderr)[-400:]))
 ok("I agos-build writes into AGOS_APPS")
 
-shutil.rmtree(TMP, ignore_errors=True)
+# J ── image hardening
+reset()
+for store, apps in ((os.path.join(TMP, "image", "s.json"), ""), ("", os.path.join(TMP, "image", "apps"))):
+    ib = image_bin(store, apps)
+    a = mk_app(apps or DEFAULT_APPS); approve_in(DEFAULT_STORE)
+    rc, out = dry(os.path.join(ib, "agos-run"), a)
+    check(rc == 3 and "only one of IMAGE_APPROVALS" in out, "J: a half-substituted image copy must refuse, got %d: %s" % (rc, out))
+imgstore = os.path.join(TMP, "image", "app-approvals", "approvals.json"); imgapps = os.path.join(TMP, "image", "apps")
+ib = image_bin(imgstore, imgapps); a = mk_app(imgapps)
+p = subprocess.run([sys.executable, os.path.join(ib, "agos-run"), a, "--dry-run", "--approve-for-test"],
+                   env=BASE_ENV, capture_output=True, text=True)
+check(p.returncode == 2 and "does not exist in the image build" in p.stderr, "J: --approve-for-test must be refused in the image copy: %s" % p.stderr)
+a = mk_app(DEFAULT_APPS)
+p = subprocess.run([sys.executable, os.path.join(BIN, "agos-run"), a, "--dry-run", "--approve-for-test"],
+                   env=BASE_ENV, capture_output=True, text=True)
+check(p.returncode == 0, "J control: --approve-for-test works on a dev copy, rc=%d %s" % (p.returncode, p.stderr))
+ok("J image hardening: half-substituted copy refuses; no --approve-for-test")
+
+# K ── store in $HOME; `$` in a unit env value
+reset()
+homestore = os.path.join(HOME, "approvals.json")
+a = mk_app(DEFAULT_APPS); approve_in(homestore)
+rc, out = dry(os.path.join(BIN, "agos-run"), a, AGOS_APPROVALS=homestore)
+check(rc == 0, "K: a store directly in $HOME must not block normal files, got %d: %s" % (rc, out))
+m = dict(GOOD, files=[{"path": "~/approvals.json", "mode": "r"}]); a2 = mk_app(DEFAULT_APPS, m)
+rc, out = dry(os.path.join(BIN, "agos-run"), a2, AGOS_APPROVALS=homestore)
+check(rc == 3 and "R5" in out, "K: the store file itself is still refused R5, got %d: %s" % (rc, out))
+reset()
+dollar = os.path.join(TMP, "envstore", "a$b", "approvals.json")
+a = mk_app(DEFAULT_APPS); approve_in(dollar)
+rc, unit, out = install(os.path.join(BIN, "agos-schedule"), a, AGOS_APPROVALS=dollar)
+check(rc == 0 and ('Environment=AGOS_APPROVALS="%s"' % dollar) in unit and "$$" not in unit.split("Environment=AGOS_APPROVALS")[1].split("\n")[0],
+      "K: `$` must reach the Environment= value single:\n" + unit)
+ok("K store in $HOME protects the file only; `$` stays single in Environment=")
+
 print("agos-store-paths-battery: PASS (%d criteria)" % len(passed))

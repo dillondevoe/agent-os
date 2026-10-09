@@ -75,6 +75,12 @@ def unit_arg(p):
     return '"' + p.replace("\\", "\\\\").replace('"', '\\"').replace("%", "%%").replace("$", "$$") + '"'
 
 
+def env_arg(p):
+    """Quote one Environment= value: like unit_arg but `$` stays single (Environment= does no
+    variable expansion; specifiers % are still expanded, so % is doubled)."""
+    return '"' + p.replace("\\", "\\\\").replace('"', '\\"').replace("%", "%%") + '"'
+
+
 def unit_value(v, allow_pct=False):
     """A value that must sit on ONE unit line. Refuse control characters (a newline would start a
     new key). % is refused too (systemd expands it) unless the caller doubles it itself."""
@@ -134,9 +140,9 @@ def cmd_install(appdir):
     path_env = os.environ.get("PATH", "")
     # A scheduled run must read the same store and apps root as a run by hand. On the image the
     # runner beside us carries them as constants; on a dev box carry the env into the unit.
-    store_env = "".join("Environment=%s=%s\n" % (k, unit_arg(os.environ[k]))
-                        for k in ("AGOS_APPROVALS", "AGOS_APPS")
-                        if os.environ.get(k) and not (R.IMAGE_APPROVALS or R.IMAGE_APPS))
+    store_env = "".join("Environment=%s=%s\n" % (k, env_arg(os.environ[k]))
+                        for k, const in (("AGOS_APPROVALS", R.IMAGE_APPROVALS), ("AGOS_APPS", R.IMAGE_APPS))
+                        if os.environ.get(k) and not const)
     service = ("# written by agos-schedule; do not edit, re-run `agos-schedule install` instead\n"
                "[Unit]\nDescription=Agent OS app %s (sandboxed by agos-run)\n"
                "X-AgentOS-App=%s\nX-AgentOS-Sha=%s\n\n"
