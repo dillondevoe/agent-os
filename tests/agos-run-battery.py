@@ -19,6 +19,13 @@
 #   F. devices non-empty is R8; unknown key is R12; app dir outside the apps root is R11.
 #   G. REAL RUN (only when bwrap works on this host): a file NOT in the manifest is invisible
 #      inside the sandbox while a bound file is readable. Skipped (and said so) under nix.
+#   H. CONTROL (ancestor hole): `~`, `~/.local`, `~/.config` are refused (R4/R5) because they
+#      sit ABOVE a denied location; `~/notes` is still accepted.
+#   I. CONTROL (shadowing): two entries where one is under the other are refused (R14) in both
+#      orders; an entry overlapping the app dir is refused; two siblings are accepted.
+#   J. CONTROL (missing source): a missing `r` path is refused (R13); a missing `rw` path is
+#      accepted, listed under "create", and (real bwrap) created 0700 on the host so the
+#      daily-summary example runs on a FRESH home and writes its file.
 #
 # stdlib only. Exit 0 all-pass; AssertionError otherwise.
 SIDE_EFFECTS = []  # scratch HOME under mktemp, removed at exit; arm G runs bwrap on-box, nothing outlives the run
@@ -67,6 +74,8 @@ def approve(m):
 
 
 os.makedirs(os.path.join(HOME, "notes"), exist_ok=True)
+os.makedirs(os.path.join(HOME, "drafts"), exist_ok=True)
+os.makedirs(os.path.join(HOME, ".config/gh"), exist_ok=True)
 os.makedirs(os.path.join(HOME, ".ssh"), exist_ok=True)
 open(os.path.join(HOME, "notes/todo.md"), "w").write("todo\n")
 open(os.path.join(HOME, "notes/.env"), "w").write("X=1\n")
@@ -78,7 +87,7 @@ open(os.path.join(FAKE_BWRAP, "systemd-run"), "w").write("#!/bin/sh\nexit 0\n");
 ENV["PATH"] = FAKE_BWRAP + os.pathsep + ENV.get("PATH", "")
 
 GOOD = {"name": "gym-spending", "version": "0.1", "entry": ["sh", "-c", "cat $HOME/notes/todo.md"],
-        "files": [{"path": "~/notes/todo.md", "mode": "r"}, {"path": "~/notes", "mode": "rw"}],
+        "files": [{"path": "~/notes/todo.md", "mode": "r"}, {"path": "~/drafts", "mode": "rw"}],
         "network": [], "devices": [], "limits": {"cpu_pct": 25, "mem_mb": 128, "wall_s": 60}, "schedule": ""}
 
 
@@ -91,9 +100,10 @@ def test_a_valid():
     check(a[a.index("--tmpfs", a.index(HOME) - 1) + 1] == HOME or ["--tmpfs", HOME] == a[a.index(HOME) - 1:a.index(HOME) + 1], "A no tmpfs over HOME")
     ad = os.path.realpath(d)
     check(["--bind", ad, ad] == a[a.index("--bind"):a.index("--bind") + 3], "A app dir not bound rw")
-    todo = os.path.realpath(os.path.join(HOME, "notes/todo.md")); notes = os.path.realpath(os.path.join(HOME, "notes"))
+    todo = os.path.realpath(os.path.join(HOME, "notes/todo.md")); drafts = os.path.realpath(os.path.join(HOME, "drafts"))
     check(["--ro-bind", todo, todo] == a[a.index(todo) - 1:a.index(todo) + 2], "A todo not ro-bind")
-    i = a.index(notes); check(a[i - 1] == "--bind", "A notes not rw bind")
+    i = a.index(drafts); check(a[i - 1] == "--bind", "A drafts not rw bind")
+    check("--remount-ro" in a and a[a.index("--remount-ro") + 1] == HOME and a.index("--remount-ro") > i, "A HOME remount-ro must come after binds")
     check(a[-3:] == GOOD["entry"], "A entry not last: %r" % a[-3:])
     check("--approve-for-test bypasses" in err, "A test bypass must warn loudly")
     check(j["sha256"] == sha_of(GOOD), "A sha mismatch")
@@ -192,13 +202,63 @@ def test_g_real_run():
     check(os.path.exists(os.path.join(d, "made")), "G app dir write did not land on the host side")
 
 
+def test_h_ancestor():
+    for path in ("~", "~/.local", "~/.config", "~/.local/share", "~/.local/state/agent-os", "~/.local/share/agent-os"):
+        for mode in ("r", "rw"):
+            m = copy.deepcopy(GOOD); m["files"] = [{"path": path, "mode": mode}]
+            rc, _, err = dry(mk("gym-spending", m), "--approve-for-test")
+            check(rc == 3 and ("R4" in err or "R5" in err), "H %s %s must be refused: rc=%d err=%s" % (path, mode, rc, err))
+    m = copy.deepcopy(GOOD); m["files"] = [{"path": "~/notes", "mode": "rw"}]
+    rc, _, err = dry(mk("gym-spending", m), "--approve-for-test"); check(rc == 0, "H control ~/notes must still pass: %s" % err)
+    m = copy.deepcopy(GOOD); m["files"] = [{"path": "~/.local/state/agent-os/approvals.json", "mode": "r"}]
+    rc, _, err = dry(mk("gym-spending", m), "--approve-for-test"); check(rc == 3 and "R5" in err, "H approvals file itself must be R5")
+
+
+def test_i_nesting():
+    pairs = [[{"path": "~/notes/todo.md", "mode": "r"}, {"path": "~/notes", "mode": "rw"}],
+             [{"path": "~/notes", "mode": "rw"}, {"path": "~/notes/todo.md", "mode": "r"}],
+             [{"path": "~/notes", "mode": "r"}, {"path": "~/notes", "mode": "rw"}]]
+    for files in pairs:
+        m = copy.deepcopy(GOOD); m["files"] = files
+        rc, _, err = dry(mk("gym-spending", m), "--approve-for-test")
+        check(rc == 3 and ("R14" in err or "R4" in err), "I nested %r must be refused: rc=%d err=%s" % (files, rc, err))
+    m = copy.deepcopy(GOOD); m["files"] = [{"path": "~/.local/share/agent-os/apps/gym-spending/data", "mode": "rw"}]
+    rc, _, err = dry(mk("gym-spending", m), "--approve-for-test"); check(rc == 3, "I path inside app dir must be refused: %s" % err)
+    m = copy.deepcopy(GOOD); m["files"] = [{"path": "~/notes", "mode": "r"}, {"path": "~/drafts", "mode": "rw"}]
+    rc, _, err = dry(mk("gym-spending", m), "--approve-for-test"); check(rc == 0, "I control: siblings accepted: %s" % err)
+
+
+def test_j_missing_source():
+    m = copy.deepcopy(GOOD); m["files"] = [{"path": "~/nope.csv", "mode": "r"}]
+    rc, _, err = dry(mk("gym-spending", m), "--approve-for-test"); check(rc == 3 and "R13" in err, "J missing r must be R13: %d %s" % (rc, err))
+    m = copy.deepcopy(GOOD); m["files"] = [{"path": "~/summaries", "mode": "rw"}]
+    rc, j, err = dry(mk("gym-spending", m), "--approve-for-test")
+    want = os.path.realpath(os.path.join(HOME, "summaries"))
+    check(rc == 0 and j["create"] == [want], "J missing rw must be accepted and listed for creation: %d %s %r" % (rc, err, j and j["create"]))
+    check(not os.path.exists(want), "J dry-run must not create anything")
+    if not bwrap_works():
+        print("   (J real-run half skipped: bwrap not usable on this host)"); return
+    # the daily-summary example, byte for byte, on a fresh home: network denied, file still written
+    ex = os.path.join(HERE, "..", "examples", "apps", "daily-summary")
+    d = os.path.join(APPS, "daily-summary"); shutil.rmtree(d, ignore_errors=True); shutil.copytree(ex, d)
+    env = dict(ENV, PATH=os.environ.get("PATH", ""), AGOS_RUN_NO_SYSTEMD="1")
+    r = subprocess.run([sys.executable, RUN, d, "--approve-for-test"], capture_output=True, text=True, env=env, timeout=120)
+    check(r.returncode == 0, "J daily-summary must run on a fresh home: rc=%d err=%s" % (r.returncode, r.stderr[-400:]))
+    check(os.path.isdir(want) and (os.stat(want).st_mode & 0o777) == 0o700, "J ~/summaries must be created 0700")
+    made = os.listdir(want); check(len(made) == 1 and made[0].endswith(".md"), "J app must have written its summary: %r" % made)
+    check("unavailable" in open(os.path.join(want, made[0])).read(), "J network must have been denied inside")
+
+
 TESTS = [("A. valid manifest dry-run: binds, tmpfs HOME, unshare-net, entry last", test_a_valid),
          ("B. CONTROL: credential path / name / outside $HOME / bad mode refused", test_b_credentials_and_outside),
          ("C. approval: unapproved, approved, edited-after-approval, corrupt, wrong name", test_c_approval),
          ("D. network listed -> still --unshare-net + honest notice; scheme refused", test_d_network),
          ("E. limits -> systemd-run flags; bounds; defaults; no-systemd knob keeps bwrap", test_e_limits),
          ("F. devices/unknown key/name/schedule/app root/no-bwrap refusals", test_f_shape),
-         ("G. REAL RUN: unbound file invisible, r is r, app dir rw", test_g_real_run)]
+         ("G. REAL RUN: unbound file invisible, r is r, app dir rw", test_g_real_run),
+         ("H. CONTROL: ancestor of a denied location (~, ~/.local, ~/.config) refused", test_h_ancestor),
+         ("I. CONTROL: nested/shadowing entries refused; siblings accepted", test_i_nesting),
+         ("J. CONTROL: missing r refused; missing rw created 0700; daily-summary runs on fresh HOME", test_j_missing_source)]
 
 if __name__ == "__main__":
     fails = 0

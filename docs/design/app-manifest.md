@@ -43,7 +43,7 @@ deny list, so one app cannot name another app's directory in `files`.
 | `name` | R1: `^[a-z0-9][a-z0-9-]{0,39}$`, must equal the directory name (R11) | identity |
 | `version` | R2: non-empty string | shown at approval; any change changes the hash |
 | `entry` | R3: argv list, non-empty strings | run from the app directory, `$HOME` and `$PATH` only |
-| `files[]` | R4: absolute or `~/`, resolves (symlinks followed) under `$HOME`; R5: never a credential location or credential-looking name; R6: `mode` is `r` or `rw` | the only paths visible besides the app dir |
+| `files[]` | R4: absolute or `~/`, resolves (symlinks followed) strictly under `$HOME` (never `$HOME` itself); R5: never a credential location, a credential-looking name, **or an ancestor of one** (`~/.local`, `~/.config` are refused because `~/.config/gh` and the approvals file live below them); R6: `mode` is `r` or `rw`; R13: the path must exist, except a missing `rw` path, which the runner creates as a 0700 directory the app owns; R14: entries must not nest (one under another, or over the app dir), so no bind can shadow another | the only paths visible besides the app dir |
 | `network` | R7: list of bare domain names; empty means none | **not enforced per-domain in v0: always denied** (section 5) |
 | `devices` | R8: must be empty in v0 | no device access exists yet |
 | `limits` | R9: `cpu_pct` 1-100 (default 50), `mem_mb` 16-8192 (default 512), `wall_s` 1-86400 (default 300) | cgroup limits via `systemd-run --scope` |
@@ -91,7 +91,7 @@ Never unsandboxed: no bubblewrap means refusal (exit 5). The argv, in order:
 1. `systemd-run --user --scope -p MemoryMax=<mem_mb>M -p CPUQuota=<cpu_pct>% -p RuntimeMaxSec=<wall_s>` when `systemd-run` exists (`AGOS_RUN_NO_SYSTEMD=1` drops only this prefix; the sandbox stays).
 2. `bwrap --unshare-all --unshare-net --die-with-parent --new-session`
 3. `--ro-bind / /` then `--proc`, `--dev`, `--tmpfs /tmp`, `--tmpfs /run`, `--tmpfs $HOME`: the whole system is visible read-only, the home directory is empty.
-4. `--bind <appdir> <appdir>` then one `--ro-bind` (`r`) or `--bind` (`rw`) per `files[]` entry, then `--remount-ro $HOME` so the mount-point directories bwrap created inside the tmpfs are not writable scratch (non-recursive, the rw mounts under it stay rw).
+4. Missing `rw` paths are created on the host (`mkdir -p`, 0700) only now, after validation and approval, never on `--dry-run`. Then `--bind <appdir> <appdir>` and one `--ro-bind` (`r`) or `--bind` (`rw`) per `files[]` entry (siblings only, R14, so order cannot shadow), then `--remount-ro $HOME` so the mount-point directories bwrap created inside the tmpfs are not writable scratch (non-recursive, the rw mounts under it stay rw).
 5. `--clearenv --setenv HOME --setenv PATH --setenv AGOS_APP <name> --chdir <appdir> -- <entry>`.
 
 `--dry-run` prints the exact argv as JSON and exits 0; the battery asserts on it.

@@ -2619,7 +2619,8 @@
         # a measurement and never a gate.
         # bin/agos-run — the v0 app sandbox runner (docs/design/app-manifest.md). This check
         # proves the GATE: a valid manifest dry-runs to the expected bwrap/systemd-run argv and
-        # every forbidden change (credential path, path outside $HOME, unapproved or edited-after-
+        # every forbidden change (credential path or an ancestor of one, path outside $HOME, nested
+        # entries, missing source, unapproved or edited-after-
         # approval manifest, devices, unknown keys, out-of-range limits, no bwrap) is refused
         # naming its rule. The real-bwrap arm self-skips under nix (no user namespaces here).
         agos-run-contract =

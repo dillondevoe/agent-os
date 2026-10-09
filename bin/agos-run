@@ -54,23 +54,34 @@ def sha(m):
     return hashlib.sha256(canonical(m)).hexdigest()
 
 
-def resolve_home_path(p, h):
+def resolve_home_path(p, h, mode):
     if not isinstance(p, str) or not p:
         raise ManifestError("R4 files[].path must be a non-empty string")
-    if p == "~" or p.startswith("~/"):
+    if p.startswith("~/"):
         p = os.path.join(h, p[2:])
     if not os.path.isabs(p):
         raise ManifestError("R4 files[].path must be absolute or start with ~/ : %r" % p)
     real = os.path.realpath(p)
-    if real != h and not real.startswith(h + os.sep):
+    if real == h:
+        raise ManifestError("R4 files[].path is $HOME itself; the home directory is never bindable")
+    if not real.startswith(h + os.sep):
         raise ManifestError("R4 files[].path resolves outside $HOME: %r" % p)
     rel = os.path.relpath(real, h)
-    for d in DENY_PREFIXES:
+    for d in DENY_PREFIXES + [APPROVALS_REL]:
         if rel == d or rel.startswith(d + os.sep):
             raise ManifestError("R5 files[].path is a credential/private location: %r" % p)
+        if d.startswith(rel + os.sep):
+            raise ManifestError("R5 files[].path is an ancestor of a private location (~/%s): %r" % (d, p))
     if any(DENY_NAME_RE.search(part) for part in rel.split(os.sep)):
         raise ManifestError("R5 files[].path has a credential-looking name: %r" % p)
-    return real
+    # R13: the source must exist on the host; bwrap cannot bind what is not there. One
+    # exception, documented in app-manifest.md: a missing rw path is a directory the app will
+    # own, and the runner creates it (0700) before bwrap. A missing r path is a typo.
+    if not os.path.lexists(real):
+        if mode != "rw":
+            raise ManifestError("R13 files[].path does not exist (mode r cannot create it): %r" % p)
+        return real, True
+    return real, False
 
 
 def validate(m, appdir):
@@ -97,16 +108,22 @@ def validate(m, appdir):
     files = m["files"]
     if not isinstance(files, list):
         raise ManifestError("R4 files must be a list")
-    seen, binds = set(), []
+    seen, binds, create = set(), [], []
     for f in files:
         if not isinstance(f, dict) or set(f) != {"path", "mode"}:
             raise ManifestError("R4 files[] entries are exactly {path, mode}")
         if f["mode"] not in ("r", "rw"):
             raise ManifestError("R6 files[].mode must be r or rw: %r" % (f["mode"],))
-        real = resolve_home_path(f["path"], h)
+        real, missing = resolve_home_path(f["path"], h, f["mode"])
         if real in seen:
             raise ManifestError("R4 duplicate files[].path: %r" % f["path"])
+        for other in seen:  # R14: no entry may sit under another; a later bind would shadow an earlier one
+            if real.startswith(other + os.sep) or other.startswith(real + os.sep):
+                raise ManifestError("R14 files[] entries must not nest: %r is inside or above another entry" % f["path"])
+        if real.startswith(real_app + os.sep) or real_app.startswith(real + os.sep) or real == real_app:
+            raise ManifestError("R14 files[].path overlaps the app directory (already rw): %r" % f["path"])
         seen.add(real); binds.append((real, f["mode"]))
+        if missing: create.append(real)
     net = m["network"]
     if not isinstance(net, list) or not all(isinstance(d, str) and DOMAIN_RE.match(d) for d in net):
         raise ManifestError("R7 network must be a list of bare domain names (no scheme, no path)")
@@ -128,7 +145,7 @@ def validate(m, appdir):
         r = subprocess.run(["systemd-analyze", "calendar", sch], capture_output=True, text=True)
         if r.returncode != 0:
             raise ManifestError("R10 schedule is not a valid OnCalendar expression: %r" % sch)
-    return {"home": h, "appdir": real_app, "binds": binds, "limits": limits, "network": net}
+    return {"home": h, "appdir": real_app, "binds": binds, "limits": limits, "network": net, "create": create}
 
 
 def load_manifest(appdir):
@@ -201,7 +218,9 @@ def main(args):
     use_systemd = bool(shutil.which("systemd-run")) and not os.environ.get("AGOS_RUN_NO_SYSTEMD")
     argv = build_argv(m, v, use_systemd)
     if dry:
-        print(json.dumps({"sha256": sha(m), "argv": argv})); return 0
+        print(json.dumps({"sha256": sha(m), "argv": argv, "create": v["create"]})); return 0
+    for d in v["create"]:  # R13 exception: an approved, missing rw path is a directory the app owns
+        os.makedirs(d, mode=0o700, exist_ok=True)
     os.execvp(argv[0], argv)
 
 
