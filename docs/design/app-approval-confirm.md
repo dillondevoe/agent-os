@@ -1,7 +1,7 @@
 # App approval through the confirm channel (spec, v0)
 
-Status: SPEC, revised after the Fable spec review (2026-10-09: approve with required changes;
-every finding is folded in below, rulings recorded in section 7). No code in this PR. It
+Status: SPEC, APPROVED by the Fable spec review (2026-10-09: first pass approve with required
+changes, all folded in; re-review approve, its four should-fix notes folded in; rulings in section 7). No code in this PR. It
 covers §7 item 1 of `docs/design/app-manifest.md`: approving an agent-built app through broker
 → `bin/confirm` → Telegram/getty, for the sealed image where the human is not sitting at the
 agent's terminal.
@@ -111,8 +111,12 @@ the agent there; the absence of sudo for `agent` is.
   arguments (the generic sorted `key=value` block, every value scrubbed and line-prefixed).
   Passing each field means the human reads the real permissions, not a name. The agent cannot
   lie in them: the impl refuses unless each one equals the manifest on disk (3.3). List and
-  object fields are canonical JSON strings (`sort_keys`, compact, `ensure_ascii`), because the
-  registry has no list type and adding one is a wall change this does not need.
+  object fields are JSON strings, because the registry has no list type and adding one is a wall
+  change this does not need. **Two encoders, kept apart:** the manifest hash is the runner's
+  `sha()` over its `canonical()` (`ensure_ascii=False`, unchanged). The per-FIELD encoder is
+  `json.dumps(v, sort_keys=True, separators=(",", ":"), ensure_ascii=True)`, defined once in
+  `agos-run` as `field_json()` and used both by `agos-build` when it prints the call and by the
+  impl in step 5, so the two can never disagree on a non-ASCII path.
 - **Registry home for invariant A1:** `exclusivePaths = { "/var/lib/agent-os/app-approvals" =
   "app.approve"; }` in `modules/capability-registry.nix`, with a check that fails evaluation if
   any other capability declares a path that conflicts with it (same containment rule as the
@@ -150,21 +154,23 @@ I/O (its `main` is guarded).
    `agos-approve`.
 4. **Hash.** Compute the canonical manifest SHA-256 with the runner's `sha()`. Refuse unless it
    equals `sha256`.
-5. **Fields.** Refuse unless each field argument equals the canonical JSON (or the plain string
-   for `name`, `version`, `schedule`) of the same manifest key. This binds "what the human
+5. **Fields.** Refuse unless each field argument equals `field_json()` (or the plain string for
+   `name`, `version`, `schedule`) of the same manifest key. This binds "what the human
    read" to "what is approved".
 6. **What the human reads.**
    - Refuse unless `scrub(v) == v` for every argument: the human reads scrubbed text, so a value
      carrying control or bidi characters would display as something other than what is approved.
      A manifest has no legitimate use for those characters.
+   - Refuse unless `v.isascii()` for the plain-string arguments (`app`, `name`, `version`,
+     `schedule`, `sha256`); the JSON fields are ASCII by construction (`field_json()`).
    - Refuse if any argument is longer than `MAXPREVIEW` (512): the frame would truncate it.
    - Build the exact frame with `render_frame(req, first_time=True, for_getty=True,
      confirm_code="XXXXXXXX")` where `req = {"capability": "app.approve", "tier": "T2",
      "provenance": "TAINTED", "typed_args": args, "destination": None}` (the longest shape the
      human can see), and refuse if it is longer than 4096 characters, one Telegram message. The
      frame renders every argument twice (PAYLOAD and ARGS), which is why the whole frame is
-     measured, not the argument block. Telegram counts UTF-16 units; after step 6's first check
-     and `ensure_ascii` JSON every argument is ASCII, so `len()` is exact.
+     measured, not the argument block. Telegram counts UTF-16 units; every argument is ASCII
+     after the previous check, so `len()` is exact.
    - A refused manifest can still be approved at a local tty with `agos-approve` (break-glass).
 7. **Write.** Temp file in the store directory, `os.fchmod(fd, 0o644)` (the unit's `UMask=0077`
    would otherwise leave it 0600 and unreadable to the agent-uid runner, so every approval would
@@ -172,7 +178,9 @@ I/O (its `main` is guarded).
    "via": "confirm"}}`. A corrupt or non-object store is refused, never overwritten (the
    `agos-approve` rule).
 8. **Return.** `{ok: true, content: "approved <name> <sha prefix>"}`; every refusal is `{ok:
-   false, content: "<reason>"}` with exit 0 (the `cap-invoke` contract). The content is composed
+   false, content: "<reason>"}` with exit 0 (the `cap-invoke` contract). A refusal's content is
+   a fixed literal per reason code and never echoes an argument or a manifest byte: because the
+   capability is mapped TRUSTED (next sentence), echoed bytes would bypass the taint fence. The content is composed
    by the impl from validated, ASCII-only fields, so the broker maps the capability TRUSTED
    (`ORIGIN_BY_CAP["app.approve"] = TRUSTED`); unmapped, every approval would taint the session.
 
@@ -242,7 +250,11 @@ it is a follow-up, not designed here.
   without it passes;
 - one argument over 512 characters → refused; a manifest whose rendered frame is over 4096 →
   refused, and the same manifest one character shorter in one field passes;
-- `geteuid() != 0` (simulated) → refused;
+- `geteuid() != 0` → refused. The battery runs unprivileged, so the positive arms need a test
+  affordance: `AGOS_APPROVE_TEST_SKIP_UID=1` skips the uid guard, in the same class as
+  `AGENT_OS_FILE_SAFE_ROOT`; `cap-invoke` never passes it (its impl env is exactly `PATH` and
+  `AGENT_OS_REGISTRY`), and the guard arm runs with it unset;
+- no refusal's content contains the offending argument value (fixed literals only);
 - corrupt store → refused, file byte-identical afterwards.
 
 Registry: the A1 flake-check negative control. Runner and schedule: the A3 and A5 arms in
@@ -258,7 +270,9 @@ image wiring): broker + `bin/confirm` with a scripted getty answer. Approve → 
 2. **`app.approve`**: registry entry + `exclusivePaths` check (A1) + `bin/cap-app-approve` +
    battery + `shippedCaps` and the copied helpers (A4) + the one-line `ORIGIN_BY_CAP` entry.
    Wall code: Fable code review before merge.
-3. **Image wiring**: a module that packages the agos tools with the constants substituted,
+3. **Image wiring** (note: scheduled units name a store path for `ExecStart`, so a rebuild
+   leaves old timers pointing at a collectable path; pre-existing `agos-schedule` behaviour that
+   this PR must handle or document): a module that packages the agos tools with the constants substituted,
    creates `/var/lib/agent-os/apps` (agent-owned) and the store directory (root-owned, tmpfiles),
    plus the VM test. Wall-adjacent: Fable code review.
 
