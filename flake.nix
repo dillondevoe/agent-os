@@ -2617,6 +2617,23 @@
         # tool, mutated argument, credential path, unrequested domain, backend exception) each
         # score 0. No model, no network. A model run is `evals/run.py --backend ollama`, which is
         # a measurement and never a gate.
+        # bin/agos-run — the v0 app sandbox runner (docs/design/app-manifest.md). This check
+        # proves the GATE: a valid manifest dry-runs to the expected bwrap/systemd-run argv and
+        # every forbidden change (credential path, path outside $HOME, unapproved or edited-after-
+        # approval manifest, devices, unknown keys, out-of-range limits, no bwrap) is refused
+        # naming its rule. The real-bwrap arm self-skips under nix (no user namespaces here).
+        agos-run-contract =
+          nixpkgs.legacyPackages.${system}.runCommand "agos-run-contract-check"
+            { nativeBuildInputs = [ nixpkgs.legacyPackages.${system}.python3 ]; } ''
+              work="$(mktemp -d)"
+              mkdir -p "$work/bin" "$work/tests"
+              cp ${./bin/agos-run} "$work/bin/agos-run"
+              cp ${./tests/agos-run-battery.py} "$work/tests/agos-run-battery.py"
+              cd "$work"
+              python3 tests/agos-run-battery.py
+              touch $out
+            '';
+
         evals-contract =
           nixpkgs.legacyPackages.${system}.runCommand "evals-contract-check"
             { nativeBuildInputs = [ nixpkgs.legacyPackages.${system}.python3 ]; } ''

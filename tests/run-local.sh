@@ -49,6 +49,7 @@
 #   installer-honesty-battery.sh  install.sh never claims 'sealed' without the unsealed caveat + next step
 #   mem-battery.py                11 checks — bin/mem (memory-as-filesystem) contract
 #   evals-battery.py              9 criteria — evals/run.py model-agnostic eval runner, control-armed
+#   agos-run-battery.py           7 criteria — bin/agos-run app sandbox gate, control-armed (real bwrap arm if usable)
 #   agent-loop-dispatch-battery.py  8 checks — agent-loop tool-dispatch mechanics vs bin/mcp + broker-stub
 #
 # NOT COVERED HERE — these need a materialized Nix registry and/or store paths:
@@ -148,6 +149,11 @@ need "$T/mem-battery.py" mem && \
 # only, no model, no network). Control-armed: wrong tool / wrong arg / credential path score 0.
 need "$T/evals-battery.py" evals && \
   run evals "$PY" "$T/evals-battery.py"
+
+# agos-run-battery.py — contract battery for bin/agos-run (locates ../bin itself; fake bwrap on
+# PATH for the dry-run arms, real bwrap for arm G when the host allows user namespaces).
+need "$T/agos-run-battery.py" agos-run && \
+  run agos-run "$PY" "$T/agos-run-battery.py"
 
 # ── shell batteries: wire their positional contracts ─────────────────────────
 # agent-loop-battery.sh <agent-loop> <ollama-stub> <mcp> <broker-stub> <workdir>

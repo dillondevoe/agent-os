@@ -1,0 +1,10 @@
+{
+  "name": "daily-summary",
+  "version": "0.1",
+  "entry": ["python3", "summarize.py"],
+  "files": [{"path": "~/summaries", "mode": "rw"}],
+  "network": ["news.ycombinator.com", "lobste.rs", "arstechnica.com", "theverge.com", "hnrss.org"],
+  "devices": [],
+  "limits": {"cpu_pct": 50, "mem_mb": 256, "wall_s": 300},
+  "schedule": "*-*-* 07:00:00"
+}

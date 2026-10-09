@@ -1,0 +1,10 @@
+{
+  "name": "gym-spending",
+  "version": "0.1",
+  "entry": ["python3", "report.py"],
+  "files": [{"path": "~/Documents/bank.csv", "mode": "r"}],
+  "network": [],
+  "devices": [],
+  "limits": {"cpu_pct": 25, "mem_mb": 128, "wall_s": 30},
+  "schedule": ""
+}
