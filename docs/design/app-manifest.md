@@ -188,7 +188,7 @@ human/agent split (`docs/design/egress-policy.md`) is a separate, owner-gated ch
 
 ## 7. Next slices
 
-1. App approval through the confirm channel (broker → `bin/confirm` → Telegram/getty) for the sealed image; v0 is the owner-side `bin/agos-approve` on the human's own login.
+1. App approval through the confirm channel (broker → `bin/confirm` → Telegram/getty) for the sealed image; v0 is the owner-side `bin/agos-approve` on the human's own login. Spec: `docs/design/app-approval-confirm.md` (it also moves the image's approval store out of the agent's reach).
 2. ~~Timer installation from `schedule` as a user unit, listed and revocable.~~ Done: `bin/agos-schedule`.
 3. ~~Per-domain network for apps.~~ Done: `bin/agos-net` + `bin/agos-fetch` (section 5).
 4. An "apps" surface: list running apps, what each can touch, one-tap revoke.
