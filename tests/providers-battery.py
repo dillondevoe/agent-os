@@ -70,7 +70,7 @@ def test_valid_load_and_floor():
     try:
         cfg = P.load_providers(path)
         check(isinstance(cfg, dict), "load_providers must return a dict")
-        check(set(cfg.keys()) == {"providers", "roles", "limits"}, "top-level keys wrong: %r" % cfg.keys())
+        check(set(cfg.keys()) == {"providers", "roles", "limits", "stream_rules"}, "top-level keys wrong: %r" % cfg.keys())
         check(cfg["limits"] == {}, "absent limits block must load as {}: %r" % cfg["limits"])
         check(cfg["roles"] == {"floor": "local"}, "roles wrong: %r" % cfg["roles"])
         name, prov, degraded = P.resolve(cfg, "floor")
