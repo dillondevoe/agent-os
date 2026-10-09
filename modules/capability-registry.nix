@@ -15,7 +15,12 @@
 # check imports it with nixpkgs.lib) and, in Step 7, so each capability impl's systemd
 # sandbox (ReadWritePaths / PrivateNetwork / IPAddressDeny) is DERIVED from these exact,
 # already-validated declarations — the assertion guards the single source of truth.
-{ lib }:
+{ lib
+  # TEST-ONLY: extra raw capability declarations merged into the registry, so a flake check can
+  # prove an invariant FIRES (e.g. a second cap claiming an exclusive path must fail evaluation).
+  # No NixOS module passes it; the shipped registry is exactly the literal below.
+, extraCaps ? { }
+}:
 
 let
   inherit (lib) hasPrefix all mapAttrsToList concatStringsSep length;
@@ -90,7 +95,18 @@ let
   # ── The v1 registry (matches docs/phase2-threat-model.md §5) ─────────────────
   # Bound as `rawRegistry`: it is UNvalidated here. No consumer may read it directly —
   # the output `registry` gates it behind `assert ok` so the invariants throw first.
-  rawRegistry = {
+  rawRegistry =
+    assert lib.assertMsg (lib.intersectLists (lib.attrNames baseRegistry) (lib.attrNames extraCaps) == [ ])
+      "capability-registry: extraCaps (test-only) may add capabilities, never replace a shipped one.";
+    baseRegistry // lib.mapAttrs (_: mkCap) extraCaps;
+
+  # ── Exclusive paths — a path only ONE named capability may hold, in ANY scope (readable or
+  #    writable). Invariant A1 of docs/design/app-approval-confirm.md: the app-approval store is
+  #    what the app runner trusts, so any other impl able to read or write it could forge or
+  #    probe approvals. Checked by (8) below with the same containment rule as the protected paths.
+  exclusivePaths = { "/var/lib/agent-os/app-approvals" = "app.approve"; };
+
+  baseRegistry = {
     # T0 — read-only, side-effect-free, reversible, local. Runs even under taint.
     "mem.recall" = mkCap {
       tier = "T0"; impl = "cap-mem-recall";
@@ -137,6 +153,19 @@ let
       # verbs (POST/PUT/DELETE/PATCH) are out of scope for v1 net.fetch.
       argEnums = { method = [ "GET" "HEAD" ]; };
       sandbox = { network = true; egressDeny = egressDenyList; };
+    };
+    # T2 — granting an app authority. Always confirmed, and never-auto BY NAME: if
+    # T1-auto-on-trusted or any T2 relaxation ever lands, app.approve stays excluded
+    # (docs/design/app-approval-confirm.md §3.2). The impl writes ONE approval to the store only
+    # after the broker's human yes, and only for the exact manifest the frame showed.
+    "app.approve" = mkCap {
+      tier = "T2"; impl = "cap-app-approve";
+      summary = "Ask the owner to approve an app's exact permission manifest.";
+      args = { app = "path"; sha256 = "string";
+               name = "string"; version = "string"; entry = "string"; files = "string";
+               network = "string"; schedule = "string"; limits = "string"; devices = "string"; };
+      sandbox = { readOnlyPaths  = [ "/var/lib/agent-os/apps" ];
+                  readWritePaths = [ "/var/lib/agent-os/app-approvals" ]; };
     };
     "message.send" = mkCap {
       tier = "T2"; impl = "cap-message-send";
@@ -302,12 +331,26 @@ let
         cond = (c.args ? ${an}) && c.args.${an} == "enum";
         msg  = "capability-registry: '${c.name}' declares argEnums.${an} but arg '${an}' is not type 'enum' — a member set on a non-enum arg is dead config.";
       }) c.argEnums
-    ) caps);
+    ) caps)
+    ++
+    # (8) A1 — an exclusive path (or anything containing / contained by it) may be declared,
+    #     in any scope, only by its named owner; and the owner must exist and declare it.
+    (lib.concatMap (c:
+      mapAttrsToList (xp: owner: {
+        cond = c.name == owner || !(lib.any (p: pathConflicts p xp) (allDeclaredPaths c));
+        msg  = "capability-registry: '${c.name}' declares a path conflicting with '${xp}', which only '${owner}' may hold (exclusivePaths, A1).";
+      }) exclusivePaths
+    ) caps)
+    ++
+    (mapAttrsToList (xp: owner: {
+      cond = (rawRegistry ? ${owner}) && lib.elem xp (allDeclaredPaths (rawRegistry.${owner}));
+      msg  = "capability-registry: exclusive path '${xp}' names owner '${owner}', which does not exist or does not declare it.";
+    }) exclusivePaths);
 
   ok = all (c: lib.asserts.assertMsg c.cond c.msg) checks;
 
 in {
-  inherit runtimeTiers forbiddenT3 protectedPaths protectedReadPaths egressDenyList argTypes;
+  inherit runtimeTiers forbiddenT3 protectedPaths protectedReadPaths egressDenyList argTypes exclusivePaths;
   # Nix is LAZY: reading `registry` does not force `ok`. So the DATA is gated behind
   # `assert ok` — no consumer (incl. Step 7's sandbox derivation) can obtain a
   # capability without every mechanism-3 invariant throwing first. Same for the name

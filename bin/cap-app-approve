@@ -1,0 +1,199 @@
+#!/usr/bin/env python3
+# cap-app-approve — impl for the T2 `app.approve` capability (docs/design/app-approval-confirm.md
+# §3.3, the merged, Fable-reviewed spec this file implements step for step).
+#
+# Security surface (the store the app runner trusts): branch -> PR -> Fable -> merge. Never
+# direct-push.
+#
+# The broker reaches this impl ONLY after a human approved the confirm frame and the taint epoch
+# did not change. The frame showed the typed arguments, which are the manifest's fields; this impl
+# re-reads the manifest from disk and records an approval only if every field, and the hash, are
+# exactly what the human read. Anything else is a refusal and writes nothing.
+#
+# Seam contract (via cap-invoke, the AGENT_OS_INVOKE_SEAM dispatcher):
+#   stdin  : {"capability": "app.approve", "arguments": {app, sha256, name, version, entry, files,
+#             network, schedule, limits, devices}}
+#   stdout : {"ok": true,  "content": "approved <name> <sha prefix>", "meta": {}}   exit 0
+#            {"ok": false, "content": "refused: <reason code>", "meta": {}}        exit 0
+#            exit 3 only when the helper copies are missing (infrastructure, nothing to launder).
+# Refusal content is a FIXED literal per reason code and never echoes an argument or manifest
+# byte: the broker maps app.approve TRUSTED, so echoed bytes would bypass the taint fence.
+#
+# TEST-ONLY overrides (same class as AGENT_OS_FILE_SAFE_ROOT): AGOS_APPROVE_TEST_ROOT prefixes the
+# two fixed paths, AGOS_APPROVE_TEST_SKIP_UID=1 skips the root guard. cap-invoke strips the impl
+# env to exactly PATH + AGENT_OS_REGISTRY, so neither is reachable in production.
+import datetime, importlib.machinery, importlib.util, json, os, stat, sys
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+_TROOT = os.environ.get("AGOS_APPROVE_TEST_ROOT", "")
+APPS_ROOT = _TROOT + "/var/lib/agent-os/apps"
+STORE = _TROOT + "/var/lib/agent-os/app-approvals/approvals.json"
+FIELDS = ("name", "version", "entry", "files", "network", "schedule", "limits", "devices")
+PLAIN = ("name", "version", "schedule")                  # compared as plain strings
+ASCII_ONLY = ("app", "name", "version", "schedule", "sha256")
+ARGS = frozenset(FIELDS) | {"app", "sha256"}
+MAX_MANIFEST = 64 * 1024
+FRAME_MAX = 4096                                         # one Telegram message
+
+
+def reply(ok, content, code=0):
+    sys.stdout.write(json.dumps({"ok": ok, "content": content, "meta": {}}))
+    sys.stdout.flush()
+    sys.exit(code)
+
+
+def refuse(reason):
+    reply(False, "refused: " + reason)
+
+
+def helper(name):
+    """The packaged read-only copy ($out/lib/agent-os-cap/<name>), else the repo sibling (dev and
+    batteries). Never PATH."""
+    for d in (os.path.join(HERE, "..", "lib", "agent-os-cap"), HERE):
+        p = os.path.join(d, name)
+        if os.path.isfile(p):
+            # spec_from_file_location + a loader for extension-less files (SourceFileLoader.load_module
+            # is removed in Python 3.15).
+            loader = importlib.machinery.SourceFileLoader("agos_helper_" + name.replace("-", "_"), p)
+            spec = importlib.util.spec_from_loader(loader.name, loader)
+            mod = importlib.util.module_from_spec(spec)
+            loader.exec_module(mod)
+            return mod
+    raise FileNotFoundError(name)
+
+
+def read_manifest(app):
+    try:
+        st = os.lstat(app)
+        if not stat.S_ISDIR(st.st_mode):
+            return None
+        # O_NONBLOCK: the agent owns the app dir, and a FIFO named manifest.json would otherwise
+        # block here until cap-invoke's timeout, stalling the single-flight broker; fstat refuses it.
+        fd = os.open(os.path.join(app, "manifest.json"), os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_NOCTTY)
+    except OSError:
+        return None
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_size > MAX_MANIFEST:
+            return None
+        data = os.read(fd, MAX_MANIFEST + 1)
+    finally:
+        os.close(fd)
+    if len(data) > MAX_MANIFEST:
+        return None
+    try:
+        m = json.loads(data.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        return None
+    return m if isinstance(m, dict) else None
+
+
+def write_store(db):
+    d = os.path.dirname(STORE)
+    tmp = STORE + ".tmp.%d" % os.getpid()
+    try:
+        os.unlink(tmp)
+    except FileNotFoundError:
+        pass
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644)
+    try:
+        os.fchmod(fd, 0o644)                    # the unit's UMask=0077 would leave it 0600
+        os.write(fd, (json.dumps(db, sort_keys=True, indent=1) + "\n").encode())
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    os.replace(tmp, STORE)
+    # The entry is committed once the rename returns; a failing directory fsync after it must not
+    # turn a written approval into a refusal (that would be a write without ok:true).
+    try:
+        dfd = os.open(d, os.O_RDONLY)
+        try:
+            os.fsync(dfd)
+        finally:
+            os.close(dfd)
+    except OSError:
+        pass
+
+
+def main():
+    try:
+        req = json.loads(sys.stdin.buffer.read().decode("utf-8"))
+    except (ValueError, UnicodeDecodeError, OSError):
+        refuse("bad-request")
+    args = req.get("arguments") if isinstance(req, dict) else None
+    if not isinstance(args, dict):
+        refuse("bad-request")
+
+    # 1. uid guard: the store's ownership model assumes the impl runs as root.
+    if os.environ.get("AGOS_APPROVE_TEST_SKIP_UID") != "1" and os.geteuid() != 0:
+        refuse("not-root")
+    if set(args) != ARGS or not all(isinstance(v, str) for v in args.values()):
+        refuse("arguments")
+
+    try:
+        R, C = helper("agos-run"), helper("confirm")
+    except (OSError, ImportError, SyntaxError):
+        reply(False, "refused: helpers-missing", code=3)
+
+    # 2. path: exactly <apps root>/<name>; the broker's path check alone admits the store dir too.
+    name = args["name"]
+    if not R.NAME_RE.match(name) or args["app"] != os.path.join(APPS_ROOT, name):
+        refuse("app-path")
+    m = read_manifest(args["app"])
+    if m is None:
+        refuse("manifest-unreadable")
+
+    # 3. structure only (the runner re-enforces every filesystem rule at every run).
+    if set(m) != R.ALLOWED_KEYS or not all(isinstance(m[k], str) for k in PLAIN):
+        refuse("manifest-structure")
+
+    # 4. hash, re-computed now, after the human's yes.
+    sha = R.sha(m)
+    if sha != args["sha256"]:
+        refuse("sha-mismatch")
+
+    # 5. every field the human read equals the manifest on disk.
+    for k in FIELDS:
+        want = m[k] if k in PLAIN else R.field_json(m[k])
+        if args[k] != want:
+            refuse("field-mismatch")
+
+    # 6. what the human reads: scrub-invariant, ASCII where plain, untruncated, one message.
+    for k, v in args.items():
+        if C.scrub(v) != v:
+            refuse("unrenderable-value")
+        if k in ASCII_ONLY and not v.isascii():
+            refuse("non-ascii-value")
+        if len(v) > C.MAXPREVIEW:
+            refuse("value-too-long")
+    frame = C.render_frame({"capability": "app.approve", "tier": "T2", "provenance": "TAINTED",
+                            "typed_args": args, "destination": None},
+                           first_time=True, for_getty=True, confirm_code="X" * 8)
+    if len(frame) > FRAME_MAX:
+        refuse("frame-too-long")
+
+    # 7. write one entry; a corrupt or non-object store is refused, never overwritten.
+    if not os.path.isdir(os.path.dirname(STORE)):
+        refuse("store-dir-missing")
+    try:
+        with open(STORE, "rb") as fh:
+            db = json.loads(fh.read().decode("utf-8"))
+    except FileNotFoundError:
+        db = {}
+    except (OSError, ValueError, UnicodeDecodeError):
+        refuse("store-corrupt")
+    if not isinstance(db, dict):
+        refuse("store-corrupt")
+    db[sha] = {"name": name, "approved_at": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+               "via": "confirm"}
+    try:
+        write_store(db)
+    except OSError:
+        refuse("store-write")
+
+    # 8. content composed from validated ASCII fields only.
+    reply(True, "approved %s %s" % (name, sha[:12]))
+
+
+if __name__ == "__main__":
+    main()
