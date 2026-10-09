@@ -2713,6 +2713,27 @@
               touch $out
             '';
 
+        # bin/agos-build — the first app builder loop (app-manifest.md §4b). This check proves
+        # the builder is a writer that asks, not a runner: a good answer lands as an app the
+        # runner's rules and the approval render accept; R- and B-rule refusals are fed back a
+        # bounded number of times; a declined request writes nothing; approvals.json is never
+        # written and bwrap is never invoked; the eval's prompt/tool contract is preserved.
+        agos-build-contract =
+          nixpkgs.legacyPackages.${system}.runCommand "agos-build-contract-check"
+            { nativeBuildInputs = [ nixpkgs.legacyPackages.${system}.python3 ]; } ''
+              work="$(mktemp -d)"
+              mkdir -p "$work/bin" "$work/tests" "$work/evals/tasks"
+              cp ${./bin/agos-run} "$work/bin/agos-run"
+              cp ${./bin/agos-approve} "$work/bin/agos-approve"
+              cp ${./bin/agos-build} "$work/bin/agos-build"
+              cp ${./evals/run.py} "$work/evals/run.py"
+              cp ${./evals/tasks/app-generation.json} "$work/evals/tasks/app-generation.json"
+              cp ${./tests/agos-build-battery.py} "$work/tests/agos-build-battery.py"
+              cd "$work"
+              python3 tests/agos-build-battery.py
+              touch $out
+            '';
+
         # bin/agos-net + bin/agos-fetch — the per-app network hand (app-manifest.md §5). This
         # check proves a `network` list buys exactly its domains, read-only, through a unix
         # socket, and nothing else: unlisted/sub/port hosts, POST and bodies are refused with the
