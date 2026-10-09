@@ -50,6 +50,7 @@
 #   mem-battery.py                11 checks — bin/mem (memory-as-filesystem) contract
 #   evals-battery.py              9 criteria — evals/run.py model-agnostic eval runner, control-armed
 #   agos-run-battery.py           13 criteria — bin/agos-run app sandbox gate, control-armed (real bwrap arm if usable)
+#   agos-approve-battery.py       8 criteria — bin/agos-approve owner-side approval writer: tty/session/sha-prefix gates
 #   agent-loop-dispatch-battery.py  8 checks — agent-loop tool-dispatch mechanics vs bin/mcp + broker-stub
 #
 # NOT COVERED HERE — these need a materialized Nix registry and/or store paths:
@@ -154,6 +155,11 @@ need "$T/evals-battery.py" evals && \
 # PATH for the dry-run arms, real bwrap for arm G when the host allows user namespaces).
 need "$T/agos-run-battery.py" agos-run && \
   run agos-run "$PY" "$T/agos-run-battery.py"
+
+# agos-approve-battery.py — contract battery for bin/agos-approve (drives `approve` over a pty so
+# the tty gate is exercised for real; imports bin/agos-run's validator by path).
+need "$T/agos-approve-battery.py" agos-approve && \
+  run agos-approve "$PY" "$T/agos-approve-battery.py"
 
 # ── shell batteries: wire their positional contracts ─────────────────────────
 # agent-loop-battery.sh <agent-loop> <ollama-stub> <mcp> <broker-stub> <workdir>

@@ -68,7 +68,7 @@ recorded in `~/.local/state/agent-os/approvals.json`:
 {"<sha256>": {"name": "gym-spending", "approved_at": "2026-10-08T01:02:03Z"}}
 ```
 
-Only the confirm channel (`bin/confirm`, outside the agent's session) writes this file; the
+Only `bin/agos-approve`, run by the owner outside the agent's session, writes this file; the
 agent and the runner never do. The file sits inside a deny-listed directory, so no app can
 bind it. Consequences, all enforced by the runner:
 
@@ -81,8 +81,23 @@ bind it. Consequences, all enforced by the runner:
 `--approve-for-test` bypasses the lookup for batteries and prints a loud warning; it is not
 an approval and must never be used by the agent.
 
-Wiring the confirm channel to write this file is the next slice; today the owner adds the
-line by hand after reading the manifest.
+### How the owner approves (v0, `bin/agos-approve`)
+
+    agos-approve show    <appdir>     # render: name, version, entry, files + modes, network (v0: denied anyway), limits, schedule, sha256
+    agos-approve approve <appdir>     # same render, then type the first 8 hex of the sha to record it
+    agos-approve revoke  <name|sha>   # delete the entry; the runner refuses from then on
+    agos-approve list
+
+`approve` refuses (exit 3) unless it is a human outside the agent session: stdin must be a tty,
+`AGENT_OS_ACTIVE` (the marker `agent-shell.nix` exports when the agent session starts) must be
+unset, and the invoking account must not be `agent`. The answer is the sha prefix, not y/N, so
+what is approved is bound to what was rendered: a different manifest shows a different sha.
+Validation is the runner's own, imported by path, so nothing the runner would refuse is ever
+offered for approval. The file is written atomically, 0600, in a 0700 directory.
+
+This is not the confirm channel. `bin/confirm` is a pure relayer the broker drives with a nonce
+and never writes state; routing app approval through broker → confirm → Telegram/getty inside
+the sealed image is a later slice (§7).
 
 ## 5. Enforcement (v0, `bin/agos-run`)
 
@@ -112,7 +127,7 @@ per-app proxy; the runner refuses to pretend until that exists.
 
 ## 7. Next slices
 
-1. `bin/confirm` writes `approvals.json` from a rendered manifest (approve = record the hash).
+1. App approval through the confirm channel (broker → `bin/confirm` → Telegram/getty) for the sealed image; v0 is the owner-side `bin/agos-approve` on the human's own login.
 2. Timer installation from `schedule` as a user unit, listed and revocable.
 3. Per-domain network for apps, on top of the egress work.
 4. An "apps" surface: list running apps, what each can touch, one-tap revoke.

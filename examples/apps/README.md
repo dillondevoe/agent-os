@@ -13,4 +13,10 @@ refuses rather than binding a file that is not there. `daily-summary` needs no s
 path is `rw` and the runner creates it.
 
 Without `--approve-for-test` the runner refuses until the manifest's sha256 is in
-`~/.local/state/agent-os/approvals.json`, which only the confirm channel writes.
+`~/.local/state/agent-os/approvals.json`. To approve for real, from your own login (not the
+agent session):
+
+    bin/agos-approve show    ~/.local/share/agent-os/apps/gym-spending   # read what it may touch
+    bin/agos-approve approve ~/.local/share/agent-os/apps/gym-spending   # type the 8-hex sha prefix shown
+    bin/agos-run             ~/.local/share/agent-os/apps/gym-spending   # runs sandboxed
+    bin/agos-approve revoke  gym-spending                                 # and it refuses again

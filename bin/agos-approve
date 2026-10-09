@@ -1,0 +1,173 @@
+#!/usr/bin/env python3
+# bin/agos-approve — the OWNER's side of app approval (docs/design/app-manifest.md §4). v0.
+#
+# agos-run refuses any app whose manifest sha256 is not in ~/.local/state/agent-os/approvals.json.
+# This program is the only thing that writes that file, and it only works for a human:
+#
+#   agos-approve show    <appdir>     render the manifest the way the human will judge it
+#   agos-approve approve <appdir>     render, then require the first 8 hex of the sha typed back
+#   agos-approve revoke  <name|sha>   delete the entry (the runner refuses from then on)
+#   agos-approve list
+#
+# `approve` REFUSES (exit 3) when it is not a human outside the agent's session:
+#   - stdin is not a tty                      (an agent piping "yes" is not an approval)
+#   - AGENT_OS_ACTIVE is set                  (the marker agent-shell.nix exports when the agent
+#                                              session starts on tty1)
+#   - the invoking user is the agent account  (`agent`, configuration.nix users.users.agent)
+# The answer is the sha prefix, not y/N, so what was approved is bound to what was shown: a
+# different manifest renders a different sha and the typed prefix no longer matches.
+#
+# This is NOT the confirm channel. bin/confirm is a pure relayer the broker drives with a nonce
+# and must never write state; routing app approval through broker -> confirm -> Telegram/getty
+# inside the sealed image is a later slice. Validation is agos-run's own (imported by path), so
+# the human is never shown a manifest the runner would refuse anyway.
+import datetime, importlib.util, json, os, pwd, sys
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+AGENT_USER = "agent"
+AGENT_SESSION_MARK = "AGENT_OS_ACTIVE"
+
+
+def load_runner():
+    # agos-run has no .py suffix, so name the loader explicitly.
+    import importlib.machinery
+    path = os.path.join(HERE, "agos-run")
+    loader = importlib.machinery.SourceFileLoader("agos_run", path)
+    spec = importlib.util.spec_from_loader("agos_run", loader)
+    mod = importlib.util.module_from_spec(spec); loader.exec_module(mod)
+    return mod
+
+
+R = load_runner()
+
+
+def approvals_path(h):
+    return os.path.join(h, R.APPROVALS_REL)
+
+
+def read_db(h):
+    try:
+        with open(approvals_path(h)) as fh:
+            db = json.load(fh)
+    except FileNotFoundError:
+        return {}
+    except (OSError, ValueError) as e:
+        raise R.ManifestError("approvals file unreadable or corrupt (%s); fix or remove it by hand" % e)
+    return db if isinstance(db, dict) else {}
+
+
+def write_db(h, db):
+    p = approvals_path(h); d = os.path.dirname(p)
+    os.makedirs(d, mode=0o700, exist_ok=True); os.chmod(d, 0o700)
+    tmp = p + ".tmp.%d" % os.getpid()
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as fh:
+        json.dump(db, fh, sort_keys=True, indent=1); fh.write("\n")
+    os.chmod(tmp, 0o600); os.replace(tmp, p)
+
+
+def render(m, v, h):
+    s = R.sha(m)
+    lines = ["App:      %s  (version %s)" % (m["name"], m["version"]),
+             "Dir:      %s  (rw, implicit)" % v["appdir"],
+             "Entry:    %s" % " ".join(m["entry"]),
+             "Files:"]
+    if not v["binds"]:
+        lines.append("  (none besides the app dir)")
+    for real, mode in v["binds"]:
+        note = "  [will be created]" if real in v["create"] else ""
+        lines.append("  %-3s %s%s" % (mode, real, note))
+    if v["network"]:
+        lines.append("Network:  %s  (DENIED anyway in v0: the runner always unshares the network)" % ", ".join(v["network"]))
+    else:
+        lines.append("Network:  none")
+    L = v["limits"]
+    lines.append("Limits:   cpu %d%%  mem %d MB  wall %d s" % (L["cpu_pct"], L["mem_mb"], L["wall_s"]))
+    lines.append("Schedule: %s" % (m.get("schedule") or "none (run by hand)"))
+    lines.append("sha256:   %s  (%s)" % (s[:8], s))
+    return "\n".join(lines), s
+
+
+def load(appdir):
+    m = R.load_manifest(appdir)
+    v = R.validate(m, appdir)
+    return m, v
+
+
+def human_here():
+    """Why this is not a human outside the agent session, or None."""
+    if not sys.stdin.isatty():
+        return "stdin is not a tty"
+    if os.environ.get(AGENT_SESSION_MARK):
+        return "%s is set: this is the agent's session" % AGENT_SESSION_MARK
+    try:
+        name = pwd.getpwuid(os.getuid()).pw_name
+    except KeyError:
+        name = str(os.getuid())
+    if name == AGENT_USER:
+        return "running as the agent account (%s)" % AGENT_USER
+    return None
+
+
+def cmd_show(appdir):
+    m, v = load(appdir)
+    print(render(m, v, v["home"])[0]); return 0
+
+
+def cmd_approve(appdir):
+    why = human_here()
+    if why:
+        print("agos-approve: REFUSED: %s. Approve from your own login, outside the agent session." % why, file=sys.stderr)
+        return 3
+    m, v = load(appdir); h = v["home"]
+    text, s = render(m, v, h)
+    db = read_db(h)
+    print(text)
+    if isinstance(db.get(s), dict) and db[s].get("name") == m["name"]:
+        print("already approved at %s" % db[s].get("approved_at")); return 0
+    print("\nTo approve exactly this manifest, type its first 8 sha256 hex characters (anything else refuses):")
+    sys.stdout.flush()
+    try:
+        typed = sys.stdin.readline().strip().lower()
+    except (OSError, ValueError):
+        typed = ""
+    if typed != s[:8]:
+        print("agos-approve: not approved (typed %r, expected %s)" % (typed, s[:8]), file=sys.stderr); return 4
+    db[s] = {"name": m["name"], "approved_at": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}
+    write_db(h, db)
+    print("approved %s %s -> %s" % (m["name"], s[:8], approvals_path(h))); return 0
+
+
+def cmd_revoke(key):
+    h = R.home(); db = read_db(h)
+    hit = [k for k, e in db.items() if k == key or k.startswith(key) and len(key) >= 8 or (isinstance(e, dict) and e.get("name") == key)]
+    if not hit:
+        print("agos-approve: nothing approved matches %r" % key, file=sys.stderr); return 1
+    for k in hit:
+        e = db.pop(k); print("revoked %s %s" % (e.get("name") if isinstance(e, dict) else "?", k[:8]))
+    write_db(h, db); return 0
+
+
+def cmd_list():
+    db = read_db(R.home())
+    if not db:
+        print("(no approved apps)"); return 0
+    for k, e in sorted(db.items(), key=lambda kv: (kv[1].get("name", "") if isinstance(kv[1], dict) else "")):
+        if isinstance(e, dict):
+            print("%-24s %s  %s" % (e.get("name", "?"), k[:8], e.get("approved_at", "?")))
+    return 0
+
+
+def main(argv):
+    try:
+        if len(argv) == 2 and argv[0] == "show":    return cmd_show(argv[1])
+        if len(argv) == 2 and argv[0] == "approve": return cmd_approve(argv[1])
+        if len(argv) == 2 and argv[0] == "revoke":  return cmd_revoke(argv[1])
+        if len(argv) == 1 and argv[0] == "list":    return cmd_list()
+    except R.ManifestError as e:
+        print("agos-approve: REFUSED manifest: %s" % e, file=sys.stderr); return 2
+    print("usage: agos-approve show <appdir> | approve <appdir> | revoke <name|sha> | list", file=sys.stderr); return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
