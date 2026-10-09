@@ -88,10 +88,10 @@ line by hand after reading the manifest.
 
 Never unsandboxed: no bubblewrap means refusal (exit 5). The argv, in order:
 
-1. `systemd-run --user --scope -p MemoryMax=<mem_mb>M -p CPUQuota=<cpu_pct>% -p RuntimeMaxSec=<wall_s>` when `systemd-run` exists (`AGOS_RUN_NO_SYSTEMD=1` drops only this prefix; the sandbox stays).
+1. `systemd-run --user --scope -p MemoryMax=<mem_mb>M -p CPUQuota=<cpu_pct>% -p RuntimeMaxSec=<wall_s>` when a user manager answers a probe (`systemd-run --user --scope -- true`). A binary without a reachable user manager (container, nix sandbox, non-lingering ssh) or `AGOS_RUN_NO_SYSTEMD=1` drops only this prefix and prints "limits: not enforced"; the sandbox stays.
 2. `bwrap --unshare-all --unshare-net --die-with-parent --new-session`
 3. `--ro-bind / /` then `--proc`, `--dev`, `--tmpfs /tmp`, `--tmpfs /run`, `--tmpfs $HOME`: the whole system is visible read-only, the home directory is empty.
-4. Missing `rw` paths are created on the host (`mkdir -p`, 0700) only now, after validation and approval, never on `--dry-run`. Then `--bind <appdir> <appdir>` and one `--ro-bind` (`r`) or `--bind` (`rw`) per `files[]` entry (siblings only, R14, so order cannot shadow), then `--remount-ro $HOME` so the mount-point directories bwrap created inside the tmpfs are not writable scratch (non-recursive, the rw mounts under it stay rw).
+4. Missing `rw` paths are created on the host only now, after validation and approval, never on `--dry-run`: each missing component is created 0700 in turn, nothing is followed through a file or symlink, and any failure (a regular file in the way, permissions) is a named refusal, R15, before anything runs. Then `--bind <appdir> <appdir>` and one `--ro-bind` (`r`) or `--bind` (`rw`) per `files[]` entry (siblings only, R14, so order cannot shadow), then `--remount-ro $HOME` so the mount-point directories bwrap created inside the tmpfs are not writable scratch (non-recursive, the rw mounts under it stay rw).
 5. `--clearenv --setenv HOME --setenv PATH --setenv AGOS_APP <name> --chdir <appdir> -- <entry>`.
 
 `--dry-run` prints the exact argv as JSON and exits 0; the battery asserts on it.

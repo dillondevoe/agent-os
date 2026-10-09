@@ -101,7 +101,7 @@ def validate(m, appdir):
     e = m["entry"]
     if not isinstance(e, list) or not e or not all(isinstance(x, str) and x for x in e):
         raise ManifestError("R3 entry must be a non-empty list of non-empty strings (argv)")
-    apps_root = os.path.join(h, APPS_REL)
+    apps_root = os.path.realpath(os.path.join(h, APPS_REL))  # ~/.local may itself be a symlink
     real_app = os.path.realpath(appdir)
     if os.path.dirname(real_app) != apps_root or os.path.basename(real_app) != m["name"]:
         raise ManifestError("R11 app dir must be $HOME/%s/<name> and <name> must equal manifest.name" % APPS_REL)
@@ -172,6 +172,31 @@ def approved(m, h):
     return isinstance(entry, dict) and entry.get("name") == m["name"]
 
 
+def user_manager_available():
+    """systemd-run --user needs a live user manager, not just the binary. Probe it; a failed
+    probe means run with bare bwrap (sandbox intact, limits not enforced) rather than not at all."""
+    if os.environ.get("AGOS_RUN_NO_SYSTEMD") or not shutil.which("systemd-run"):
+        return False
+    try:
+        r = subprocess.run(["systemd-run", "--user", "--scope", "--quiet", "--collect", "--", "true"],
+                           capture_output=True, timeout=10)
+        return r.returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def make_private_dirs(path, h):
+    """mkdir -p with 0700 on EVERY component created, never following a file. Raises OSError."""
+    parts = []
+    cur = path
+    while not os.path.lexists(cur):
+        parts.append(cur); cur = os.path.dirname(cur)
+    if not os.path.isdir(cur):
+        raise OSError(0, "parent is not a directory", cur)
+    for d in reversed(parts):
+        os.mkdir(d, 0o700); os.chmod(d, 0o700)
+
+
 def build_argv(m, v, use_systemd):
     argv = ["bwrap", "--unshare-all", "--unshare-net", "--die-with-parent", "--new-session",
             "--ro-bind", "/", "/", "--proc", "/proc", "--dev", "/dev",
@@ -215,12 +240,17 @@ def main(args):
               % ", ".join(v["network"]), file=sys.stderr)
     if not shutil.which("bwrap"):
         print("agos-run: REFUSED: cannot sandbox: bwrap missing (will not run unsandboxed)", file=sys.stderr); return 5
-    use_systemd = bool(shutil.which("systemd-run")) and not os.environ.get("AGOS_RUN_NO_SYSTEMD")
+    use_systemd = user_manager_available()
+    if not use_systemd:
+        print("agos-run: limits: not enforced (no user manager; sandbox still applies)", file=sys.stderr)
     argv = build_argv(m, v, use_systemd)
     if dry:
         print(json.dumps({"sha256": sha(m), "argv": argv, "create": v["create"]})); return 0
-    for d in v["create"]:  # R13 exception: an approved, missing rw path is a directory the app owns
-        os.makedirs(d, mode=0o700, exist_ok=True)
+    try:
+        for d in v["create"]:  # R13 exception: an approved, missing rw path is a directory the app owns
+            make_private_dirs(d, v["home"])
+    except OSError as e:
+        print("agos-run: REFUSED: R15 cannot create rw path %s: %s" % (d, e.strerror or e), file=sys.stderr); return 6
     os.execvp(argv[0], argv)
 
 

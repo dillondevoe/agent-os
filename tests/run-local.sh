@@ -49,7 +49,7 @@
 #   installer-honesty-battery.sh  install.sh never claims 'sealed' without the unsealed caveat + next step
 #   mem-battery.py                11 checks — bin/mem (memory-as-filesystem) contract
 #   evals-battery.py              9 criteria — evals/run.py model-agnostic eval runner, control-armed
-#   agos-run-battery.py           10 criteria — bin/agos-run app sandbox gate, control-armed (real bwrap arm if usable)
+#   agos-run-battery.py           13 criteria — bin/agos-run app sandbox gate, control-armed (real bwrap arm if usable)
 #   agent-loop-dispatch-battery.py  8 checks — agent-loop tool-dispatch mechanics vs bin/mcp + broker-stub
 #
 # NOT COVERED HERE — these need a materialized Nix registry and/or store paths:

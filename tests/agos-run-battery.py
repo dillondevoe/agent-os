@@ -23,6 +23,10 @@
 #      sit ABOVE a denied location; `~/notes` is still accepted.
 #   I. CONTROL (shadowing): two entries where one is under the other are refused (R14) in both
 #      orders; an entry overlapping the app dir is refused; two siblings are accepted.
+#   K. A systemd-run that exists but has no user manager: no prefix, "limits: not enforced", run starts.
+#   L. ~/.local is a symlink: the app is still accepted (apps root is realpath'd).
+#   M. Creating a missing rw path through a regular file is a named R15 refusal, never a
+#      traceback; a multi-level create is 0700 on every component.
 #   J. CONTROL (missing source): a missing `r` path is refused (R13); a missing `rw` path is
 #      accepted, listed under "create", and (real bwrap) created 0700 on the host so the
 #      daily-summary example runs on a FRESH home and writes its file.
@@ -249,6 +253,56 @@ def test_j_missing_source():
     check("unavailable" in open(os.path.join(want, made[0])).read(), "J network must have been denied inside")
 
 
+def test_k_no_user_manager():
+    # a systemd-run binary that exists but cannot reach a user manager: no prefix, run proceeds
+    bad = os.path.join(TMP, "badbin"); os.makedirs(bad, exist_ok=True)
+    open(os.path.join(bad, "systemd-run"), "w").write("#!/bin/sh\necho 'Failed to connect to bus' >&2; exit 1\n"); os.chmod(os.path.join(bad, "systemd-run"), 0o755)
+    open(os.path.join(bad, "bwrap"), "w").write("#!/bin/sh\nexit 0\n"); os.chmod(os.path.join(bad, "bwrap"), 0o755)
+    env = dict(ENV, PATH=bad)
+    rc, j, err = dry(mk("gym-spending", GOOD), "--approve-for-test", env=env)
+    check(rc == 0 and j["argv"][0] == "bwrap", "K failing user manager must fall back to bare bwrap: %d %s" % (rc, err))
+    check("limits: not enforced" in err, "K must say limits are not enforced")
+    env = dict(ENV, AGOS_RUN_NO_SYSTEMD="1")
+    rc, j, err = dry(mk("gym-spending", GOOD), "--approve-for-test", env=env)
+    check(rc == 0 and j["argv"][0] == "bwrap" and "limits: not enforced" in err, "K NO_SYSTEMD knob same path")
+    if bwrap_works():
+        only_sr = os.path.join(TMP, "badsr"); os.makedirs(only_sr, exist_ok=True)
+        shutil.copy(os.path.join(bad, "systemd-run"), os.path.join(only_sr, "systemd-run"))
+        env = dict(ENV, PATH=only_sr + os.pathsep + os.environ.get("PATH", ""))
+        m = copy.deepcopy(GOOD); m["entry"] = ["sh", "-c", "echo ran"]; m["files"] = []
+        r = subprocess.run([sys.executable, RUN, mk("gym-spending", m), "--approve-for-test"], capture_output=True, text=True, env=env, timeout=60)
+        check(r.returncode == 0 and "ran" in r.stdout, "K real run must still start without a user manager: %d %s" % (r.returncode, r.stderr[-300:]))
+
+
+def test_l_symlinked_local():
+    h2 = os.path.join(TMP, "home2"); real = os.path.join(TMP, "elsewhere-local"); os.makedirs(real)
+    os.makedirs(h2); os.symlink(real, os.path.join(h2, ".local"))
+    apps2 = os.path.join(h2, ".local/share/agent-os/apps/gym-spending"); os.makedirs(apps2)
+    os.makedirs(os.path.join(h2, "notes")); open(os.path.join(h2, "notes/todo.md"), "w").write("x\n"); os.makedirs(os.path.join(h2, "drafts"))
+    json.dump(GOOD, open(os.path.join(apps2, "manifest.json"), "w"))
+    env = dict(ENV, HOME=h2)
+    rc, j, err = dry(apps2, "--approve-for-test", env=env)
+    check(rc == 0, "L app under a symlinked ~/.local must be accepted: %d %s" % (rc, err))
+    check(os.path.realpath(apps2) in j["argv"], "L app dir bound by its real path")
+
+
+def test_m_create_refusal():
+    # a missing rw path whose parent is a regular FILE: named refusal, not a traceback
+    open(os.path.join(HOME, "blocker"), "w").write("file\n")
+    m = copy.deepcopy(GOOD); m["files"] = [{"path": "~/blocker/out", "mode": "rw"}]
+    rc, j, err = dry(mk("gym-spending", m), "--approve-for-test"); check(rc == 0, "M dry-run accepts (nothing created yet)")
+    r = subprocess.run([sys.executable, RUN, mk("gym-spending", m), "--approve-for-test"], capture_output=True, text=True, env=ENV, timeout=60)
+    check(r.returncode == 6 and "R15" in r.stderr and "Traceback" not in r.stderr, "M must refuse with R15: %d %s" % (r.returncode, r.stderr[-300:]))
+    # two missing levels: every created component is 0700
+    m["files"] = [{"path": "~/deep/er/out", "mode": "rw"}]
+    if bwrap_works():
+        m["entry"] = ["sh", "-c", "true"]
+        r = subprocess.run([sys.executable, RUN, mk("gym-spending", m), "--approve-for-test"], capture_output=True, text=True, env=dict(ENV, PATH=os.environ.get("PATH", ""), AGOS_RUN_NO_SYSTEMD="1"), timeout=60)
+        check(r.returncode == 0, "M deep create run: %s" % r.stderr[-300:])
+        for sub in ("deep", "deep/er", "deep/er/out"):
+            check((os.stat(os.path.join(HOME, sub)).st_mode & 0o777) == 0o700, "M %s not 0700" % sub)
+
+
 TESTS = [("A. valid manifest dry-run: binds, tmpfs HOME, unshare-net, entry last", test_a_valid),
          ("B. CONTROL: credential path / name / outside $HOME / bad mode refused", test_b_credentials_and_outside),
          ("C. approval: unapproved, approved, edited-after-approval, corrupt, wrong name", test_c_approval),
@@ -258,7 +312,10 @@ TESTS = [("A. valid manifest dry-run: binds, tmpfs HOME, unshare-net, entry last
          ("G. REAL RUN: unbound file invisible, r is r, app dir rw", test_g_real_run),
          ("H. CONTROL: ancestor of a denied location (~, ~/.local, ~/.config) refused", test_h_ancestor),
          ("I. CONTROL: nested/shadowing entries refused; siblings accepted", test_i_nesting),
-         ("J. CONTROL: missing r refused; missing rw created 0700; daily-summary runs on fresh HOME", test_j_missing_source)]
+         ("J. CONTROL: missing r refused; missing rw created 0700; daily-summary runs on fresh HOME", test_j_missing_source),
+         ("K. no user manager -> bare bwrap, limits notice, run still starts", test_k_no_user_manager),
+         ("L. symlinked ~/.local: app accepted (R11 uses the real apps root)", test_l_symlinked_local),
+         ("M. rw create: file in the way -> R15 refusal; deep create is 0700 per component", test_m_create_refusal)]
 
 if __name__ == "__main__":
     fails = 0
