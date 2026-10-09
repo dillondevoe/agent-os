@@ -1164,6 +1164,46 @@
         #   * every registry protectedPath that the cap does not legitimately overlap is
         #     InaccessiblePaths.
         # Regression -> RED at eval time, before anything is built.
+        # A1 (docs/design/app-approval-confirm.md §4): only app.approve may hold the app-approval
+        # store, in ANY scope. The default registry evaluating proves nothing (it is legal either
+        # way), so force the other direction through the test-only `extraCaps` parameter: a cap that
+        # READS the store, one that holds a path INSIDE it, and one that holds its PARENT must each
+        # fail evaluation, while a benign extra cap still evaluates (so the failures are A1's).
+        registry-exclusive-paths =
+          let
+            lib = nixpkgs.lib;
+            evalWith = extra: (builtins.tryEval (builtins.deepSeq
+              (import ./modules/capability-registry.nix { inherit lib; extraCaps = extra; }).registry true)).success;
+            cap = name: sandbox: { "${name}" = { tier = "T0"; impl = "cap-${name}"; summary = "test"; inherit sandbox; }; };
+          in
+          assert lib.assertMsg (evalWith { }) "registry-exclusive-paths: the shipped registry must evaluate";
+          assert lib.assertMsg (evalWith (cap "benign" { readOnlyPaths = [ "/var/lib/agent-os/benign" ]; }))
+            "registry-exclusive-paths: CONTROL — a benign extra cap must evaluate";
+          assert lib.assertMsg (!(evalWith (cap "thief" { readOnlyPaths = [ "/var/lib/agent-os/app-approvals" ]; })))
+            "registry-exclusive-paths: a second cap READING the approval store evaluated — A1 is not enforced";
+          assert lib.assertMsg (!(evalWith (cap "inside" { readOnlyPaths = [ "/var/lib/agent-os/app-approvals/sub" ]; })))
+            "registry-exclusive-paths: a cap holding a path INSIDE the store evaluated";
+          assert lib.assertMsg (!(evalWith (cap "parent" { readOnlyPaths = [ "/var/lib/agent-os" ]; })))
+            "registry-exclusive-paths: a cap holding the store's PARENT evaluated";
+          nixpkgs.legacyPackages.${system}.runCommand "registry-exclusive-paths-check" { } "touch $out";
+
+        # bin/cap-app-approve — the T2 app.approve impl (app-approval-confirm.md §3.3/§5). Each way
+        # of approving something other than what the human read writes nothing and answers a fixed
+        # literal; the correct call writes one 0644 entry. Fake root, no broker, no systemd.
+        app-approve-contract =
+          nixpkgs.legacyPackages.${system}.runCommand "app-approve-contract-check"
+            { nativeBuildInputs = [ nixpkgs.legacyPackages.${system}.python3 ]; } ''
+              work="$(mktemp -d)"
+              mkdir -p "$work/bin" "$work/tests" "$work/modules"
+              for f in cap-app-approve agos-run confirm broker; do cp ${./bin}/$f "$work/bin/$f"; done
+              cp ${./modules/capability-registry.nix} "$work/modules/capability-registry.nix"
+              cp ${./modules/cap-invoke-pkg.nix} "$work/modules/cap-invoke-pkg.nix"
+              cp ${./tests/app-approve-battery.py} "$work/tests/app-approve-battery.py"
+              cd "$work"
+              HOME="$work/h" python3 tests/app-approve-battery.py
+              touch $out
+            '';
+
         cap-sandbox =
           let
             lib = nixpkgs.lib;

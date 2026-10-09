@@ -77,7 +77,11 @@ let
   # not a symlink at the final component — cap-file-read's own lstat DOES reject the latter. That
   # makes file.read's residual escape the SAME shape as file.write's target-only-lstat gap, which
   # is why one mount namespace closes both.
-  shippedCaps = [ "capabilities.list" "mem.recall" "mem.remember" "file.read" "file.write" ];
+  #
+  # app.approve (docs/design/app-approval-confirm.md, PR 2) ships WITH its two read-only helper
+  # copies (agos-run for canonical()/sha()/field_json(), confirm for scrub()/render_frame()) in
+  # $out/lib/agent-os-cap — not $out/bin, so no registry impl name can ever resolve to them (A4).
+  shippedCaps = [ "capabilities.list" "mem.recall" "mem.remember" "file.read" "file.write" "app.approve" ];
   offenders   = lib.filter (name: reg.${name}.sandbox.network) shippedCaps;
 
   # The registry-DERIVED confinement policy, materialized. Reading it forces the registry asserts
@@ -141,9 +145,14 @@ let
     assert lib.assertMsg (offenders == [ ])
       "cap-invoke-pkg: shipped cap(s) [${lib.concatStringsSep " " offenders}] declare sandbox.network=true, but capBinDir direct-execs impls with NO systemd net-confinement (PrivateNetwork/IPAddressDeny) built yet — a network-capable cap must not reach the seam until Step-7 cgroup confinement lands. Remove it from shippedCaps or build the confinement first.";
     pkgs.runCommand "agent-os-cap-bin" { nativeBuildInputs = [ pkgs.python3 ]; } ''
-      mkdir -p $out/bin
+      mkdir -p $out/bin $out/lib/agent-os-cap
       ${cpLines}
       patchShebangs $out/bin
+      ${lib.optionalString (lib.elem "app.approve" shippedCaps) ''
+        cp ${../bin/agos-run} $out/lib/agent-os-cap/agos-run
+        cp ${../bin/confirm} $out/lib/agent-os-cap/confirm
+        chmod 0444 $out/lib/agent-os-cap/agos-run $out/lib/agent-os-cap/confirm
+      ''}
     '';
   wrapper = mkWrapper true;
   unconfinedWrapper = mkWrapper false;

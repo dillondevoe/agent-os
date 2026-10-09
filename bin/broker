@@ -74,7 +74,10 @@ MAX_RECIPIENT = 256             # `recipient`-typed arg length bound
 # in _commit_provenance would `taint set` on EVERY list, tainting the session spuriously the
 # moment the seam goes live. mem.recall consults the stored tag via `taint recall`; anything
 # else defaults UNTRUSTED.
-ORIGIN_BY_CAP = {"net.fetch": UNTRUSTED, "file.read": TRUSTED, "capabilities.list": TRUSTED}
+ORIGIN_BY_CAP = {"net.fetch": UNTRUSTED, "file.read": TRUSTED, "capabilities.list": TRUSTED,
+                 # impl-composed from validated ASCII fields; refusals are fixed literals that never
+                 # echo an argument (docs/design/app-approval-confirm.md §3.3 step 8)
+                 "app.approve": TRUSTED}
 
 # namespace charset: no "/", no "..", bounded — so <root>/<ns> is confined by construction.
 _NS_RE = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
