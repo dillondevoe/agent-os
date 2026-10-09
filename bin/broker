@@ -141,11 +141,30 @@ def taint_gate_shadow(tier):
 
 
 def taint_effect(*args):
-    """A mutating taint op (set/recall/stamp). Return True iff it COMMITTED (exit 0). On the
-    return path the broker withholds content unless the covering effect committed first."""
+    """A mutating taint op (set/recall/stamp). Return the child's rc: 0 iff it COMMITTED. On the
+    return path the broker withholds content unless the covering effect committed first. The rc
+    is surfaced (not collapsed to a bool) so the withhold reason distinguishes taint's REQUIRED-mode
+    refusal (2: the broker passed no/malformed --content-hash — a broker regression) from a dead
+    audit (3) or an unreachable binary (-1)."""
     tb = os.environ.get("TAINT_BIN", "taint")
     rc, _ = _run(tb, list(args), capture=True)
-    return rc == 0
+    return rc
+
+
+def _effect_failed(what, rc):
+    return "%s rc=%s" % (what, rc)
+
+
+def _entry_unbindable(ent):
+    """Why a mem.recall entry cannot be bound to a stored origin tag, or None if it can. Two shapes,
+    ONE posture: the entry is not recalled against the ledger; instead the session is `taint set`
+    fail-closed and the batch is released-as-tainted (never fail-broken). cap-invoke already drops
+    the whole list on either shape, so this is belt-and-suspenders for a cap-invoke-bypassing seam."""
+    if not (isinstance(ent, dict) and _meta_key_ok(ent.get("key"))):
+        return "mem.recall bad-key entry (fail-closed untrusted)"       # could name a FOREIGN tag
+    if _content_hash(ent.get("content")) is None:
+        return "mem.recall unhashable entry (fail-closed untrusted)"    # no octets to bind (REQUIRED)
+    return None
 
 
 def _content_hash(content):
@@ -154,18 +173,13 @@ def _content_hash(content):
     raw content string carried on the invoke seam (invoke_res['content']), hashed the SAME way at
     stamp (post-write) and recall (pre-release) so a legit no-swap round-trip matches; `taint boot`
     hashes the on-disk file octets independently as the cross-layer check. Non-str content (e.g. a
-    capability-error with no body) -> None -> no hash passed -> taint fails closed to UNTRUSTED."""
+    capability-error with no body) -> None: there are no octets to bind, and taint's --content-hash
+    is REQUIRED (task 276 — a hash-less stamp/recall is refused, exit 2), so the CALLER must branch
+    BEFORE invoking taint: remember -> withhold (provenance unbindable); recall -> `taint set` the
+    session fail-closed and release-as-tainted (never fail-broken, mirrors the bad-key fence)."""
     if not isinstance(content, str):
         return None
     return "sha256:" + hashlib.sha256(content.encode("utf-8")).hexdigest()
-
-
-def _content_hash_args(content):
-    """The optional --content-hash bridge (fail-closed from day 1): a valid hash -> the arg pair;
-    absent/unhashable -> () so taint sees no hash and treats the tag as UNVERIFIABLE (never
-    TRUSTED). Follow-up flips --content-hash to REQUIRED once the broker always passes it."""
-    ch = _content_hash(content)
-    return ("--content-hash", ch) if ch else ()
 
 
 def _meta_key_ok(key):
@@ -521,23 +535,29 @@ class Broker:
                 # session wholesale (release-as-tainted), the same posture as the old unidentified
                 # single-key path. cap-invoke already drops a non-conforming entries list, so this
                 # fires only on a direct/hostile seam.
-                ok = taint_effect("set", "mem.recall no entries (fail-closed untrusted)")
-                return ok, (None if ok else "taint-set-failed")
+                rc = taint_effect("set", "mem.recall no entries (fail-closed untrusted)")
+                return rc == 0, (None if rc == 0 else _effect_failed("taint-set-failed", rc))
             for ent in entries:
-                # Per-entry key fence: an entry whose key is absent or not grammar-legal cannot be
-                # bound to a stored tag (a bad key could name a FOREIGN entry's origin). Do NOT
-                # recall it; taint the session fail-closed instead (release-as-tainted, never
-                # fail-broken). Only a NON-COMMITTING taint op withholds the batch.
-                if not (isinstance(ent, dict) and _meta_key_ok(ent.get("key"))):
-                    if not taint_effect("set", "mem.recall bad-key entry (fail-closed untrusted)"):
-                        return False, "taint-set-failed (recall bad key)"
+                # Per-entry fence (_entry_unbindable): a bad key or non-str content cannot be bound
+                # to a stored tag. Do NOT recall it against the ledger; `taint set` the session
+                # fail-closed and continue (release-as-tainted, never fail-broken). NOTE the bytes
+                # of an unbindable entry DO still reach the model — non-str content is serialized
+                # into the FF1 envelope and released at Stage-10 — so this release is safe ONLY
+                # because the taint bit is set first; the `continue` must never be reached without
+                # a committed `set`. Only a NON-COMMITTING taint op withholds the batch.
+                why = _entry_unbindable(ent)
+                if why is not None:
+                    rc = taint_effect("set", why)
+                    if rc != 0:
+                        return False, _effect_failed("taint-set-failed (%s)" % why, rc)
                     continue
                 # PIN A: hash THIS entry's content ALONE -> its own --content-hash. taint owns the
                 # tag; a TRUSTED tag is honored only if this per-entry hash matches the stamped one;
                 # a swap under a blessed key re-taints (GAP-4).
                 key = ent.get("key")
-                if not taint_effect("recall", key, *_content_hash_args(ent.get("content"))):
-                    return False, "taint-recall-failed: %s" % key
+                rc = taint_effect("recall", key, "--content-hash", _content_hash(ent.get("content")))
+                if rc != 0:
+                    return False, _effect_failed("taint-recall-failed: %s" % key, rc)
             # Content-coverage (Fable FF1): Stage-9 bound each ENTRY's content above, but Stage-10
             # releases the SEPARATE res["content"] (~L649). Assert they are the SAME bytes — the
             # released envelope MUST equal the canonical serialization of the tainted entries, which is
@@ -562,14 +582,21 @@ class Broker:
                 # a write whose origin cannot be pinned (no / illegal key) is a laundering hole ->
                 # fail the request. The key-fence mirrors the recall path and cap-invoke's gate.
                 return False, "mem.remember: no valid key to stamp (provenance unpinnable)"
-            # the BROKER stamps (§4.9 MUST-FIX #2); bind the tag to the exact written bytes (GAP-4)
-            ok = taint_effect("stamp", key, *_content_hash_args(invoke_res.get("content")))
-            return ok, (None if ok else "taint-stamp-failed")
+            # the BROKER stamps (§4.9 MUST-FIX #2); bind the tag to the exact written bytes (GAP-4).
+            # Non-str content == nothing was written that we can bind a tag to (the sanctioned impl
+            # echoes the stored octets verbatim; a hostile/error seam returns null). taint would
+            # refuse a hash-less stamp (REQUIRED mode) -> fail the request rather than leave the
+            # key's provenance unpinned.
+            ch = _content_hash(invoke_res.get("content"))
+            if ch is None:
+                return False, "mem.remember: content unhashable (provenance unbindable)"
+            rc = taint_effect("stamp", key, "--content-hash", ch)
+            return rc == 0, (None if rc == 0 else _effect_failed("taint-stamp-failed", rc))
         # Everything else: taint iff the broker-derived origin is UNTRUSTED (net.fetch, or any
         # unmapped cap that somehow returned content). TRUSTED (file.read) needs no effect.
         if ORIGIN_BY_CAP.get(name, UNTRUSTED) == UNTRUSTED:
-            ok = taint_effect("set", "untrusted-origin result (cap=%s)" % name)
-            return ok, (None if ok else "taint-set-failed")
+            rc = taint_effect("set", "untrusted-origin result (cap=%s)" % name)
+            return rc == 0, (None if rc == 0 else _effect_failed("taint-set-failed", rc))
         return True, None
 
     # ── tools/call — the 10-stage pipeline (§3) ──

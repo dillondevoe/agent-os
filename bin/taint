@@ -28,7 +28,10 @@ Two load-bearing invariants it enforces (both persisted where the model can't re
      The tag also BINDS a content-hash of the stamped bytes (GAP-4): a TRUSTED tag is
      honored only while the recall/boot content-hash still matches, so content swapped
      under a blessed key by a stamp-BYPASSING path is caught and permanently latched
-     UNTRUSTED — closing the name-keyed-tag laundering residual.
+     UNTRUSTED — closing the name-keyed-tag laundering residual. The hash is REQUIRED on
+     stamp/recall (task 276): an absent or malformed --content-hash is a hard DENY (exit 2,
+     no state touched), so a broker that stops passing it trips loudly instead of silently
+     over-tainting every entry.
 
 Fail-closed everywhere: missing/corrupt taint state, or a recall of a mem key with no
 known origin, is treated as UNTRUSTED (tainted). The safe default is "assume poisoned."
@@ -47,13 +50,15 @@ Commands:
   taint reset --confirm-human --break-glass
                                         audited BREAK-GLASS: clear taint WITHOUT the channel
                                         (two-token operator gate; use iff the channel is down)
-  taint stamp <mem-key> [--content-hash sha256:<hex>]
+  taint stamp <mem-key> --content-hash sha256:<hex>
                                         record a mem entry's origin (+ the content-hash that
-                                        binds the tag to its bytes, GAP-4) from the current taint
-  taint recall <mem-key> [--content-hash sha256:<hex>]
+                                        binds the tag to its bytes, GAP-4) from the current taint.
+                                        --content-hash is REQUIRED (absent/malformed -> exit 2)
+  taint recall <mem-key> --content-hash sha256:<hex>
                                         recall: re-taint iff UNTRUSTED-origin, OR the tag is
                                         TRUSTED but the supplied content-hash != the stamped one
-                                        (a swap under a blessed key — latched UNTRUSTED, GAP-4)
+                                        (a swap under a blessed key — latched UNTRUSTED, GAP-4).
+                                        --content-hash is REQUIRED (absent/malformed -> exit 2)
   taint boot [--mem-root DIR]           boot-taint iff any loaded mem entry is UNTRUSTED, unknown,
                                         or its on-disk bytes no longer match its stamped hash
   taint gate <T0|T1|T2>                 SHADOW: log the taint-gated decision it WOULD make
@@ -175,13 +180,19 @@ def load_origins():
 #    blessed. The hash is computed by the BROKER at stamp/recall (it holds the exact committed/
 #    released octets — atomic-with-write, no TOCTOU) and passed via --content-hash; `taint boot`
 #    hashes the files INDEPENDENTLY over the identical octet layer. taint stays ignorant of the
-#    mem-store layout — it only stores/compares an opaque sha256 string. ──────────────────────────
+#    mem-store layout — it only stores/compares an opaque sha256 string.
+#    REQUIRED mode (task 276, after the optional migration bridge): stamp/recall REFUSE (exit 2) an
+#    absent or malformed hash. The bridge's fail-closed-to-UNTRUSTED was safe but SILENT — a broker
+#    regression that dropped the hash would over-taint everything and read as "working". Refusing
+#    makes it a tripwire: the broker withholds on any non-committing effect (§4.9). ────────────────
 _HEXCHARS = frozenset("0123456789abcdef")
 
 
 def _valid_content_hash(h):
-    """True iff h is a well-formed `sha256:<64 lowercase hex>`. Anything else is treated as ABSENT
-    (fail-closed): a malformed hash never counts as a match, so it can only ever over-taint."""
+    """True iff h is a well-formed `sha256:<64 lowercase hex>`. Two consumers, two consequences:
+    a malformed hash STORED in the ledger (_tag_hash) reads as no hash -> that tag is unverifiable ->
+    UNTRUSTED (fail-closed, over-taint only); a malformed hash PRESENTED to stamp/recall is REFUSED
+    outright (exit 2, REQUIRED mode) — it never reaches a comparison, so it can never match."""
     if not isinstance(h, str) or not h.startswith("sha256:"):
         return False
     hexpart = h[len("sha256:"):]
@@ -189,23 +200,51 @@ def _valid_content_hash(h):
 
 
 def _parse_content_hash(argv):
-    """Split an optional `--content-hash <value>` out of argv. Return (positional, chash). A missing
-    flag, a flag with no value, or a MALFORMED value all yield chash=None so the caller fails closed
-    (an unverifiable entry is UNTRUSTED, never a silent TRUSTED honor)."""
-    positional, chash = [], None
+    """Split a `--content-hash <value>` (or `--content-hash=<value>`) out of argv. Return
+    (positional, chash, why): chash is the validated hash or None, and why is the tri-state reason
+    for None — "absent" (no flag), "no-value" (flag with nothing after it), "malformed" (a value that
+    is not `sha256:<64 hex>`) — or None when chash is valid. stamp/recall REFUSE on any None via
+    _refuse_no_hash (REQUIRED mode) and report `why`, so an on-call reads "the broker stopped passing
+    a value" vs "the broker's hash formatting broke" straight off the refusal."""
+    positional, chash, why = [], None, "absent"
     i = 0
     while i < len(argv):
-        if argv[i] == "--content-hash":
-            if i + 1 < len(argv):
+        a = argv[i]
+        if a == "--content-hash" or a.startswith("--content-hash="):
+            if a.startswith("--content-hash="):
+                cand = a[len("--content-hash="):]
+                i += 1
+            elif i + 1 < len(argv):
                 cand = argv[i + 1]
-                chash = cand if _valid_content_hash(cand) else None
                 i += 2
-                continue
-            i += 1
+            else:
+                cand = None
+                i += 1
+            if cand is None or cand == "":
+                chash, why = None, "no-value"
+            elif _valid_content_hash(cand):
+                chash, why = cand, None
+            else:
+                chash, why = None, "malformed"
             continue
-        positional.append(argv[i])
+        positional.append(a)
         i += 1
-    return positional, chash
+    return positional, chash, why
+
+
+def _refuse_no_hash(op, key, why):
+    """REQUIRED-mode hard deny (task 276). A stamp/recall whose --content-hash is absent or malformed
+    is refused with exit 2 and NO state change: no tag written, no taint bit moved, nothing honored.
+    The broker treats any non-zero effect as non-committing and withholds (§4.9), so a broker that
+    regresses to passing no hash fails LOUD at the first mem op instead of silently over-tainting.
+    Audited best-effort — a dead audit must not mask the primary refusal (exit stays 2 either way);
+    `why` (absent | no-value | malformed, from _parse_content_hash) tells the operator which."""
+    s, _ = load_session()
+    _emit({"src": "taint", "event": op, "session_id": s["session_id"], "key": key,
+           "origin": UNTRUSTED, "refused": "no-content-hash", "why": why, "shadow": True})
+    sys.stderr.write("taint %s: --content-hash sha256:<hex> is REQUIRED (%s) — refusing %s "
+                     "(GAP-4 tripwire: the broker must pass the content-hash)\n" % (op, why, key))
+    return 2
 
 
 def _tag_origin(v):
@@ -511,11 +550,13 @@ def cmd_reset(argv):
 
 
 def cmd_stamp(argv):
-    argv, chash = _parse_content_hash(argv)
+    argv, chash, why = _parse_content_hash(argv)
     if not argv:
-        sys.stderr.write("usage: taint stamp <mem-key> [--content-hash sha256:<hex>]\n")
+        sys.stderr.write("usage: taint stamp <mem-key> --content-hash sha256:<hex>\n")
         return 2
     key = argv[0]
+    if chash is None:
+        return _refuse_no_hash("stamp", key, why)
     s, _ = load_session()
     tags, corrupt = load_origins()
     if corrupt:
@@ -535,34 +576,37 @@ def cmd_stamp(argv):
     # tainted, else TRUSTED. An ABSENT key is NOT absorbing — a fresh clean stamp is TRUSTED.
     prior_untrusted = prior is not None and _tag_origin(prior) == UNTRUSTED
     origin = UNTRUSTED if (prior_untrusted or s["tainted"]) else TRUSTED
-    # GAP-4: bind the tag to the stamped content-hash. chash is None when the broker passed no (or a
-    # malformed) hash -> the tag is unverifiable and a later recall/boot fails it closed to UNTRUSTED.
+    # GAP-4: bind the tag to the stamped content-hash (REQUIRED — a None chash was refused above, so
+    # every tag this writes is verifiable by a later recall/boot).
     tags[key] = {"origin": origin, "hash": chash}
     if not _emit({"src": "taint", "event": "stamp", "session_id": s["session_id"], "key": key,
-                  "origin": origin, "hashed": chash is not None, "shadow": True}):
+                  "origin": origin, "shadow": True}):
         return 3
     try:
         _atomic_write(origins_path(), {"schema": SCHEMA, "tags": tags})
     except OSError as e:
         sys.stderr.write("taint stamp: cannot persist origins: %s\n" % e)
         return 3
-    print("taint: STAMP %s origin=%s%s" % (key, origin, "" if chash else " (no content-hash)"))
+    print("taint: STAMP %s origin=%s" % (key, origin))
     return 0
 
 
 def cmd_recall(argv):
-    argv, chash = _parse_content_hash(argv)
+    argv, chash, why = _parse_content_hash(argv)
     if not argv:
-        sys.stderr.write("usage: taint recall <mem-key> [--content-hash sha256:<hex>]\n")
+        sys.stderr.write("usage: taint recall <mem-key> --content-hash sha256:<hex>\n")
         return 2
     key = argv[0]
+    if chash is None:
+        return _refuse_no_hash("recall", key, why)
     tags, corrupt = load_origins()
     s, _ = load_session()
     # Resolve the honored origin (GAP-4 fail-closed verdict matrix). A TRUSTED verdict is honored
     # ONLY when the stamped tag is TRUSTED, carries a content-hash, the recall supplied one, and the
     # two MATCH. Every other case fails closed to UNTRUSTED: unknown key, corrupt ledger, UNTRUSTED
-    # (absorbing), a legacy/no stamped hash, an absent recall hash, or a MISMATCH. content-hash only
-    # ever ADDS a gate to the TRUSTED branch — it can never launder an untrusted entry.
+    # (absorbing), a legacy/no stamped hash, or a MISMATCH (an absent recall hash was already REFUSED
+    # above — REQUIRED mode). content-hash only ever ADDS a gate to the TRUSTED branch — it can never
+    # launder an untrusted entry.
     swap_detected = False
     if corrupt:
         origin = UNTRUSTED
@@ -572,8 +616,8 @@ def cmd_recall(argv):
             origin = UNTRUSTED
         else:                                   # stamped TRUSTED — verify the bytes still match
             stored = _tag_hash(v)
-            if stored is None or chash is None:
-                origin = UNTRUSTED              # unverifiable: legacy tag or no recall hash
+            if stored is None:
+                origin = UNTRUSTED              # unverifiable: legacy string / hash-less STORED tag
             elif chash == stored:
                 origin = TRUSTED
             else:
