@@ -18,7 +18,7 @@ threshold sweep costs nothing. The contract battery is `tests/router-battery.py`
 |---|---|---|---|
 | `routing` | 10 | the eval harness (`evals/tasks/routing.json`) | the models; NOT the rules (the rules' author saw them) |
 | `cases` | 23 | the same author as the rules, before the rules | the models; NOT the rules |
-| `blind` | 48 (12 per handler, ~4 tricky each) | a separate agent given only the four handler definitions, after the rules were frozen (commit "rules frozen before reading the blind set") | everything |
+| `blind` | 48 (12 per handler, ~4 tricky each) | a separate agent given only the four handler definitions, after the rules were frozen (committed locally before the blind file was opened; that work-in-progress commit was squashed into this one) | everything |
 
 `exemplars.json` (33) feeds only the embedding router and is disjoint from every scored set
 (the battery checks it). **Read the `blind` column**; the others flatter the rules.
