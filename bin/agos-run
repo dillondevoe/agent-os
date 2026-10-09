@@ -29,7 +29,7 @@ DENY_PREFIXES = [".ssh", ".gnupg", ".gnupg2", ".config/gh", ".aws", ".kube", ".d
                  ".config/agent-os/keys", ".local/state/agent-os", ".local/share/agent-os/apps"]
 DENY_NAME_RE = re.compile(r"(^\.env($|\.)|^id_(rsa|dsa|ecdsa|ed25519)|\.(pem|key|p12|pfx|kdbx|gpg|asc)$"
                           r"|^\.?(credentials?|secrets?|token)s?(\.|$))", re.I)
-NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,39}$")
+NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,39}\Z")
 DOMAIN_RE = re.compile(r"^(?=.{1,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$")
 ALLOWED_KEYS = {"name", "version", "entry", "files", "network", "devices", "limits", "schedule"}
 LIMIT_BOUNDS = {"cpu_pct": (1, 100, 50), "mem_mb": (16, 8192, 512), "wall_s": (1, 86400, 300)}
@@ -141,8 +141,10 @@ def validate(m, appdir):
     sch = m.get("schedule", "")
     if not isinstance(sch, str):
         raise ManifestError("R10 schedule must be a string (systemd OnCalendar) or empty")
+    if sch and (sch.startswith("-") or "\x00" in sch):
+        raise ManifestError("R10 schedule must not start with '-' or contain NUL (it is passed to systemd-analyze as an argument)")
     if sch and shutil.which("systemd-analyze"):
-        r = subprocess.run(["systemd-analyze", "calendar", sch], capture_output=True, text=True)
+        r = subprocess.run(["systemd-analyze", "calendar", "--", sch], capture_output=True, text=True)
         if r.returncode != 0:
             raise ManifestError("R10 schedule is not a valid OnCalendar expression: %r" % sch)
     return {"home": h, "appdir": real_app, "binds": binds, "limits": limits, "network": net, "create": create}

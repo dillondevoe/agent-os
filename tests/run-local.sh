@@ -52,7 +52,7 @@
 #   evals-battery.py              9 criteria — evals/run.py model-agnostic eval runner, control-armed
 #   agos-run-battery.py           13 criteria — bin/agos-run app sandbox gate, control-armed (real bwrap arm if usable)
 #   agos-approve-battery.py       8 criteria — bin/agos-approve owner-side approval writer: tty/session/sha-prefix gates
-#   agos-build-battery.py         9 criteria — bin/agos-build app builder loop: fake model, B/R-rule retries, never approves/runs
+#   agos-build-battery.py         10 criteria — bin/agos-build app builder loop: fake model, B/R-rule retries, never approves/runs
 #   agos-schedule-battery.py      12 criteria — bin/agos-schedule manifest schedule -> systemd user timer, control-armed (fake systemctl)
 #   agent-loop-dispatch-battery.py  8 checks — agent-loop tool-dispatch mechanics vs bin/mcp + broker-stub
 #

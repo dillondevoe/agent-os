@@ -27,6 +27,11 @@
 #      `required` is unchanged; the eval's own fake for ag-gym-spending passes evals/run.py's
 #      matcher through the builder's tools (so the eval keeps scoring this contract).
 #   H. CONTROL: --backend ollama against a closed port -> exit 3, nothing written.
+#   J. Hardening (review of #309): a plan with an escape sequence is printed and written
+#      clean; a name or filename with a trailing newline is refused (B1 / slugified, never
+#      written raw); a NUL in files[].path or in schedule is a fed-back refusal, never a
+#      traceback; schedule "--help" is refused by R10 (not parsed as an option); a failed
+#      final rename leaves no .build-* dir and the previous app intact.
 #   I. Request hygiene + schedule: control bytes are stripped and a 10 KB request is cut to
 #      2000 chars before it reaches the model; cron "0 7 * * *" becomes "*-*-* 07:00:00" in
 #      the written manifest (R10 is checked by systemd-analyze only where it exists).
@@ -143,7 +148,7 @@ try:
     bak = d + ".v0.1.bak"
     check(os.path.isdir(bak) and open(os.path.join(bak, "app.py"), "rb").read() == before, "E: .bak missing or wrong")
     rr = subprocess.run([sys.executable, RUN, bak, "--dry-run", "--approve-for-test"], capture_output=True, text=True, env=ENV)
-    check(rr.returncode == 3 and "R1" in rr.stderr or "R11" in rr.stderr, "E: runner accepted the .bak: %d %s" % (rr.returncode, rr.stderr))
+    check(rr.returncode == 3 and "R11" in rr.stderr, "E: runner must refuse the .bak with R11: %d %s" % (rr.returncode, rr.stderr))
     print("E. collision refused; version bump replaces and keeps a .bak the runner refuses")
 
     # F
@@ -191,6 +196,36 @@ try:
     check(m["schedule"] == "*-*-* 07:00:00" and "agos-schedule install %s" % d in r.stdout, "I: schedule %r / next lines %r" % (m["schedule"], r.stdout[-300:]))
     print("I. request cleaned and capped; cron converted; schedule install step shown")
 
-    print("agos-build-battery: PASS (9 criteria)")
+    # J
+    shutil.rmtree(d, ignore_errors=True)
+    r = build([call(plan="1. do\x1b[8mhidden\x1b[0m 2. done")], "gym")
+    check(r.returncode == 0 and "\x1b" not in r.stdout and "\x1b" not in open(os.path.join(d, "PLAN.md")).read() and "dohidden" in r.stdout, "J: plan not cleaned: %r" % r.stdout[:300])
+    shutil.rmtree(d)
+    r = build([call(filename="app.py\n")], "gym", "--retries", "0")
+    check(r.returncode == 4 and "B1" in r.stderr and apps() == [], "J: trailing-newline filename accepted: %d %s" % (r.returncode, r.stderr[:200]))
+    r = build([call(name="gym\n")], "gym")
+    check(r.returncode == 0 and apps() == ["gym"] and "\n" not in json.load(open(os.path.join(APPS, "gym/manifest.json")))["name"], "J: newline name leaked: %r" % apps())
+    shutil.rmtree(os.path.join(APPS, "gym"))
+    r = build([call(files=[{"path": "~/finance/ba\x00nk.csv", "mode": "r"}]), call()], "gym")
+    check(r.returncode == 0 and "Traceback" not in r.stderr and "REFUSED: B4" in requests()[1]["messages"][-1]["content"], "J: NUL path: %d %s" % (r.returncode, r.stderr[:300]))
+    shutil.rmtree(d)
+    r = build([call(schedule="*-*-* 07:00:00\x00"), call()], "gym")
+    check(r.returncode == 0 and "Traceback" not in r.stderr and "REFUSED: B5" in requests()[1]["messages"][-1]["content"], "J: NUL schedule: %d %s" % (r.returncode, r.stderr[:300]))
+    shutil.rmtree(d)
+    r = build([call(schedule="--help")], "gym", "--retries", "0")
+    check(r.returncode == 4 and "R10" in r.stderr and apps() == [], "J: schedule --help: %d %s" % (r.returncode, r.stderr[:200]))
+    r = build([call()], "gym"); check(r.returncode == 0, "J: setup")
+    keep = open(os.path.join(d, "app.py"), "rb").read()
+    os.rename(d, d + ".hold"); open(d, "w").write("in the way\n")  # a regular FILE where the dir must go: rename(dir -> file) raises
+    r = build([call(source=SRC + "# v2\n")], "gym", "--version", "0.2")
+    check(r.returncode == 5 and "nothing left behind" in r.stderr, "J: failed rename: %d %s" % (r.returncode, r.stderr[:300]))
+    check(not [x for x in os.listdir(APPS) if x.startswith(".build-")], "J: stage dir left: %r" % os.listdir(APPS))
+    check(open(d).read() == "in the way\n" and open(os.path.join(d + ".hold", "app.py"), "rb").read() == keep, "J: previous state disturbed")
+    os.unlink(d); os.rename(d + ".hold", d)
+    r = build([call(source=SRC + "# v2\n")], "gym", "--version", "0.2")  # bak path: make the final rename fail AFTER the bak move
+    check(r.returncode == 0 and os.path.isdir(d + ".v0.1.bak"), "J: setup bak")
+    print("J. plan cleaned; newline names/filenames refused; NUL and --help schedules fed back; failed rename leaves nothing")
+
+    print("agos-build-battery: PASS (10 criteria)")
 finally:
     shutil.rmtree(TMP, ignore_errors=True)
