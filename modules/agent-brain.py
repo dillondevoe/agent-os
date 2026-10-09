@@ -1374,7 +1374,10 @@ def chat_stream_safe(msgs, retries=1, route=None):
                 # partial is returned (it was already on screen; hiding it would make the
                 # transcript lie) with NO tool calls — an aborted attempt never executes.
                 print(f"\n\033[1;31m⛔ THINK-TWICE: rule {rid!r} kept firing ({fired[rid]}x) — giving up on this turn's answer; no tools run.\033[0m")
-                return {"role":"assistant","content":e.partial,"tool_calls":[],"_usage":aborted_tokens}
+                # `_ttsr_gave_up` tells turn() to stop here: extract_tools() would otherwise
+                # regex-parse a TEXT-form call out of the partial (the ollama template quirk
+                # fallback) and run the very command the rule fired on.
+                return {"role":"assistant","content":e.partial,"tool_calls":[],"_usage":aborted_tokens,"_ttsr_gave_up":True}
             print(f"\n  \033[2m(think-twice: rule {rid!r} fired — retrying with the rule in view)\033[0m")
             by_id={r["id"]:r for r in STREAM_RULES}
             wire=list(msgs)+[{"role":"system","content":by_id[r]["rule"]} for r in order]
@@ -1440,6 +1443,7 @@ def turn(msgs, consent_source=None):
         # Monotone: a served route is the asked route or its floor degrade, never more metered.
         route=msg.pop("_route", route)
         usage=msg.pop("_usage", None)
+        gave_up=msg.pop("_ttsr_gave_up", False)
         _log_turn_provenance(route, usage)
         # Cost-cap breaker counters: cumulative output tokens across the turn's hops (None
         # from a transport that reported nothing counts as 0 spend — it cannot trip the
@@ -1458,6 +1462,7 @@ def turn(msgs, consent_source=None):
                 print(f"\n\033[1;31m⛔ spend ceiling could not record this hop ({e}) — halting the turn\033[0m")
                 return
         msgs.append(msg)
+        if gave_up: return   # think-twice give-up: nothing in the partial may execute, text-form calls included
         calls,clean=extract_tools(msg)
         if not calls:
             if clean and not msg.get("content"): print(clean)  # regex-extracted clean text wasn't already streamed

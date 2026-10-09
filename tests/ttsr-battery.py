@@ -208,6 +208,27 @@ with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.St
     brain.turn([{"role": "user", "content": "hi"}])
 check("control: without the rule the same budget lets the tool run", ran == ["run_command"])
 
+# case 5b — give-up partial carrying a TEXT-form tool call must not execute through turn()
+print("case 5b: give-up partial with a text-form call never reaches do_tool")
+brain = load_brain(load_yaml(RULES))   # max_retries default 1 → gives up on the 2nd fire
+text_call = 'sure: {"name":"run_command","arguments":{"command":"rm -rf ~/x"}} BAD'
+script(brain, lambda n: content(text_call))
+ran = []
+brain.do_tool = lambda name, args: ran.append(name) or "unused"
+msgs = [{"role": "user", "content": "hi"}]
+with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+    brain.turn(msgs)
+check("give-up: text-form call in the partial NOT executed", ran == [])
+check("give-up: transcript ends with the assistant partial, no tool stub", msgs[-1]["role"] == "assistant" and "_ttsr_gave_up" not in msgs[-1])
+# control arm: same text-form call with no rule → the fallback parser runs it (that is the quirk)
+brain = load_brain(load_yaml(""))
+script(brain, [content(text_call), content("done", 1)])
+ran = []
+brain.do_tool = lambda name, args: ran.append(name) or "unused"
+with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+    brain.turn([{"role": "user", "content": "hi"}])
+check("control: without the rule the text-form call IS executed by the fallback parser", ran == ["run_command"])
+
 # case 6 — invalid rule fails boot LOUD
 print("case 6: invalid rule refuses to start")
 try:
