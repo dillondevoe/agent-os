@@ -17,6 +17,10 @@ Cases (from ~/dvo-cache/authored/ttsr-scope-2026-08-20.md):
   7 anthropic path: the translator hoists the injected system msg into `system`
   8 regex straddling chunks fires (buffer search, not piece search)
 """
+# SIDE_EFFECTS — Geist's law as amended 2026-09-05T13:05Z: a box-runnable battery declares
+# every effect that leaves the machine or outlives the run. Read as DATA by
+# tests/vm-matrix-contract.py, not as a comment.
+SIDE_EFFECTS = []
 import contextlib, importlib.util, io, json, os, py_compile, sys, tempfile, textwrap, threading
 
 HERE = os.path.dirname(os.path.abspath(__file__))
