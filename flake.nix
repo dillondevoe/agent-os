@@ -2713,6 +2713,25 @@
               touch $out
             '';
 
+        # Where the agos tools read approvals and keep apps (app-approval-confirm.md §3.1, A3/A5):
+        # image constants beat AGOS_APPROVALS/AGOS_APPS beat the $HOME defaults, with no fallback
+        # on the image; relocated store/apps are never bindable; schedule units read the same store.
+        agos-store-paths-contract =
+          nixpkgs.legacyPackages.${system}.runCommand "agos-store-paths-contract-check"
+            { nativeBuildInputs = [ nixpkgs.legacyPackages.${system}.python3 ]; } ''
+              work="$(mktemp -d)"
+              mkdir -p "$work/bin" "$work/tests" "$work/evals/tasks"
+              for t in agos-run agos-approve agos-schedule agos-build agos-net cap-net-fetch; do
+                cp ${./bin}/$t "$work/bin/$t"
+              done
+              cp ${./evals/run.py} "$work/evals/run.py"
+              cp ${./evals/tasks/app-generation.json} "$work/evals/tasks/app-generation.json"
+              cp ${./tests/agos-store-paths-battery.py} "$work/tests/agos-store-paths-battery.py"
+              cd "$work"
+              HOME="$work/h" python3 tests/agos-store-paths-battery.py
+              touch $out
+            '';
+
         # bin/agos-build — the first app builder loop (app-manifest.md §4b). This check proves
         # the builder is a writer that asks, not a runner: a good answer lands as an app the
         # runner's rules and the approval render accept; R- and B-rule refusals are fed back a

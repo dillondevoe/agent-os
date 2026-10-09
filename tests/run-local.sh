@@ -55,6 +55,7 @@
 #   agos-approve-battery.py       8 criteria — bin/agos-approve owner-side approval writer: tty/session/sha-prefix gates
 #   agos-build-battery.py         10 criteria — bin/agos-build app builder loop: fake model, B/R-rule retries, never approves/runs
 #   agos-net-battery.py           12 criteria — bin/agos-net + bin/agos-fetch app network hand: exact-domain, GET/HEAD, no redirects, real bwrap arm
+#   agos-store-paths-battery.py   11 criteria — agos tools: approvals store / apps root precedence (image constants > env > $HOME), A3/A5
 #   agos-schedule-battery.py      12 criteria — bin/agos-schedule manifest schedule -> systemd user timer, control-armed (fake systemctl)
 #   agent-loop-dispatch-battery.py  8 checks — agent-loop tool-dispatch mechanics vs bin/mcp + broker-stub
 #
@@ -177,6 +178,11 @@ need "$T/agos-approve-battery.py" agos-approve && \
 # records the activation calls; the unapproved / unscheduled / foreign-unit controls must refuse).
 need "$T/agos-schedule-battery.py" agos-schedule && \
   run agos-schedule "$PY" "$T/agos-schedule-battery.py"
+
+# agos-store-paths-battery.py — where approvals are read and apps live (image constants win, no
+# $HOME fallback on the image; relocated store/apps never bindable; schedule units carry the store).
+need "$T/agos-store-paths-battery.py" agos-store-paths && \
+  run agos-store-paths "$PY" "$T/agos-store-paths-battery.py"
 
 # agos-build-battery.py — contract battery for bin/agos-build (scripted fake model answers;
 # every refusal arm asserts nothing was written; eval contract pinned against evals/run.py).
