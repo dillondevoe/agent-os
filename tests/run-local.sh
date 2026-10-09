@@ -52,6 +52,7 @@
 #   evals-battery.py              9 criteria — evals/run.py model-agnostic eval runner, control-armed
 #   agos-run-battery.py           13 criteria — bin/agos-run app sandbox gate, control-armed (real bwrap arm if usable)
 #   agos-approve-battery.py       8 criteria — bin/agos-approve owner-side approval writer: tty/session/sha-prefix gates
+#   agos-net-battery.py           12 criteria — bin/agos-net + bin/agos-fetch app network hand: exact-domain, GET/HEAD, no redirects, real bwrap arm
 #   agos-schedule-battery.py      12 criteria — bin/agos-schedule manifest schedule -> systemd user timer, control-armed (fake systemctl)
 #   agent-loop-dispatch-battery.py  8 checks — agent-loop tool-dispatch mechanics vs bin/mcp + broker-stub
 #
@@ -169,6 +170,12 @@ need "$T/agos-approve-battery.py" agos-approve && \
 # records the activation calls; the unapproved / unscheduled / foreign-unit controls must refuse).
 need "$T/agos-schedule-battery.py" agos-schedule && \
   run agos-schedule "$PY" "$T/agos-schedule-battery.py"
+
+# agos-net-battery.py — contract battery for the app network hand (local upstream via the hand's
+# tests-only --test-upstream; every refusal arm asserts the upstream saw nothing; real bwrap arm
+# proves the socket is reachable inside the sandbox and the raw network is not).
+need "$T/agos-net-battery.py" agos-net && \
+  run agos-net "$PY" "$T/agos-net-battery.py"
 
 # ── shell batteries: wire their positional contracts ─────────────────────────
 # agent-loop-battery.sh <agent-loop> <ollama-stub> <mcp> <broker-stub> <workdir>
