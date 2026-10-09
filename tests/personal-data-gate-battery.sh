@@ -30,11 +30,11 @@ expect() { # expect <BLOCK|PASS> <name> <file> <line>
 
 echo "== armed: real leaks that must be blocked =="
 expect BLOCK "1 relayAddr literal (the real bad commit)" modules/confirm-pkg.nix \
-  '    relayAddr = "100.71.238.38";'  # gate-allow
+  '    relayAddr = "100.101.102.103";'  # gate-allow
 expect BLOCK "2 CGNAT low edge 100.64.x"    a.nix 'x = "100.64.0.1";'  # gate-allow
 expect BLOCK "3 CGNAT high edge 100.127.x"  a.nix 'x = "100.127.255.254";'  # gate-allow
 expect BLOCK "4 mesh bus path"              m.py  'D = "~/jarvis-sync/brain-comms"'  # gate-allow
-expect BLOCK "5 operator account"           d.sh  'ssh dtd@mini "uptime"'  # gate-allow
+expect BLOCK "5 operator account"           d.sh  'ssh d't'd@mini "uptime"'  # gate-allow
 expect BLOCK "6 brain process name"         r.nix 'ExecStart = "run_rabbot";'  # gate-allow
 expect BLOCK "7 bot handle"                 n.md  'Notify via @HeraldTalbot on ship.'  # gate-allow
 expect BLOCK "8 telegram id"                c.nix 'telegram_chat_id = 123456789;'  # gate-allow
@@ -55,7 +55,7 @@ expect PASS  "C8 allow-marked self-documentation" tools/x.txt 'match ~/jarvis-sy
 echo
 # A removed line must not trip the gate: cleanup commits DELETE these strings, and a
 # gate that blocks its own remediation guarantees it gets bypassed on the first cleanup.
-out=$(printf -- '--- a/x\n+++ b/x\n@@ -1 +0,0 @@\n-relayAddr = "100.71.238.38";\n' | "$GATE" --stdin 2>&1); rc=$?  # gate-allow
+out=$(printf -- '--- a/x\n+++ b/x\n@@ -1 +0,0 @@\n-relayAddr = "100.101.102.103";\n' | "$GATE" --stdin 2>&1); rc=$?  # gate-allow
 if [ $rc -eq 0 ]; then printf 'ok   %-46s (PASS, rc=0)\n' "C9 REMOVING a leak is allowed"; pass=$((pass+1));
 else printf 'FAIL %-46s rc=%s\n%s\n' "C9 REMOVING a leak is allowed" "$rc" "$out"; fail=$((fail+1)); fi
 
@@ -80,7 +80,7 @@ expect PASS  "C14 semver is not an address"          x 'version = "10.4.2"'
 expect PASS  "C15 marked range definition"           x 'allow 10.0.0.0/8  # gate-allow'  # gate-allow
 
 # Null-instrument arm: an empty denylist must ERROR (2), never pass silently (0).
-out=$(: > /tmp/empty-denylist.$$; mkdiff x 'ssh dtd@mini' | PERSONAL_DATA_DENYLIST=/tmp/empty-denylist.$$ "$GATE" --stdin 2>&1); rc=$?  # gate-allow
+out=$(: > /tmp/empty-denylist.$$; mkdiff x 'ssh d't'd@mini' | PERSONAL_DATA_DENYLIST=/tmp/empty-denylist.$$ "$GATE" --stdin 2>&1); rc=$?  # gate-allow
 rm -f /tmp/empty-denylist.$$
 if [ $rc -eq 2 ]; then printf 'ok   %-46s (ERROR, rc=2)\n' "C10 empty denylist refuses to run"; pass=$((pass+1));
 else printf 'FAIL %-46s want rc=2 got %s\n' "C10 empty denylist refuses to run" "$rc"; fail=$((fail+1)); fi

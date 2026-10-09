@@ -1,0 +1,258 @@
+#!/usr/bin/env python3
+# bin/agos-run — run ONE agent-made app under its approved manifest, sandboxed. v0 prototype.
+#
+# Spec: docs/design/app-manifest.md. The shape here is the one evals/tasks/app-generation.json
+# already scores (files[{path,mode}], network[], devices[], schedule) plus entry/limits.
+#
+# What this enforces in v0 (and nothing more):
+#   files    — bubblewrap: whole tree read-only, $HOME replaced by tmpfs, then ONLY the manifest
+#              paths bound back (ro for "r", rw for "rw"); the app's own dir is rw implicitly.
+#   network  — DENIED. Always --unshare-net. A non-empty `network` list is recorded and shown
+#              but NOT enforced per-domain yet (that needs the per-uid egress work); v0 refuses
+#              to pretend, so the app simply has no network.
+#   devices  — must be empty.
+#   limits   — systemd-run --user --scope MemoryMax / CPUQuota / RuntimeMaxSec, when available.
+#   approval — the manifest's sha256 must be in ~/.local/state/agent-os/approvals.json, which
+#              is written by the confirm channel (bin/confirm), never by this program or the
+#              agent. Edit the manifest after approval and the hash no longer matches: refused.
+#
+# Never runs unsandboxed: no bwrap -> refuse. stdlib only.
+import hashlib, json, os, re, shutil, subprocess, sys
+
+APPS_REL = ".local/share/agent-os/apps"
+APPROVALS_REL = ".local/state/agent-os/approvals.json"
+# Mirrors agos-do's deny list (playground, 2026-10-05): credential/private locations under $HOME.
+DENY_PREFIXES = [".ssh", ".gnupg", ".gnupg2", ".config/gh", ".aws", ".kube", ".docker", ".password-store",
+                 ".claude", ".mozilla", ".config/google-chrome", ".config/chromium", ".config/rclone",
+                 ".config/Bitwarden", ".local/share/keyrings", ".local/share/kwalletd", ".config/sops",
+                 ".netrc", ".git-credentials", ".config/git/credentials", ".cache",
+                 ".config/agent-os/keys", ".local/state/agent-os", ".local/share/agent-os/apps"]
+DENY_NAME_RE = re.compile(r"(^\.env($|\.)|^id_(rsa|dsa|ecdsa|ed25519)|\.(pem|key|p12|pfx|kdbx|gpg|asc)$"
+                          r"|^\.?(credentials?|secrets?|token)s?(\.|$))", re.I)
+NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,39}$")
+DOMAIN_RE = re.compile(r"^(?=.{1,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$")
+ALLOWED_KEYS = {"name", "version", "entry", "files", "network", "devices", "limits", "schedule"}
+LIMIT_BOUNDS = {"cpu_pct": (1, 100, 50), "mem_mb": (16, 8192, 512), "wall_s": (1, 86400, 300)}
+
+
+class ManifestError(Exception):
+    """Validation failure. The message names the rule (R<n>) so a refusal is actionable."""
+
+
+def home():
+    h = os.environ.get("HOME")
+    if not h or not os.path.isabs(h):
+        raise ManifestError("R0 HOME is not set to an absolute path")
+    return os.path.realpath(h)
+
+
+def canonical(m):
+    return json.dumps(m, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
+
+
+def sha(m):
+    return hashlib.sha256(canonical(m)).hexdigest()
+
+
+def resolve_home_path(p, h, mode):
+    if not isinstance(p, str) or not p:
+        raise ManifestError("R4 files[].path must be a non-empty string")
+    if p.startswith("~/"):
+        p = os.path.join(h, p[2:])
+    if not os.path.isabs(p):
+        raise ManifestError("R4 files[].path must be absolute or start with ~/ : %r" % p)
+    real = os.path.realpath(p)
+    if real == h:
+        raise ManifestError("R4 files[].path is $HOME itself; the home directory is never bindable")
+    if not real.startswith(h + os.sep):
+        raise ManifestError("R4 files[].path resolves outside $HOME: %r" % p)
+    rel = os.path.relpath(real, h)
+    for d in DENY_PREFIXES + [APPROVALS_REL]:
+        if rel == d or rel.startswith(d + os.sep):
+            raise ManifestError("R5 files[].path is a credential/private location: %r" % p)
+        if d.startswith(rel + os.sep):
+            raise ManifestError("R5 files[].path is an ancestor of a private location (~/%s): %r" % (d, p))
+    if any(DENY_NAME_RE.search(part) for part in rel.split(os.sep)):
+        raise ManifestError("R5 files[].path has a credential-looking name: %r" % p)
+    # R13: the source must exist on the host; bwrap cannot bind what is not there. One
+    # exception, documented in app-manifest.md: a missing rw path is a directory the app will
+    # own, and the runner creates it (0700) before bwrap. A missing r path is a typo.
+    if not os.path.lexists(real):
+        if mode != "rw":
+            raise ManifestError("R13 files[].path does not exist (mode r cannot create it): %r" % p)
+        return real, True
+    return real, False
+
+
+def validate(m, appdir):
+    h = home()
+    if not isinstance(m, dict):
+        raise ManifestError("R12 manifest must be a JSON object")
+    extra = set(m) - ALLOWED_KEYS
+    if extra:
+        raise ManifestError("R12 unknown manifest keys: %s" % ", ".join(sorted(extra)))
+    for k in ("name", "version", "entry", "files", "network"):
+        if k not in m:
+            raise ManifestError("R12 missing required key: %s" % k)
+    if not isinstance(m["name"], str) or not NAME_RE.match(m["name"]):
+        raise ManifestError("R1 name must match %s" % NAME_RE.pattern)
+    if not isinstance(m["version"], str) or not m["version"].strip():
+        raise ManifestError("R2 version must be a non-empty string")
+    e = m["entry"]
+    if not isinstance(e, list) or not e or not all(isinstance(x, str) and x for x in e):
+        raise ManifestError("R3 entry must be a non-empty list of non-empty strings (argv)")
+    apps_root = os.path.realpath(os.path.join(h, APPS_REL))  # ~/.local may itself be a symlink
+    real_app = os.path.realpath(appdir)
+    if os.path.dirname(real_app) != apps_root or os.path.basename(real_app) != m["name"]:
+        raise ManifestError("R11 app dir must be $HOME/%s/<name> and <name> must equal manifest.name" % APPS_REL)
+    files = m["files"]
+    if not isinstance(files, list):
+        raise ManifestError("R4 files must be a list")
+    seen, binds, create = set(), [], []
+    for f in files:
+        if not isinstance(f, dict) or set(f) != {"path", "mode"}:
+            raise ManifestError("R4 files[] entries are exactly {path, mode}")
+        if f["mode"] not in ("r", "rw"):
+            raise ManifestError("R6 files[].mode must be r or rw: %r" % (f["mode"],))
+        real, missing = resolve_home_path(f["path"], h, f["mode"])
+        if real in seen:
+            raise ManifestError("R4 duplicate files[].path: %r" % f["path"])
+        for other in seen:  # R14: no entry may sit under another; a later bind would shadow an earlier one
+            if real.startswith(other + os.sep) or other.startswith(real + os.sep):
+                raise ManifestError("R14 files[] entries must not nest: %r is inside or above another entry" % f["path"])
+        if real.startswith(real_app + os.sep) or real_app.startswith(real + os.sep) or real == real_app:
+            raise ManifestError("R14 files[].path overlaps the app directory (already rw): %r" % f["path"])
+        seen.add(real); binds.append((real, f["mode"]))
+        if missing: create.append(real)
+    net = m["network"]
+    if not isinstance(net, list) or not all(isinstance(d, str) and DOMAIN_RE.match(d) for d in net):
+        raise ManifestError("R7 network must be a list of bare domain names (no scheme, no path)")
+    if m.get("devices", []) != []:
+        raise ManifestError("R8 devices must be empty in v0 (no device access exists yet)")
+    lim = m.get("limits", {})
+    if not isinstance(lim, dict) or set(lim) - set(LIMIT_BOUNDS):
+        raise ManifestError("R9 limits keys are cpu_pct, mem_mb, wall_s")
+    limits = {}
+    for k, (lo, hi, default) in LIMIT_BOUNDS.items():
+        v = lim.get(k, default)
+        if not isinstance(v, int) or isinstance(v, bool) or not lo <= v <= hi:
+            raise ManifestError("R9 limits.%s must be an integer in [%d, %d]" % (k, lo, hi))
+        limits[k] = v
+    sch = m.get("schedule", "")
+    if not isinstance(sch, str):
+        raise ManifestError("R10 schedule must be a string (systemd OnCalendar) or empty")
+    if sch and shutil.which("systemd-analyze"):
+        r = subprocess.run(["systemd-analyze", "calendar", sch], capture_output=True, text=True)
+        if r.returncode != 0:
+            raise ManifestError("R10 schedule is not a valid OnCalendar expression: %r" % sch)
+    return {"home": h, "appdir": real_app, "binds": binds, "limits": limits, "network": net, "create": create}
+
+
+def load_manifest(appdir):
+    p = os.path.join(appdir, "manifest.json")
+    try:
+        with open(p, "rb") as fh:
+            return json.loads(fh.read().decode("utf-8"))
+    except FileNotFoundError:
+        raise ManifestError("R12 no manifest.json in %s" % appdir)
+    except OSError as e:
+        raise ManifestError("R12 manifest.json unreadable: %s" % e)
+    except (ValueError, UnicodeDecodeError) as e:
+        raise ManifestError("R12 manifest.json is not valid JSON: %s" % e)
+
+
+def approved(m, h):
+    p = os.path.join(h, APPROVALS_REL)
+    try:
+        with open(p) as fh:
+            db = json.load(fh)
+    except (OSError, ValueError):
+        return False  # a missing, unreadable or corrupt approvals file approves nothing
+    entry = db.get(sha(m)) if isinstance(db, dict) else None
+    return isinstance(entry, dict) and entry.get("name") == m["name"]
+
+
+def user_manager_available():
+    """systemd-run --user needs a live user manager, not just the binary. Probe it; a failed
+    probe means run with bare bwrap (sandbox intact, limits not enforced) rather than not at all."""
+    if os.environ.get("AGOS_RUN_NO_SYSTEMD") or not shutil.which("systemd-run"):
+        return False
+    try:
+        r = subprocess.run(["systemd-run", "--user", "--scope", "--quiet", "--collect", "--", "true"],
+                           capture_output=True, timeout=10)
+        return r.returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def make_private_dirs(path):
+    """mkdir -p with 0700 on EVERY component created, never following a file. Raises OSError."""
+    parts = []
+    cur = path
+    while not os.path.lexists(cur):
+        parts.append(cur); cur = os.path.dirname(cur)
+    if not os.path.isdir(cur):
+        raise OSError(0, "parent is not a directory", cur)
+    for d in reversed(parts):
+        os.mkdir(d, 0o700); os.chmod(d, 0o700)
+
+
+def build_argv(m, v, use_systemd):
+    argv = ["bwrap", "--unshare-all", "--unshare-net", "--die-with-parent", "--new-session",
+            "--ro-bind", "/", "/", "--proc", "/proc", "--dev", "/dev",
+            "--tmpfs", "/tmp", "--tmpfs", "/run", "--tmpfs", v["home"],
+            "--bind", v["appdir"], v["appdir"]]
+    for real, mode in v["binds"]:
+        argv += ["--ro-bind" if mode == "r" else "--bind", real, real]
+    # bwrap creates the parent directories of every bind inside the tmpfs $HOME; those would be
+    # writable scratch. Remount the tmpfs itself read-only (non-recursive: the app dir and the
+    # rw binds mounted under it keep their own rw mounts). The app writes only where approved.
+    argv += ["--remount-ro", v["home"]]
+    argv += ["--clearenv", "--setenv", "HOME", v["home"], "--setenv", "PATH", os.environ.get("PATH", "/usr/bin:/bin"),
+             "--setenv", "AGOS_APP", m["name"], "--chdir", v["appdir"], "--"] + list(m["entry"])
+    if use_systemd:
+        L = v["limits"]
+        argv = ["systemd-run", "--user", "--scope", "--quiet", "--collect",
+                "-p", "MemoryMax=%dM" % L["mem_mb"], "-p", "CPUQuota=%d%%" % L["cpu_pct"],
+                "-p", "RuntimeMaxSec=%d" % L["wall_s"], "--"] + argv
+    return argv
+
+
+def main(args):
+    dry = "--dry-run" in args
+    test_ok = "--approve-for-test" in args
+    pos = [a for a in args if not a.startswith("--")]
+    if len(pos) != 1 or any(a not in ("--dry-run", "--approve-for-test") for a in args if a.startswith("--")):
+        print("usage: agos-run <appdir> [--dry-run] [--approve-for-test]", file=sys.stderr); return 2
+    appdir = pos[0]
+    try:
+        m = load_manifest(appdir)
+        v = validate(m, appdir)
+    except ManifestError as e:
+        print("agos-run: REFUSED manifest: %s" % e, file=sys.stderr); return 3
+    if test_ok:
+        print("agos-run: WARNING --approve-for-test bypasses the owner's approval; tests only", file=sys.stderr)
+    elif not approved(m, v["home"]):
+        print("agos-run: REFUSED: manifest sha256 %s is not approved (approve via the confirm channel; "
+              "an edited manifest needs re-approval)" % sha(m)[:16], file=sys.stderr); return 4
+    if v["network"]:
+        print("agos-run: network: not yet enforced per-domain, DENIED in v0 (requested: %s)"
+              % ", ".join(v["network"]), file=sys.stderr)
+    if not shutil.which("bwrap"):
+        print("agos-run: REFUSED: cannot sandbox: bwrap missing (will not run unsandboxed)", file=sys.stderr); return 5
+    use_systemd = user_manager_available()
+    if not use_systemd:
+        print("agos-run: limits: not enforced (no user manager; sandbox still applies)", file=sys.stderr)
+    argv = build_argv(m, v, use_systemd)
+    if dry:
+        print(json.dumps({"sha256": sha(m), "argv": argv, "create": v["create"]})); return 0
+    try:
+        for d in v["create"]:  # R13 exception: an approved, missing rw path is a directory the app owns
+            make_private_dirs(d)
+    except OSError as e:
+        print("agos-run: REFUSED: R15 cannot create rw path %s: %s" % (d, e.strerror or e), file=sys.stderr); return 6
+    os.execvp(argv[0], argv)
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

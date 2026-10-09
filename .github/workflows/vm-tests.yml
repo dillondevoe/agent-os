@@ -222,6 +222,7 @@ jobs:
           # test, because the property that matters (a restart does not rotate keys, orphaning
           # every prior signature) only exists across boots. Boots the SOVEREIGN image twice.
           - test-identity-boot
+          - test-installer-iso
     steps:
       - name: Checkout
         # SHA-pinned, matching flake-check.yml: immutable commit of the newest v* release tag.
@@ -265,7 +266,7 @@ jobs:
 
       - name: Install Nix (flakes + sandbox)
         # SHA-pinned, matching flake-check.yml.
-        uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25  # v22
+        uses: DeterminateSystems/nix-installer-action@3138316df39ed29be04236d7ffc686fa525866aa  # v23
         with:
           extra-conf: |
             experimental-features = nix-command flakes

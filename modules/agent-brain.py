@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # Agent OS local brain — WITH HANDS + CONTEXT ANTENNA.
 # Talk to it; it acts (browse, run commands, arrange windows) AND it knows the real NOW.
-import json, re, subprocess, sys, urllib.request, urllib.error, datetime, os, hashlib, time, threading, shutil, contextlib
+import json, re, subprocess, sys, urllib.request, urllib.error, datetime, os, hashlib, time, threading, shutil, contextlib, platform, glob
 
 # ── UX v2 slice 1: INPUT LOCK (rabbot-to-page-P2-ux-v2-spec 2026-08-02, Dillon msg 9315) ──
 # prompt_toolkit PromptSession + patch_stdout = a bottom input line that background output
@@ -214,13 +214,18 @@ class _SummonConsent:
     def __init__(self, ttl=_SUMMON_GRANT_TTL_S):
         self._at = None
         self._ttl = ttl
+        self._spent_at = None   # the stamp the last consume took, so restore() can put THAT back
+        self._restores = 0      # how many times THIS grant has been given back (see _MAX)
     def arm(self):
         """Called ONLY from the operator's own input line. Never from a tool, a model
         response, or anything parsed out of model output."""
         self._at = time.time()
+        self._spent_at = None
+        self._restores = 0
     def check_and_consume(self, now=None):
         """(True, None) if a summon may proceed, else (False, reason). Single-use: a
-        successful check disarms the grant, so one `:summon` buys exactly one summon."""
+        successful check disarms the grant, so one `:summon` buys exactly one ANSWER — and
+        at most `_SUMMON_MAX_RESTORES` further attempts that produced no answer at all."""
         now = time.time() if now is None else now
         if self._at is None:
             return False, "no operator consent — summon_claude is cloud and uses the user's account"
@@ -228,8 +233,53 @@ class _SummonConsent:
         if age > self._ttl:
             self._at = None
             return False, f"consent expired ({int(age)}s > {self._ttl}s) — ask again"
+        self._spent_at = self._at
         self._at = None
         return True, None
+    def restore(self, now=None):
+        """Put back a grant that was consumed by an attempt which never produced an answer.
+
+        THE RULE: A GRANT BUYS AN ANSWER, NOT AN ATTEMPT. The operator's `:summon` pays for
+        one reply from cloud Claude; a CLI that is absent, unauthenticated, timed out or
+        errored spent nothing on their account and returned nothing to them, so charging the
+        grant for it destroys a consent act in exchange for an error string. The observed
+        shape on this OS: `claude-code` is in the closure but auth is per-user OAuth, so a
+        box where nobody has run `claude` once fails EVERY summon this way — the operator
+        types `:summon`, gets "isn't logged in", and must re-consent for each retry.
+
+        THE CLOCK IS NOT REFRESHED, and that is the whole safety property: this restores the
+        ORIGINAL stamp, so a restored grant expires exactly when the operator's act said it
+        would. Restoring with `now` would mint consent-time nobody granted, and a loop of
+        failing attempts could then hold a grant open indefinitely. Restore can only ever
+        give back a grant that was armed from the `:summon` input line (arm() is the sole
+        writer of `_at`, asserted structurally by arm F of the battery) — it can never
+        manufacture one, and it cannot outlive the TTL.
+
+        BOUNDED TWICE, and the second bound is not the clock. The TTL says how long a grant
+        may live; `_SUMMON_MAX_RESTORES` says how many answerless attempts may be made inside
+        it. Without the second, a CLI that fails in milliseconds turns one consent act into an
+        unbounded run of real subprocesses — the TTL never expires early enough to stop it.
+        """
+        now = time.time() if now is None else now
+        if self._spent_at is None:
+            return False
+        # THE MESSAGE MUST AGREE WITH THE CLOCK IT OWNS (Augur, #278 review). Returning True
+        # here without consulting the clock makes `_kept()` tell the operator their `:summon`
+        # is still good when the very next check will refuse it as expired. It is the defect
+        # removed one section above ("nothing was spent") applied one line further — except
+        # that spend is UNOBSERVABLE to this code while expiry is ENTIRELY INTERNAL, so this
+        # half was always ours to check rather than assert. Not exotic either: the subprocess
+        # timeout is 180s against a 300s TTL, so every summon consumed after t=120 that times
+        # out lands exactly here.
+        if now - self._spent_at > self._ttl:
+            self._spent_at = None
+            return False
+        if self._restores >= _SUMMON_MAX_RESTORES:
+            self._spent_at = None
+            return False
+        self._restores += 1
+        self._at, self._spent_at = self._spent_at, None
+        return True
     def armed(self, now=None):
         now = time.time() if now is None else now
         return self._at is not None and (now - self._at) <= self._ttl
@@ -242,6 +292,33 @@ def ok_to_summon(consent=None, now=None):
     (#256's lesson: an arm that exercises a different code path than the box runs is an arm
     that proves nothing about the box.)"""
     return (consent or SUMMON_CONSENT).check_and_consume(now=now)
+
+def restore_summon_grant(consent=None, now=None):
+    """Counterpart to ok_to_summon, and reached by the deployed path for the same reason.
+
+    Called ONLY when a consumed summon produced no answer. See _SummonConsent.restore for
+    why this cannot manufacture or extend consent."""
+    return (consent or SUMMON_CONSENT).restore(now=now)
+
+# Appended to every summon failure that gave the operator nothing, so the surviving grant is
+# stated rather than left for them to discover by guessing. Silence here would be the same
+# defect one level down: a consent act whose fate only the code knows.
+# DELIBERATELY SAYS NOTHING ABOUT SPEND. The first draft read "nothing was spent, so you can
+# retry" — an unconditional claim about the operator's cloud ACCOUNT, made by code that cannot
+# observe it. On the FileNotFoundError path it is true; on the 180s-timeout path it is close to
+# the opposite, since a timeout means the request was in flight and most likely billed. The
+# grant and the billing are two different facts and only one of them is ours to report: the
+# restore is about the CONSENT ACT, which is genuinely intact because no answer came back.
+# A RESTORE BUDGET, because "give the grant back on every failure" is unbounded on its own.
+# The TTL bounds how LONG a grant lives; nothing bounded how many subprocesses could be spawned
+# inside it. A fast-failing `claude` (rate limit, transient network error) returns in
+# milliseconds, so a model could loop summon_claude dozens of times in one 300s window, each
+# iteration a real process. Worse, `_SUMMON_KEPT` is a TOOL RESULT — it is read by the model,
+# the party this gate exists to constrain, not by the operator. So the retry affordance is
+# finite: three attempts that produced no answer, then the operator consents again.
+_SUMMON_MAX_RESTORES = 3
+
+_SUMMON_KEPT = " (Your `:summon` is still good — this attempt returned no answer, so you can retry without re-consenting.)"
 
 def _log_summon_attempt(allowed, reason=None):
     """A refused summon is LOUD. A legitimate summon blocked by this gate must show up as a
@@ -542,7 +619,7 @@ TOOLS=[
  {"type":"function","function":{"name":"calendar.now","description":"Get the exact current date/time from the calendar (station timezone).","parameters":{"type":"object","properties":{}}}},
  {"type":"function","function":{"name":"calendar.cals","description":"List the user's calendar collections.","parameters":{"type":"object","properties":{}}}},
  {"type":"function","function":{"name":"calculator","description":"Evaluate a math expression (arithmetic, %, units, functions). Use for any calculation.","parameters":{"type":"object","properties":{"expression":{"type":"string","description":"e.g. (2+3)*4, sqrt(2), 200*15%, 5 km + 300 m"}},"required":["expression"]}}},
- {"type":"function","function":{"name":"system","description":"Read or change machine settings. action 'status' reports network/audio/display/power; 'volume' sets 0-100 or mute/unmute/toggle; 'brightness' sets 0-100.","parameters":{"type":"object","properties":{"action":{"type":"string","description":"status | volume | brightness"},"value":{"type":"string","description":"for volume/brightness: 0-100 (or mute/unmute/toggle for volume)"}},"required":["action"]}}},
+ {"type":"function","function":{"name":"system","description":"Read or change machine settings, and power the machine off or restart it. action 'status' reports network/audio/display/power; 'volume' sets 0-100 or mute/unmute/toggle; 'brightness' sets 0-100; 'power' takes value 'reboot' or 'poweroff' and DOES IT — use it when the user asks to reboot/restart/shut down.","parameters":{"type":"object","properties":{"action":{"type":"string","description":"status | volume | brightness | power"},"value":{"type":"string","description":"for volume/brightness: 0-100 (or mute/unmute/toggle for volume); for power: reboot | poweroff"}},"required":["action"]}}},
  {"type":"function","function":{"name":"list_files","description":"List the entries (files/folders) in a directory. Use when the user asks what's in a folder.","parameters":{"type":"object","properties":{"dir":{"type":"string","description":"absolute directory path"}},"required":["dir"]}}},
  {"type":"function","function":{"name":"read_document","description":"Extract text from a PDF document — whole doc or one page. Use to read/summarize a PDF the user names.","parameters":{"type":"object","properties":{"path":{"type":"string","description":"path to the .pdf"},"page":{"type":"integer","description":"optional 1-indexed page; omit for whole doc"}},"required":["path"]}}},
  {"type":"function","function":{"name":"media_info","description":"Probe an image/video/audio file (type, format, duration, dimensions, streams). Use to inspect a media file.","parameters":{"type":"object","properties":{"path":{"type":"string","description":"path to the media file"}},"required":["path"]}}},
@@ -551,30 +628,142 @@ TOOLS=[
  {"type":"function","function":{"name":"summon_claude","description":"Bring in cloud Claude for a task beyond the local brain. CLOUD, uses the user's account. Consent is enforced in code, not here: the call is REFUSED unless the operator typed `:summon` at the prompt. Offer a summon and tell them to type `:summon <msg>`; a yes in conversation does not arm it. Never auto-fire.","parameters":{"type":"object","properties":{"task":{"type":"string","description":"what Claude should do, stated completely"},"context_summary":{"type":"string","description":"compact summary of the last ~6 turns relevant to the task — never the whole history, never secrets"}},"required":["task","context_summary"]}}},
 ]
 
+# ── THE SHELL THE BOX ACTUALLY HAS (P0, 2026-09-05) ───────────────────────────
+# `subprocess.run(["bash", ...])` resolves `bash` on PATH; on NixOS there is no `/bin/bash`
+# and a login shell's PATH is not the brain service's PATH. On the Dell every run_command
+# died `[Errno 2] No such file or directory: 'bash'` — the brain's only hand, broken on the
+# OS it ships on, with the failure surfacing as an errno the model then narrated at 20s a
+# turn. Resolve ONCE, at import, against what is on this machine; never a hardcoded name.
+#
+# Order is deliberate: bash first (the probes below use bashisms), sh as the POSIX floor,
+# then the two absolute paths that exist on a NixOS system even when PATH is empty. If none
+# resolve, SHELL is None and every shell-out reports that as data rather than raising an
+# errno the model has to interpret.
+#
+# BUILD-TIME LITERAL, same discipline as @GENESIS_PATH@ above: genesis-open.nix substitutes
+# @SH@ with ${pkgs.bash}/bin/bash, so the LOCKED build carries the store path of the exact
+# bash it was built against and asks the machine nothing. Until substituted (hand-deployed
+# dev) it starts with "@" and the fallback below runs — running from source must keep working.
+# The fallback stays as DEPTH, not as the mechanism: it is a second name-resolution
+# assumption, and the whole finding was that name resolution is what failed.
+SH_BUILD = "@SH@"
+
+def _resolve_shell(build=None):
+    b = SH_BUILD if build is None else build
+    # `os.path.exists` and not a bare truth test: a baked path that is not installed is not
+    # a shell, and returning it would only move the ENOENT to the first run_command — after
+    # the caller has already been told it has a hand.
+    if not b.startswith("@") and os.path.exists(b): return b
+    for c in ("bash", "sh"):
+        p = shutil.which(c)
+        if p: return p
+    for p in ("/run/current-system/sw/bin/bash", "/run/current-system/sw/bin/sh", "/bin/sh"):
+        if os.path.exists(p): return p
+    return None
+SHELL = _resolve_shell()
+
+def _sh(cmd, timeout):
+    """Run `cmd` through the resolved shell. Raises RuntimeError — never FileNotFoundError —
+    when no shell exists, so callers report a cause instead of an errno."""
+    if not SHELL:
+        raise RuntimeError("no shell on this system (tried bash, sh, /run/current-system/sw/bin/*, /bin/sh)")
+    return subprocess.run([SHELL, "-c", cmd], capture_output=True, text=True, timeout=timeout)
+
 def live_context():
     # The context antenna: ground the brain in the real NOW, past its training cutoff.
+    #
+    # ── THE EYES NEED NOTHING THE HAND HAS (Geist's ruling, 2026-09-05) ───────────────
+    # This function used to read every machine fact by shelling out — `hostname`, `uptime -p`,
+    # `free -h | awk`, `cat /sys/...`. On the Dell's brain-home unit the PATH is five store
+    # dirs and NONE of those binaries are on it, so every probe returned "" and the context
+    # shipped three lines, silently dropping the one sentence that tells the model it is on
+    # NixOS Linux. The #277 fix made that WORSE in shape: loud errnos became a short,
+    # confident context that omitted the OS.
+    #
+    # The file's own remedy — the "blind instrument" NOTE — was keyed on `not SHELL`, the
+    # CAUSE it was written from, while the property it protects is the SYMPTOM (the probes
+    # read nothing). SHELL resolved, so the note stayed silent while every probe was blind.
+    # Re-keying the note onto the symptom would still be a guard over a mechanism that has
+    # no business existing: four of these facts are handed to Python for free by the kernel
+    # or the interpreter. They shelled out because that is how a human at a prompt gets them.
+    #
+    # So the mechanism goes, and the note is RETIRED WITH IT rather than re-keyed: nothing
+    # below looks up a binary BY NAME except the two probes for which PATH-presence IS the
+    # measurement (installed apps) or which are a genuine external instrument (hyprctl).
+    # `SHELL`/`_sh` stay — they are `run_command`'s hand, not the eyes.
+    #
+    # And per-instrument: an unreadable /proc is an absence of INSTRUMENT and SAYS so in its
+    # own slot; an absent BAT* dir is an absence of DATA (a desktop) and stays silent.
     lines=[]
     now=datetime.datetime.now().astimezone()
     lines.append("Current date & time: "+now.strftime("%A, %B %d, %Y, %-I:%M %p %Z")+" (this is ground truth — trust it over your training data).")
-    def probe(cmd):
-        try: return subprocess.run(["bash","-c",cmd],capture_output=True,text=True,timeout=4).stdout.strip()
-        except Exception: return ""
-    host=probe("hostname");
-    if host: lines.append("Machine: "+host+" — Agent OS, a NixOS LINUX system (not Windows/macOS; nix installs, systemctl for power).")
-    bat=probe("cat /sys/class/power_supply/BAT*/capacity 2>/dev/null | head -1")
-    bst=probe("cat /sys/class/power_supply/BAT*/status 2>/dev/null | head -1")
-    if bat: lines.append(f"Battery: {bat}% ({bst or 'unknown'})")
-    up=probe("uptime -p 2>/dev/null")
-    if up: lines.append("Uptime: "+up)
-    mem=probe("free -h | awk '/Mem:/{print $3\" used / \"$2\" total\"}'")
-    if mem: lines.append("Memory: "+mem)
-    wins=probe("hyprctl clients -j 2>/dev/null | python3 -c \"import sys,json;\\nd=json.load(sys.stdin);\\nprint('; '.join(w.get('class','?')+': '+(w.get('title','')[:40]) for w in d) or 'none')\" 2>/dev/null")
-    if wins: lines.append("Open windows right now: "+wins)
+
+    # Unconditional: platform.node() reads the kernel's hostname through the interpreter.
+    # The OS sentence the model needs most is no longer gated on anything.
+    lines.append("Machine: "+platform.node()+" — Agent OS, a NixOS LINUX system (not Windows/macOS; nix installs, systemctl for power).")
+
+    # Battery — absence of DATA, so silent. A desktop has no BAT* and that is a true fact
+    # about the machine, not a broken instrument.
+    try:
+        caps=glob.glob("/sys/class/power_supply/BAT*/capacity")
+        if caps:
+            with open(caps[0]) as f: bat=f.read().strip()
+            bst="unknown"
+            try:
+                with open(caps[0].rsplit("/",1)[0]+"/status") as f: bst=f.read().strip() or "unknown"
+            except OSError: pass
+            if bat: lines.append(f"Battery: {bat}% ({bst})")
+    except OSError: pass
+
+    # Uptime — absence of INSTRUMENT, so it says so. /proc/uptime is a kernel file; on Linux
+    # it being unreadable is a fact worth showing, not one to hide behind an empty string.
+    try:
+        with open("/proc/uptime") as f: secs=int(float(f.read().split()[0]))
+        d,r=divmod(secs,86400); h,r=divmod(r,3600); m=r//60
+        lines.append("Uptime: up "+", ".join(p for p in (
+            f"{d} day{'s' if d!=1 else ''}" if d else "",
+            f"{h} hour{'s' if h!=1 else ''}" if h else "",
+            f"{m} minute{'s' if m!=1 else ''}" if m or not (d or h) else "") if p))
+    except (OSError, ValueError, IndexError):
+        lines.append("Uptime: unavailable (/proc/uptime unreadable)")
+
+    # Memory — same class as uptime.
+    try:
+        info={}
+        with open("/proc/meminfo") as f:
+            for ln in f:
+                k,_,v=ln.partition(":")
+                info[k]=int(v.split()[0])  # kB
+        used=info["MemTotal"]-info["MemAvailable"]
+        gb=lambda kb: f"{kb/1048576:.1f}Gi"
+        lines.append("Memory: "+gb(used)+" used / "+gb(info["MemTotal"])+" total")
+    except (OSError, ValueError, KeyError, IndexError):
+        lines.append("Memory: unavailable (/proc/meminfo unreadable)")
+
+    # Windows — the ONE genuinely external instrument. Direct argv, never through a shell:
+    # the file's own doctrine (see run_command's hyprctl guard) is that a shell here could
+    # reach `hyprctl dispatch`. `which` returning None is an absent INSTRUMENT and says so —
+    # this line was dead on every Dell boot and nothing showed it.
+    hyprctl=shutil.which("hyprctl")
+    if not hyprctl:
+        lines.append("Open windows right now: unavailable (hyprctl not on this unit's PATH)")
+    else:
+        try:
+            r=subprocess.run([hyprctl,"clients","-j"],capture_output=True,text=True,timeout=4)
+            d=json.loads(r.stdout)
+            lines.append("Open windows right now: "+("; ".join(
+                w.get("class","?")+": "+(w.get("title","")[:40]) for w in d) or "none"))
+        except Exception:
+            lines.append("Open windows right now: unavailable (hyprctl gave no readable answer)")
+
     # Installed-app awareness (rabbot-to-page-ADD-to-pack-brain-blindspot 2026-08-01: brain
     # looped `nix profile install steam` into the unfree wall while Steam was already on the
-    # box). Volatile tail on purpose — keeps the KV-cached static prefix untouched.
-    apps=probe("for a in steam firefox thunar kitty mpv libreoffice gimp; do command -v $a >/dev/null && printf '%s ' $a; done")
-    if apps: lines.append("Already-installed apps (RUN these, never re-install): "+apps.strip())
+    # box). THE DELIBERATE EXCEPTION: this probe's PATH dependence IS the measurement — "can
+    # this brain invoke steam by name from where it stands". The four facts above were
+    # VICTIMS of PATH; this one measures it. Same call, opposite meaning.
+    # Volatile tail on purpose — keeps the KV-cached static prefix untouched.
+    apps=[a for a in ("steam","firefox","thunar","kitty","mpv","libreoffice","gimp") if shutil.which(a)]
+    if apps: lines.append("Already-installed apps (RUN these, never re-install): "+" ".join(apps))
     return "\n".join(lines)
 
 # Trimmed for prefill cost (P1 fix #3, rabbot-to-page-P1-UPGRADE-brain-timeout-crash-2026-08-01:
@@ -1152,7 +1341,7 @@ def do_tool(name,args):
         return f"opened {url} in the browser"
     if name=="run_command":
         try:
-            o=subprocess.run(["bash","-c",args.get("command","")],capture_output=True,text=True,timeout=30)
+            o=_sh(args.get("command",""),30)
             return ((o.stdout+o.stderr).strip() or "(done, no output)")[:1500]
         except Exception as e: return f"error: {e}"
     if name=="arrange_windows":
@@ -1172,7 +1361,15 @@ def do_tool(name,args):
         a=args.get("action","").lower()
         if a=="status": return _run_agos("agos-sys","status")
         if a in ("volume","brightness"): return _run_agos("agos-sys",a,str(args.get("value","")))
-        return f"system: unknown action '{a}' (use status|volume|brightness)"
+        if a=="power":
+            # Closed enum, validated HERE as well as in agos-sys: the value selects a fixed
+            # word, it is never interpolated into a command line. Rejecting it here means an
+            # unknown value returns as DATA and dispatches nothing (the arrange_windows shape).
+            v=str(args.get("value","")).lower().strip()
+            if v not in ("reboot","poweroff"):
+                return f"system: power takes 'reboot' or 'poweroff', got {v!r}"
+            return _run_agos("agos-sys","power",v)
+        return f"system: unknown action '{a}' (use status|volume|brightness|power)"
     if name=="list_files":     return _run_agos("agos-files","list",args.get("dir",""))
     if name=="read_document":
         c=["agos-doc","text",args.get("path","")]
@@ -1203,7 +1400,20 @@ def _summon_claude(task,context_summary):
                 "prompt — saying yes in conversation is not enough, because this path spends "
                 "their cloud account.")
     _log_summon_attempt(True, None)
-    if not task: return "summon error: no task given"
+    # A GRANT BUYS AN ANSWER, NOT AN ATTEMPT. Every return below this point that hands the
+    # operator an error instead of a reply gives the grant back on its ORIGINAL clock, so a
+    # box whose `claude` has never been logged in does not eat one consent act per retry.
+    # ONE rule, applied to rc!=0 and to every exception alike — deliberately not a per-error
+    # classification, and in particular NOT a string match on stderr deciding whether the
+    # account was touched. The success path is the only path that consumes.
+    def _kept(msg):
+        return msg + _SUMMON_KEPT if restore_summon_grant() else msg
+    # A MALFORMED CALL IS AN ATTEMPT THAT RETURNED NOTHING, so it restores like any other.
+    # This return used to sit ABOVE `_kept` and was the single non-success path that still
+    # ate the grant — the comment directly above said "every return below this point", and
+    # it was true only because this one was not below it. A model emitting `summon_claude`
+    # with a blank task burned the operator's consent act for a validation error.
+    if not task: return _kept("summon error: no task given")
     brief=(f"Task from Agent OS's local brain (relay your answer to the user through it):\n{task}\n\n"
            f"Conversation context:\n{context_summary}\n\n"
            f"Machine: NixOS Linux (Agent OS, flake-built — system changes go in the OS repo).")
@@ -1212,16 +1422,23 @@ def _summon_claude(task,context_summary):
                          capture_output=True,text=True,timeout=180)
         if o.returncode!=0:
             err=(o.stderr or o.stdout).strip()[:300]
-            if "log in" in err.lower() or "auth" in err.lower():
-                return "Claude Code isn't logged in — run `claude` once in a terminal to sign in"
-            return f"Claude couldn't complete that: {err or 'no output'}"
+            # BEST-EFFORT MESSAGING ONLY, and it is only safe to leave as a substring guess
+            # BECAUSE of the restore above: this branch no longer decides anything about the
+            # operator's grant, which is given back on every failure path alike. It picks
+            # which sentence they read, nothing more. `login` is matched as well as `log in`
+            # — they are not substrings of each other, and an arm using an auth-shaped
+            # failure ("Please run /login") fell straight through the old pair into the
+            # generic "couldn't complete that", which names no remedy at all.
+            if any(s in err.lower() for s in ("log in", "login", "auth", "api key")):
+                return _kept("Claude Code isn't logged in — run `claude` once in a terminal to sign in")
+            return _kept(f"Claude couldn't complete that: {err or 'no output'}")
         return (o.stdout.strip() or "(Claude returned nothing)")[:8000]
     except FileNotFoundError:
-        return "Claude Code isn't set up — run `claude` once in a terminal to log in"
+        return _kept("Claude Code isn't set up — run `claude` once in a terminal to log in")
     except subprocess.TimeoutExpired:
-        return "Claude took too long (180s) — try a smaller ask, or run `claude` in a terminal for long jobs"
+        return _kept("Claude took too long (180s) — try a smaller ask, or run `claude` in a terminal for long jobs")
     except Exception as e:
-        return f"summon error: {e}"  # fail-soft — never crash a turn
+        return _kept(f"summon error: {e}")  # fail-soft — never crash a turn
 
 def _run_agos(*cmd):
     # generic runner for the agos-* ambient-dozen CLIs; passes their JSON stdout through verbatim
@@ -1477,6 +1694,51 @@ def _frontdoor_available():
             _FRONTDOOR_OK=False
     return _FRONTDOOR_OK
 
+# ── LITERAL-VERB SHORT-CIRCUIT (P0, 2026-09-05) ───────────────────────────────
+# Dillon typed `reboot` at the front door and waited 86s of routing plus a 20s think, and
+# then got a question back. A one-word literal that names a power verb has nothing for a
+# model to decide: there is no argument to extract, no ambiguity to resolve, and no
+# alternative reading. So it does not reach one — this table dispatches the capability
+# directly and no LLM call happens on the turn at all.
+#
+# DELIBERATELY NARROW, and the narrowness is the safety argument. Matching is EXACT on the
+# whole normalised utterance (lowercased, trailing punctuation stripped) against a closed
+# table — not a prefix, not a keyword search, not "contains". "reboot the router when you
+# get a chance" does not match and goes to the model, which is correct. A verb only earns a
+# row here when a model could add NOTHING to it; `status` is deliberately NOT in the table,
+# because a person asking for status wants prose about the machine, not its JSON.
+#
+# It is also not a confirmation bypass. Typing the bare word IS the act — the same standard
+# as `:summon` and `:escalate` one screen down, where typing the token is itself the consent
+# and nothing else can arm it.
+#
+# ⚠ THIS TABLE ASSUMES A TYPED TRANSPORT, AND THE CODE CANNOT SEE ITS TRANSPORT.
+# The safety argument one paragraph up — "typing the bare word IS the act" — is a claim
+# about how the utterance ARRIVED, not about anything in this file. It is true today:
+# `frontdoor_turn` has one call site, fed from the typed REPL loop, and there is no
+# ASR/whisper/STT path anywhere in agent-brain.py (Augur verified this against origin/main
+# in the #277 review rather than taking it on my word).
+#
+# IF A NON-TYPED FRONT END IS EVER WIRED TO THIS LOOP — voice, transcription, a remote
+# message bus, anything that can put text in `msgs` without a human pressing keys — REVISIT
+# HERE FIRST, BEFORE wiring it. A mis-transcribed one-word utterance would then reboot the
+# machine with no model anywhere in the path to hesitate, and every line above would still
+# read as correct, because each one is. A defence argued on one axis does not survive a
+# change on another; this note exists so the change on the other axis lands on the defence.
+_LITERAL_VERBS = {
+    "reboot":    ("system", {"action": "power", "value": "reboot"}),
+    "restart":   ("system", {"action": "power", "value": "reboot"}),
+    "poweroff":  ("system", {"action": "power", "value": "poweroff"}),
+    "power off": ("system", {"action": "power", "value": "poweroff"}),
+    "shutdown":  ("system", {"action": "power", "value": "poweroff"}),
+    "shut down": ("system", {"action": "power", "value": "poweroff"}),
+}
+
+def literal_verb(text):
+    """The whole utterance, or nothing. Returns (tool, args) or None — never executes."""
+    t = (text or "").strip().lower().rstrip(".!?").strip()
+    return _LITERAL_VERBS.get(t)
+
 def frontdoor_turn(msgs, consent_source=None):
     """Interactive entry: 3B first, kick to the 7B turn() on any action shape.
     Fail-open to turn() (the status-quo 7B path) if the 3B is absent or errors — the
@@ -1489,6 +1751,15 @@ def frontdoor_turn(msgs, consent_source=None):
     # the 3B can't handle is kicked to the local 7B floor, exactly as before.)
     if consent_source:
         return turn(msgs, consent_source)
+    # Before ANY model call, including the 3B's. An explicitly-consented escalate turn is
+    # already gone above, so a person who typed `:escalate reboot` still gets the cloud brain.
+    lit = literal_verb(msgs[-1].get("content","")) if msgs and msgs[-1].get("role")=="user" else None
+    if lit:
+        name, args = lit
+        out = do_tool(name, args)
+        print(out)
+        msgs.append({"role":"assistant","content":out,"tool_calls":[]})
+        return
     if not _frontdoor_available():
         return turn(msgs)
     stop,t=_spin(lambda i: (sys.stdout.write(f"\r\033[K\033[2mrouting{'.'*(i%3+1)}\033[0m"),sys.stdout.flush()))
@@ -1554,6 +1825,96 @@ def warmup_greeting(msgs):
     warmup_msgs=[sysmsg(), user_turn("boot complete, greet the operator in one line")]
     turn(warmup_msgs)
 
+# ── IN-LOOP STDERR → JOURNAL (task 285 follow-up; Geist RULED 2026-09-05T18:17Z) ──
+# #285 teed the brain's PRE-loop stderr into brain-home's journal and said, in its own commit
+# message, which half it could not reach: the turn loop runs inside patch_stdout(raw=True),
+# which replaces sys.stderr with a StdoutProxy onto STDOUT, so every in-loop write to fd 2 —
+# the `[front-door 26.3s]` router-leg lines — hits the screen and fd 2 never sees it. That is
+# row A2 of #285's firing table: screen YES, journal NO.
+#
+# ONE site, and it is the guard, not the writers. The eleven sys.stderr.write call sites are
+# untouched: the guard is what swallows the stream, so the guard is where the copy belongs.
+#
+# The screen side is byte-for-byte pass-through — a startup refusal and the dim styling both
+# stay exactly as they were. The journal side is COOKED: complete lines only, ANSI stripped,
+# and only the last frame of a \r-redraw, because the journal wants `[front-door 26.3s]` and
+# not two hundred spinner repaints.
+_ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
+
+class _JournalTee:
+    # PER-THREAD line buffers, not one shared buffer with a lock (Geist's #286 note 2, measured
+    # rather than taken). The brain writes to stderr from the warmup thread as well as the turn
+    # loop. The screen was never at risk — prompt_toolkit's proxy locks its own write — but the
+    # journal side buffers until a newline, and a partial write from one thread followed by
+    # another thread's `...\n` produces ONE journal line built from TWO writers.
+    #
+    # A lock around the buffer does NOT fix that, and this is the part worth keeping: the splice
+    # happens BETWEEN two write() calls, so any per-call lock is the wrong granularity. Measured
+    # on DVo before and after — two threads, 300 partial+newline pairs each: 550 of 600 lines
+    # spliced under the shared buffer, 0 under per-thread buffers. Keying the buffer to the
+    # writer is what makes a journal line attributable to one of them.
+    #
+    # The lock is still here, for the dict itself and for close_copy's drain.
+    def __init__(self, proxy, journal):
+        self._proxy = proxy; self._journal = journal
+        self._bufs = {}
+        self._lock = threading.Lock()
+    def write(self, d):
+        n = self._proxy.write(d)
+        key = threading.get_ident()
+        with self._lock:
+            buf = self._bufs.get(key, "") + d
+            while "\n" in buf:
+                line, buf = buf.split("\n", 1)
+                self._emit(line)
+            # drop the entry when it drains, so a long-lived process does not accumulate one
+            # dead key per thread that ever wrote a partial line
+            if buf: self._bufs[key] = buf
+            else: self._bufs.pop(key, None)
+        return n
+    def _emit(self, line):
+        line = _ANSI_RE.sub("", line.rsplit("\r", 1)[-1]).rstrip()
+        if not line:
+            return
+        # An observer that can raise takes down the turn it was only watching. This copy is
+        # never load-bearing: if the journal side is gone, the screen side has already run.
+        try:
+            self._journal.write(line + "\n"); self._journal.flush()
+        except Exception:
+            pass
+    def flush(self):
+        self._proxy.flush()
+        try: self._journal.flush()
+        except Exception: pass
+    def close_copy(self):
+        # Drain EVERY thread's tail, not just the caller's — the unwinding thread is the turn
+        # loop, and the warmup thread's half-line is exactly as owed to the journal.
+        with self._lock:
+            for key in list(self._bufs):
+                self._emit(self._bufs.pop(key))
+    def isatty(self):
+        return self._proxy.isatty()
+    def __getattr__(self, name):
+        if name.startswith("_"): raise AttributeError(name)
+        return getattr(self.__dict__["_proxy"], name)
+
+@contextlib.contextmanager
+def journal_stderr_copy():
+    # The test is `sys.stderr is sys.__stderr__`, NOT `_PTK` — it asks the question that
+    # actually matters (has something taken fd 2 away) rather than a proxy for it. In the
+    # nullcontext branch stderr already IS fd 2, and installing a copy there would double-write
+    # every line into the tee #285 put on the unit.
+    proxy = sys.stderr
+    if sys.__stderr__ is None or proxy is sys.__stderr__:
+        yield False; return
+    tee = _JournalTee(proxy, sys.__stderr__)
+    sys.stderr = tee
+    try:
+        yield True
+    finally:
+        tee.close_copy()
+        sys.stderr = proxy
+
 def main():
     # system message stays STATIC across turns (byte-identical prefix = KV cache hit);
     # live_context rides each user turn's tail instead (see user_turn()).
@@ -1585,6 +1946,9 @@ def main():
     # ExitStack instead of a `with` block so the whole existing loop keeps its indent
     # (minimal diff); closed after the loop to detach the stdout proxy cleanly.
     _stack=contextlib.ExitStack(); _stack.enter_context(_guard)
+    # Entered AFTER the guard so it unwinds BEFORE it: sys.stderr is handed back to the
+    # proxy while the proxy is still alive, and _stack.close() then detaches the proxy.
+    _stack.enter_context(journal_stderr_copy())
     while True:
         try: u=_read().strip()
         except EOFError: print(); break

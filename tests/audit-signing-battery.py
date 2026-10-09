@@ -1,4 +1,9 @@
 #!/usr/bin/env python3
+# SIDE_EFFECTS — Geist's law as amended 2026-09-05T13:05Z: a box-runnable battery declares
+# every effect that leaves the machine or outlives the run. Read as DATA by
+# tests/vm-matrix-contract.py, not as a comment.
+SIDE_EFFECTS = []
+
 """audit-signing-battery.py — properties for SIGNED audit records (task 287, slice 3).
 
 Usage: audit-signing-battery.py [<path-to-bin/audit>] [<scratch-dir>]

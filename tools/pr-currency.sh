@@ -12,8 +12,9 @@
 # THE PREDICATE, AND THE ONE THAT LOOKS RIGHT AND ISN'T. The obvious test is ancestry — is the
 # gate commit an ancestor of the PR head. That is WRONG and it over-reports. These workflows all
 # trigger on `pull_request`, and a `pull_request` run checks out the merge of the head into main
-# AS OF THE RUN. So a run carries main's criteria at run time: a branch forked months ago whose
-# checks re-ran ten minutes ago has every current gate, and ancestry flags it anyway. The correct
+# AS OF THE RUN'S CREATION. So a run carries main's criteria at creation time: a branch forked months
+# ago whose checks were freshly TRIGGERED (push, update-branch, reopen) ten minutes ago has every current
+# gate, and ancestry flags it anyway. A RE-RUN is not that -- see the RR arms. The correct
 # question is temporal — DID ANY CRITERIA-CHANGING COMMIT LAND AFTER THIS PR'S LATEST RUN? The two
 # agreed on #232 by coincidence, which is exactly how a wrong predicate survives.
 #
@@ -112,6 +113,32 @@ classify_checks() {
 # fixtures are tab-separated on purpose -- SP1 is the exact shape that defeated v1.
 if [ "${1:-}" = "--selftest" ]; then
   fail=0
+  # ABSOLUTE, because the fixture arms below re-run this script from a DIFFERENT cwd and `$0` is
+  # whatever the caller typed. A relative `$0` would make those arms silently run nothing.
+  SELF="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
+
+  # The fixture repo. Added 2026-09-05 to close the gap disclosed in f01ebba's commit message: the
+  # gate-strength and paths arms read the REAL repo via `git rev-parse HEAD~6`, so they could not run
+  # inside a nix check derivation (no history there), and this whole battery therefore ran by hand
+  # only -- an arm nothing runs is prose with a shell prompt. A synthetic repo makes the arms depend
+  # on commits THEY create rather than on whatever this branch happens to be sitting on, which also
+  # removes a second, quieter defect: those arms' inputs changed every time anyone pushed here, so a
+  # green was never reproducible twice.
+  #
+  # Layout: base -> W (a workflow) -> T (a tool). "The PR" forked at `base`, so W and T are exactly
+  # the criteria commits in its gap, and the arms can assert on paths they wrote themselves.
+  mk_fixture() {
+    f="$(mktemp -d)"
+    ( cd "$f" || exit 1
+      git init -q -b main .
+      git config user.email t@t; git config user.name t; git config commit.gpgsign false
+      mkdir -p .github/workflows tools
+      echo base > README; git add -A; git commit -qm base
+      echo "on: [pull_request]" > .github/workflows/fixture.yml; git add -A; git commit -qm "ci: fixture workflow"
+      echo "# tool"          > tools/fixture.sh;                 git add -A; git commit -qm "tools: fixture tool"
+    ) >/dev/null 2>&1 || return 1
+    echo "$f"
+  }
   arm() { got="$(printf '%b' "$2" | classify_checks)"
           case "$got" in $3) echo "  ok   $1" ;; *) echo "  FAIL $1: got [$got] want [$3]"; fail=1 ;; esac; }
   echo "pr-currency selftest"
@@ -140,10 +167,21 @@ if [ "${1:-}" = "--selftest" ]; then
       echo '  "pr list") echo 999 ;;'
       echo '  "pr checks") printf %b "$STUB_ROWS" ;;'
       echo '  "pr view") echo "${STUB_HEAD:-deadbeef}" ;;'
-      echo '  "run view") echo "${STUB_DATE:-2026-09-03T00:00:00Z}" ;;'
+      # The stub must DISCRIMINATE ON THE FIELD, or the RR arms below are vacuous: a stub that
+      # answers one date to every `run view` cannot tell a script reading createdAt from one
+      # reading startedAt, and both would pass. Arm discrimination lives in the fixture.
+      # Key on the WHOLE argument list, not a position: a `$5` stub answers createdAt to any call
+      # whose field sits elsewhere (`-q .startedAt --json startedAt`), so a script reading the
+      # WRONG field passes every RR arm -- a permissive failure that lets a stale PR read current.
+      echo '  "run view")'
+      echo '    case "$*" in'
+      echo '      *startedAt*) echo "${STUB_STARTED:-${STUB_DATE:-2026-09-03T00:00:00Z}}" ;;'
+      echo '      *)         echo "${STUB_CREATED:-${STUB_DATE:-2026-09-03T00:00:00Z}}" ;;'
+      echo '    esac ;;'
       echo 'esac'; } > "$d/gh"
     chmod +x "$d/gh"
-    STUB_ROWS="$1" PATH="$d:$PATH" bash "$0" ${2:-} 2>&1
+    ( [ -n "${FIXTURE:-}" ] && cd "$FIXTURE"
+      STUB_ROWS="$1" BASE="${BASE_OVERRIDE:-$BASE}" PATH="$d:$PATH" bash "$SELF" ${2:-} 2>&1 )
     rm -rf "$d"
   }
   o="$(ord_run 'codecov/patch\tfail\t3s\thttps://codecov.io/x\n')"
@@ -160,7 +198,9 @@ if [ "${1:-}" = "--selftest" ]; then
   # GS arms: --gate-strength annotates each counted commit with the gate its OWN PR passed.
   # The stub answers `pr checks` with one row, so an annotated commit must read "(1ck)".
   echo "GS arms: gate strength of the commits that devalue the green"
-  gs="$(STUB_DATE=2026-01-01T00:00:00Z STUB_HEAD="$(git rev-parse HEAD~6 2>/dev/null)" ord_run 'gate\tpass\t3s\thttps://github.com/o/r/actions/runs/1/job/2\n' --gate-strength)"
+  FIX="$(mk_fixture)" || { echo "  FAIL FX0: could not build the fixture repo"; fail=1; FIX=""; }
+  if [ -n "$FIX" ]; then FIXBASE="$(git -C "$FIX" rev-parse main)"; FIXFORK="$(git -C "$FIX" rev-parse main~2)"; fi
+  gs="$(FIXTURE="$FIX" BASE_OVERRIDE=main STUB_DATE=2026-01-01T00:00:00Z STUB_HEAD="$FIXFORK" ord_run 'gate\tpass\t3s\thttps://github.com/o/r/actions/runs/1/job/2\n' --gate-strength)"
   case "$gs" in *"ck)"*) echo "  ok   GS1 counted commits carry their own PR's check count" ;;
     *) echo "  FAIL GS1: no gate annotation under --gate-strength; got [$gs]"; fail=1 ;; esac
   # GS2 is the control arm and it is the one that matters: without it, a script that annotated
@@ -168,6 +208,152 @@ if [ "${1:-}" = "--selftest" ]; then
   # because it costs an API call per commit. A default that silently pays that cost is the defect.
   case "$o3" in *"ck)"*) echo "  FAIL GS2 CONTROL: annotated without the flag -- lookup is not opt-in"; fail=1 ;;
     *) echo "  ok   GS2 CONTROL: default run does no gate lookup" ;; esac
+  # PD arms: the paths themselves. Added 2026-09-05, one tick after the paths shipped WITHOUT an
+  # arm and I said so in the state line -- a disclosed gap is still a gap, and the disclosure is not
+  # the control. The detail block is the whole point of that change: a COUNT cannot say what is in
+  # the gap, so an arm that only checks the count would have gone green over its removal.
+  echo "PD arms: the counted commits' PATHS, not just their count"
+  pd="$(FIXTURE="$FIX" BASE_OVERRIDE=main STUB_DATE=2026-01-01T00:00:00Z STUB_HEAD="$FIXFORK" ord_run 'gate\tpass\t3s\thttps://github.com/o/r/actions/runs/1/job/2\n')"
+  if printf '%s\n' "$pd" | grep -qE "^ +(\.github/workflows/|flake\.nix|tests/|tools/)"; then
+    echo "  ok   PD1 a counted commit prints the criteria path it touched"
+  else echo "  FAIL PD1: counted commits but printed no paths; got [$pd]"; fail=1; fi
+  # PD2 is the control arm and it carries PD1. Without it, a script that dumped paths on every PR --
+  # including ones with nothing in the gap -- would satisfy PD1 while destroying the signal, because
+  # a report that prints paths unconditionally cannot distinguish a stale PR from a current one.
+  if printf '%s\n' "$o3" | grep -qE "^ +(\.github/workflows/|flake\.nix|tests/|tools/)"; then
+    echo "  FAIL PD2 CONTROL: printed paths for a PR with 0 criteria commits"; fail=1
+  else echo "  ok   PD2 CONTROL: no counted commits, no path block"; fi
+  # FX1 is the fixture's own control arm, and without it every arm above that uses $FIX is
+  # vacuous: a fixture that produced ZERO criteria commits would make PD2's "no path block"
+  # assertion pass for the wrong reason and PD1 fail for a reason that has nothing to do with
+  # the code under test. Assert the fixture really does put two criteria commits in the gap.
+  case "$pd" in *"currency : 2 criteria commit"*) echo "  ok   FX1 CONTROL: the fixture puts exactly 2 criteria commits in the gap" ;;
+    *) echo "  FAIL FX1 CONTROL: fixture gap is not 2 commits -- arms above are not measuring what they say; got [$pd]"; fail=1 ;; esac
+  # FX2: the arms must no longer depend on THIS repo. Run the fixture arm from a directory that is
+  # not a git repo at all -- which is what a nix check derivation looks like -- and require the same
+  # answer. This is the arm that licenses wiring the battery into CI.
+  nog="$(mktemp -d)"
+  pdx="$(cd "$nog" && FIXTURE="$FIX" BASE_OVERRIDE=main STUB_DATE=2026-01-01T00:00:00Z STUB_HEAD="$FIXFORK" ord_run 'gate\tpass\t3s\thttps://github.com/o/r/actions/runs/1/job/2\n')"
+  case "$pdx" in *"currency : 2 criteria commit"*) echo "  ok   FX2 no ambient repo needed -- runs from a non-repo cwd" ;;
+    *) echo "  FAIL FX2: depends on the ambient checkout; got [$pdx]"; fail=1 ;; esac
+  # RR arms: A RE-RUN RE-EXECUTES THE ORIGINAL MERGE COMMIT. IT RE-ASKS THE OLD QUESTION; IT DOES NOT
+  # ASK THE NEW ONE. So `createdAt` -- the moment GitHub built that merge commit -- is the right anchor,
+  # and `startedAt`, which a re-run moves, is the wrong one.
+  #
+  # History, kept because the wrong version was reasoned carefully. On #232, 2026-09-12, I re-ran all
+  # three workflow runs (attempt 1 -> 2, startedAt 2026-09-05T06:03:39Z -> 2026-09-12T16:40:40Z), the
+  # board printed the identical "15 criteria commits" line, and I "fixed" the board to read startedAt
+  # (PR #292). Geist pulled both attempts' checkout logs and they are the SAME commit:
+  #   attempt 1  2026-09-05T06:03:44Z  HEAD is now at d5122ee Merge c2437ce… into 5d4e475…
+  #   attempt 2  2026-09-12T16:40:47Z  HEAD is now at d5122ee Merge c2437ce… into 5d4e475…
+  # (re-verified from DVo 2026-09-14). The re-run exercised none of the 18 commits since. The board was
+  # RIGHT; the defect was this file's closing remedy sentence, which prescribed a re-run. The startedAt
+  # "fix" would have turned an over-reporting alarm into one that a re-run launders green -- the
+  # direction this tool must never fail in. The comment at `when=` asked which RUN, the fix asked which
+  # FIELD, and neither asked which COMMIT.
+  echo "RR arms: a re-run re-executes the original merge commit -- createdAt, not startedAt"
+  rr="$(FIXTURE="$FIX" BASE_OVERRIDE=main STUB_CREATED=2026-01-01T00:00:00Z STUB_STARTED=2099-01-01T00:00:00Z \
+        STUB_HEAD="$FIXFORK" ord_run 'gate\tpass\t3s\thttps://github.com/o/r/actions/runs/1/job/2\n')"
+  case "$rr" in *"currency : 2 criteria commit"*)
+      echo "  ok   RR1 a re-run (fresh startedAt, stale createdAt) STILL counts the gap -- no laundering" ;;
+    *) echo "  FAIL RR1: a re-run cleared the alarm while testing the stale base; got [$rr]"; fail=1 ;; esac
+  # RR1b is the control arm: without it RR1 passes on a script that counts EVERY commit regardless of
+  # the run. A genuinely new run (fresh createdAt) must read as current, even with an old startedAt,
+  # and only because the stub discriminates on the field (above) can this arm tell the two apart.
+  rrb="$(FIXTURE="$FIX" BASE_OVERRIDE=main STUB_CREATED=2099-01-01T00:00:00Z STUB_STARTED=2026-01-01T00:00:00Z \
+         STUB_HEAD="$FIXFORK" ord_run 'gate\tpass\t3s\thttps://github.com/o/r/actions/runs/1/job/2\n')"
+  case "$rrb" in *"currency : 0 criteria commit"*) echo "  ok   RR1b CONTROL: a genuinely new run (fresh createdAt) reads as CURRENT" ;;
+    *) echo "  FAIL RR1b CONTROL: currency does not follow createdAt; got [$rrb]"; fail=1 ;; esac
+  # RR2 is a same-field assertion, not a control: the printed stamp must be the field the count used,
+  # or the line hands the reader two facts that contradict each other.
+  case "$rr" in *"(2099-01-01"*) echo "  FAIL RR2: the printed stamp is startedAt but the count used createdAt"; fail=1 ;;
+    *"(2026-01-01T00:00:00Z)"*) echo "  ok   RR2 the printed stamp is the same field the count used" ;;
+    *) echo "  FAIL RR2: no run stamp printed at all, so the count cannot be audited; got [$rr]"; fail=1 ;; esac
+  # RM arm: the remedy line must not prescribe a re-run -- it cannot clear this, by the arms above.
+  case "$rr" in *"a re-run repairs"*) echo "  FAIL RM: the board still prescribes a re-run, which re-tests the stale base"; fail=1 ;;
+    *"update-branch"*) echo "  ok   RM the remedy names a NEW run (update-branch / push / reopen)" ;;
+    *) echo "  FAIL RM: no remedy line printed for a stale PR; got [$rr]"; fail=1 ;; esac
+  # BD arms: the board must DATE ITSELF. Augur's law, 2026-09-05: a currency (or inertness) verdict is
+  # a dated measurement of what CI DOES, not a property of a path -- valid for one PR, against one CI
+  # configuration, at one timestamp. He proved the retroactive half on #168: his own "a662b0d is inert"
+  # reading was correct when written and wrong eight minutes later, because `flake.nix` started building
+  # the path. Nothing in the reading said WHEN or AGAINST WHAT, so the natural reuse -- paste the board
+  # excerpt into the next comm -- silently converts a measurement into a property. And it converts in
+  # the permissive direction: "inert" reads as "no re-run needed".
+  echo "BD arms: the board dates itself, so a pasted excerpt cannot be reused as a property"
+  case "$pd" in *"board    : computed "*"Z against "*) echo "  ok   BD1 the board prints a UTC stamp and a base" ;;
+    *) echo "  FAIL BD1: no self-dating header; got [$pd]"; fail=1 ;; esac
+  # BD2 is the arm that makes BD1 mean anything: a header carrying a HARD-CODED or AMBIENT sha would
+  # satisfy BD1 while being exactly the lie the header exists to prevent. Require the sha printed to be
+  # the sha of the base this run actually measured against -- the fixture's, not this checkout's.
+  if [ -n "$FIX" ]; then
+    fixshort="$(git -C "$FIX" rev-parse --short main)"
+    case "$pd" in *"against main $fixshort"*) echo "  ok   BD2 CONTROL: the stamped sha is the base actually measured ($fixshort)" ;;
+      *) echo "  FAIL BD2 CONTROL: header sha is not the measured base $fixshort; got [$pd]"; fail=1 ;; esac
+  fi
+  # BD3 asserts a FORMAT, and Augur's review is right that this is its ceiling: the fixture's base is
+  # committed during the run, so its date is always ~now and always parseable. There is no run here in
+  # which a stale base makes BD3 go red. It proves the field is PRINTED; it cannot prove the field
+  # DISCRIMINATES -- and the incident that motivated the header was eight minutes wide, where a date is
+  # visibly fresh and still wrong. That limit belongs in the arm, not in a comment above it. BD4/BD5 are
+  # what carry the discrimination, by asserting the FETCH STATE is reported and is not a blanket claim.
+  # THE ANCHOR IS THE SHAPE OF A DATE, NOT ITS TIMEZONE SUFFIX (Augur, #276 review §1). This used to
+  # end `*"Z)"*`, which carried TWO properties -- "a date was printed" and "it parses" -- and only the
+  # first was about Z. Moving to %cI forced the Z out (his §4 on #275, the right fix) and took the
+  # second property with it, silently: what was left asserted only that the WORDS "base dated" were
+  # printed, which `(base dated ?; FETCH FAILED ...)` and `(base dated banana; ...)` both satisfy. The
+  # `?` branch is live code -- `git log ... || echo '?'` -- and reachable in precisely the scenario
+  # BD6 exists to cover, so BD3 would have stayed green on a board that had dated nothing. A leading
+  # four-digit year rejects both fallbacks and is agnostic to Z, -05:00, and any future format.
+  # ONE FUNCTION, TWO CALLERS. BD3b below feeds it the literals BD3 must reject, so the rule is not
+  # spelled twice -- a control arm that re-typed the glob could drift from the arm it controls and
+  # would then certify a pattern nothing uses.
+  bd3_dated() { case "$1" in *"(base dated "[0-9][0-9][0-9][0-9]-*) return 0 ;; *) return 1 ;; esac; }
+  if bd3_dated "$pd"; then echo "  ok   BD3 the stamped base carries its own commit date (shape only -- see above)"
+    else echo "  FAIL BD3: base named but not dated -- a stale ref is undetectable; got [$pd]"; fail=1; fi
+  # BD3b CONTROL, and it exists because the property it guards was LOST ONCE ALREADY, in silence. The
+  # `?` is live code (`git log ... || echo '?'`) and reachable in the same scenario BD6 covers, so
+  # without this arm BD3 goes green on a board that dated nothing. Assert the rejection, not just the
+  # acceptance: BD3 alone passes on a glob that matches everything.
+  if bd3_dated "board: computed X against main abc (base dated ?; FETCH FAILED)"; then
+      echo "  FAIL BD3b CONTROL: the '?' fallback satisfies BD3 -- the arm cannot see an undated board"; fail=1
+    elif bd3_dated "board: computed X against main abc (base dated banana; never fetched)"; then
+      echo "  FAIL BD3b CONTROL: a non-date satisfies BD3"; fail=1
+    else echo "  ok   BD3b CONTROL: BD3 rejects the '?' fallback and other non-dates"; fi
+  case "$pd" in *"never fetched"*|*"fetched just now"*|*"FETCH FAILED"*)
+      echo "  ok   BD4 the header states the base's FETCH state, not just its date" ;;
+    *) echo "  FAIL BD4: no fetch state -- staleness is the default and goes unreported; got [$pd]"; fail=1 ;; esac
+  # BD6: the FETCH FAILED state, which Augur flagged as the one state no arm produced. It is the state
+  # most likely to appear in the wild (CI with no credentials for the remote, a laptop offline) and the
+  # only one whose text carries real information. Exercised by giving the fixture a remote named `origin`
+  # that points nowhere, with the remote-tracking ref planted by hand so the BASE still resolves -- so
+  # the fetch fails while everything downstream of it stays measurable, which is exactly the wild case.
+  if [ -n "$FIX" ]; then
+    git -C "$FIX" remote add origin /nonexistent/definitely-not-a-repo.git >/dev/null 2>&1
+    git -C "$FIX" update-ref refs/remotes/origin/main "$(git -C "$FIX" rev-parse main)" >/dev/null 2>&1
+    ff="$(FIXTURE="$FIX" BASE_OVERRIDE=origin/main STUB_DATE=2026-01-01T00:00:00Z STUB_HEAD="$FIXFORK" ord_run 'gate\tpass\t3s\thttps://github.com/o/r/actions/runs/1/job/2\n')"
+    case "$ff" in *"FETCH FAILED"*) echo "  ok   BD6 an unreachable remote is reported, not silently treated as fresh" ;;
+      *) echo "  FAIL BD6: fetch failed but the board did not say so; got [$ff]"; fail=1 ;; esac
+    # BD6b CONTROL: the run must still PRODUCE a board -- a fetch failure that aborted the report would
+    # satisfy BD6's sibling concerns while destroying the tool. Degrade, do not die.
+    # THE GAP I NAMED HERE WAS MALFORMED, and Augur's §3 dissolved it rather than accepting it. I had
+    # written that BD6b covers "still reports" and nothing covers "still reports CORRECTLY under a
+    # failed fetch". There is no such second thing: after a failed fetch every currency number still
+    # comes from local refs, so the board is exactly as correct as it always was ABOUT A BASE THAT IS
+    # NOW OLD -- and BD6 asserts the header says so. Correctness is not in question; noticing is, and
+    # noticing is what is armed. Recorded here rather than in a comm so the question is closed in the
+    # file instead of parked outside it.
+    case "$ff" in *"currency : "*) echo "  ok   BD6b CONTROL: the board still reports after a failed fetch" ;;
+      *) echo "  FAIL BD6b CONTROL: a failed fetch killed the report; got [$ff]"; fail=1 ;; esac
+    git -C "$FIX" remote remove origin >/dev/null 2>&1
+  fi
+  # BD5 CONTROL, and it is the one that stops BD4 being satisfied by a lie: the fixture measures against a
+  # LOCAL ref, so a header that claimed "fetched just now" unconditionally -- the flattering answer, and
+  # the one that reproduces the defect -- must fail here.
+  case "$pd" in *"fetched just now"*) echo "  FAIL BD5 CONTROL: claimed a fetch for a purely local base"; fail=1 ;;
+    *"never fetched"*) echo "  ok   BD5 CONTROL: a local base is reported as never fetched, not as fresh" ;;
+    *) echo "  FAIL BD5 CONTROL: no fetch state at all; got [$pd]"; fail=1 ;; esac
+  rm -rf "$nog" "$FIX"
   [ "$fail" = 0 ] && echo "ALL GREEN" || echo "SELFTEST FAILED"
   exit "$fail"
 fi
@@ -177,6 +363,44 @@ command -v gh >/dev/null 2>&1 || { echo "CANNOT-ASSESS: gh not on PATH; currency
 prs="$(gh pr list --state open --json number -q '.[].number' 2>/dev/null)"
 if [ -z "$prs" ]; then echo "no open PRs"; exit 0; fi
 
+# THE BOARD DATES ITSELF (Augur, 2026-09-05). Every line below is a measurement against ONE base at
+# ONE instant, and the natural thing to do with a board is paste an excerpt of it into a comm hours
+# later. Without a stamp there is nothing in the text that says the reading has an expiry, so it gets
+# reused as a PROPERTY of the PR ("still current") or of a path ("inert, no re-run needed") -- both of
+# which fail permissive. The base moves under this report constantly, and so does what counts as
+# criteria-bearing: `tools/pr-currency.sh` was correctly inert at a662b0d and criteria-bearing at
+# 703d930 with no change to the regex that matches it, because flake-check builds `checks` unfiltered.
+# The stamp does not stop the reuse. It makes the reuse checkable, which is the most a printed line can do.
+board_at="$(TZ=UTC date -u +%Y-%m-%dT%H:%M:%SZ)"
+# STALE IS THE DEFAULT, NOT THE EDGE CASE (Augur's #275 review, 2026-09-05). `origin/main` is a LOCAL
+# ref that moves only when someone runs `git fetch`; nothing in this file ever did. So the board did not
+# *risk* measuring against a stale base -- absent an unrelated fetch it always did, by an amount that is
+# a property of the operator's shell history. Augur hit it in this repo the same morning: his origin/main
+# sat at 5d4e475 while 703d930 was already merged. Fetch, and SAY whether the fetch worked -- a board that
+# could not reach the network and says so is honest; one that silently reports a week-old base is the
+# exact thing this header exists to prevent.
+# CONTRACT NOTE (Augur, 2026-09-05): this fetch means THE BOARD MUTATES WHAT IT MEASURES. Two
+# consecutive runs can disagree for a reason the first run itself caused, and running it moves
+# origin/* under whatever else the operator has going in that checkout. Only remote-tracking refs
+# move -- no worktree, no local branch, nothing lost -- but the file is no longer a pure read-only
+# probe, and the next person to read its NAME will otherwise be right about the name and wrong about
+# the file. Recorded here rather than in a reviewer's memory.
+case "$BASE" in
+  origin/*|upstream/*)
+    if git fetch -q "${BASE%%/*}" 2>/dev/null; then board_fresh="fetched just now"
+    else board_fresh="FETCH FAILED -- base is as of this checkout's last fetch, age unknown"; fi ;;
+  *) board_fresh="local ref, never fetched -- age is this checkout's" ;;
+esac
+board_base="$(git rev-parse --short "$BASE" 2>/dev/null || echo '?')"
+# ...AND THE STAMP MUST DATE THE BASE, NOT JUST NAME IT: a sha looks equally authoritative fresh or stale.
+# %cI carries a REAL OFFSET rather than a hand-appended `Z`. The earlier form put the Z literal in the
+# format string with `format-local`, the one directive that reads the environment -- so its correctness
+# lived entirely in a `TZ=UTC` prefix, and Augur reproduced the failure by dropping it while reviewing:
+# 703d930 printed as 01:11:31Z for a commit made at 06:11:31Z. CDT wearing a Z, no diagnostic. A format
+# that cannot lie about its offset beats a prefix that has to be remembered.
+board_bdate="$(git log -1 --format=%cI "$BASE" 2>/dev/null || echo '?')"
+echo "board    : computed $board_at against $BASE $board_base (base dated $board_bdate; $board_fresh)"
+
 rc=0
 for pr in $prs; do
   head="$(gh pr view "$pr" --json headRefOid -q .headRefOid 2>/dev/null)"
@@ -184,6 +408,8 @@ for pr in $prs; do
   # took whichever gh listed first. Today they share a timestamp (one push triggers all three), so it
   # cannot be wrong yet -- it breaks the first time someone re-runs one workflow alone, after which a
   # fresh sibling masks the stale gates. Currency is a property of the STALEST run, so take the min.
+  # `createdAt`, NOT `startedAt` -- see the RR arms. A re-run moves startedAt but re-executes the
+  # ORIGINAL merge commit, so only createdAt dates the base the run actually tested.
   when="$(for r in $(gh pr checks "$pr" 2>/dev/null | grep -oE 'runs/[0-9]+' | cut -d/ -f2 | sort -u); do
             gh run view "$r" --json createdAt -q .createdAt 2>/dev/null; done | sort | head -1)"
   run="$when"
@@ -218,9 +444,18 @@ for pr in $prs; do
   mb="$(git merge-base "$BASE" "$head" 2>/dev/null)"
   dist="$(git rev-list --count "${mb}..${BASE}" 2>/dev/null || echo '?')"
 
-  n=0; which=""
+  n=0; which=""; detail=""
   for c in $(git rev-list "${mb}..${BASE}" 2>/dev/null); do
-    git show --name-only --format='' "$c" 2>/dev/null | grep -qE "$CRITERIA_RE" || continue
+    # Keep the matching PATHS, not just the fact that one matched. A COUNT cannot say what is in
+    # the gap, and the reader who cannot see the paths supplies a guess -- in this lane the guess
+    # has been "cosmetic" three times running. Measured 2026-09-05 on this repo's own board: of the
+    # 3 commits devaluing every open PR, one was a comment-only block in vm-tests.yml and one was a
+    # tool file no workflow invokes; only the actions/checkout bump changes what a run executes.
+    # Same count, three very different answers to "should I re-run this."
+    # Deliberately NOT classified inert/material here: a classifier that mislabels fails toward
+    # "no re-run needed", which is the direction this tool must never fail in. Show, do not judge.
+    cp="$(git show --name-only --format='' "$c" 2>/dev/null | grep -E "$CRITERIA_RE")"
+    [ -n "$cp" ] || continue
     # BOTH SIDES MUST BE Z. `[ a \> b ]` is a STRING compare, and the two clocks disagree by default:
     # git prints the committer's own offset (-05:00 throughout this repo) while gh prints UTC. A commit
     # made 00:00-05:00 local then sorts BEFORE a run in that window and is silently dropped -- an
@@ -229,6 +464,9 @@ for pr in $prs; do
     if [ "$cz" \> "$when" ]; then
       n=$((n+1)); sh="$(git log -1 --format=%h "$c")"
       if [ "$GATE_STRENGTH" = 1 ]; then which="$which $sh($(gate_of "$c")ck)"; else which="$which $sh"; fi
+      detail="$detail
+               $sh $(git log -1 --format=%s "$c" | cut -c1-60)
+$(echo "$cp" | sed 's/^/                    /')"
     fi
   done
 
@@ -237,13 +475,15 @@ for pr in $prs; do
   echo "    distance : $dist commits behind $BASE"
   echo "    currency : $n criteria commit(s) landed after its run ($when)"
   [ "$n" -gt 0 ] && echo "               ->$which"
-  [ "$n" -gt 0 ] && echo "               a re-run repairs this and moves NO other number here."
+  [ "$n" -gt 0 ] && printf '%s\n' "${detail#?}"
+  [ "$n" -gt 0 ] && echo "               a NEW run repairs this (gh pr update-branch $pr, a push, or close/reopen);"
+  [ "$n" -gt 0 ] && echo "               a re-run does NOT -- it re-executes the original merge commit."
   # The comparison Augur's finding is made of: this PR's gate against the gate its devaluers passed.
   [ "$n" -gt 0 ] && [ "$GATE_STRENGTH" = 1 ] && \
     echo "               (Nck = checks on the commit's OWN merged PR; compare against this PR's outcome count)"
 done
 
-# Deliberately NOT a merge gate. Currency is context for a human deciding whether to re-run; a
+# Deliberately NOT a merge gate. Currency is context for a human deciding whether to re-trigger; a
 # stale-criteria PR is not thereby wrong, and promoting this to blocking would need a labelled
 # false-positive measurement first. rc reflects OUTCOME failures only.
 exit "$rc"
