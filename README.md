@@ -180,8 +180,10 @@ with **no fetcher**: its builder's whole job is to print the staging command and
 nix-store --add-fixed sha256 /path/to/qwen2.5-3b-augur-q4_k_m.gguf
 ```
 
-`configuration-open.nix` imports that module unconditionally, so the blob is in the closure of
-the whole open system. Evaluation succeeds; the **build** fails. `modules/model-open.nix` is a
+**Since 2026-10-09 the module is opt-in** (`agentos.model3b.enable`, default off): the only
+staged copies of the blob were lost with DVo, and `agent-brain` already falls back to the main
+brain when the 3B tag is absent. With it off, the blob is not in the closure and the open system
+builds anywhere. Enabling it brings the hand-staging requirement below back. `modules/model-open.nix` is a
 milder version of the same thing — buildable, but it pulls a multi-gigabyte 9B from HuggingFace
 on any store that lacks it.
 

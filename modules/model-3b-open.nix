@@ -65,6 +65,16 @@ let
     PARAMETER temperature 0.7
   '';
 in {
+  # OPT-IN since 2026-10-09. The 3B weights have no fetcher and their only staged copies (DVo's
+  # store and disk) are gone, so importing this unconditionally made agentos-open unbuildable on
+  # every machine: CI runners and the Dell's deploy VM included. agent-brain.py already bypasses
+  # the front-door to the main brain when qwen2.5:3b-augur is absent, so off loses routing only.
+  # Turn it on (and stage the GGUF) on a box that has the blob. Its successor is a decision model
+  # trained on the box itself, which needs no hand-staged artifact.
+  options.agentos.model3b.enable = lib.mkEnableOption
+    "the hand-staged qwen2.5:3b-augur front-door model (requires nix-store --add-fixed of its GGUF)";
+
+  config = lib.mkIf config.agentos.model3b.enable {
   # First-boot seed: import the bundled 3B into Ollama LOCALLY (no network). Mirrors
   # agos-seed-model exactly (same env fix for the ollama-CLI $HOME panic, same user +
   # DynamicUser/StateDirectory namespace so it can WRITE the daemon's store). Ordered AFTER
@@ -113,5 +123,6 @@ in {
       ollama create ${modelTag3b} -f ${modelfile3b}
       echo "agos-seed-model-3b: done — second brain resident (non-default)."
     '';
+  };
   };
 }
