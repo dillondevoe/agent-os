@@ -93,6 +93,11 @@ in
     curl
   ];
 
+  # install.sh ends in `nixos-install --flake`, and its nix-shell fallbacks resolve <nixpkgs>
+  # through the flake registry: with flakes off the install died right after partitioning.
+  # Found by the first real install from this ISO (2026-10-09, the NixOS deploy VM on dellon).
+  nix.settings.experimental-features = [ "nix-command" "flakes" ];
+
   environment.etc."agent-os/README.txt".source = readme;
 
   # Banner on every console login prompt, plus the post-login motd.
