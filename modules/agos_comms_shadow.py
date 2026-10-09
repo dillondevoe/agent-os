@@ -30,6 +30,7 @@ import hashlib
 import json
 import os
 import re
+import time
 
 import agos_events as E
 
@@ -247,7 +248,83 @@ def scan_once(comms_dir, root, model):
         done_already.add(base)
         dones += 1
 
-    return {"emitted": emitted, "dones": dones}
+    res = {"emitted": emitted, "dones": dones}
+    write_scan_receipt(root, res, comms_seen=len(files))
+    return res
+
+
+# ---- the positive receipt ----------------------------------------------------
+# WHY THIS EXISTS. `scan_once` returning {'emitted': 0} has TWO causes that are byte-identical to
+# every consumer: (a) everything is already emitted — healthy — and (b) nothing has called this
+# function for two days. Augur hit (b) on 2026-09-03 and read the frozen host files as a per-host
+# problem. They are not reconstructible from the log either, and that is the sharper half: every
+# emitted event carries `ts=mtime_iso`, the SOURCE COMM's mtime, deliberately. So the newest line in
+# a host file dates the newest COMM, never the newest SCAN — `comms.atlas.jsonl` ends 2026-08-01 and
+# is perfectly healthy. **There is no emit-time anywhere in the events, so no query over them can
+# date the emitter.** A blind zero with no clock to check it against.
+#
+# The receipt is therefore a SEPARATE positive artifact on the real wall clock, written on every
+# COMPLETED scan whether or not it emitted anything. Absence of new events stops being ambiguous:
+# fresh receipt + zero emitted = healthy; stale or missing receipt = the emitter is not running.
+#
+# Three states, not two ([[exists-collapses-dangling-into-absent]]): MISSING, UNREADABLE and
+# PRESENT are distinct, because a receipt that cannot be parsed is a broken instrument and must not
+# read as an intentional absence.
+RECEIPT_BASENAME = "scan-receipt.json"
+
+
+def receipt_path(root):
+    return os.path.join(os.path.expanduser(root), RECEIPT_BASENAME)
+
+
+def write_scan_receipt(root, res, comms_seen, now=None):
+    """Stamp a completed scan. Atomic (tmp+replace) so a reader never sees a half-written receipt.
+
+    `scanned_at` is time.time() — the REAL clock — and is deliberately not the event `ts`, which is
+    a comm mtime and can be months old on a healthy lane."""
+    path = receipt_path(root)
+    body = {
+        "scanned_at": float(time.time() if now is None else now),
+        "emitted": int(res.get("emitted", 0)),
+        "dones": int(res.get("dones", 0)),
+        "comms_seen": int(comms_seen),
+        "schema": 1,
+    }
+    tmp = path + ".tmp"
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(tmp, "w") as f:
+            json.dump(body, f, sort_keys=True)
+        os.replace(tmp, path)
+    except OSError:
+        # A receipt that cannot be written must never take the scan down with it: the scan is the
+        # product, the receipt is the instrument. It degrades to MISSING, which reads as unhealthy.
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        return None
+    return body
+
+
+def read_scan_receipt(root, stale_after_s=3600, now=None):
+    """Return {'state': MISSING|UNREADABLE|FRESH|STALE, 'age_s': float|None, 'receipt': dict|None}."""
+    path = receipt_path(root)
+    try:
+        with open(path) as f:
+            body = json.load(f)
+    except FileNotFoundError:
+        return {"state": "MISSING", "age_s": None, "receipt": None, "path": path}
+    except (ValueError, OSError) as e:
+        return {"state": "UNREADABLE", "age_s": None, "receipt": None, "path": path,
+                "reason": str(e)}
+    try:
+        age = float(time.time() if now is None else now) - float(body["scanned_at"])
+    except (KeyError, TypeError, ValueError) as e:
+        return {"state": "UNREADABLE", "age_s": None, "receipt": body, "path": path,
+                "reason": "scanned_at: " + str(e)}
+    return {"state": "FRESH" if age <= stale_after_s else "STALE",
+            "age_s": age, "receipt": body, "path": path}
 
 
 # ---- the shadow consumer (observation only) ---------------------------------
@@ -369,8 +446,20 @@ def main(argv=None):
     argv = argv if argv is not None else sys.argv[1:]
     comms_dir = os.environ.get("AGOS_COMMS_DIR", _DEFAULT_COMMS_DIR)
     root = _default_root()
-    model = load_model(os.environ.get("AGOS_MESH_MODEL"))
     cmd = argv[0] if argv else "scan"
+
+    # `receipt` is a HEALTH CHECK and must not need the mesh model: loading it here crashed the
+    # check with FileNotFoundError on a box with no model, exiting 1 for a reason that has nothing
+    # to do with the emitter's health. Same exit code, different failure — indistinguishable to the
+    # monitor that reads it, which is exactly the collapse this whole change exists to undo.
+    if cmd == "receipt":
+        stale = float(os.environ.get("AGOS_SCAN_STALE_S", "3600"))
+        r = read_scan_receipt(root, stale_after_s=stale)
+        print(json.dumps(r, sort_keys=True))
+        # Exit code is the whole point: a monitor must be able to fail on this without parsing.
+        return 0 if r["state"] == "FRESH" else 1
+
+    model = load_model(os.environ.get("AGOS_MESH_MODEL"))
 
     if cmd == "scan":
         res = scan_once(comms_dir, root, model)
@@ -386,7 +475,7 @@ def main(argv=None):
                           "divergences": rep["port_parity"]["divergence_count"],
                           "wrote": out}, sort_keys=True))
         return 0
-    print("usage: agos_comms_shadow.py [scan|report]", file=__import__("sys").stderr)
+    print("usage: agos_comms_shadow.py [scan|receipt|report]", file=__import__("sys").stderr)
     return 2
 
 

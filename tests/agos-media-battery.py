@@ -5,6 +5,11 @@
 # so: if AGOS_MEDIA_FIXTURE is set, use it; else SKIP with a clear note. (The Dell gate
 # or CI can pass a fixture, e.g. a sample PNG/mp4, to exercise the real ffprobe reshape.)
 # Run: AGOS_MEDIA_FIXTURE=/path/to/sample.png PYTHONPATH=modules python3 tests/agos-media-battery.py
+# SIDE_EFFECTS — Geist's law as amended 2026-09-05T13:05Z: a box-runnable battery declares
+# every effect that leaves the machine or outlives the run. Read as DATA by
+# tests/vm-matrix-contract.py, not as a comment.
+SIDE_EFFECTS = []
+
 import subprocess, json, shutil, sys, os
 
 EX = 0

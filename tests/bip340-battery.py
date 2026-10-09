@@ -18,6 +18,11 @@
 #   C. every official vector verifies to its published result (TRUE and FALSE alike)
 #   D. malformed inputs raise rather than returning a verdict
 #   I. control arm: a deliberately broken verifier is CAUGHT by the must-fail vectors
+# SIDE_EFFECTS — Geist's law as amended 2026-09-05T13:05Z: a box-runnable battery declares
+# every effect that leaves the machine or outlives the run. Read as DATA by
+# tests/vm-matrix-contract.py, not as a comment.
+SIDE_EFFECTS = []
+
 import csv, os, py_compile, sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))

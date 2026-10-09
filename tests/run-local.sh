@@ -47,7 +47,12 @@
 #                                 keypairs, NIP-19 npub, 0600/0700 preflight, boot self-test,
 #                                 name-namespace confinement; perms/markers/traversal/collision
 #                                 control-armed
+#   installer-honesty-battery.sh  install.sh never claims 'sealed' without the unsealed caveat + next step
 #   mem-battery.py                11 checks — bin/mem (memory-as-filesystem) contract
+#   evals-battery.py              9 criteria — evals/run.py model-agnostic eval runner, control-armed
+#   agos-run-battery.py           13 criteria — bin/agos-run app sandbox gate, control-armed (real bwrap arm if usable)
+#   agos-approve-battery.py       8 criteria — bin/agos-approve owner-side approval writer: tty/session/sha-prefix gates
+#   agos-schedule-battery.py      12 criteria — bin/agos-schedule manifest schedule -> systemd user timer, control-armed (fake systemctl)
 #   agent-loop-dispatch-battery.py  8 checks — agent-loop tool-dispatch mechanics vs bin/mcp + broker-stub
 #
 # NOT COVERED HERE — these need a materialized Nix registry and/or store paths:
@@ -145,6 +150,25 @@ need "$T/identity-battery.py" identity && \
 # mem-battery.py locates bin/mem via its own __file__ (../bin/mem) — no args, no env.
 need "$T/mem-battery.py" mem && \
   run mem "$PY" "$T/mem-battery.py"
+# evals-battery.py — contract battery for evals/run.py (locates ../evals itself; fake backend
+# only, no model, no network). Control-armed: wrong tool / wrong arg / credential path score 0.
+need "$T/evals-battery.py" evals && \
+  run evals "$PY" "$T/evals-battery.py"
+
+# agos-run-battery.py — contract battery for bin/agos-run (locates ../bin itself; fake bwrap on
+# PATH for the dry-run arms, real bwrap for arm G when the host allows user namespaces).
+need "$T/agos-run-battery.py" agos-run && \
+  run agos-run "$PY" "$T/agos-run-battery.py"
+
+# agos-approve-battery.py — contract battery for bin/agos-approve (drives `approve` over a pty so
+# the tty gate is exercised for real; imports bin/agos-run's validator by path).
+need "$T/agos-approve-battery.py" agos-approve && \
+  run agos-approve "$PY" "$T/agos-approve-battery.py"
+
+# agos-schedule-battery.py — contract battery for bin/agos-schedule (a fake systemctl on PATH
+# records the activation calls; the unapproved / unscheduled / foreign-unit controls must refuse).
+need "$T/agos-schedule-battery.py" agos-schedule && \
+  run agos-schedule "$PY" "$T/agos-schedule-battery.py"
 
 # ── shell batteries: wire their positional contracts ─────────────────────────
 # agent-loop-battery.sh <agent-loop> <ollama-stub> <mcp> <broker-stub> <workdir>
@@ -213,6 +237,11 @@ fi
 # and this one's whole job is to be noticed BEFORE a stale pin ships.
 if need "$ROOT/tests/pin-freshness.sh" pin-freshness; then
   run pin-freshness sh -c 'cd "$1" && bash tests/pin-freshness.sh' _ "$ROOT"
+fi
+
+# install.sh must not call the (unsealed) machine it installs "sealed", and must print the seal step.
+if need "$ROOT/tests/installer-honesty-battery.sh" installer-honesty; then
+  run installer-honesty bash "$ROOT/tests/installer-honesty-battery.sh" "$ROOT/install.sh"
 fi
 
 if need "$ROOT/bin/fetch-verified.sh" supply-chain; then

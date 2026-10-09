@@ -467,8 +467,35 @@ in {
     ethtool                                # NIC/WoL introspection — see note below
     # Claude Code CLI (Dillon msg 9280: "talk claude through this box"). Unfree —
     # whitelisted in gaming-open.nix's allowUnfreePredicate (single shared predicate;
-    # a second definition elsewhere would conflict). Auth is per-user OAuth (`claude`
-    # → browser login with the Max account) — no secrets baked into the image.
+    # a second definition elsewhere would conflict). No secrets are baked into the
+    # image, so the CLI arrives UNAUTHENTICATED and someone has to log it in.
+    #
+    # WHERE A BROWSER LOGIN CAN HAPPEN ON THIS VARIANT. This config imports
+    # modules/desktop-open.nix (line ~78 above), which enables programs.hyprland and
+    # installs firefox, kitty and xdg-utils. Its loginShellInit does `exec Hyprland` on
+    # tty1 when WAYLAND_DISPLAY is unset, and getty autologins `agent` there, so a
+    # Wayland session (compositor, no display manager) is what tty1 is meant to be.
+    # A browser-based login therefore has a display to open on, from a terminal INSIDE
+    # that session. It has none from SSH: an SSH pty is not tty1, so no session is
+    # started for it and WAYLAND_DISPLAY is empty there.
+    #
+    # What stays true: there is NO display manager (autologin + exec, by design) and
+    # the X server is disabled below (Hyprland is Wayland and does not need it). An
+    # earlier version of this comment said no compositor exists at all, citing a
+    # measurement on the deployed Dell on 2026-09-07 (getty@tty1 the only session,
+    # DISPLAY and WAYLAND_DISPLAY empty, zero display-manager unit files). Only the
+    # last of those follows from this config; the other two are what an SSH probe
+    # sees, or what a generation without the desktop import would show. The
+    # measurement is not reproduced here and its conditions were not recorded.
+    #
+    # NOT VERIFIED: that the OAuth browser flow completes from the Hyprland session.
+    # Nobody has been seen to do it, so this says where it could work, not that it does.
+    #
+    # What the working flow IS remains unconfirmed and is deliberately not asserted
+    # here. `claude setup-token` exists on the deployed CLI and is the candidate,
+    # but probed headless it printed nothing and exited 0, so it wants a real TTY
+    # and an attended sitting. When that is actually run and seen to work, name it
+    # here — and not before.
     claude-code
   ];
 
@@ -484,6 +511,6 @@ in {
   # The box rebuilds itself from nixpkgs (and here the operator has full sudo to do so).
   nix.settings.experimental-features = [ "nix-command" "flakes" ];
 
-  services.xserver.enable = false;   # talk-to-it / SSH-in box, no desktop
+  services.xserver.enable = false;   # no X server and no display manager; the Wayland desktop comes from desktop-open.nix
   system.stateVersion = "24.11";
 }

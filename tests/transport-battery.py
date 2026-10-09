@@ -40,6 +40,11 @@
 #      floor); nothing prevented the next transport from doing the same. This pins the CLASS,
 #      not the instance: a new transport that configures itself from a global fails here at
 #      registration time rather than on the first escalate-role turn.
+# SIDE_EFFECTS — Geist's law as amended 2026-09-05T13:05Z: a box-runnable battery declares
+# every effect that leaves the machine or outlives the run. Read as DATA by
+# tests/vm-matrix-contract.py, not as a comment.
+SIDE_EFFECTS = []
+
 import importlib.util, inspect, io, os, py_compile, sys, tempfile
 
 MOD = "modules/agent-brain.py"

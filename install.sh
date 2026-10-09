@@ -12,11 +12,13 @@
 #            (the var is in CURL's env; sudo -E has nothing to preserve → script sees it UNSET)
 #       ❌  curl -sL .../install.sh | sudo VARIANT=agentos-open bash
 #            (sudo's default env_reset strips it → script sees it UNSET)
-#    A lost VARIANT silently defaults to the SEALED box, so the YES-gate below prints the
-#    RESOLVED variant and makes you type it — a fall-through can't install the wrong OS unseen.
+#    A lost VARIANT silently defaults to the sovereign box (unsealed until you seal it), so the
+#    YES-gate below prints the RESOLVED variant and makes you type it — a fall-through can't install the wrong OS unseen.
 #
 # VARIANTS:
-#   (default)              — the sovereign box (sealed after model pull). Just `| bash`.
+#   (default)              — the sovereign box. Installs the flake's `agentos`, which starts UNSEALED
+#     (egress open so the first-boot model pull works); you seal it afterwards — see the final
+#     summary. This script does NOT seal it. Just `| bash`.
 #   VARIANT=agentos-open   — the OPEN / MESHED dev box (Dillon msg 8926): OpenSSH + Tailscale +
 #     full-power user + real shell, no egress wall, no auto-pull. Pass a Tailscale PRE-AUTH key so
 #     the Dell auto-joins the mesh on first boot (written to the TARGET only, mode 0600 — never in
@@ -51,7 +53,7 @@ esac
 # this line back into the moving ref it replaced while still looking pinned.
 #
 # Override for testing an unmerged branch:  ... | FLAKE_REV=my-branch bash
-FLAKE_REV="${FLAKE_REV:-6d54109023911b23a8d009b57997b6537c773613}"
+FLAKE_REV="${FLAKE_REV:-66aeaeb169c0d421cc6909a15035ef852830558a}"
 FLAKE="github:dillondevoe/agent-os/${FLAKE_REV}#${VARIANT}"
 DISK="${DISK:-/dev/nvme0n1}"   # override:  curl ... | DISK=/dev/sdX bash   (prefix on the piped bash)
 TS_AUTHKEY="${TS_AUTHKEY:-}"   # OPEN variant only — Tailscale pre-auth key (runtime secret, never committed)
@@ -69,7 +71,8 @@ echo "--------------------------------------------------------------"
 echo "This will ERASE $DISK completely and install Agent OS (variant: $VARIANT) on it."
 echo "The USB you booted from is separate and will NOT be touched."
 if [ "$VARIANT" = agentos ]; then
-  echo "  → variant 'agentos' = the SEALED sovereign box. If you meant the OPEN/MESHED dev box"
+  echo "  → variant 'agentos' = the sovereign box. It installs UNSEALED (outbound DNS + 80/443 open so"
+  echo "    the model can be pulled) and stays that way until you seal it after the first boot. If you meant the OPEN/MESHED dev box"
   echo "    and this fell through to the default, ABORT and re-run with the var on the PIPED bash:"
   echo "        curl -sL .../install.sh | VARIANT=agentos-open bash   (NOT before curl, NOT after sudo)"
 fi
@@ -128,7 +131,7 @@ fi
 #   users.users.root.hashedPasswordFile = "/etc/agent-os/break-glass.hash";
 # so if that file is ABSENT at activation, root has no valid password and the ONLY admin path — the
 # tty3 break-glass console — is fail-safe CLOSED: a fresh base install would then be recoverable
-# ONLY from installer media. So for the sealed sovereign box we REQUIRE an operator-set break-glass
+# ONLY from installer media. So for the sovereign box we REQUIRE an operator-set break-glass
 # password here: hash it sha-512 (crypt) and write it 0600 root:root to the target BEFORE
 # nixos-install (activation reads the file at install time). The plaintext never touches disk or the
 # repo — only the one-way crypt hash is written, and only into the installed system.
@@ -146,7 +149,7 @@ if [ "$VARIANT" = agentos ]; then
   esac
   if [ -z "$BG_HASH" ]; then
     echo ">>> Break-glass: set the ROOT rescue password for the tty3 console."
-    echo "    On the SEALED box this is the ONLY admin path — no agent sudo, no SSH. Don't lose it."
+    echo "    On the sovereign box this is the ONLY admin path — no agent sudo, no SSH. Don't lose it."
     echo "    Provisioned to the TARGET only (sha-512 crypt, 0600 root:root); never stored in the repo."
     # mkpasswd may be absent from the minimal-installer PATH — pull it via nix-shell (same belt as the
     # mkfs/efibootmgr blocks) and resolve its store path once; the path stays valid after the shell exits.
@@ -271,6 +274,14 @@ if [ "$VARIANT" = agentos-open ]; then
 else
   echo " First boot: it gets online (wifi: it offers a picker; ethernet: auto), installs"
   echo " its local brain, then you're talking to it at a  you ›  prompt."
+  echo ""
+  echo " ⚠️  THIS MACHINE IS UNSEALED. The install is the flake's 'agentos' target, whose egress"
+  echo "     wall still allows outbound DNS + 80/443 so the model can be pulled. Nothing seals it"
+  echo "     automatically. Until you do, the 'nothing leaves the box' guarantee does NOT hold."
+  echo "     NEXT STEP, once the model has finished pulling (as root, via the tty3 break-glass login):"
+  echo "         nixos-rebuild switch --flake github:dillondevoe/agent-os/${FLAKE_REV}#agentos-sealed"
+  echo "     That is the same machine with agentos.cleanRoom.sealed = true (egress: nixpkgs cache +"
+  echo "     time sync only)."
 fi
 echo ""
 echo " ⚠️  If boot hangs on 'waiting for /dev/disk/by-label/nixos': your"

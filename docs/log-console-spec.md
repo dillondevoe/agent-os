@@ -82,8 +82,10 @@ This is the band that exists because of the prewarm finding:
 
 ```
 WAITING   agos-boot-prewarm.service — warming the model KV cache
-          elapsed 6m12s · timeout: NONE (TimeoutStartUSec=infinity)
-          multi-user.target and graphical.target are queued behind this.
+          elapsed 6m12s · timeout: 30m (TimeoutStartSec=1800)
+          is-system-running reads `starting` while this job is pending. (This line previously
+  asserted the targets were "queued behind this" — the unit declares no `Before=`, so that
+  ordering is UNVERIFIED; `systemctl list-jobs` during a boot is the discriminator.)
           Normal range on this machine: ~11 min. Longer than ~25 min is not normal.
 ```
 
@@ -120,6 +122,8 @@ harness — not as a runbook a human performs.
 3. **An untimed wait is marked.** For any entry with `band: "waiting"` whose unit has
    `TimeoutStartUSec=infinity`, the record has `timeout: null` and the rendered line contains
    `timeout: NONE`.
+   *Note:* `agos-boot-prewarm` is no longer such a unit — it carries `TimeoutStartSec=1800` as of
+   PR #290 — so this criterion needs a different (or synthetic) untimed unit to exercise it.
 4. **Known noise is explained, not dropped.** Every journal line at `PRIORITY<=3` this boot appears
    in the JSON exactly once, in some band. *Negative arm* (the anti-filter): a line whose signature
    is absent from the table appears with `band: "known", explained: false` — asserted by injecting
@@ -137,9 +141,10 @@ everything it did not recognise would pass every other check.
 - **`loglevel=2`.** Measured as ineffective for the stated symptom and a strict loss of `KERN_CRIT`
   diagnosability (§1). Filed back to Rabbot/Dillon rather than shipped; if it is wanted for another
   reason, that is a separate decision on stated grounds.
-- **A finite `TimeoutStartSec` on `agos-boot-prewarm.service`.** A real proposal (25–30 min against
-  an ~11 min normal), but it changes boot behaviour and is out of scope here. This spec makes the
-  untimed wait *visible*; it does not change it.
+- ~~**A finite `TimeoutStartSec` on `agos-boot-prewarm.service`.**~~ **SHIPPED** in PR #290 as
+  `TimeoutStartSec = 1800`, enforced by the `prewarm-start-timeout-is-finite` flake check. It was
+  correctly out of scope for this spec, which makes the untimed wait *visible* without changing it;
+  it is recorded here so this section is not read as still-current scope.
 - Any change to the tty1 splash.
 
 ## 7. The open measurement

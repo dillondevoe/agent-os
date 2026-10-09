@@ -128,10 +128,27 @@
       # (install.sh VARIANT=agentos-open bakes the mesh authorized_keys + TS_AUTHKEY).
       nixosConfigurations.agentos-open = mkOpenSystem [ ];
 
+      # Live installer image (M1a). Self-contained like the open variant; carries no model,
+      # secret or key. `nix build .#iso` -> result/iso/*.iso. See docs/installer-iso.md.
+      nixosConfigurations.installer = nixpkgs.lib.nixosSystem {
+        inherit system;
+        modules = [ ./modules/installer-iso.nix ];
+      };
+
       # Prove boot-and-talk in a VM BEFORE it ever touches the Dell:
       #   nix build .#vm && ./result/bin/run-*-vm       (unsealed: can pull a model)
       #   nix build .#vm-sealed                          (sealed: nixpkgs-only egress)
       packages.${system} = {
+        # Bootable live installer ISO: nix build .#iso --option sandbox true
+        iso = self.nixosConfigurations.installer.config.system.build.isoImage;
+
+        # Headless boot test of the installer's console: banner + `agentos-install` on PATH.
+        # Out of `checks` (boots a VM); ENFORCED by .github/workflows/vm-tests.yml.
+        test-installer-iso = import ./tests/installer-iso.nix {
+          pkgs = nixpkgs.legacyPackages.${system};
+          installerModule = ./modules/installer-iso.nix;
+        };
+
         vm        = self.nixosConfigurations.agentos.config.system.build.vm;
         vm-sealed = self.nixosConfigurations.agentos-sealed.config.system.build.vm;
         # Boot-sanity the open variant in a VM before it touches the Dell:
@@ -534,6 +551,81 @@
             touch $out
           '';
 
+        # ARM G — THE HAND IS BAKED IN THE BUILT ARTIFACT, not merely in the nix source.
+        #
+        # #282 replaces `@SH@` in agent-brain.py with the store path of bash at build time, via
+        # a `--replace-fail` pair in genesis-open.nix. The battery's arm F asserts that pair is
+        # PRESENT in the nix source — and geist showed F is not a detector. Comment the line out
+        # rather than deleting it:
+        #
+        #     --replace-fail '@THINK_DEFAULT@' '${thinkDefault}' \
+        #     # --replace-fail '@SH@'            '${pkgs.bash}/bin/bash'
+        #
+        # the `\` continuation carries into a word beginning with `#`, the shell ends the command
+        # there, substituteInPlace runs with every pair BUT @SH@, and the build SUCCEEDS. The
+        # built brain then carries SH_BUILD = "@SH@", falls back to resolving `sh` by name — the
+        # exact defect #282 exists to remove — and F still prints "found the --replace-fail line"
+        # with 0 failures. F is a word test on a file that is not the guarded thing.
+        #
+        # AND NOTHING DOWNSTREAM CAN SEE IT. Main carries #277's runtime fallback, so a brain
+        # built with @SH@ unsubstituted still shells out correctly through the literal path: the
+        # verb battery passes, the readiness receipt passes, the Dell behaves. The substitution
+        # can drop out silently and stay dropped. That is why this is a gate condition and not a
+        # follow-up — G is the only detector that can exist for it.
+        sh-is-baked-into-the-built-brain =
+          let
+            p = nixpkgs.legacyPackages.${system};
+            brain = self.nixosConfigurations.agentos-open.config.system.build.agentBrain;
+          in p.runCommand "sh-is-baked-into-the-built-brain" {
+            nativeBuildInputs = [ p.python3 ];
+          } ''
+            cat > check.py <<'PYEOF'
+            import os, re, sys
+
+            script = os.path.join(sys.argv[1], "agent-brain")
+            src = open(script).read()
+
+            # VACUITY GUARD FIRST. Every assertion below is about the VALUE bound to SH_BUILD, so
+            # a rename or a deletion of that binding would leave this check asserting nothing over
+            # nothing and still printing green — the failure mode this whole arm was written to
+            # answer. Find the binding before judging it.
+            m = re.search(r'^SH_BUILD\s*=\s*"([^"]*)"', src, re.M)
+            if not m:
+                raise SystemExit("no `SH_BUILD = \"...\"` binding in the shipped brain. Either the "
+                                 "name changed or the line is gone; this check has lost its "
+                                 "subject and must not pass by finding nothing to object to.")
+            baked = m.group(1)
+            print("SH_BUILD as shipped: %r" % (baked,))
+
+            # (1) the placeholder is GONE from the artifact. Checked over the whole file, not just
+            # the binding: @SH@ surviving anywhere in the shipped script means substituteInPlace
+            # did not do its job, wherever it landed.
+            if "@SH@" in src:
+                raise SystemExit(
+                    "the placeholder @SH@ is still present in the BUILT brain at %s. The "
+                    "--replace-fail pair did not run -- and note the build SUCCEEDED anyway, "
+                    "which is precisely the silent shape this arm exists to catch." % (script,))
+
+            # (2) the baked value is a real path in the closure. Absence of the placeholder is not
+            # presence of a working hand: a substitution to a typo'd or garbage-collected path
+            # would clear (1) and still leave the brain unable to run a command.
+            if not baked.startswith("/nix/store/"):
+                raise SystemExit("SH_BUILD is %r, which is not a store path. The hand must be "
+                                 "resolved at BUILD time to a pinned interpreter, not left as a "
+                                 "name for the runtime to look up -- that lookup is the defect." % (baked,))
+            if not os.path.exists(baked):
+                raise SystemExit("SH_BUILD is %r, which does not exist. The substitution ran but "
+                                 "produced a path nothing can execute." % (baked,))
+            if not os.access(baked, os.X_OK):
+                raise SystemExit("SH_BUILD is %r, which exists but is not executable." % (baked,))
+            print("baked hand: %s  exists=True executable=True" % (baked,))
+            PYEOF
+            sed -i 's/^            //' check.py
+            python3 check.py ${brain}/bin
+            echo "sh-is-baked-into-the-built-brain: the ARTIFACT carries a pinned interpreter, not a placeholder"
+            touch $out
+          '';
+
         # The Hyprland config the OPEN variant actually ships PARSES, checked by the
         # PINNED COMPOSITOR ITSELF — not by a regex that encodes my belief about the grammar.
         #
@@ -795,6 +887,34 @@
               cd src
               python3 tests/bip340-exposure-selftest.py
               python3 tests/bip340-exposure-contract.py
+              touch $out
+            '';
+
+        # pr-currency-selftest -- 18 arms, 6 of them controls.
+        #
+        # It ran BY HAND ONLY until 2026-09-05, and that is the exact shape the tool it tests was
+        # written about: a battery nothing executes is prose with a shell prompt, and its green is a
+        # claim about the day someone last typed the command. The blocker was real, not neglect --
+        # the gate-strength and paths arms read the surrounding checkout via `git rev-parse HEAD~6`,
+        # so they could not run in a sandbox with no history, AND their inputs changed on every push
+        # here, so a green was never reproducible twice. Both are fixed by a synthetic fixture repo
+        # the arms build themselves; FX2 is what licenses this wiring, asserting the battery gives
+        # the same answer from a cwd that is not a git repo at all.
+        #
+        # `gh` is deliberately NOT an input: every arm that needs it uses a stub on PATH, so a
+        # derivation that could reach GitHub would be testing the network rather than the parser.
+        pr-currency-selftest =
+          nixpkgs.legacyPackages.${system}.runCommand "pr-currency-selftest"
+            {
+              nativeBuildInputs = [
+                nixpkgs.legacyPackages.${system}.git
+                nixpkgs.legacyPackages.${system}.gawk
+              ];
+            } ''
+              cp -r ${./.}/. src && chmod -R u+w src
+              cd src
+              export HOME=$TMPDIR
+              bash tools/pr-currency.sh --selftest
               touch $out
             '';
 
@@ -1631,6 +1751,99 @@
               touch $out
             '';
 
+        # A UNIT THAT CANNOT TIME OUT IS A BOOT THAT CANNOT FAIL LOUDLY. agos-boot-prewarm is
+        # `Type=oneshot RemainAfterExit=yes wantedBy=multi-user.target`, and systemd's default
+        # TimeoutStartSec for a oneshot is INFINITY — so a WEDGED prewarm and a merely SLOW one
+        # are BYTE-IDENTICAL from every vantage: same `activating`, same empty
+        # `systemctl --failed`, forever, with nothing anywhere reporting it.
+        #
+        # This is not theoretical. It was MEASURED on the Dell during the WP-C1 acceptance
+        # (2026-08-29): `systemctl is-system-running` read `starting`, not `running`, in BOTH
+        # independent observations (Rabbot from the mini, Mirror from DVo), while the prewarm was
+        # still running ~11 minutes into the boot (10:45:41 -> 10:56:31 on the prior boot).
+        # Benign as observed — but that acceptance recorded `is-system-running` as NOT a valid
+        # readiness check on this box, which is the diagnosis of a boot that cannot report its
+        # own failure.
+        #
+        # CORRECTION, and it is the reason this comment is longer than the check: an earlier
+        # draft opened "A UNIT THAT GATES multi-user.target", and that mechanism is NOT
+        # SUPPORTED BY THE UNIT. `wantedBy` renders a `Wants=` edge with NO ordering, and this
+        # unit declares no `Before=`; the rendered [Unit] section is only
+        # `After=ollama.service agos-seed-model.service` / `Requires=ollama.service`. The
+        # observed `starting` is fully explained by a pending job in the initial transaction.
+        # Whether multi-user.target/graphical.target actually queue behind it is UNVERIFIED —
+        # the discriminator is `systemctl list-jobs` during a Dell boot window. The claim came
+        # from docs/log-console-spec.md:86, i.e. it was INHERITED FROM PROSE rather than read
+        # off the unit, which is exactly the failure this repo keeps naming. The symptom and
+        # the fix stand on their own; only the mechanism was over-claimed.
+        #
+        # A finite bound converts the silent hang into a FAILED UNIT, which `systemctl --failed`
+        # surfaces — a MANUAL observable: it appears in acceptance prose and in comments, and
+        # nothing in this repo runs it automatically (an earlier draft called it "the check every
+        # deploy already runs"; it is not). 1800s is ~2.7x the measured prefill, but that prefill
+        # is n=1, so the threshold is sized off a SINGLE observation. The unit sets no `Restart=`
+        # and `RemainAfterExit=yes`, so a fired timeout is sticky for that boot: a degraded brain,
+        # not a retry loop. The cost of the bound is a cold KV cache on the boot where it fires
+        # (the script swallows its own failure with `|| true`, and the in-process warmup remains
+        # as belt); the cost of no bound is the indistinguishability above.
+        #
+        # SIX pre-fix arms, and the zero-class ones are what matter. `0`, `"0s"`, `"0min"` and
+        # `infinity` are the SAME VALUE to systemd (all disable the timeout), so a predicate that merely asserts the
+        # attribute EXISTS accepts a unit that is exactly as unbounded as it was before — the
+        # "a control that lives only in a name is not a control" shape, in a config value.
+        prewarm-start-timeout-is-finite =
+          let
+            lib = nixpkgs.lib;
+            cfg = self.nixosConfigurations.agentos-open.config;
+            # ONE predicate, applied to the real config and to every arm — never paraphrased.
+            # Reject the EQUIVALENCE CLASS "systemd will not time this unit out", not two
+            # spellings of it. systemd time-spans accept a unit suffix ("0s", "0min", "0us"),
+            # so a literal comparison against "0" states the class in a comment and checks a
+            # spelling in the code. Normalise instead: a value is finite iff it is not
+            # "infinity", is not negative, and contains at least one NON-ZERO digit.
+            # That admits "1800", "30min", "0.5s" and rejects "0", "0s", "0min", "00", "".
+            finite = sc:
+              (sc ? TimeoutStartSec)
+              && (let
+                    v = toString sc.TimeoutStartSec;
+                    digits = lib.filter (c: builtins.match "[0-9]" c != null)
+                      (lib.stringToCharacters v);
+                  in
+                    v != "infinity"
+                    && ! (lib.hasPrefix "-" v)
+                    && digits != [ ]
+                    && lib.any (c: c != "0") digits);
+            realSc = cfg.systemd.services.agos-boot-prewarm.serviceConfig;
+            armAbsent   = { Type = "oneshot"; RemainAfterExit = true; };
+            armInfinity = { Type = "oneshot"; TimeoutStartSec = "infinity"; };
+            armZero     = { Type = "oneshot"; TimeoutStartSec = 0; };
+            armZeroSec  = { Type = "oneshot"; TimeoutStartSec = "0s"; };
+            armZeroMin  = { Type = "oneshot"; TimeoutStartSec = "0min"; };
+            armEmpty    = { Type = "oneshot"; TimeoutStartSec = ""; };
+          in
+            assert lib.assertMsg (finite realSc)
+              ("prewarm-start-timeout-is-finite: agos-boot-prewarm has no finite TimeoutStartSec "
+               + "(got " + (toString (realSc.TimeoutStartSec or "<unset -> oneshot default = infinity>"))
+               + "). It is wantedBy=multi-user.target, so an unbounded start blocks the target with "
+               + "no failed unit and no observable — a wedged prewarm is indistinguishable from a "
+               + "slow one, forever.");
+            assert lib.assertMsg (! (finite armAbsent))
+              "prewarm-start-timeout-is-finite: PRE-FIX ARM 1 (no TimeoutStartSec — the shape measured on the Dell) was ACCEPTED; the predicate cannot detect what it was written for.";
+            assert lib.assertMsg (! (finite armInfinity))
+              "prewarm-start-timeout-is-finite: PRE-FIX ARM 2 (explicit infinity) was ACCEPTED; the predicate is checking presence, not boundedness.";
+            assert lib.assertMsg (! (finite armZero))
+              "prewarm-start-timeout-is-finite: PRE-FIX ARM 3 (TimeoutStartSec=0) was ACCEPTED. To systemd 0 IS infinity, so this unit is exactly as unbounded as an absent value while LOOKING bounded to a reader.";
+            assert lib.assertMsg (! (finite armZeroSec))
+              "prewarm-start-timeout-is-finite: PRE-FIX ARM 4 (TimeoutStartSec=\"0s\") was ACCEPTED. `0s` is a legal systemd time-span spelling of the SAME disabled timeout as `0`, so a predicate matching the literal \"0\" states an equivalence class and checks a spelling.";
+            assert lib.assertMsg (! (finite armZeroMin))
+              "prewarm-start-timeout-is-finite: PRE-FIX ARM 5 (TimeoutStartSec=\"0min\") was ACCEPTED; same class as ARM 4 with a different unit suffix.";
+            assert lib.assertMsg (! (finite armEmpty))
+              "prewarm-start-timeout-is-finite: PRE-FIX ARM 6 (TimeoutStartSec=\"\") was ACCEPTED; an empty value carries no bound and systemd refuses it at parse time, so the unit would not even load.";
+            nixpkgs.legacyPackages.${system}.runCommand "prewarm-start-timeout-is-finite" { } ''
+              echo "agos-boot-prewarm TimeoutStartSec=${toString realSc.TimeoutStartSec} (finite); absent/infinity/0 arms all rejected"
+              touch $out
+            '';
+
         # The engine MANIFEST, read off the BUILT ARTIFACT — not off the comment that claims it.
         #
         # selfimprove-open.nix's header used to say it installs "every `agos_*` module". That was
@@ -2199,6 +2412,37 @@
               touch $out
             '';
 
+        # The IN-LOOP stderr->journal copy (#285 follow-up, Geist RULED 2026-09-05T18:17Z).
+        #
+        # #285 could only tee the PRE-loop writes: the turn loop runs inside patch_stdout(raw=True),
+        # which swaps sys.stderr for a proxy onto stdout, so the router-leg latency lines never
+        # touch fd 2 and the unit's tee has nothing to copy. That gap was recorded as row A2 of
+        # #285's own firing table. The copy lives at ONE site, the guard, so these arms test the
+        # guard-side object rather than the eleven write call sites.
+        #
+        # A2 is the permitting twin -- without it a copy that installed unconditionally would pass
+        # every other arm while double-writing the pre-loop path into #285's tee. A8 is the pre-fix
+        # arm: the same writes with no copy installed must produce ZERO journal lines, or the gap
+        # this check exists for is unproven and the greens above mean nothing. A9 is the call-site
+        # arm -- a correct tee that nothing enters is exactly the "lives only in prose" failure one
+        # level up, and it also pins the ExitStack ORDER, which decides whether sys.stderr is
+        # handed back to a proxy that is still alive.
+        brain-stderr-journal-contract =
+          let
+            pkgs = nixpkgs.legacyPackages.${system};
+            pyWithYaml = pkgs.python3.withPackages (ps: [ ps.pyyaml ]);
+          in pkgs.runCommand "brain-stderr-journal-contract-check"
+            { nativeBuildInputs = [ pyWithYaml ]; } ''
+              work="$(mktemp -d)"
+              mkdir -p "$work/modules" "$work/tests"
+              cp ${./modules/agent-brain.py} "$work/modules/agent-brain.py"
+              cp ${./modules/providers.py} "$work/modules/providers.py"
+              cp ${./tests/brain-stderr-journal-battery.py} "$work/tests/brain-stderr-journal-battery.py"
+              cd "$work"
+              python3 tests/brain-stderr-journal-battery.py
+              touch $out
+            '';
+
         # The R1 CONTEXT BOUND, checked against the shipped module (tier-0 item 3).
         #
         # Two halves, both of which are easy to ship inert. `num_ctx` is a JSON key: omit it
@@ -2344,6 +2588,25 @@
               touch $out
             '';
 
+        # The brain's HAND, resolved at build time rather than by name. A battery with no
+        # runner is four batteries and no runner — the arms exist here or they are prose.
+        shell-resolve-contract =
+          let
+            pkgs = nixpkgs.legacyPackages.${system};
+            pyWithYaml = pkgs.python3.withPackages (ps: [ ps.pyyaml ]);
+          in pkgs.runCommand "shell-resolve-contract-check"
+            { nativeBuildInputs = [ pyWithYaml ]; } ''
+              work="$(mktemp -d)"
+              mkdir -p "$work/modules" "$work/tests"
+              cp ${./modules/agent-brain.py} "$work/modules/agent-brain.py"
+              cp ${./modules/providers.py} "$work/modules/providers.py"
+              cp ${./modules/genesis-open.nix} "$work/modules/genesis-open.nix"
+              cp ${./tests/shell-resolve-battery.py} "$work/tests/shell-resolve-battery.py"
+              cd "$work"
+              python3 tests/shell-resolve-battery.py
+              touch $out
+            '';
+
         # A tool call that renders as prose is a CLAIM — the model asked to act, nothing
         # acted, and the next turn narrated a result it never produced. Observed live on
         # qwen3.5:9b (Dillon's Dell TUI photo, 2026-08-31): an XML/Hermes `<tool_call>` block
@@ -2384,6 +2647,79 @@
               cp ${./tests/spend-ceiling-battery.py} "$work/tests/spend-ceiling-battery.py"
               cd "$work"
               python3 tests/spend-ceiling-battery.py
+              touch $out
+            '';
+
+        # evals/run.py — the model-agnostic eval runner the weekly model watch and the router
+        # experiment read (vision draft B, 2026-10-05). This check proves the INSTRUMENT, not a
+        # model: the fake backend scores 100% on every task file and the control arms (wrong
+        # tool, mutated argument, credential path, unrequested domain, backend exception) each
+        # score 0. No model, no network. A model run is `evals/run.py --backend ollama`, which is
+        # a measurement and never a gate.
+        # bin/agos-run — the v0 app sandbox runner (docs/design/app-manifest.md). This check
+        # proves the GATE: a valid manifest dry-runs to the expected bwrap/systemd-run argv and
+        # every forbidden change (credential path or an ancestor of one, path outside $HOME, nested
+        # entries, missing source, unapproved or edited-after-
+        # approval manifest, devices, unknown keys, out-of-range limits, no bwrap) is refused
+        # naming its rule. The real-bwrap arm self-skips under nix (no user namespaces here).
+        agos-run-contract =
+          nixpkgs.legacyPackages.${system}.runCommand "agos-run-contract-check"
+            { nativeBuildInputs = [ nixpkgs.legacyPackages.${system}.python3 ]; } ''
+              work="$(mktemp -d)"
+              mkdir -p "$work/bin" "$work/tests"
+              cp ${./bin/agos-run} "$work/bin/agos-run"
+              cp ${./tests/agos-run-battery.py} "$work/tests/agos-run-battery.py"
+              cd "$work"
+              python3 tests/agos-run-battery.py
+              touch $out
+            '';
+
+        # bin/agos-approve — the owner-side writer of approvals.json (app-manifest.md §4). This
+        # check proves the WHO and WHAT gates: a piped stdin, the agent-session marker, and any
+        # answer other than the rendered sha prefix are refused with the file untouched; the right
+        # prefix on a pty writes a 0600 entry that agos-run then honours, and an edit or a revoke
+        # makes the runner refuse again.
+        agos-approve-contract =
+          nixpkgs.legacyPackages.${system}.runCommand "agos-approve-contract-check"
+            { nativeBuildInputs = [ nixpkgs.legacyPackages.${system}.python3 ]; } ''
+              work="$(mktemp -d)"
+              mkdir -p "$work/bin" "$work/tests"
+              cp ${./bin/agos-run} "$work/bin/agos-run"
+              cp ${./bin/agos-approve} "$work/bin/agos-approve"
+              cp ${./tests/agos-approve-battery.py} "$work/tests/agos-approve-battery.py"
+              cd "$work"
+              python3 tests/agos-approve-battery.py
+              touch $out
+            '';
+
+        # bin/agos-schedule — installs an approved manifest's `schedule` as a systemd user timer
+        # whose only ExecStart is agos-run (app-manifest.md §7 item 2). This check proves the
+        # installer is a clock and not a widening: unscheduled and unapproved manifests are
+        # refused with nothing written, the units it writes point at the runner only, and a
+        # changed manifest or a revoked approval is surfaced as STALE by `list`.
+        agos-schedule-contract =
+          nixpkgs.legacyPackages.${system}.runCommand "agos-schedule-contract-check"
+            { nativeBuildInputs = [ nixpkgs.legacyPackages.${system}.python3 ]; } ''
+              work="$(mktemp -d)"
+              mkdir -p "$work/bin" "$work/tests"
+              cp ${./bin/agos-run} "$work/bin/agos-run"
+              cp ${./bin/agos-schedule} "$work/bin/agos-schedule"
+              cp ${./tests/agos-schedule-battery.py} "$work/tests/agos-schedule-battery.py"
+              cd "$work"
+              python3 tests/agos-schedule-battery.py
+              touch $out
+            '';
+
+        evals-contract =
+          nixpkgs.legacyPackages.${system}.runCommand "evals-contract-check"
+            { nativeBuildInputs = [ nixpkgs.legacyPackages.${system}.python3 ]; } ''
+              work="$(mktemp -d)"
+              mkdir -p "$work/evals" "$work/tests"
+              cp -r ${./evals/tasks} "$work/evals/tasks"
+              cp ${./evals/run.py} "$work/evals/run.py"
+              cp ${./tests/evals-battery.py} "$work/tests/evals-battery.py"
+              cd "$work"
+              python3 tests/evals-battery.py
               touch $out
             '';
 
