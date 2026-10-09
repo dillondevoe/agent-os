@@ -25,5 +25,11 @@ pkgs.testers.runNixOSTest {
     out = machine.execute("su nobody -s /bin/sh -c \"$(command -v agentos-install)\" 2>&1")
     print("WRAPPER-AS-NOBODY:", out)
     assert "must run as root" in out[1], out
+    # install.sh runs `nixos-install --flake` (and nix-shell, which resolves <nixpkgs> through the
+    # flake registry). With flakes off the install dies after partitioning, as the first real
+    # install from this ISO did (2026-10-09, NixOS deploy VM on dellon).
+    machine.succeed("grep -Eq '^experimental-features *=.*\\bflakes\\b' /etc/nix/nix.conf")
+    # the disk tools install.sh formats with are on PATH, so it need not fetch them first
+    machine.succeed("command -v mkfs.fat && command -v mkfs.ext4")
   '';
 }

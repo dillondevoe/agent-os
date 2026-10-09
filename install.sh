@@ -95,13 +95,19 @@ parted -s "$DISK" -- mklabel gpt \
 partprobe "$DISK" 2>/dev/null || true
 sleep 2
 
-echo ">>> Formatting (pulling mkfs tools via nix-shell)..."
+echo ">>> Formatting..."
 wipefs -a "${P}1" "${P}2" 2>/dev/null || true   # kill stale per-partition signatures (FAT leftovers)
-nix-shell -p dosfstools e2fsprogs --run "
-  set -e
-  mkfs.fat -F32 -n BOOT ${P}1
-  mkfs.ext4 -F -L nixos  ${P}2
-"
+# The installer ISO ships both mkfs tools; use them. nix-shell stays only as the belt for a
+# bare NixOS live image without them (same pattern as efibm below) — it needs the network and
+# flakes, so it must not be the first thing an install depends on.
+FMT='set -e
+  mkfs.fat -F32 -n BOOT '"${P}1"'
+  mkfs.ext4 -F -L nixos  '"${P}2"
+if command -v mkfs.fat >/dev/null 2>&1 && command -v mkfs.ext4 >/dev/null 2>&1; then
+  bash -c "$FMT"
+else
+  nix-shell -p dosfstools e2fsprogs --run "$FMT"
+fi
 udevadm settle 2>/dev/null || true
 
 echo ">>> Mounting (explicit fs types — auto-detect can trip on stale FAT sigs)..."
