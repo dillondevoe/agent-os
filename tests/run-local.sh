@@ -51,6 +51,7 @@
 #   evals-battery.py              9 criteria — evals/run.py model-agnostic eval runner, control-armed
 #   agos-run-battery.py           13 criteria — bin/agos-run app sandbox gate, control-armed (real bwrap arm if usable)
 #   agos-approve-battery.py       8 criteria — bin/agos-approve owner-side approval writer: tty/session/sha-prefix gates
+#   agos-schedule-battery.py      12 criteria — bin/agos-schedule manifest schedule -> systemd user timer, control-armed (fake systemctl)
 #   agent-loop-dispatch-battery.py  8 checks — agent-loop tool-dispatch mechanics vs bin/mcp + broker-stub
 #
 # NOT COVERED HERE — these need a materialized Nix registry and/or store paths:
@@ -160,6 +161,11 @@ need "$T/agos-run-battery.py" agos-run && \
 # the tty gate is exercised for real; imports bin/agos-run's validator by path).
 need "$T/agos-approve-battery.py" agos-approve && \
   run agos-approve "$PY" "$T/agos-approve-battery.py"
+
+# agos-schedule-battery.py — contract battery for bin/agos-schedule (a fake systemctl on PATH
+# records the activation calls; the unapproved / unscheduled / foreign-unit controls must refuse).
+need "$T/agos-schedule-battery.py" agos-schedule && \
+  run agos-schedule "$PY" "$T/agos-schedule-battery.py"
 
 # ── shell batteries: wire their positional contracts ─────────────────────────
 # agent-loop-battery.sh <agent-loop> <ollama-stub> <mcp> <broker-stub> <workdir>

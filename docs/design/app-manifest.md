@@ -47,7 +47,7 @@ deny list, so one app cannot name another app's directory in `files`.
 | `network` | R7: list of bare domain names; empty means none | **not enforced per-domain in v0: always denied** (section 5) |
 | `devices` | R8: must be empty in v0 | no device access exists yet |
 | `limits` | R9: `cpu_pct` 1-100 (default 50), `mem_mb` 16-8192 (default 512), `wall_s` 1-86400 (default 300) | cgroup limits via `systemd-run --scope` |
-| `schedule` | R10: systemd `OnCalendar` string or empty, checked with `systemd-analyze calendar` | a timer the owner can see and revoke; v0 records it, nothing installs it yet |
+| `schedule` | R10: systemd `OnCalendar` string or empty, checked with `systemd-analyze calendar` | a timer the owner can see and revoke; installed by `agos-schedule` after approval (section 4) |
 
 Credential deny list (R5), mirrored from the agos-do prototype: `~/.ssh`, `~/.gnupg`,
 `~/.aws`, `~/.kube`, `~/.docker`, `~/.password-store`, `~/.claude`, browser profiles,
@@ -95,6 +95,20 @@ what is approved is bound to what was rendered: a different manifest shows a dif
 Validation is the runner's own, imported by path, so nothing the runner would refuse is ever
 offered for approval. The file is written atomically, 0600, in a 0700 directory.
 
+### Schedules (v0, `bin/agos-schedule`)
+
+    agos-schedule install <appdir>    # agos-app-<name>.{service,timer} in ~/.config/systemd/user, enable --now
+    agos-schedule remove  <name>
+    agos-schedule list                # schedule, sha prefix, and ok | STALE (manifest changed / approval revoked)
+
+The timer's service runs `agos-run <appdir>` and nothing else, so a scheduled fire passes the
+same sandbox and the same approval check as a run by hand: the clock cannot widen the app.
+`install` refuses an empty `schedule`, an unapproved manifest (the owner approves the schedule by
+approving the manifest that carries it), and a host without `systemctl`. Because `schedule` is
+inside the hashed manifest, editing it changes the sha and the runner refuses every fire until
+the owner re-approves; `list` shows that timer as STALE. Units carry `X-AgentOS-Sha` so `remove`
+and `list` only ever touch units this tool wrote.
+
 This is not the confirm channel. `bin/confirm` is a pure relayer the broker drives with a nonce
 and never writes state; routing app approval through broker → confirm → Telegram/getty inside
 the sealed image is a later slice (§7).
@@ -128,6 +142,6 @@ per-app proxy; the runner refuses to pretend until that exists.
 ## 7. Next slices
 
 1. App approval through the confirm channel (broker → `bin/confirm` → Telegram/getty) for the sealed image; v0 is the owner-side `bin/agos-approve` on the human's own login.
-2. Timer installation from `schedule` as a user unit, listed and revocable.
+2. ~~Timer installation from `schedule` as a user unit, listed and revocable.~~ Done: `bin/agos-schedule`.
 3. Per-domain network for apps, on top of the egress work.
 4. An "apps" surface: list running apps, what each can touch, one-tap revoke.

@@ -2653,6 +2653,24 @@
               touch $out
             '';
 
+        # bin/agos-schedule — installs an approved manifest's `schedule` as a systemd user timer
+        # whose only ExecStart is agos-run (app-manifest.md §7 item 2). This check proves the
+        # installer is a clock and not a widening: unscheduled and unapproved manifests are
+        # refused with nothing written, the units it writes point at the runner only, and a
+        # changed manifest or a revoked approval is surfaced as STALE by `list`.
+        agos-schedule-contract =
+          nixpkgs.legacyPackages.${system}.runCommand "agos-schedule-contract-check"
+            { nativeBuildInputs = [ nixpkgs.legacyPackages.${system}.python3 ]; } ''
+              work="$(mktemp -d)"
+              mkdir -p "$work/bin" "$work/tests"
+              cp ${./bin/agos-run} "$work/bin/agos-run"
+              cp ${./bin/agos-schedule} "$work/bin/agos-schedule"
+              cp ${./tests/agos-schedule-battery.py} "$work/tests/agos-schedule-battery.py"
+              cd "$work"
+              python3 tests/agos-schedule-battery.py
+              touch $out
+            '';
+
         evals-contract =
           nixpkgs.legacyPackages.${system}.runCommand "evals-contract-check"
             { nativeBuildInputs = [ nixpkgs.legacyPackages.${system}.python3 ]; } ''
