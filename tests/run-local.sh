@@ -55,7 +55,7 @@
 #   agos-approve-battery.py       8 criteria — bin/agos-approve owner-side approval writer: tty/session/sha-prefix gates
 #   agos-build-battery.py         10 criteria — bin/agos-build app builder loop: fake model, B/R-rule retries, never approves/runs
 #   agos-net-battery.py           12 criteria — bin/agos-net + bin/agos-fetch app network hand: exact-domain, GET/HEAD, no redirects, real bwrap arm
-#   agos-store-paths-battery.py   9 criteria — agos tools: approvals store / apps root precedence (image constants > env > $HOME), A3/A5
+#   agos-store-paths-battery.py   11 criteria — agos tools: approvals store / apps root precedence (image constants > env > $HOME), A3/A5
 #   agos-schedule-battery.py      12 criteria — bin/agos-schedule manifest schedule -> systemd user timer, control-armed (fake systemctl)
 #   agent-loop-dispatch-battery.py  8 checks — agent-loop tool-dispatch mechanics vs bin/mcp + broker-stub
 #
