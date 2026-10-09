@@ -2635,6 +2635,24 @@
               touch $out
             '';
 
+        # bin/agos-approve — the owner-side writer of approvals.json (app-manifest.md §4). This
+        # check proves the WHO and WHAT gates: a piped stdin, the agent-session marker, and any
+        # answer other than the rendered sha prefix are refused with the file untouched; the right
+        # prefix on a pty writes a 0600 entry that agos-run then honours, and an edit or a revoke
+        # makes the runner refuse again.
+        agos-approve-contract =
+          nixpkgs.legacyPackages.${system}.runCommand "agos-approve-contract-check"
+            { nativeBuildInputs = [ nixpkgs.legacyPackages.${system}.python3 ]; } ''
+              work="$(mktemp -d)"
+              mkdir -p "$work/bin" "$work/tests"
+              cp ${./bin/agos-run} "$work/bin/agos-run"
+              cp ${./bin/agos-approve} "$work/bin/agos-approve"
+              cp ${./tests/agos-approve-battery.py} "$work/tests/agos-approve-battery.py"
+              cd "$work"
+              python3 tests/agos-approve-battery.py
+              touch $out
+            '';
+
         evals-contract =
           nixpkgs.legacyPackages.${system}.runCommand "evals-contract-check"
             { nativeBuildInputs = [ nixpkgs.legacyPackages.${system}.python3 ]; } ''
