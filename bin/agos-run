@@ -285,18 +285,21 @@ def run_with_net(m, v, use_systemd):
         hand.kill(); shutil.rmtree(d, ignore_errors=True)
         print("agos-run: REFUSED: the network hand did not start", file=sys.stderr); return 7
     argv = build_argv(m, v, use_systemd, sock)
-    app = subprocess.Popen(argv)
-    def relay(signum, frame):
-        try: app.send_signal(signum)
-        except OSError: pass
-    for sg in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
-        signal.signal(sg, relay)
-    rc = app.wait()
-    hand.terminate()
-    try: hand.wait(timeout=5)
-    except subprocess.TimeoutExpired: hand.kill()
-    shutil.rmtree(d, ignore_errors=True)
-    return rc
+    rc = 1
+    try:
+        app = subprocess.Popen(argv)
+        def relay(signum, frame):
+            try: app.send_signal(signum)
+            except OSError: pass
+        for sg in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+            signal.signal(sg, relay)
+        rc = app.wait()
+    finally:
+        hand.terminate()
+        try: hand.wait(timeout=5)
+        except subprocess.TimeoutExpired: hand.kill()
+        shutil.rmtree(d, ignore_errors=True)
+    return rc if rc >= 0 else 128 - rc  # killed by a signal: the shell convention, not a wrapped negative
 
 
 if __name__ == "__main__":

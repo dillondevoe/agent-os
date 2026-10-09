@@ -19,11 +19,13 @@
 #   agos-net serve <socket-path> --app <name> --allow <domain>[,<domain>...] [--parent <pid>]
 #
 # The helper exits when its parent (the runner) is gone, so it never outlives the app.
-import argparse, http.client, http.server, importlib.machinery, importlib.util, os, socket, socketserver, sys, threading, time, urllib.parse
+import argparse, http.client, http.server, importlib.machinery, importlib.util, os, socket, socketserver, ssl, sys, threading, time, urllib.parse
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 MAX_BODY_BYTES = 4 * 1024 * 1024
 TIMEOUT_S = 20
+IDLE_TIMEOUT_S = 10      # a connection that sends nothing is closed (slowloris)
+MAX_CONNS = 8            # beyond this the hand answers 503 at once (bounded threads + body buffers)
 METHODS = ("GET", "HEAD")
 
 
@@ -38,6 +40,18 @@ def load_netfetch():
 NF = load_netfetch()  # EGRESS_DENY / _addr_denied: one deny list, one unwrap, shared with the agent's own hand
 
 
+class PinnedHTTPSConnection(http.client.HTTPSConnection):
+    """Dial the ADDRESS that passed the deny-list check, not the name again: a second lookup at
+    connect time is the DNS-rebinding window cap-net-fetch's header calls unclosable in userspace
+    without a second layer. TLS still verifies the certificate against the name."""
+    def __init__(self, host, ip, timeout):
+        super().__init__(host, 443, timeout=timeout); self._ip = ip; self._ctx = ssl.create_default_context()
+
+    def connect(self):
+        raw = socket.create_connection((self._ip, 443), timeout=self.timeout)
+        self.sock = self._ctx.wrap_socket(raw, server_hostname=self.host)
+
+
 def log(app, line):
     sys.stderr.write("agos-net[%s]: %s\n" % (app, line)); sys.stderr.flush()
 
@@ -46,6 +60,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     server_version = "agos-net/0"
     sys_version = ""
+    timeout = IDLE_TIMEOUT_S  # socket timeout for reading the request (set from --idle-timeout)
 
     def address_string(self):  # unix socket: client_address is not a (host, port) tuple
         return "app"
@@ -68,17 +83,23 @@ class Handler(http.server.BaseHTTPRequestHandler):
     do_PUT = do_DELETE = do_PATCH = do_OPTIONS = do_CONNECT = do_POST
 
     def forward(self):
-        host = (self.headers.get("Host") or "").strip().lower()
+        hosts = self.headers.get_all("Host") or []
+        if len(hosts) != 1:
+            return self.refuse(400, "exactly one Host header required")
+        host = hosts[0].strip().lower()
         if not host:
             return self.refuse(400, "no Host header")
         if host not in self.server.allow:
             return self.refuse(403, "domain %r is not in the approved manifest network list" % host)
         if self.command not in METHODS:
             return self.refuse(405, "only GET and HEAD")
-        path = self.path if self.path.startswith("/") else "/"
+        path = self.path
+        if not path.startswith("/"):  # absolute-URI request line: the Host header still decides the destination
+            u = urllib.parse.urlsplit(path)
+            path = urllib.parse.urlunsplit(("", "", u.path or "/", u.query, "")) if u.scheme in ("http", "https") else "/"
         if "\r" in path or "\n" in path or " " in path:
             return self.refuse(400, "bad request path")
-        if self.headers.get("Content-Length") not in (None, "0"):
+        if self.headers.get("Content-Length") not in (None, "0") or self.headers.get("Transfer-Encoding"):
             return self.refuse(400, "request body not accepted")
         upstream = self.server.upstream  # None in production: https to the Host; a test override otherwise
         if upstream is None:
@@ -88,12 +109,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 return self.refuse(502, "could not resolve host (%s)" % e)
             if not infos or any(NF._addr_denied(i[4][0]) for i in infos):
                 return self.refuse(403, "host resolves to a denied (private/loopback/link-local) address")
-            conn = http.client.HTTPSConnection(host, 443, timeout=TIMEOUT_S)
+            conn = PinnedHTTPSConnection(host, infos[0][4][0], TIMEOUT_S)
         else:
             u = urllib.parse.urlsplit(upstream)
             conn = http.client.HTTPConnection(u.hostname, u.port, timeout=TIMEOUT_S)
-        hdrs = {"Host": host, "User-Agent": "agos-net/0 (%s)" % self.server.app, "Accept": self.headers.get("Accept", "*/*"),
-                "Connection": "close"}
+        hdrs = {"Host": host, "User-Agent": "agos-net/0 (%s)" % self.server.app, "Accept": "*/*", "Connection": "close"}
+        # nothing else from the app's request is forwarded: no cookies, no auth, no folded values
         try:
             conn.request(self.command, path, headers=hdrs)
             resp = conn.getresponse()
@@ -123,6 +144,30 @@ class Handler(http.server.BaseHTTPRequestHandler):
 class Server(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
     daemon_threads = True
     allow_reuse_address = True
+    slots = threading.BoundedSemaphore(MAX_CONNS)
+
+    def process_request(self, request, client_address):
+        if not self.slots.acquire(blocking=False):
+            try:
+                request.sendall(b"HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\nContent-Length: 0\r\n\r\n")
+                request.settimeout(0.3)
+                while request.recv(65536):  # drain what the client sent so the close is a FIN, not a reset
+                    pass
+            except OSError:
+                pass
+            self.shutdown_request(request)
+            log(self.app, "503 REFUSED: more than %d concurrent connections" % MAX_CONNS)
+            return
+        try:
+            super().process_request(request, client_address)
+        except BaseException:
+            self.slots.release(); raise
+
+    def process_request_thread(self, request, client_address):
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self.slots.release()
 
 
 def watch_parent(ppid, server):
@@ -139,6 +184,7 @@ def main(argv):
     s.add_argument("socket"); s.add_argument("--app", required=True); s.add_argument("--allow", required=True)
     s.add_argument("--parent", type=int, default=None)
     s.add_argument("--test-upstream", default=None, help="TESTS ONLY: forward every request to this http://host:port instead of https://<Host>")
+    s.add_argument("--idle-timeout", type=float, default=IDLE_TIMEOUT_S, help="seconds a connection may stay silent before it is closed")
     a = ap.parse_args(argv)
     allow = {d.strip().lower() for d in a.allow.split(",") if d.strip()}
     if not allow:
@@ -155,6 +201,7 @@ def main(argv):
     finally:
         os.umask(old)
     srv.allow = allow; srv.app = a.app; srv.upstream = a.test_upstream
+    Handler.timeout = a.idle_timeout
     ppid = a.parent or os.getppid()
     threading.Thread(target=watch_parent, args=(ppid, srv), daemon=True).start()
     log(a.app, "serving %s for %s" % (a.socket, ", ".join(sorted(allow))))

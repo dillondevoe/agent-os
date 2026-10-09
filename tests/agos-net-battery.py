@@ -25,6 +25,15 @@
 #      The hand is gone after the app exits.
 #   I. Without --test-upstream, a Host that resolves to loopback is refused 403 before any
 #      connection (the cap-net-fetch deny list is in force).
+#   J. CONTROL: adversarial requests cannot change the destination or smuggle a second one:
+#      absolute-URI request line -> only Host decides; two Host headers -> 400; Transfer-Encoding
+#      chunked with a pipelined second request -> 400 and the upstream saw nothing; a cookie /
+#      folded Accept header is NOT forwarded (upstream sees only Host, User-Agent, Accept: */*,
+#      Connection).
+#   K. Resource bounds: more than MAX_CONNS idle connections -> the next one gets 503 at once; a
+#      silent connection is closed after --idle-timeout; the hand still answers afterwards.
+#   L. The upstream connection is pinned to the address that passed the deny list (the class
+#      overrides connect() and dials the ip, TLS verifies the name): asserted structurally.
 #
 # stdlib only. Exit 0 all-pass; AssertionError otherwise.
 SIDE_EFFECTS = []  # scratch dirs under mktemp; local-only sockets and a 127.0.0.1 listener; removed at exit
@@ -35,7 +44,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 BIN = os.path.abspath(os.path.join(HERE, "..", "bin"))
 NET = os.path.join(BIN, "agos-net"); FETCH = os.path.join(BIN, "agos-fetch"); RUN = os.path.join(BIN, "agos-run")
 TMP = tempfile.mkdtemp(prefix="agos-net-battery.")
-SEEN = []
+SEEN = []; HDRS = []
 
 
 def check(c, msg):
@@ -45,7 +54,7 @@ def check(c, msg):
 class Upstream(http.server.BaseHTTPRequestHandler):
     def log_message(self, *a): pass
     def do_GET(self):
-        SEEN.append((self.command, self.headers.get("Host"), self.path))
+        SEEN.append((self.command, self.headers.get("Host"), self.path)); HDRS.append(dict(self.headers))
         if self.path == "/moved":
             self.send_response(302); self.send_header("Location", "https://elsewhere.test/x"); self.send_header("Content-Length", "0"); self.end_headers(); return
         if self.path == "/big":
@@ -65,9 +74,10 @@ threading.Thread(target=up.serve_forever, daemon=True).start()
 UPSTREAM = "http://127.0.0.1:%d" % up.server_address[1]
 
 
-def start_hand(sock, allow, test_upstream=UPSTREAM, app="t"):
+def start_hand(sock, allow, test_upstream=UPSTREAM, app="t", idle=None):
     args = [sys.executable, NET, "serve", sock, "--app", app, "--allow", allow]
     if test_upstream: args += ["--test-upstream", test_upstream]
+    if idle is not None: args += ["--idle-timeout", str(idle)]
     p = subprocess.Popen(args, stderr=subprocess.PIPE, text=True)
     for _ in range(100):
         if os.path.exists(sock): break
@@ -96,6 +106,21 @@ def raw(sock, method, path, host=None, body=None, extra=None):
     for line in head.split(b"\r\n")[1:]:
         k, _, v = line.decode().partition(":"); hdrs[k.strip().lower()] = v.strip()
     return status, hdrs, rest
+
+
+def rawbytes(sock, data, settle=0.0):
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM); s.connect(sock); s.sendall(data)
+    if settle: time.sleep(settle)
+    out = b""
+    s.settimeout(5)
+    try:
+        while True:
+            chunk = s.recv(65536)
+            if not chunk: break
+            out += chunk
+    except (socket.timeout, ConnectionResetError):
+        pass
+    s.close(); return out
 
 
 def fetch(sock, *args):
@@ -192,8 +217,19 @@ try:
         check("fetch-rc=4" in out and "403" in out and "not in the approved manifest" in out, "H: in-sandbox fetch to unlisted domain: rc=%d out=%r err=%r" % (r.returncode, out, r.stderr[-400:]))
         check("direct-fail" in out and "sock-present" in out, "H: sandbox net shape: %r" % out)
         check("agos-net[netapp]" in r.stderr and "evil.test/ -> 403" in r.stderr, "H: hand log on host: %r" % r.stderr[-400:])
-        left = [p for p in os.listdir(os.environ.get("XDG_RUNTIME_DIR", tempfile.gettempdir())) if p.startswith("agos-net.")] if os.path.isdir(os.environ.get("XDG_RUNTIME_DIR", "")) else []
+        roots = [r for r in (os.environ.get("XDG_RUNTIME_DIR"), tempfile.gettempdir()) if r and os.path.isdir(r)]
+        left = [os.path.join(r, p) for r in roots for p in os.listdir(r) if p.startswith("agos-net.")]
         check(not left, "H: socket dirs left behind: %r" % left)
+        alive = []
+        for pid in os.listdir("/proc"):
+            if not pid.isdigit(): continue
+            try:
+                argv = open("/proc/%s/cmdline" % pid, "rb").read().split(b"\0")
+            except OSError:
+                continue
+            if len(argv) > 4 and argv[1].endswith(b"/agos-net") and argv[2] == b"serve" and b"netapp" in argv:
+                alive.append(pid)
+        check(not alive, "H: the hand outlived the app: pids %s" % alive)
         print("H. REAL RUN: hand reachable inside the sandbox, direct network is not, hand cleaned up")
     else:
         print("H. real run SKIPPED (bwrap cannot create user namespaces here)")
@@ -206,6 +242,53 @@ try:
     hand2.terminate(); hand2.wait(timeout=5)
     print("I. a listed domain resolving to loopback is refused before connecting")
 
-    print("agos-net-battery: PASS (9 criteria)")
+    # J: adversarial requests
+    sock3 = os.path.join(TMP, "c.sock"); hand3 = start_hand(sock3, "allowed.test", idle=1)
+    SEEN.clear(); HDRS.clear()
+    out = rawbytes(sock3, b"GET http://evil.test/abs HTTP/1.1\r\nHost: allowed.test\r\nConnection: close\r\n\r\n")
+    check(out.startswith(b"HTTP/1.1 200") and SEEN == [("GET", "allowed.test", "/abs")], "J: absolute-URI %r %r" % (out[:40], SEEN))
+    SEEN.clear()
+    out = rawbytes(sock3, b"GET / HTTP/1.1\r\nHost: allowed.test\r\nHost: evil.test\r\nConnection: close\r\n\r\n")
+    check(out.startswith(b"HTTP/1.1 400") and SEEN == [], "J: duplicate Host %r %r" % (out[:40], SEEN))
+    out = rawbytes(sock3, b"GET / HTTP/1.1\r\nHost: allowed.test\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\nGET /smuggled HTTP/1.1\r\nHost: allowed.test\r\n\r\n", settle=0.5)
+    check(out.startswith(b"HTTP/1.1 400") and out.count(b"HTTP/1.1 ") == 1 and SEEN == [], "J: chunked+pipelined %r %r" % (out[:60], SEEN))
+    SEEN.clear(); HDRS.clear()
+    out = rawbytes(sock3, b"GET /h HTTP/1.1\r\nHost: allowed.test\r\nCookie: secret=1\r\nAccept: text/html\r\n evil\r\nAuthorization: Bearer x\r\nConnection: close\r\n\r\n")
+    check(out.startswith(b"HTTP/1.1 200") and len(HDRS) == 1, "J: forwarded request %r %r" % (out[:40], HDRS))
+    fwd = {k.lower(): v for k, v in HDRS[0].items()}
+    check(set(fwd) == {"host", "user-agent", "accept", "accept-encoding", "connection"} and fwd["accept"] == "*/*", "J: forwarded headers %r" % fwd)
+    print("J. absolute-URI, duplicate Host, chunked smuggling, cookies/auth/folded headers all neutralised")
+
+    # K: bounds
+    idle = []
+    for _ in range(8):
+        c = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM); c.connect(sock3); idle.append(c)
+    time.sleep(0.3)
+    out = rawbytes(sock3, b"GET / HTTP/1.1\r\nHost: allowed.test\r\nConnection: close\r\n\r\n")
+    check(out.startswith(b"HTTP/1.1 503"), "K: 9th connection should be 503 at once: %r" % out[:40])
+    time.sleep(1.5)  # idle timeout 1s: the silent eight are closed by the hand
+    closed = 0
+    for c in idle:
+        c.settimeout(1)
+        try:
+            if c.recv(10) == b"": closed += 1
+        except (socket.timeout, OSError):
+            pass
+        c.close()
+    check(closed == 8, "K: silent connections not closed after idle timeout: %d/8" % closed)
+    out = rawbytes(sock3, b"GET / HTTP/1.1\r\nHost: allowed.test\r\nConnection: close\r\n\r\n")
+    check(out.startswith(b"HTTP/1.1 200"), "K: hand did not recover: %r" % out[:40])
+    hand3.terminate(); hand3.wait(timeout=5)
+    log3 = hand3.stderr.read(); check("503 REFUSED: more than 8" in log3, "K: cap not logged: %r" % log3[-200:])
+    print("K. connection cap 503s the 9th, idle connections are closed, hand recovers")
+
+    # L: pinned connect (structural)
+    src = open(NET).read()
+    check("class PinnedHTTPSConnection(http.client.HTTPSConnection)" in src and "socket.create_connection((self._ip, 443)" in src
+          and "wrap_socket(raw, server_hostname=self.host)" in src and "PinnedHTTPSConnection(host, infos[0][4][0]" in src
+          and "http.client.HTTPSConnection(host, 443" not in src, "L: upstream connect is not pinned to the vetted address")
+    print("L. upstream dial is pinned to the checked address; TLS verifies the name")
+
+    print("agos-net-battery: PASS (12 criteria)")
 finally:
     up.shutdown(); shutil.rmtree(TMP, ignore_errors=True)
