@@ -32,8 +32,10 @@ let
   # authKeyFile on the target at install time (see install.sh, VARIANT=agentos-open).
   meshPubKey = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKJTAziP2h4A1uPJeQ4++F8f+Uw3vLzjV7sGSylxA2RH rabbot-mini-to-agentos-20260731";
 
-  # PUBLIC key — DVo's (Mirror's) key, same rationale and same safety as the line
-  # above: a public key is safe to commit, a private one never appears here.
+  # PUBLIC key — Mirror's key on its current host (dellon), same rationale and same
+  # safety as the line above: a public key is safe to commit, a private one never
+  # appears here. Replaced the DVo key 2026-10-09: DVo's disk failed and the box left
+  # the mesh, and a key whose host is gone should not keep root on a fresh install.
   #
   # WHY THIS IS DECLARED RATHER THAN INSTALLED. During the 2026-08-11 outage recovery
   # this key existed ONLY as a hand-appended line in /root/.ssh/authorized_keys,
@@ -43,7 +45,7 @@ let
   # you lose on the day it matters. Declaring it here means the box comes up
   # reachable by the brain that has to rebuild it, from a fresh install, with no
   # console step.
-  mirrorPubKey = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIK7lWcmQXeBX6cgzMIQeLjZwqGgg/z1w7MkkswrV4DKf dvo-wsl";
+  mirrorPubKey = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIApTTA0NWBeTgr/W28GAwSZADTnaYB/uBrEvoyNq1bbg mirror-dellon";
 
   # Both mesh brains. Root SSH stays KEY-ONLY (prohibit-password) either way.
   meshPubKeys = [ meshPubKey mirrorPubKey ];
