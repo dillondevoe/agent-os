@@ -53,7 +53,9 @@ def read_db(h):
         return {}
     except (OSError, ValueError) as e:
         raise R.ManifestError("approvals file unreadable or corrupt (%s); fix or remove it by hand" % e)
-    return db if isinstance(db, dict) else {}
+    if not isinstance(db, dict):
+        raise R.ManifestError("approvals file is not a JSON object; fix or remove it by hand")
+    return db
 
 
 def write_db(h, db):
