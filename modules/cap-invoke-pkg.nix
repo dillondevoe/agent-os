@@ -130,7 +130,7 @@ let
       export AGENT_OS_CAP_SANDBOX=${sandboxPolicy}
       export AGENT_OS_SYSTEMD_RUN=${pkgs.systemd}/bin/systemd-run
     ''}
-    exec ${pkgs.python3}/bin/python3 ${../bin/cap-invoke} "$@"
+    exec ${pkgs.python3}/bin/python3 -I ${../bin/cap-invoke} "$@"
   '';
 
   cpLines = lib.concatMapStrings (name:

@@ -20,7 +20,7 @@ let
     export AGENT_OS_MCP_MAX_STRING=65536
     export AGENT_OS_MCP_MAX_DEPTH=16
     export AGENT_OS_MCP_MAX_ITEMS=4096
-    exec ${pkgs.python3}/bin/python3 ${../bin/mcp} "$@"
+    exec ${pkgs.python3}/bin/python3 -I ${../bin/mcp} "$@"
   '';
 in
 {

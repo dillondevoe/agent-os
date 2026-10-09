@@ -55,7 +55,14 @@ let
   relaySecretFile = "/etc/agent-os/credentials/confirm-relay-secret";
   dillonUserId    = "";                     # operator-set; empty => telegram fail-closed-unreachable
 
+  # The getty backend's TEST hooks (AGENT_OS_CONFIRM_GETTY_IN/_OUT redirect the console to files)
+  # must never reach production: the broker runs this seam with its caller's environment, so a
+  # caller who set them could point "the second console" at files it owns, read the code off the
+  # frame and approve its own request. Unset, not pinned — tests/confirm-battery.sh drives
+  # bin/confirm directly and keeps them. `python3 -I` likewise drops PYTHONPATH/PYTHONHOME and the
+  # user site, so a caller cannot shadow a stdlib module (hmac, json, select) inside the seam.
   wrapper = pkgs.writeShellScriptBin "confirm" ''
+    unset AGENT_OS_CONFIRM_GETTY_IN AGENT_OS_CONFIRM_GETTY_OUT
     export AGENT_OS_CONFIRM_DIR=${confirmDir}
     export AGENT_OS_CONFIRM_CHANNELS=${channels}
     export AGENT_OS_CONFIRM_HUMAN_WINDOW_S=${toString humanWindow}
@@ -64,7 +71,7 @@ let
     export AGENT_OS_CONFIRM_RELAY_SECRET_FILE=${relaySecretFile}
     export AGENT_OS_CONFIRM_DILLON_USER_ID=${dillonUserId}
     export AGENT_OS_CONFIRM_GETTY_TTY=/dev/${gettyTty}
-    exec ${pkgs.python3}/bin/python3 ${../bin/confirm} "$@"
+    exec ${pkgs.python3}/bin/python3 -I ${../bin/confirm} "$@"
   '';
 
   # The egress allowance the confirm.nix sandbox asserts is EXACTLY one pinned endpoint.
