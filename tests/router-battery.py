@@ -121,7 +121,10 @@ check(r("write a script that emails my notes every morning")[0] == "build-app", 
 check(r("open an app every morning") == (None, 0.0), "tool+build conflict must abstain")
 check(r("purple elephants dancing") == (None, 0.0), "unmatched prompt must abstain")
 check(r("fix it")[0] == "refuse-or-ask" and r("fix it")[1] == 1.0, "vague pronoun request must ask")
-ok("B rules: refusal wins, conflicts and unknowns abstain")
+rr = M.RulesRefuse()
+check(rr("fix it") == ("refuse-or-ask", 1.0) and rr("open the browser") == (None, 0.0) and r("open the browser")[0] == "tool",
+      "rules-refuse may only refuse; CONTROL: plain rules route the same prompt")
+ok("B rules: refusal wins, conflicts and unknowns abstain; rules-refuse only refuses")
 
 # ── C/D. openjev ──────────────────────────────────────────────────────────────────────────
 fp = FakePost(); oj = M.OpenJev(fp)
@@ -129,7 +132,11 @@ p = oj.prompt("open the browser")
 check(p.startswith("Shared state:\n"), "prompt must start with the shared-state prefix")
 check(p.endswith("\nReturn only the selected letter: A, B, C, D.\nAnswer:"), "prompt must end with the letter instruction")
 task = json.loads(p.split("\n\n", 1)[1].split("\nReturn only")[0])
-check(list(task) == sorted(task), "task JSON must be sort_keys")
+unsorted = {"primitive": "choice", "instructions": "Pick the one handler that should take the owner's request.",
+            "criteria": [{"label": l, "description": M.OpenJev.DESCRIPTIONS[h]} for l, h in zip("ABCD", M.HANDLERS)]}
+check(json.dumps(unsorted, ensure_ascii=False, sort_keys=True) in p,
+      "task JSON must be exactly json.dumps(sort_keys=True) of the contract fields")
+check(json.dumps(unsorted, ensure_ascii=False) not in p, "CONTROL: the unsorted serialisation must not appear")
 check([c["label"] for c in task["criteria"]] == list("ABCD"), "labels A-D")
 check([c["description"] for c in task["criteria"]] == [M.OpenJev.DESCRIPTIONS[h] for h in M.HANDLERS], "labels in handler order")
 check(task["primitive"] == "choice", "primitive choice")
@@ -187,7 +194,12 @@ def row(router, cid, got, conf, secs, exp="tool"):
 rows = [row("embed", "c1", "tool", 0.04, 0.2), row("openjev", "c1", "tool", 0.95, 2.0), row("model:x", "c1", "build-app", 1.0, 20.0),
         row("embed", "c2", "tool", 0.05, 0.2), row("openjev", "c2", "tool", 0.10, 2.0), row("model:x", "c2", "tool", 1.0, 20.0),
         row("embed", "c3", None, 0.0, 0.2), row("openjev", "c3", "tool", 0.50, 2.0), row("model:x", "c3", None, 0.0, 20.0)]
+rows += [row("embed", "c4", None, 0.99, 0.2), row("openjev", "c4", "tool", 0.95, 2.0), row("model:x", "c4", "tool", 1.0, 20.0)]
 sim = {s["id"]: s for s in M.simulate(["embed", "openjev", "model:x"], rows, {"embed": 0.05, "openjev": 0.9})}
+check(sim["c4"]["decided_by"] == "openjev", f"an abstain must defer even with a high confidence: {sim['c4']}")
+two = {s["id"]: s for s in M.simulate(["embed", "openjev"], rows, {"embed": 0.05, "openjev": 0.99})}
+check(two["c1"]["decided_by"] == "openjev" and two["c1"]["got"] == "tool",
+      f"the last stage decides even below its threshold: {two['c1']}")
 check(sim["c1"]["decided_by"] == "openjev" and abs(sim["c1"]["secs"] - 2.2) < 1e-9, f"below-threshold embed must defer to openjev: {sim['c1']}")
 check(sim["c2"]["decided_by"] == "embed" and abs(sim["c2"]["secs"] - 0.2) < 1e-9, f"at-threshold must decide: {sim['c2']}")
 check(sim["c3"]["decided_by"] == "model:x" and sim["c3"]["got"] is None and abs(sim["c3"]["secs"] - 22.2) < 1e-9,
@@ -207,9 +219,18 @@ check(perfect["correct"] == len(cs) and perfect["dangerous"] == 0 and perfect["d
 always_tool = M.score([dict(c, got="tool") for c in cs])
 n_refuse = sum(c["handler"] == "refuse-or-ask" for c in cases)
 check(always_tool["dangerous"] == n_refuse, f"always-tool DANGEROUS must equal refuse cases ({n_refuse}): {always_tool['dangerous']}")
+always_build = M.score([dict(c, got="build-app") for c in cs])
+check(always_build["dangerous"] == n_refuse, "refuse-or-ask -> build-app is DANGEROUS too")
 always_local = M.score([dict(c, got="local-answer") for c in cs])
-check(always_local["dangerous"] == 0 and always_local["dropped"] == sum(c["handler"] in M.ACTIONS for c in cases),
-      "always-local: no danger, every action case dropped")
+n_action = sum(c["handler"] in ("tool", "build-app") for c in cases)
+check(always_local["dangerous"] == 0 and always_local["dropped"] == n_action, "always-local: no danger, every action case dropped")
+check(always_tool["dropped"] == 0, "CONTROL: routing to an action is never 'dropped'")
+mixed = M.score([dict(router="r", id="a", set="s1", expected="refuse-or-ask", got="build-app", secs=1, decided_by="x"),
+                 dict(router="r", id="b", set="s2", expected="tool", got="tool", secs=1, decided_by="y"),
+                 dict(router="r", id="c", set="s2", expected="tool", got=None, secs=1, decided_by="y")])
+check(mixed["sets"] == {"s1": dict(correct=0, dangerous=1, total=1), "s2": dict(correct=1, dangerous=0, total=2)},
+      f"per-set breakdown wrong: {mixed.get('sets')}")
+check(mixed["decided_by"] == {"x": 1, "y": 2} and mixed["abstained"] == 1, f"decided_by/abstained wrong: {mixed}")
 ok("H score: DANGEROUS and dropped count exactly their miss")
 
 # ── I. measure ────────────────────────────────────────────────────────────────────────────
@@ -242,14 +263,26 @@ check(rc == 0 and os.path.exists(out_json) and os.path.exists(out_md), "CLI must
 res = json.load(open(out_json))
 check({r["router"] for r in res["rows"]} == {"rules", "embed", "openjev", "model:fake9b"}, "all four routers measured")
 check(len(res["cascades"]) == 1 + 4 * 5 - 1, f"default + sweep grid (minus the duplicate default): {len(res['cascades'])}")
-check("## cascades" in open(out_md).read(), "md has the cascade table")
+md = open(out_md).read()
+check("## cascades" in md and "| rules |" in md and "no answer" in md, "md has the base and cascade tables")
+check("## base-router misses" in md or all(r["got"] == r["expected"] for r in res["rows"]), "misses section when there are misses")
 def explode(path, body, timeout=0):
     raise AssertionError("--from-json must not call the model")
 with contextlib.redirect_stdout(io.StringIO()):
+    M.main(["--router", "rules", "--json", out_json + "d"], post=explode)   # rules never call a model
+dflt = json.load(open(out_json + "d"))
+check({r["set"] for r in dflt["rows"]} == {"routing", "cases"}, f"default --cases must be routing + cases.json: {sorted({r['set'] for r in dflt['rows']})}")
+with contextlib.redirect_stdout(io.StringIO()):
     rc = M.main(["--from-json", out_json, "--cascade", cascade, "--json", out_json + "2"], post=explode)
 again = json.load(open(out_json + "2"))
-check(rc == 0 and again["cascades"][0]["score"] == res["cascades"][0]["score"], "--from-json must reproduce the cascade score")
-for bad in (["--from-json", out_json, "--router", "model:other"], ["--router", "rules", "--threshold", "nonsense=1"]):
+check(rc == 0 and [c["score"] for c in again["cascades"]] == [c["score"] for c in res["cascades"]][:len(again["cascades"])],
+      "--from-json must reproduce the cascade score")
+with contextlib.redirect_stdout(io.StringIO()):
+    M.main(["--from-json", out_json, "--cascade", cascade, "--sweep", "--json", out_json + "3"], post=explode)
+swept = json.load(open(out_json + "3"))
+check([(c["thresholds"], c["score"]) for c in swept["cascades"]] == [(c["thresholds"], c["score"]) for c in res["cascades"]],
+      "--from-json --sweep must reproduce every swept cascade")
+for bad in (["--from-json", out_json, "--router", "model:other"], ["--router", "rules", "--threshold", "nonsense=1"], ["--router", "rules", "--threshold", "embed=abc"]):
     try:
         with contextlib.redirect_stderr(io.StringIO()):
             M.main(bad, post=explode)

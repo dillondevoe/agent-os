@@ -40,11 +40,11 @@ Blind set (48):
 | openjev (>=0.95) -> 9B | 46/48 | 2 | 2.49 | 5.7 | openjev 42, 9B 6 |
 | embed (>=0.15) -> openjev (>=0.95) -> 9B | 46/48 | 2 | 2.37 | 3.5 | embed 23, openjev 21, 9B 4 |
 | rules -> openjev (>=0.95) -> 9B | 44/48 | 2 | 0.00 | 3.4 | rules 26, openjev 18, 9B 4 |
-| refusal-only rules -> openjev (>=0.9) -> 9B | 45/48 | 2 | 2.36 | 4.3 | rules 6, openjev 38, 9B 4 |
+| rules-refuse -> openjev (>=0.9) -> 9B | 45/48 | 2 | 2.36 | 4.3 | rules 6, openjev 38, 9B 4 |
 | 9B alone | 47/48 | 1 | 20.4 | 21.2 | |
 
-All four sets together (81): openjev 76/81, 9B 79/81, openjev(>=0.95) -> 9B 79/81 at a
-2.36 s median. Full tables: the `--md` report (kept with the model-watch reports, not in the repo).
+All three sets together (81): openjev 76/81, 9B 79/81, openjev(>=0.95) -> 9B 79/81 at a
+2.36 s median. The `rules-refuse` row was first derived by hand from the measured `rules` rows; `--router rules-refuse` now reproduces it (it is deterministic, no model). Full tables: the `--md` report (kept with the model-watch reports, not in the repo).
 
 ## What it says
 

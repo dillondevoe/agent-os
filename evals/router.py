@@ -10,6 +10,7 @@ simulating keeps a threshold sweep free: no extra model calls.
 Base routers:
     rules            keyword rules; abstains unless exactly one handler's rules match (refusal
                      rules win outright). Confidence 1 when it decides.
+    rules-refuse     the same rules allowed only to say refuse-or-ask; abstains otherwise.
     embed            nearest labelled exemplar (evals/router/exemplars.json) by cosine over an
                      ollama embedding model; confidence = margin between the best and second-best
                      handler's nearest exemplar.
@@ -42,7 +43,7 @@ CASES = os.path.join(HERE, "router", "cases.json")
 EXEMPLARS = os.path.join(HERE, "router", "exemplars.json")
 EMBED_MODEL = os.environ.get("ROUTER_EMBED_MODEL", "qwen3-embedding:0.6b")
 OPENJEV_MODEL = os.environ.get("ROUTER_OPENJEV_MODEL", "openjev")
-DEFAULT_THRESHOLDS = {"rules": 1.0, "embed": 0.05, "openjev": 0.9}
+DEFAULT_THRESHOLDS = {"rules": 1.0, "rules-refuse": 1.0, "embed": 0.05, "openjev": 0.9}
 SWEEP = {"embed": [0.02, 0.05, 0.1, 0.15], "openjev": [0.6, 0.8, 0.9, 0.95, 0.99]}
 WARMUP = "what time is it in Tokyo"
 
@@ -119,6 +120,15 @@ class Rules:
         if len(hit) == 1:
             return hit.pop(), 1.0
         return None, 0.0
+
+
+class RulesRefuse(Rules):
+    """The keyword rules as a refusal-only first stage: they may stop a request, never route one."""
+    name = "rules-refuse"
+
+    def __call__(self, prompt):
+        h, c = Rules.__call__(self, prompt)
+        return (h, c) if h == "refuse-or-ask" else (None, 0.0)
 
 
 def _unit(v):
@@ -215,13 +225,15 @@ class Model:
 def make_router(spec, post, exemplars):
     if spec == "rules":
         return Rules()
+    if spec == "rules-refuse":
+        return RulesRefuse()
     if spec == "embed":
         return Embed(post, exemplars)
     if spec == "openjev":
         return OpenJev(post)
     if spec.startswith("model:") and len(spec) > 6:
         return Model(post, spec[6:])
-    raise ValueError(f"unknown router {spec!r} (rules | embed | openjev | model:<name>)")
+    raise ValueError(f"unknown router {spec!r} (rules | rules-refuse | embed | openjev | model:<name>)")
 
 
 # ── measure, simulate, score ──────────────────────────────────────────────────────────────
@@ -322,14 +334,14 @@ def to_markdown(base, cascades, label):
                  f"| {s['dangerous']} ({dsets}) | {s['dropped']} | {s['median_s']} | {s['p95_s']} |")
     if cascades:
         L += ["", "## cascades (simulated from the measured rows)", "",
-              "| cascade | thresholds | correct | DANGEROUS | dropped | median s | p95 s | decided by |",
-              "|---|---|---|---|---|---|---|---|"]
+              "| cascade | thresholds | correct | DANGEROUS | dropped | no answer | median s | p95 s | decided by |",
+              "|---|---|---|---|---|---|---|---|---|"]
         for c in cascades:
             s = c["score"]
             th = " ".join(f"{k}={v}" for k, v in c["thresholds"].items()) or "-"
             dec = " ".join(f"{k}:{v}" for k, v in s["decided_by"].items())
             sets = " ".join(f"{k}:{v['correct']}/{v['total']}" for k, v in s.get("sets", {}).items())
-            L.append(f"| {c['stages']} | {th} | {s['correct']}/{s['total']} ({sets}) | {s['dangerous']} | {s['dropped']} "
+            L.append(f"| {c['stages']} | {th} | {s['correct']}/{s['total']} ({sets}) | {s['dangerous']} | {s['dropped']} | {s['abstained']} "
                      f"| {s['median_s']} | {s['p95_s']} | {dec} |")
     return "\n".join(L) + "\n"
 
@@ -347,7 +359,7 @@ def misses_markdown(rows):
 
 def main(argv=None, post=ollama_post):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--router", action="append", default=[], help="rules | embed | openjev | model:<name> (repeatable)")
+    ap.add_argument("--router", action="append", default=[], help="rules | rules-refuse | embed | openjev | model:<name> (repeatable)")
     ap.add_argument("--cascade", action="append", default=[], help="comma-separated stages, cheapest first (repeatable)")
     ap.add_argument("--threshold", action="append", default=[], help="stage=value, e.g. openjev=0.95 (repeatable)")
     ap.add_argument("--sweep", action="store_true", help="also simulate every cascade over the threshold grid")
@@ -361,9 +373,12 @@ def main(argv=None, post=ollama_post):
     th = dict(DEFAULT_THRESHOLDS)
     for t in a.threshold:
         k, _, v = t.partition("=")
-        if k not in DEFAULT_THRESHOLDS or not v:
+        try:
+            if k not in DEFAULT_THRESHOLDS:
+                raise ValueError
+            th[k] = float(v)
+        except ValueError:
             ap.error(f"--threshold {t!r}: want one of {sorted(DEFAULT_THRESHOLDS)}=<number>")
-        th[k] = float(v)
     stages_list = [c.split(",") for c in a.cascade]
     wanted = list(dict.fromkeys(a.router + [s for st in stages_list for s in st]))
     if a.from_json:
