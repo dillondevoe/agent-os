@@ -44,7 +44,7 @@ deny list, so one app cannot name another app's directory in `files`.
 | `version` | R2: non-empty string | shown at approval; any change changes the hash |
 | `entry` | R3: argv list, non-empty strings | run from the app directory, `$HOME` and `$PATH` only |
 | `files[]` | R4: absolute or `~/`, resolves (symlinks followed) strictly under `$HOME` (never `$HOME` itself); R5: never a credential location, a credential-looking name, **or an ancestor of one** (`~/.local`, `~/.config` are refused because `~/.config/gh` and the approvals file live below them); R6: `mode` is `r` or `rw`; R13: the path must exist, except a missing `rw` path, which the runner creates as a 0700 directory the app owns; R14: entries must not nest (one under another, or over the app dir), so no bind can shadow another | the only paths visible besides the app dir |
-| `network` | R7: list of bare domain names; empty means none | **not enforced per-domain in v0: always denied** (section 5) |
+| `network` | R7: list of bare domain names; empty means none | reachable only through the network hand (section 5): exact domains, GET/HEAD, https, no redirects |
 | `devices` | R8: must be empty in v0 | no device access exists yet |
 | `limits` | R9: `cpu_pct` 1-100 (default 50), `mem_mb` 16-8192 (default 512), `wall_s` 1-86400 (default 300) | cgroup limits via `systemd-run --scope` |
 | `schedule` | R10: systemd `OnCalendar` string or empty, checked with `systemd-analyze calendar` | a timer the owner can see and revoke; installed by `agos-schedule` after approval (section 4) |
@@ -161,14 +161,25 @@ Never unsandboxed: no bubblewrap means refusal (exit 5). The argv, in order:
 
 `--dry-run` prints the exact argv as JSON and exits 0; the battery asserts on it.
 
-**Network is denied in v0 regardless of the manifest.** A non-empty `network` list is
-validated, kept in the hash, and printed as "not yet enforced per-domain, DENIED in v0".
-Per-domain enforcement needs the per-uid egress design (`docs/design/egress-policy.md`) or a
-per-app proxy; the runner refuses to pretend until that exists.
+**The sandbox never has a network.** `--unshare-net` is unconditional. A non-empty `network`
+list instead starts `bin/agos-net` on the host for the app's lifetime: a per-app HTTP/1.1
+server on a unix socket in a private 0700 directory that is the only extra bind into the
+sandbox, named `$AGOS_NET_SOCKET`. It forwards GET and HEAD only, to a `Host` that is exactly
+one of the listed domains (no subdomains, ports or IP literals), over https, without following
+redirects, after resolving the name and refusing any private, loopback or link-local answer
+(the deny list and IPv4-mapped unwrap are `bin/cap-net-fetch`'s, imported by path, so the app
+hand and the agent's hand share one rule). Bodies are capped at 4 MiB (`X-AgentOS-Truncated`).
+Every request is one stderr line on the host: app, verb, host, path, result. `bin/agos-fetch`
+(`$AGOS_FETCH` inside the sandbox) is the client; `curl --unix-socket "$AGOS_NET_SOCKET"
+http://<domain>/<path>` is equivalent. A network app is supervised rather than exec'd: the
+runner starts the hand, runs the sandbox, stops the hand, removes the socket directory; the
+hand also exits on its own if the runner dies. A packet filter cannot say "this domain"; the
+hand can, and the app never holds a socket it could point elsewhere. Per-uid egress for the
+human/agent split (`docs/design/egress-policy.md`) is a separate, owner-gated change.
 
 ## 6. What v0 does not do
 
-- No per-domain network, no devices, no timer installation, no GUI confirm.
+- No devices, no GUI confirm. (Per-domain network and timers landed: section 5, `bin/agos-schedule`.)
 - `--ro-bind / /` exposes world-readable system files; a secret stored outside `$HOME` with
   loose permissions is visible. The home directory is the privacy boundary in v0.
 - No seccomp filter; no outbound D-Bus or Wayland socket (both live under the tmpfs `/run`),
@@ -179,6 +190,6 @@ per-app proxy; the runner refuses to pretend until that exists.
 
 1. App approval through the confirm channel (broker → `bin/confirm` → Telegram/getty) for the sealed image; v0 is the owner-side `bin/agos-approve` on the human's own login.
 2. ~~Timer installation from `schedule` as a user unit, listed and revocable.~~ Done: `bin/agos-schedule`.
-3. Per-domain network for apps, on top of the egress work.
+3. ~~Per-domain network for apps.~~ Done: `bin/agos-net` + `bin/agos-fetch` (section 5).
 4. An "apps" surface: list running apps, what each can touch, one-tap revoke.
 5. Builder loop v1: read the approval answer back and run; multi-file apps; the builder on the confirm channel. v0 is `bin/agos-build` (section 4).

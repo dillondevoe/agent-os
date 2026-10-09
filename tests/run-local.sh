@@ -53,6 +53,7 @@
 #   agos-run-battery.py           13 criteria — bin/agos-run app sandbox gate, control-armed (real bwrap arm if usable)
 #   agos-approve-battery.py       8 criteria — bin/agos-approve owner-side approval writer: tty/session/sha-prefix gates
 #   agos-build-battery.py         10 criteria — bin/agos-build app builder loop: fake model, B/R-rule retries, never approves/runs
+#   agos-net-battery.py           12 criteria — bin/agos-net + bin/agos-fetch app network hand: exact-domain, GET/HEAD, no redirects, real bwrap arm
 #   agos-schedule-battery.py      12 criteria — bin/agos-schedule manifest schedule -> systemd user timer, control-armed (fake systemctl)
 #   agent-loop-dispatch-battery.py  8 checks — agent-loop tool-dispatch mechanics vs bin/mcp + broker-stub
 #
@@ -175,6 +176,12 @@ need "$T/agos-schedule-battery.py" agos-schedule && \
 # every refusal arm asserts nothing was written; eval contract pinned against evals/run.py).
 need "$T/agos-build-battery.py" agos-build && \
   run agos-build "$PY" "$T/agos-build-battery.py"
+
+# agos-net-battery.py — contract battery for the app network hand (local upstream via the hand's
+# tests-only --test-upstream; every refusal arm asserts the upstream saw nothing; real bwrap arm
+# proves the socket is reachable inside the sandbox and the raw network is not).
+need "$T/agos-net-battery.py" agos-net && \
+  run agos-net "$PY" "$T/agos-net-battery.py"
 
 # ── shell batteries: wire their positional contracts ─────────────────────────
 # agent-loop-battery.sh <agent-loop> <ollama-stub> <mcp> <broker-stub> <workdir>

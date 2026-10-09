@@ -2668,6 +2668,9 @@
               work="$(mktemp -d)"
               mkdir -p "$work/bin" "$work/tests"
               cp ${./bin/agos-run} "$work/bin/agos-run"
+              cp ${./bin/agos-net} "$work/bin/agos-net"
+              cp ${./bin/agos-fetch} "$work/bin/agos-fetch"
+              cp ${./bin/cap-net-fetch} "$work/bin/cap-net-fetch"
               cp ${./tests/agos-run-battery.py} "$work/tests/agos-run-battery.py"
               cd "$work"
               python3 tests/agos-run-battery.py
@@ -2728,6 +2731,27 @@
               cp ${./tests/agos-build-battery.py} "$work/tests/agos-build-battery.py"
               cd "$work"
               python3 tests/agos-build-battery.py
+              touch $out
+            '';
+
+        # bin/agos-net + bin/agos-fetch — the per-app network hand (app-manifest.md §5). This
+        # check proves a `network` list buys exactly its domains, read-only, through a unix
+        # socket, and nothing else: unlisted/sub/port hosts, POST and bodies are refused with the
+        # upstream untouched, redirects come back unfollowed, bodies are capped, a loopback
+        # answer is refused by the shared deny list, and the runner wires the socket only when a
+        # manifest asks (no user namespaces in the sandbox, so the real-bwrap arm self-skips).
+        agos-net-contract =
+          nixpkgs.legacyPackages.${system}.runCommand "agos-net-contract-check"
+            { nativeBuildInputs = [ nixpkgs.legacyPackages.${system}.python3 ]; } ''
+              work="$(mktemp -d)"
+              mkdir -p "$work/bin" "$work/tests"
+              cp ${./bin/agos-run} "$work/bin/agos-run"
+              cp ${./bin/agos-net} "$work/bin/agos-net"
+              cp ${./bin/agos-fetch} "$work/bin/agos-fetch"
+              cp ${./bin/cap-net-fetch} "$work/bin/cap-net-fetch"
+              cp ${./tests/agos-net-battery.py} "$work/tests/agos-net-battery.py"
+              cd "$work"
+              python3 tests/agos-net-battery.py
               touch $out
             '';
 
