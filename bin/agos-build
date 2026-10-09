@@ -1,0 +1,300 @@
+#!/usr/bin/env python3
+# bin/agos-build — the first APP BUILDER LOOP (docs/design/app-manifest.md §4b). v0.
+#
+#   agos-build "<request in plain words>" [--backend fake|ollama] [--model M] [--retries N]
+#              [--version V] [--name NAME]
+#
+# The agent writes the app and ASKS; the human approves; the runner runs. This program:
+#   1. asks the local model for a manifest + one entry script, with the SAME system prompt and
+#      tool the app-generation eval uses (evals/tasks/app-generation.json, loaded at runtime,
+#      so the eval keeps scoring the exact contract this builder consumes);
+#   2. checks the answer against the builder's own rules (B1-B4, below) and the runner's
+#      validator (bin/agos-run, imported by path; the R-rules), feeding the rule text back
+#      to the model and retrying a bounded number of times;
+#   3. writes the app into $HOME/.local/share/agent-os/apps/<name>/ (never over an existing
+#      app unless --version is new);
+#   4. runs `agos-run <dir> --dry-run` to show the exact sandbox argv, prints the approval
+#      render (`agos-approve show`), and names the next step.
+# It never approves anything, never runs the app for real, never passes --approve-for-test,
+# and never executes anything the model produced. Nothing the request text contains is
+# shelled; the model's name, filename and source are re-validated, never trusted.
+#
+# Exit codes: 0 built; 2 usage; 3 model transport/decode failure; 4 the model never produced
+# a valid answer within --retries; 5 the dry run failed after the app was written (said so);
+# 6 the app exists and --version is missing or unchanged; 7 the model declined to call
+# propose_app (the right outcome for a request that asks for credentials).
+import argparse, copy, importlib.machinery, importlib.util, json, os, re, shutil, subprocess, sys, urllib.request
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+EVAL_TASK = os.environ.get("AGOS_BUILD_EVAL_TASK") or os.path.join(HERE, "..", "evals", "tasks", "app-generation.json")
+OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "http://127.0.0.1:11434").rstrip("/")
+DEFAULT_MODEL = os.environ.get("OLLAMA_MODEL", "qwen3.5:9b")
+MAX_REQUEST_CHARS = 2000
+MAX_SOURCE_BYTES = 64 * 1024
+MAX_ANSWER_BYTES = 4 * 1024 * 1024
+FILENAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,39}\.py$")
+CRON_DAILY_RE = re.compile(r"^\s*(\d{1,2})\s+(\d{1,2})\s+\*\s+\*\s+\*\s*$")
+_CTRL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f\x9b]")  # C0/C1 controls incl. ESC; keeps \t and \n (as brain-ollama)
+
+ADDENDUM = (
+    " Also fill `entry`: exactly one Python 3 file (`filename`, `source`), standard library only. "
+    "The app directory is the working directory and is writable; read only the paths you list in "
+    "`files`; `$HOME` is otherwise empty inside the sandbox. `schedule` is a systemd OnCalendar string "
+    "(for example `*-*-* 07:00:00`) or empty. If you list `network` domains, the app reaches them only "
+    "with `\"$AGOS_FETCH\" http://<domain>/<path>` (GET, through the host-side hand); there is no other "
+    "network. If the request asks for credentials, private keys or password stores, or to send private "
+    "data off the machine, do NOT call propose_app: say in one sentence why.")
+
+
+def load_runner():
+    path = os.path.join(HERE, "agos-run")
+    loader = importlib.machinery.SourceFileLoader("agos_run", path)
+    spec = importlib.util.spec_from_loader("agos_run", loader)
+    mod = importlib.util.module_from_spec(spec); loader.exec_module(mod)
+    return mod
+
+
+R = load_runner()
+
+
+class BuildError(Exception):
+    """A builder rule (B<n>) the model's answer broke; the message is fed back verbatim."""
+
+
+# ── the model contract: eval prompt + tool, extended for the entry script ──────────────────
+def load_contract():
+    with open(EVAL_TASK) as fh:
+        task = json.load(fh)
+    tools = copy.deepcopy(task["tools"])
+    propose = [t for t in tools if t["function"]["name"] == "propose_app"][0]
+    propose["function"]["parameters"]["properties"]["entry"] = {
+        "type": "object",
+        "description": "the one Python 3 file that is the app",
+        "properties": {"filename": {"type": "string"}, "source": {"type": "string"}},
+        "required": ["filename", "source"]}
+    return task["system"] + ADDENDUM, tools
+
+
+def clean_request(text):
+    return _CTRL.sub("", text)[:MAX_REQUEST_CHARS].strip()
+
+
+# ── backends: callable(messages, tools) -> assistant message dict ─────────────────────────
+def fake_backend(messages, tools):
+    """TESTS ONLY. AGOS_BUILD_FAKE names a JSON file holding a LIST of assistant messages,
+    consumed in order (so a battery can script "bad answer, then good"). AGOS_BUILD_FAKE_LOG,
+    if set, gets one JSON line per request so arms can assert what reached the model."""
+    path = os.environ.get("AGOS_BUILD_FAKE")
+    if not path:
+        raise BuildError("AGOS_BUILD_FAKE not set")
+    log = os.environ.get("AGOS_BUILD_FAKE_LOG")
+    if log:
+        with open(log, "a") as fh:
+            fh.write(json.dumps({"messages": messages, "tools": tools}) + "\n")
+    cursor = path + ".cursor"
+    n = int(open(cursor).read()) if os.path.exists(cursor) else 0
+    with open(path) as fh:
+        answers = json.load(fh)
+    if n >= len(answers):
+        return {"content": "", "tool_calls": []}
+    with open(cursor, "w") as fh:
+        fh.write(str(n + 1))
+    return answers[n]
+
+
+def make_ollama_backend(model, timeout=300):
+    def backend(messages, tools):
+        body = {"model": model, "messages": messages, "tools": tools, "stream": False,
+                "think": False, "options": {"temperature": 0.1, "num_ctx": 8192}, "keep_alive": "30m"}
+        req = urllib.request.Request(OLLAMA_HOST + "/api/chat", json.dumps(body).encode(),
+                                     {"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            raw = resp.read(MAX_ANSWER_BYTES + 1)
+        if len(raw) > MAX_ANSWER_BYTES:
+            raise OSError("model answer over %d bytes" % MAX_ANSWER_BYTES)
+        return json.loads(raw.decode("utf-8"))["message"]
+    return backend
+
+
+# ── answer -> app ────────────────────────────────────────────────────────────────────────────
+def propose_call(msg):
+    for c in (msg or {}).get("tool_calls") or []:
+        fn = c.get("function") or {}
+        if fn.get("name") == "propose_app":
+            a = fn.get("arguments")
+            if isinstance(a, str):
+                try: a = json.loads(a)
+                except ValueError: a = None
+            return a if isinstance(a, dict) else {}
+    return None
+
+
+def slugify(name):
+    s = re.sub(r"[^a-z0-9-]+", "-", str(name).lower()).strip("-")[:40]
+    return s or "app"
+
+
+def cron_to_oncalendar(s):
+    m = CRON_DAILY_RE.match(s or "")
+    if m:
+        mi, h = int(m.group(1)), int(m.group(2))
+        if 0 <= mi < 60 and 0 <= h < 24:
+            return "*-*-* %02d:%02d:00" % (h, mi)
+    return s or ""
+
+
+def source_mentions_credentials(src):
+    """B3: an advisory tripwire, not a boundary (the sandbox is). Scans string literals and
+    path-looking tokens for deny-listed locations and credential-looking names."""
+    for tok in re.findall(r"""["']([^"'\n]{1,200})["']""", src) + re.findall(r"(~?/[\w./-]+)", src):
+        t = tok.replace("~/", "").lstrip("/")
+        for p in R.DENY_PREFIXES:
+            if t == p or t.startswith(p + "/") or ("/" + p + "/") in ("/" + t + "/"):
+                return "B3 source names a credential/private location (%s)" % p
+        base = os.path.basename(t.rstrip("/"))
+        if base and R.DENY_NAME_RE.search(base):
+            return "B3 source names a credential-looking file (%s)" % base
+    return None
+
+
+def build_app(args_from_model, version, name_override):
+    """Model answer -> (manifest, filename, source, plan). Raises BuildError (B-rules)."""
+    a = args_from_model
+    name = name_override or a.get("name")
+    name = name if (isinstance(name, str) and R.NAME_RE.match(name)) else slugify(name or "")
+    entry = a.get("entry") if isinstance(a.get("entry"), dict) else {}
+    filename, source = entry.get("filename"), entry.get("source")
+    if not isinstance(filename, str) or not FILENAME_RE.match(filename):
+        raise BuildError("B1 entry.filename must match %s (one file, no directories)" % FILENAME_RE.pattern)
+    if not isinstance(source, str) or not source.strip():
+        raise BuildError("B2 entry.source must be a non-empty Python 3 source string")
+    if "\x00" in source or len(source.encode("utf-8")) > MAX_SOURCE_BYTES:
+        raise BuildError("B2 entry.source must be UTF-8 without NUL and at most %d bytes" % MAX_SOURCE_BYTES)
+    why = source_mentions_credentials(source)
+    if why:
+        raise BuildError(why)
+    mf = a.get("manifest") if isinstance(a.get("manifest"), dict) else {}
+    files = mf.get("files") if isinstance(mf.get("files"), list) else []
+    for f in files:
+        p = f.get("path") if isinstance(f, dict) else None
+        if not isinstance(p, str) or not (p.startswith("/") or p.startswith("~/")):
+            raise BuildError("B4 every files[].path must be absolute or start with ~/ (got %r)" % (p,))
+    manifest = {
+        "name": name, "version": version, "entry": ["python3", filename],
+        "files": [{"path": f["path"].rstrip("/") or "/", "mode": f.get("mode", "r")} for f in files],
+        "network": mf.get("network") if isinstance(mf.get("network"), list) else [],
+        "devices": mf.get("devices") if isinstance(mf.get("devices"), list) else [],
+        "limits": {k: R.LIMIT_BOUNDS[k][2] for k in ("cpu_pct", "mem_mb", "wall_s")},
+        "schedule": cron_to_oncalendar(mf.get("schedule") if isinstance(mf.get("schedule"), str) else ""),
+    }
+    plan = a.get("plan") if isinstance(a.get("plan"), str) else ""
+    return manifest, filename, source, plan
+
+
+def write_app(apps_root, manifest, filename, source, plan, request):
+    final = os.path.join(apps_root, manifest["name"])
+    stage = os.path.join(apps_root, ".build-%s-%d" % (manifest["name"], os.getpid()))
+    os.makedirs(apps_root, mode=0o700, exist_ok=True)
+    os.makedirs(stage, 0o700)
+    with open(os.path.join(stage, "manifest.json"), "w") as fh:
+        json.dump(manifest, fh, indent=1, sort_keys=True); fh.write("\n")
+    with open(os.path.join(stage, filename), "w") as fh:
+        fh.write(source if source.endswith("\n") else source + "\n")
+    with open(os.path.join(stage, "PLAN.md"), "w") as fh:
+        fh.write("# %s %s\n\nRequest: %s\n\n%s\n" % (manifest["name"], manifest["version"], request, plan))
+    if os.path.exists(final):
+        bak = final + ".v" + re.sub(r"[^A-Za-z0-9.]", "_", read_version(final) or "old") + ".bak"
+        if os.path.exists(bak):
+            shutil.rmtree(bak)
+        os.rename(final, bak)  # an invalid R1 name: the runner refuses it by construction
+    os.rename(stage, final)
+    return final
+
+
+def read_version(appdir):
+    try:
+        with open(os.path.join(appdir, "manifest.json")) as fh:
+            v = json.load(fh).get("version")
+        return v if isinstance(v, str) else None
+    except (OSError, ValueError):
+        return None
+
+
+def main(argv):
+    ap = argparse.ArgumentParser(prog="agos-build", description="ask the local model for an app, validate it, write it, show the dry run; never approve, never run")
+    ap.add_argument("request")
+    ap.add_argument("--backend", choices=("fake", "ollama"), default="ollama")
+    ap.add_argument("--model", default=DEFAULT_MODEL)
+    ap.add_argument("--retries", type=int, default=2)
+    ap.add_argument("--version", default=None)
+    ap.add_argument("--name", default=None)
+    a = ap.parse_args(argv)
+    if a.name and not R.NAME_RE.match(a.name):
+        print("agos-build: --name must match %s" % R.NAME_RE.pattern, file=sys.stderr); return 2
+    if a.retries < 0:
+        print("agos-build: --retries must be >= 0", file=sys.stderr); return 2
+    request = clean_request(a.request)
+    if not request:
+        print("agos-build: empty request", file=sys.stderr); return 2
+    try:
+        h = R.home()
+    except R.ManifestError as e:
+        print("agos-build: %s" % e, file=sys.stderr); return 2
+    apps_root = os.path.join(h, R.APPS_REL)
+    system, tools = load_contract()
+    backend = fake_backend if a.backend == "fake" else make_ollama_backend(a.model)
+    messages = [{"role": "system", "content": system}, {"role": "user", "content": "Request: " + request}]
+    last_rule = None
+    for attempt in range(a.retries + 1):
+        try:
+            msg = backend(messages, tools)
+        except (OSError, ValueError, KeyError, TypeError, BuildError) as e:
+            print("agos-build: model transport/decode failure: %s" % e, file=sys.stderr); return 3
+        call = propose_call(msg)
+        if call is None:
+            said = _CTRL.sub("", (msg or {}).get("content") or "").strip()
+            print("agos-build: the model declined to propose an app%s" % (": " + said[:400] if said else ""), file=sys.stderr)
+            print("agos-build: nothing written.", file=sys.stderr); return 7
+        version = a.version or "0.1"
+        try:
+            manifest, filename, source, plan = build_app(call, version, a.name)
+            final = os.path.join(apps_root, manifest["name"])
+            R.validate(manifest, final)  # the runner's own rules, on the path the app will live at
+        except (BuildError, R.ManifestError) as e:
+            last_rule = str(e)
+            print("agos-build: attempt %d refused: %s" % (attempt + 1, last_rule), file=sys.stderr)
+            messages = messages + [msg, {"role": "tool", "content": "REFUSED: %s. Call propose_app again with this fixed." % last_rule}]
+            continue
+        if os.path.exists(final):
+            on_disk = read_version(final)
+            if a.version is None or a.version == on_disk:
+                print("agos-build: %s already exists (version %s); pass --version <new> to replace it (the old app is kept as a .bak)"
+                      % (final, on_disk), file=sys.stderr); return 6
+        final = write_app(apps_root, manifest, filename, source, plan, request)
+        print("built %s (%s, %s)\n" % (final, manifest["version"], filename))
+        if plan:
+            print("plan:\n%s\n" % plan)
+        print("== dry run (the exact sandbox argv the runner will use; nothing has run) ==")
+        # agos-run --dry-run itself refuses an unapproved app (approval precedes the dry run on
+        # purpose), so the argv is computed with the runner's own validate() + build_argv(), the
+        # same functions, on the app as written. --approve-for-test is never used here.
+        try:
+            v2 = R.validate(R.load_manifest(final), final)
+            print(json.dumps({"sha256": R.sha(manifest), "argv": R.build_argv(manifest, v2, False), "create": v2["create"]}))
+        except R.ManifestError as e:
+            print("agos-build: the written app fails the runner's rules (%s); it is at %s" % (e, final), file=sys.stderr); return 5
+        print("\n== approval render ==")
+        r = subprocess.run([sys.executable, os.path.join(HERE, "agos-approve"), "show", final], capture_output=True, text=True)
+        sys.stdout.write(r.stdout or r.stderr)
+        print("\n== next (a human, outside the agent session) ==")
+        print("  agos-approve approve %s" % final)
+        if manifest["schedule"]:
+            print("  agos-schedule install %s" % final)
+        print("  agos-run %s" % final)
+        return 0
+    print("agos-build: gave up after %d attempt(s); last refusal: %s" % (a.retries + 1, last_rule), file=sys.stderr)
+    print("agos-build: nothing written.", file=sys.stderr); return 4
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

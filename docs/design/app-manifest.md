@@ -113,6 +113,42 @@ This is not the confirm channel. `bin/confirm` is a pure relayer the broker driv
 and never writes state; routing app approval through broker → confirm → Telegram/getty inside
 the sealed image is a later slice (§7).
 
+### How the agent builds (v0, `bin/agos-build`)
+
+    agos-build "<request in plain words>" [--backend fake|ollama] [--model M] [--retries N] [--version V] [--name NAME]
+
+The builder writes files and asks; the human approves; the runner runs. It asks the local
+model with the **same system prompt and `propose_app` tool the app-generation eval uses**
+(`evals/tasks/app-generation.json`, loaded at runtime; an addendum asks for one Python 3
+`entry` file and explains `$AGOS_FETCH`), so the weekly eval keeps scoring the exact contract
+the builder consumes. The model answers `name`, `plan`, `manifest{files,network,schedule,devices}`
+and `entry{filename,source}`; the builder owns everything else: `version` (flag, default 0.1),
+`entry = ["python3", filename]`, `limits` (runner defaults), a daily cron `M H * * *` turned
+into `*-*-* HH:MM:00`, and the eight manifest keys exactly.
+
+Before the runner's R-rules, the builder's own: **B1** filename `^[a-z0-9][a-z0-9_-]{0,39}\.py$`
+(one file, no directories); **B2** source non-empty UTF-8, no NUL, at most 64 KiB; **B3** source
+must not name a deny-listed location or credential-looking file (string matching: an advisory
+tripwire, not a boundary; the tmpfs `$HOME` and the `files[]` binds are the boundary); **B4**
+every `files[].path` absolute or `~/`. Then `agos-run`'s `validate()` on the path the app will
+live at. A refusal is fed back verbatim as a `tool` message and the model gets another try,
+`--retries` (default 2) times. The app is staged beside its final directory and renamed into
+place; an existing app is replaced only with a new `--version`, the old one kept as
+`<name>.v<old>.bak` (an invalid app name, so the runner refuses it by construction).
+
+Exit codes: 0 built; 2 usage; 3 model transport/decode failure; 4 no valid answer within the
+retries (nothing written); 5 the written app fails the runner's rules; 6 the app exists and
+`--version` is missing or unchanged; 7 the model declined to call `propose_app` (the right
+answer to a request for credentials: nothing written).
+
+What it prints on success: the plan, the exact sandbox argv computed with the runner's own
+`validate()` and `build_argv()` (the runner's `--dry-run` itself refuses an unapproved app on
+purpose), the `agos-approve show` render with the sha, and the next step: `agos-approve approve
+<dir>`, `agos-schedule install <dir>` when a schedule is set, then `agos-run <dir>`. It never
+writes `approvals.json`, never runs the app, never passes `--approve-for-test`, never executes
+anything the model produced, and never shells the request text (control characters stripped,
+2000 characters max, reaching the model only).
+
 ## 5. Enforcement (v0, `bin/agos-run`)
 
 Never unsandboxed: no bubblewrap means refusal (exit 5). The argv, in order:
@@ -145,3 +181,4 @@ per-app proxy; the runner refuses to pretend until that exists.
 2. ~~Timer installation from `schedule` as a user unit, listed and revocable.~~ Done: `bin/agos-schedule`.
 3. Per-domain network for apps, on top of the egress work.
 4. An "apps" surface: list running apps, what each can touch, one-tap revoke.
+5. Builder loop v1: read the approval answer back and run; multi-file apps; the builder on the confirm channel. v0 is `bin/agos-build` (section 4).
