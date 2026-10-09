@@ -22,7 +22,7 @@
 # TEST-ONLY overrides (same class as AGENT_OS_FILE_SAFE_ROOT): AGOS_APPROVE_TEST_ROOT prefixes the
 # two fixed paths, AGOS_APPROVE_TEST_SKIP_UID=1 skips the root guard. cap-invoke strips the impl
 # env to exactly PATH + AGENT_OS_REGISTRY, so neither is reachable in production.
-import datetime, importlib.machinery, json, os, stat, sys
+import datetime, importlib.machinery, importlib.util, json, os, stat, sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 _TROOT = os.environ.get("AGOS_APPROVE_TEST_ROOT", "")
@@ -52,7 +52,13 @@ def helper(name):
     for d in (os.path.join(HERE, "..", "lib", "agent-os-cap"), HERE):
         p = os.path.join(d, name)
         if os.path.isfile(p):
-            return importlib.machinery.SourceFileLoader("agos_helper_" + name.replace("-", "_"), p).load_module()
+            # spec_from_file_location + a loader for extension-less files (SourceFileLoader.load_module
+            # is removed in Python 3.15).
+            loader = importlib.machinery.SourceFileLoader("agos_helper_" + name.replace("-", "_"), p)
+            spec = importlib.util.spec_from_loader(loader.name, loader)
+            mod = importlib.util.module_from_spec(spec)
+            loader.exec_module(mod)
+            return mod
     raise FileNotFoundError(name)
 
 
@@ -61,7 +67,9 @@ def read_manifest(app):
         st = os.lstat(app)
         if not stat.S_ISDIR(st.st_mode):
             return None
-        fd = os.open(os.path.join(app, "manifest.json"), os.O_RDONLY | os.O_NOFOLLOW)
+        # O_NONBLOCK: the agent owns the app dir, and a FIFO named manifest.json would otherwise
+        # block here until cap-invoke's timeout, stalling the single-flight broker; fstat refuses it.
+        fd = os.open(os.path.join(app, "manifest.json"), os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_NOCTTY)
     except OSError:
         return None
     try:
@@ -95,11 +103,16 @@ def write_store(db):
     finally:
         os.close(fd)
     os.replace(tmp, STORE)
-    dfd = os.open(d, os.O_RDONLY)
+    # The entry is committed once the rename returns; a failing directory fsync after it must not
+    # turn a written approval into a refusal (that would be a write without ok:true).
     try:
-        os.fsync(dfd)
-    finally:
-        os.close(dfd)
+        dfd = os.open(d, os.O_RDONLY)
+        try:
+            os.fsync(dfd)
+        finally:
+            os.close(dfd)
+    except OSError:
+        pass
 
 
 def main():

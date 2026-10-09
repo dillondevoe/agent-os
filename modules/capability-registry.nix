@@ -95,7 +95,10 @@ let
   # ── The v1 registry (matches docs/phase2-threat-model.md §5) ─────────────────
   # Bound as `rawRegistry`: it is UNvalidated here. No consumer may read it directly —
   # the output `registry` gates it behind `assert ok` so the invariants throw first.
-  rawRegistry = baseRegistry // lib.mapAttrs (_: mkCap) extraCaps;
+  rawRegistry =
+    assert lib.assertMsg (lib.intersectLists (lib.attrNames baseRegistry) (lib.attrNames extraCaps) == [ ])
+      "capability-registry: extraCaps (test-only) may add capabilities, never replace a shipped one.";
+    baseRegistry // lib.mapAttrs (_: mkCap) extraCaps;
 
   # ── Exclusive paths — a path only ONE named capability may hold, in ANY scope (readable or
   #    writable). Invariant A1 of docs/design/app-approval-confirm.md: the app-approval store is

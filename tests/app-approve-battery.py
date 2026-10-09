@@ -32,7 +32,7 @@
 
 SIDE_EFFECTS = []  # scratch tree under mktemp, removed at exit
 
-import atexit, copy, importlib.machinery, json, os, re, shutil, subprocess, sys, tempfile
+import atexit, copy, importlib.machinery, importlib.util, json, os, re, shutil, subprocess, sys, tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.abspath(os.path.join(HERE, ".."))
@@ -43,8 +43,15 @@ ROOT = os.path.join(TMP, "root")
 APPS = ROOT + "/var/lib/agent-os/apps"
 STORE_DIR = ROOT + "/var/lib/agent-os/app-approvals"
 STORE = STORE_DIR + "/approvals.json"
-R = importlib.machinery.SourceFileLoader("agos_run_b", os.path.join(REPO, "bin", "agos-run")).load_module()
-C = importlib.machinery.SourceFileLoader("confirm_b", os.path.join(REPO, "bin", "confirm")).load_module()
+def load(name, path):
+    loader = importlib.machinery.SourceFileLoader(name, path)
+    mod = importlib.util.module_from_spec(importlib.util.spec_from_loader(name, loader))
+    loader.exec_module(mod)
+    return mod
+
+
+R = load("agos_run_b", os.path.join(REPO, "bin", "agos-run"))
+C = load("confirm_b", os.path.join(REPO, "bin", "confirm"))
 CODES = {"bad-request", "not-root", "arguments", "helpers-missing", "app-path", "manifest-unreadable",
          "manifest-structure", "sha-mismatch", "field-mismatch", "unrenderable-value", "non-ascii-value",
          "value-too-long", "frame-too-long", "store-dir-missing", "store-corrupt", "store-write"}
@@ -88,8 +95,8 @@ def call(arguments, impl=IMPL, skip_uid=True, raw=None):
     stdin = raw if raw is not None else json.dumps({"capability": "app.approve", "arguments": arguments})
     # UMask=0077 is what the real capability unit applies (modules/cap-sandbox.nix); without it
     # the 0644 the runner needs would come for free and the impl's fchmod would go untested.
-    p = subprocess.run([sys.executable, impl], input=stdin.encode(), capture_output=True, env=env,
-                       preexec_fn=lambda: os.umask(0o077))
+    p = subprocess.run([sys.executable, "-W", "error::DeprecationWarning", impl], input=stdin.encode(), capture_output=True, env=env,
+                       preexec_fn=lambda: os.umask(0o077), timeout=30)   # a blocking open fails, not hangs
     try:
         out = json.loads(p.stdout.decode())
     except ValueError:
@@ -154,6 +161,8 @@ fresh(); real = os.path.join(APPS, "daily-summary"); shutil.move(real, real + "-
 rc, out = call(args_for(GOOD)); refused(out, "manifest-unreadable", "C app dir symlink")
 d = fresh(); mf = os.path.join(d, "manifest.json"); os.rename(mf, mf + ".real"); os.symlink(mf + ".real", mf)
 rc, out = call(args_for(GOOD)); refused(out, "manifest-unreadable", "C manifest symlink")
+d = fresh(); mf = os.path.join(d, "manifest.json"); os.unlink(mf); os.mkfifo(mf)
+rc, out = call(args_for(GOOD)); refused(out, "manifest-unreadable", "C manifest FIFO (must not block)")
 big = dict(GOOD, version="1" * (64 * 1024)); fresh(big)
 rc, out = call(args_for(big)); refused(out, "manifest-unreadable", "C oversize manifest")
 d = fresh(); open(os.path.join(d, "manifest.json"), "w").write("{not json")
@@ -258,7 +267,7 @@ for k in ("app = \"path\"", "sha256 = \"string\"") + tuple('%s = "string"' % f f
 check('readOnlyPaths  = [ "/var/lib/agent-os/apps" ]' in blk and 'readWritePaths = [ "/var/lib/agent-os/app-approvals" ]' in blk,
       "J: registry roots")
 check('exclusivePaths = { "/var/lib/agent-os/app-approvals" = "app.approve"; }' in reg, "J: exclusivePaths entry")
-B = importlib.machinery.SourceFileLoader("broker_b", os.path.join(REPO, "bin", "broker")).load_module()
+B = load("broker_b", os.path.join(REPO, "bin", "broker"))
 check(B.ORIGIN_BY_CAP.get("app.approve") == B.TRUSTED, "J: broker must map app.approve TRUSTED")
 pkgnix = open(os.path.join(REPO, "modules", "cap-invoke-pkg.nix")).read()
 check('"app.approve" ]' in pkgnix and "lib/agent-os-cap/agos-run" in pkgnix and "lib/agent-os-cap/confirm" in pkgnix,
