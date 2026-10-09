@@ -1,0 +1,172 @@
+#!/usr/bin/env python3
+# bin/agos-net — the per-app NETWORK HAND (docs/design/app-manifest.md §5). v0.
+#
+# An app under agos-run has NO network: the sandbox is --unshare-net and stays that way. What a
+# manifest's `network` list buys is this helper, started by the runner on the host, listening on
+# a unix socket that is bind-mounted into the sandbox and named by $AGOS_NET_SOCKET. It speaks
+# plain HTTP/1.1 on that socket (so `curl --unix-socket $AGOS_NET_SOCKET http://host/path` and
+# bin/agos-fetch both work) and forwards ONLY:
+#   - GET and HEAD                                    (read-only verbs, like cap-net-fetch)
+#   - to a Host that is EXACTLY one of the approved domains (no subdomains, no ports, no IPs)
+#   - over https to that host, redirects NOT followed (a 3xx comes back as-is)
+#   - after resolving the host and refusing any private/loopback/link-local answer
+#     (the same deny list and unwrap as bin/cap-net-fetch, imported by path)
+#   - with the response body capped at MAX_BODY_BYTES and the upstream call at TIMEOUT_S
+# Every request is logged to stderr as one line (app, verb, host, path, result) so the owner
+# can see what an app reached for. A packet filter cannot express "this domain"; this can, and
+# it keeps the app one step away from a socket it could use for anything else.
+#
+#   agos-net serve <socket-path> --app <name> --allow <domain>[,<domain>...] [--parent <pid>]
+#
+# The helper exits when its parent (the runner) is gone, so it never outlives the app.
+import argparse, http.client, http.server, importlib.machinery, importlib.util, os, socket, socketserver, sys, threading, time, urllib.parse
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+MAX_BODY_BYTES = 4 * 1024 * 1024
+TIMEOUT_S = 20
+METHODS = ("GET", "HEAD")
+
+
+def load_netfetch():
+    path = os.path.join(HERE, "cap-net-fetch")
+    loader = importlib.machinery.SourceFileLoader("cap_net_fetch", path)
+    spec = importlib.util.spec_from_loader("cap_net_fetch", loader)
+    mod = importlib.util.module_from_spec(spec); loader.exec_module(mod)
+    return mod
+
+
+NF = load_netfetch()  # EGRESS_DENY / _addr_denied: one deny list, one unwrap, shared with the agent's own hand
+
+
+def log(app, line):
+    sys.stderr.write("agos-net[%s]: %s\n" % (app, line)); sys.stderr.flush()
+
+
+class Handler(http.server.BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+    server_version = "agos-net/0"
+    sys_version = ""
+
+    def address_string(self):  # unix socket: client_address is not a (host, port) tuple
+        return "app"
+
+    def log_message(self, fmt, *args):  # our own one-liners instead of the default access log
+        pass
+
+    def refuse(self, code, why):
+        body = ("agos-net: REFUSED: %s\n" % why).encode()
+        self.send_response(code); self.send_header("Content-Type", "text/plain")
+        self.send_header("Content-Length", str(len(body))); self.send_header("Connection", "close")
+        self.end_headers()
+        if self.command != "HEAD":
+            self.wfile.write(body)
+        log(self.server.app, "%s %s%s -> %d REFUSED %s" % (self.command, self.headers.get("Host", "?"), self.path, code, why))
+
+    def do_GET(self): self.forward()
+    def do_HEAD(self): self.forward()
+    def do_POST(self): self.refuse(405, "only GET and HEAD")
+    do_PUT = do_DELETE = do_PATCH = do_OPTIONS = do_CONNECT = do_POST
+
+    def forward(self):
+        host = (self.headers.get("Host") or "").strip().lower()
+        if not host:
+            return self.refuse(400, "no Host header")
+        if host not in self.server.allow:
+            return self.refuse(403, "domain %r is not in the approved manifest network list" % host)
+        if self.command not in METHODS:
+            return self.refuse(405, "only GET and HEAD")
+        path = self.path if self.path.startswith("/") else "/"
+        if "\r" in path or "\n" in path or " " in path:
+            return self.refuse(400, "bad request path")
+        if self.headers.get("Content-Length") not in (None, "0"):
+            return self.refuse(400, "request body not accepted")
+        upstream = self.server.upstream  # None in production: https to the Host; a test override otherwise
+        if upstream is None:
+            try:
+                infos = socket.getaddrinfo(host, 443, proto=socket.IPPROTO_TCP)
+            except socket.gaierror as e:
+                return self.refuse(502, "could not resolve host (%s)" % e)
+            if not infos or any(NF._addr_denied(i[4][0]) for i in infos):
+                return self.refuse(403, "host resolves to a denied (private/loopback/link-local) address")
+            conn = http.client.HTTPSConnection(host, 443, timeout=TIMEOUT_S)
+        else:
+            u = urllib.parse.urlsplit(upstream)
+            conn = http.client.HTTPConnection(u.hostname, u.port, timeout=TIMEOUT_S)
+        hdrs = {"Host": host, "User-Agent": "agos-net/0 (%s)" % self.server.app, "Accept": self.headers.get("Accept", "*/*"),
+                "Connection": "close"}
+        try:
+            conn.request(self.command, path, headers=hdrs)
+            resp = conn.getresponse()
+            body = b"" if self.command == "HEAD" else resp.read(MAX_BODY_BYTES + 1)
+        except (OSError, http.client.HTTPException) as e:
+            return self.refuse(502, "upstream failed (%s)" % e.__class__.__name__)
+        finally:
+            conn.close()
+        truncated = len(body) > MAX_BODY_BYTES
+        body = body[:MAX_BODY_BYTES]
+        self.send_response(resp.status, resp.reason)
+        for k in ("Content-Type", "Location", "Last-Modified", "ETag"):
+            v = resp.getheader(k)
+            if v:
+                self.send_header(k, v)
+        self.send_header("Content-Length", str(len(body))); self.send_header("Connection", "close")
+        if truncated:
+            self.send_header("X-AgentOS-Truncated", str(MAX_BODY_BYTES))
+        self.end_headers()
+        if self.command != "HEAD":
+            self.wfile.write(body)
+        log(self.server.app, "%s %s%s -> %d %dB%s%s" % (self.command, host, path, resp.status, len(body),
+                                                      " truncated" if truncated else "",
+                                                      " redirect-not-followed" if 300 <= resp.status < 400 else ""))
+
+
+class Server(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
+    daemon_threads = True
+    allow_reuse_address = True
+
+
+def watch_parent(ppid, server):
+    while True:
+        time.sleep(1)
+        if os.getppid() != ppid:
+            server.shutdown(); return
+
+
+def main(argv):
+    ap = argparse.ArgumentParser(prog="agos-net")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    s = sub.add_parser("serve")
+    s.add_argument("socket"); s.add_argument("--app", required=True); s.add_argument("--allow", required=True)
+    s.add_argument("--parent", type=int, default=None)
+    s.add_argument("--test-upstream", default=None, help="TESTS ONLY: forward every request to this http://host:port instead of https://<Host>")
+    a = ap.parse_args(argv)
+    allow = {d.strip().lower() for d in a.allow.split(",") if d.strip()}
+    if not allow:
+        print("agos-net: empty allow list; nothing to serve", file=sys.stderr); return 2
+    if a.test_upstream:
+        log(a.app, "WARNING --test-upstream %s: every request goes there; tests only" % a.test_upstream)
+    try:
+        os.unlink(a.socket)
+    except FileNotFoundError:
+        pass
+    old = os.umask(0o077)
+    try:
+        srv = Server(a.socket, Handler)
+    finally:
+        os.umask(old)
+    srv.allow = allow; srv.app = a.app; srv.upstream = a.test_upstream
+    ppid = a.parent or os.getppid()
+    threading.Thread(target=watch_parent, args=(ppid, srv), daemon=True).start()
+    log(a.app, "serving %s for %s" % (a.socket, ", ".join(sorted(allow))))
+    try:
+        srv.serve_forever(poll_interval=0.5)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        try: os.unlink(a.socket)
+        except OSError: pass
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

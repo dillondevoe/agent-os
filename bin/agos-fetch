@@ -1,0 +1,60 @@
+#!/usr/bin/env python3
+# bin/agos-fetch — the in-sandbox client for the app network hand (bin/agos-net). v0.
+#
+#   agos-fetch [--head] [-o FILE] http://<domain>/<path>
+#
+# Talks HTTP/1.1 over the unix socket named by $AGOS_NET_SOCKET (set by agos-run only when the
+# approved manifest has a non-empty `network`). The scheme in the URL is ignored: the helper
+# always goes https to the named domain. Body to stdout (or FILE); exit 0 on 2xx, 3 on a 3xx
+# (redirect not followed; Location printed to stderr), 4 on any other status, 2 on usage or a
+# missing socket. `curl --unix-socket "$AGOS_NET_SOCKET" http://<domain>/<path>` is equivalent.
+import http.client, os, socket, sys, urllib.parse
+
+
+class UnixHTTPConnection(http.client.HTTPConnection):
+    def __init__(self, path, timeout=60):
+        super().__init__("app", timeout=timeout); self._path = path
+
+    def connect(self):
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM); s.settimeout(self.timeout); s.connect(self._path); self.sock = s
+
+
+def main(argv):
+    head = "--head" in argv; argv = [a for a in argv if a != "--head"]
+    out = None
+    if "-o" in argv:
+        i = argv.index("-o")
+        if i + 1 >= len(argv):
+            print("usage: agos-fetch [--head] [-o FILE] URL", file=sys.stderr); return 2
+        out = argv[i + 1]; del argv[i:i + 2]
+    if len(argv) != 1:
+        print("usage: agos-fetch [--head] [-o FILE] URL", file=sys.stderr); return 2
+    sock = os.environ.get("AGOS_NET_SOCKET")
+    if not sock:
+        print("agos-fetch: no network: this app's manifest has no `network` list (AGOS_NET_SOCKET unset)", file=sys.stderr); return 2
+    u = urllib.parse.urlsplit(argv[0])
+    if not u.hostname:
+        print("agos-fetch: URL has no host", file=sys.stderr); return 2
+    path = urllib.parse.urlunsplit(("", "", u.path or "/", u.query, ""))
+    try:
+        c = UnixHTTPConnection(sock)
+        c.request("HEAD" if head else "GET", path, headers={"Host": u.hostname.lower(), "Accept": "*/*"})
+        r = c.getresponse(); body = b"" if head else r.read()
+    except OSError as e:
+        print("agos-fetch: cannot reach the network hand (%s)" % e, file=sys.stderr); return 2
+    if 300 <= r.status < 400:
+        print("agos-fetch: %d redirect not followed -> %s" % (r.status, r.getheader("Location")), file=sys.stderr); return 3
+    if not 200 <= r.status < 300:
+        sys.stderr.write("agos-fetch: %d %s\n%s" % (r.status, r.reason, body.decode("utf-8", "replace") if not head else "")); return 4
+    if head:
+        for k, v in r.getheaders(): print("%s: %s" % (k, v))
+        return 0
+    if out:
+        with open(out, "wb") as fh: fh.write(body)
+    else:
+        sys.stdout.buffer.write(body); sys.stdout.flush()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

@@ -142,7 +142,8 @@ def test_d_network():
     m = copy.deepcopy(GOOD); m["network"] = ["news.invalid", "feed.invalid"]  # names only; nothing is contacted
     rc, j, err = dry(mk("gym-spending", m), "--approve-for-test")
     check(rc == 0 and "--unshare-net" in j["argv"], "D network still unshared")
-    check("DENIED in v0" in err and "feed.invalid" in err, "D must print the honest notice")
+    check("via agos-net hand" in err and "feed.invalid" in err and "DENIED" not in err, "D must print the hand notice")
+    check("AGOS_NET_SOCKET" in j["argv"] and "AGOS_FETCH" in j["argv"], "D network app gets the hand's socket + client env")
     m["network"] = ["https://feed.invalid"]
     rc, _, err = dry(mk("gym-spending", m), "--approve-for-test"); check(rc == 3 and "R7" in err, "D scheme in domain is R7")
 

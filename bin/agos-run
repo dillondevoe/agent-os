@@ -7,9 +7,11 @@
 # What this enforces in v0 (and nothing more):
 #   files    — bubblewrap: whole tree read-only, $HOME replaced by tmpfs, then ONLY the manifest
 #              paths bound back (ro for "r", rw for "rw"); the app's own dir is rw implicitly.
-#   network  — DENIED. Always --unshare-net. A non-empty `network` list is recorded and shown
-#              but NOT enforced per-domain yet (that needs the per-uid egress work); v0 refuses
-#              to pretend, so the app simply has no network.
+#   network  — the sandbox is ALWAYS --unshare-net. A non-empty `network` list starts bin/agos-net
+#              on the host (per-app, exact-domain allowlist, GET/HEAD only, https, no redirects,
+#              private addresses refused) on a unix socket bound into the sandbox as
+#              $AGOS_NET_SOCKET; bin/agos-fetch is the client ($AGOS_FETCH). The app never
+#              holds a network socket of its own.
 #   devices  — must be empty.
 #   limits   — systemd-run --user --scope MemoryMax / CPUQuota / RuntimeMaxSec, when available.
 #   approval — the manifest's sha256 must be in ~/.local/state/agent-os/approvals.json, which
@@ -17,8 +19,9 @@
 #              agent. Edit the manifest after approval and the hash no longer matches: refused.
 #
 # Never runs unsandboxed: no bwrap -> refuse. stdlib only.
-import hashlib, json, os, re, shutil, subprocess, sys
+import hashlib, json, os, re, shutil, signal, subprocess, sys, tempfile
 
+HERE = os.path.dirname(os.path.abspath(__file__))
 APPS_REL = ".local/share/agent-os/apps"
 APPROVALS_REL = ".local/state/agent-os/approvals.json"
 # Mirrors agos-do's deny list (playground, 2026-10-05): credential/private locations under $HOME.
@@ -197,11 +200,20 @@ def make_private_dirs(path):
         os.mkdir(d, 0o700); os.chmod(d, 0o700)
 
 
-def build_argv(m, v, use_systemd):
+def net_dir():
+    base = os.environ.get("XDG_RUNTIME_DIR")
+    if not base or not os.path.isdir(base):
+        base = None
+    return tempfile.mkdtemp(prefix="agos-net.", dir=base)
+
+
+def build_argv(m, v, use_systemd, netsock=None):
     argv = ["bwrap", "--unshare-all", "--unshare-net", "--die-with-parent", "--new-session",
             "--ro-bind", "/", "/", "--proc", "/proc", "--dev", "/dev",
             "--tmpfs", "/tmp", "--tmpfs", "/run", "--tmpfs", v["home"],
             "--bind", v["appdir"], v["appdir"]]
+    if netsock:  # the hand's socket dir, and nothing else, reaches the sandbox
+        argv += ["--bind", os.path.dirname(netsock), os.path.dirname(netsock)]
     for real, mode in v["binds"]:
         argv += ["--ro-bind" if mode == "r" else "--bind", real, real]
     # bwrap creates the parent directories of every bind inside the tmpfs $HOME; those would be
@@ -209,7 +221,10 @@ def build_argv(m, v, use_systemd):
     # rw binds mounted under it keep their own rw mounts). The app writes only where approved.
     argv += ["--remount-ro", v["home"]]
     argv += ["--clearenv", "--setenv", "HOME", v["home"], "--setenv", "PATH", os.environ.get("PATH", "/usr/bin:/bin"),
-             "--setenv", "AGOS_APP", m["name"], "--chdir", v["appdir"], "--"] + list(m["entry"])
+             "--setenv", "AGOS_APP", m["name"]]
+    if netsock:
+        argv += ["--setenv", "AGOS_NET_SOCKET", netsock, "--setenv", "AGOS_FETCH", os.path.join(HERE, "agos-fetch")]
+    argv += ["--chdir", v["appdir"], "--"] + list(m["entry"])
     if use_systemd:
         L = v["limits"]
         argv = ["systemd-run", "--user", "--scope", "--quiet", "--collect",
@@ -236,14 +251,15 @@ def main(args):
         print("agos-run: REFUSED: manifest sha256 %s is not approved (approve via the confirm channel; "
               "an edited manifest needs re-approval)" % sha(m)[:16], file=sys.stderr); return 4
     if v["network"]:
-        print("agos-run: network: not yet enforced per-domain, DENIED in v0 (requested: %s)"
+        print("agos-run: network: via agos-net hand only (GET/HEAD, https, exact domains): %s"
               % ", ".join(v["network"]), file=sys.stderr)
     if not shutil.which("bwrap"):
         print("agos-run: REFUSED: cannot sandbox: bwrap missing (will not run unsandboxed)", file=sys.stderr); return 5
     use_systemd = user_manager_available()
     if not use_systemd:
         print("agos-run: limits: not enforced (no user manager; sandbox still applies)", file=sys.stderr)
-    argv = build_argv(m, v, use_systemd)
+    netsock = os.path.join("/run/agos-net.PLACEHOLDER", "net.sock") if (dry and v["network"]) else None
+    argv = build_argv(m, v, use_systemd, netsock)
     if dry:
         print(json.dumps({"sha256": sha(m), "argv": argv, "create": v["create"]})); return 0
     try:
@@ -251,7 +267,36 @@ def main(args):
             make_private_dirs(d)
     except OSError as e:
         print("agos-run: REFUSED: R15 cannot create rw path %s: %s" % (d, e.strerror or e), file=sys.stderr); return 6
-    os.execvp(argv[0], argv)
+    if not v["network"]:
+        os.execvp(argv[0], argv)
+    return run_with_net(m, v, use_systemd)
+
+
+def run_with_net(m, v, use_systemd):
+    """Network apps are supervised, not exec'd: start the hand, run the sandbox, stop the hand."""
+    d = net_dir(); sock = os.path.join(d, "net.sock")
+    hand = subprocess.Popen([sys.executable, os.path.join(HERE, "agos-net"), "serve", sock, "--app", m["name"],
+                             "--allow", ",".join(v["network"]), "--parent", str(os.getpid())])
+    for _ in range(100):  # the socket appears when the hand listens
+        if os.path.exists(sock) or hand.poll() is not None:
+            break
+        import time; time.sleep(0.05)
+    if not os.path.exists(sock):
+        hand.kill(); shutil.rmtree(d, ignore_errors=True)
+        print("agos-run: REFUSED: the network hand did not start", file=sys.stderr); return 7
+    argv = build_argv(m, v, use_systemd, sock)
+    app = subprocess.Popen(argv)
+    def relay(signum, frame):
+        try: app.send_signal(signum)
+        except OSError: pass
+    for sg in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+        signal.signal(sg, relay)
+    rc = app.wait()
+    hand.terminate()
+    try: hand.wait(timeout=5)
+    except subprocess.TimeoutExpired: hand.kill()
+    shutil.rmtree(d, ignore_errors=True)
+    return rc
 
 
 if __name__ == "__main__":
