@@ -7,13 +7,14 @@
 # fake on PATH that records its argv, so the activation calls are asserted, not assumed.
 #
 # Acceptance criteria:
-#   A. CONTROL: a manifest with an empty schedule is refused (exit 3); no units written, no
+#   A. CONTROL: a manifest with an empty schedule is refused (exit 6); no units written, no
 #      systemctl call.
 #   B. CONTROL: a scheduled but UNAPPROVED manifest is refused (exit 4); no units, no call.
 #   C. Approved + scheduled: both units exist; ExecStart is `<abs agos-run> <appdir>` and nothing
 #      else; OnCalendar equals the manifest schedule; the timer's Unit= names the service;
 #      X-AgentOS-Sha equals the manifest sha; systemctl was called `--user daemon-reload` then
-#      `--user enable --now agos-app-<name>.timer`, in that order.
+#      `--user enable --now agos-app-<name>.timer`, then `restart` (re-arm), in that order; the
+#      service pins Environment=PATH so bwrap/python3 are found under a bare user manager.
 #   D. `list` shows the app, its schedule, the sha prefix and "ok".
 #   E. Edit the manifest after install: `list` reports STALE (manifest changed). Restore it and
 #      delete the approval: `list` reports STALE (revoked). Restore the approval: "ok" again.
@@ -22,8 +23,16 @@
 #      with a slash or dots exits 2 and touches nothing.
 #   G. CONTROL: systemctl absent from PATH: install refuses (exit 5) and writes no units.
 #   H. CONTROL: a unit file under our name that we did not write (no X-AgentOS-Sha) is never
-#      removed by `remove` (exit 2) and never listed.
+#      removed by `remove` (exit 7), never listed, and never overwritten by `install` (exit 7,
+#      bytes identical afterwards).
 #   I. CONTROL: an invalid manifest (credential path, R5) is refused (exit 3) naming the rule.
+#   J. Paths with a space, a double quote and a % (HOME and the runner's dir): ExecStart args are
+#      double-quoted with " escaped and % doubled, so systemd's splitter and specifier expansion
+#      see the real path; the unit parses back to the exact two argv words.
+#   K. A re-install whose activation fails restores the previous units byte for byte (the old
+#      timer keeps working); a FIRST install whose activation fails leaves no units.
+#   L. CONTROL: with systemd-analyze absent, a schedule carrying a newline (which would start a
+#      new unit key) or a % is refused (exit 6) and nothing is written.
 #
 # stdlib only. Exit 0 all-pass; AssertionError otherwise.
 SIDE_EFFECTS = []  # scratch HOME/XDG_CONFIG_HOME under mktemp, removed at exit
@@ -107,7 +116,7 @@ try:
     noschd = dict(GOOD, schedule="")
     d = mk(noschd); approve(noschd)
     r = run("install", d)
-    check(r.returncode == 3 and "no schedule" in r.stderr, "A: expected exit 3 no schedule: %d %s" % (r.returncode, r.stderr))
+    check(r.returncode == 6 and "no schedule" in r.stderr, "A: expected exit 6 no schedule: %d %s" % (r.returncode, r.stderr))
     check(not units("daily-summary") and not calls(), "A: units or systemctl calls on refusal")
     print("A. empty schedule refused, nothing written")
 
@@ -125,12 +134,13 @@ try:
     svc, tmr = units("daily-summary")
     check(svc.endswith(".service") and tmr.endswith(".timer"), "C: both units expected: %r" % units("daily-summary"))
     S, T = unit_kv(svc), unit_kv(tmr)
-    check(S["ExecStart"] == "%s %s" % (RUNNER, os.path.realpath(d)), "C: ExecStart %r" % S["ExecStart"])
+    check(S["ExecStart"] == '"%s" "%s"' % (RUNNER, os.path.realpath(d)), "C: ExecStart %r" % S["ExecStart"])
+    check(S.get("Environment", "").startswith('PATH="' + FAKE), "C: PATH not pinned: %r" % S.get("Environment"))
     check(S["Type"] == "oneshot" and S["TimeoutStartSec"] == "120", "C: service shape %r" % S)
     check(T["OnCalendar"] == SCHEDULE and T["Unit"] == "agos-app-daily-summary.service", "C: timer shape %r" % T)
     check(T["X-AgentOS-Sha"] == sha_of(GOOD) == S["X-AgentOS-Sha"], "C: sha not recorded")
-    check(calls() == ["--user daemon-reload", "--user enable --now agos-app-daily-summary.timer"], "C: systemctl calls %r" % calls())
-    print("C. units written; ExecStart is agos-run only; daemon-reload then enable --now")
+    check(calls() == ["--user daemon-reload", "--user enable --now agos-app-daily-summary.timer", "--user restart agos-app-daily-summary.timer"], "C: systemctl calls %r" % calls())
+    print("C. units written; ExecStart is agos-run only, quoted; daemon-reload, enable --now, restart")
 
     # D: list ok
     r = run("list")
@@ -170,8 +180,12 @@ try:
     foreign = os.path.join(UNITS, "agos-app-foreign.timer")
     open(foreign, "w").write("[Timer]\nOnCalendar=daily\n")
     r = run("list"); check("foreign" not in r.stdout, "H: foreign unit listed: %r" % r.stdout)
-    r = run("remove", "foreign"); check(r.returncode == 2 and os.path.exists(foreign), "H: foreign unit removed or wrong exit %d" % r.returncode)
-    print("H. a unit not written by agos-schedule is neither listed nor removed")
+    r = run("remove", "foreign"); check(r.returncode == 7 and os.path.exists(foreign), "H: foreign unit removed or wrong exit %d" % r.returncode)
+    fm = dict(GOOD, name="foreign"); fd = mk(fm); approve(fm)
+    r = run("install", fd)
+    check(r.returncode == 7 and open(foreign).read() == "[Timer]\nOnCalendar=daily\n" and not os.path.exists(os.path.join(UNITS, "agos-app-foreign.service")),
+          "H: install overwrote a foreign unit or wrong exit %d %s" % (r.returncode, r.stderr))
+    print("H. a unit not written by agos-schedule is neither listed, removed, nor overwritten")
 
     # I: invalid manifest
     bad = dict(GOOD, files=[{"path": "~/.ssh/config", "mode": "r"}]); mk(bad); approve(bad)
@@ -179,6 +193,53 @@ try:
     check(r.returncode == 3 and "R5" in r.stderr and not units("daily-summary"), "I: %d %s" % (r.returncode, r.stderr))
     print("I. invalid manifest refused naming the rule")
 
-    print("agos-schedule-battery: PASS (9 criteria)")
+    # J: quoting. A second HOME with awkward characters, and a copy of bin/ under an awkward dir.
+    H2 = os.path.join(TMP, 'odd home 100%"x'); X2 = os.path.join(H2, ".config")
+    B2 = os.path.join(TMP, 'odd bin %q', "bin"); os.makedirs(B2)
+    for b in ("agos-run", "agos-schedule"):
+        shutil.copy(os.path.join(BIN, b), os.path.join(B2, b)); os.chmod(os.path.join(B2, b), 0o755)
+    env3 = dict(ENV, HOME=H2, XDG_CONFIG_HOME=X2)
+    apps2 = os.path.join(H2, ".local/share/agent-os/apps/daily-summary"); os.makedirs(apps2)
+    g2 = dict(GOOD, files=[]); json.dump(g2, open(os.path.join(apps2, "manifest.json"), "w"))
+    os.makedirs(os.path.join(H2, ".local/state/agent-os"), mode=0o700)
+    json.dump({sha_of(g2): {"name": "daily-summary", "approved_at": "x"}}, open(os.path.join(H2, ".local/state/agent-os/approvals.json"), "w"))
+    r = subprocess.run([sys.executable, os.path.join(B2, "agos-schedule"), "install", apps2], capture_output=True, text=True, env=env3)
+    check(r.returncode == 0, "J: install under odd paths failed: %s" % r.stderr)
+    ex = unit_kv(os.path.join(X2, "systemd/user/agos-app-daily-summary.service"))["ExecStart"]
+    # parse it back the way systemd does: double-quoted words, \" escapes, %% -> %
+    import re as _re
+    words = [w.replace('\\"', '"').replace("%%", "%") for w in _re.findall(r'"((?:[^"\\]|\\.)*)"', ex)]
+    check(words == [os.path.join(B2, "agos-run"), os.path.realpath(apps2)], "J: ExecStart words %r from %r" % (words, ex))
+    check("%" not in ex.replace("%%", ""), "J: a lone %% survived in %r" % ex)
+    print("J. paths with space, quote and % round-trip through ExecStart quoting")
+
+    # K: failed activation. Fake systemctl that fails on enable.
+    FAIL = os.path.join(TMP, "failbin"); os.makedirs(FAIL)
+    with open(os.path.join(FAIL, "systemctl"), "w") as fh:
+        fh.write('#!/bin/sh\nprintf "%s\\n" "$*" >> "%s"\ncase "$*" in *enable*) exit 1;; esac\nexit 0\n' % ("%s", LOG))
+    os.chmod(os.path.join(FAIL, "systemctl"), 0o755)
+    envK = dict(ENV, PATH=FAIL + os.pathsep + ENV["PATH"])
+    mk(GOOD); approve(GOOD)
+    r = run("install", d); check(r.returncode == 0, "K: setup install failed %s" % r.stderr)
+    old = {p: open(p).read() for p in units("daily-summary")}
+    mk(dict(GOOD, schedule="*-*-* 08:00:00")); approve(dict(GOOD, schedule="*-*-* 08:00:00"))
+    r = run("install", d, env=envK)
+    check(r.returncode == 5 and "restored" in r.stderr, "K: expected 5 + restored: %d %s" % (r.returncode, r.stderr))
+    check({p: open(p).read() for p in units("daily-summary")} == old, "K: previous units not restored byte for byte")
+    run("remove", "daily-summary")
+    mk(GOOD); approve(GOOD)
+    r = run("install", d, env=envK)
+    check(r.returncode == 5 and not units("daily-summary"), "K: first-install failure left units: %d" % r.returncode)
+    print("K. failed re-install restores the previous units; failed first install leaves none")
+
+    # L: raw schedule with systemd-analyze absent (PATH = fake systemctl only)
+    envL = dict(ENV, PATH=FAKE)
+    for bad in ("*-*-* 07:00:00\nUnit=evil.service", "%H:00"):
+        mb = dict(GOOD, schedule=bad); mk(mb); approve(mb)
+        r = run("install", d, env=envL)
+        check(r.returncode == 6 and not units("daily-summary"), "L: schedule %r: exit %d %s" % (bad, r.returncode, r.stderr))
+    print("L. a schedule with a newline or % is refused even without systemd-analyze")
+
+    print("agos-schedule-battery: PASS (12 criteria)")
 finally:
     shutil.rmtree(TMP, ignore_errors=True)

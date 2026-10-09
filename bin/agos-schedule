@@ -19,6 +19,10 @@
 # which the runner refuses until re-approved; `list` shows such a timer as STALE so the owner
 # sees a clock whose app will no longer run.
 #
+# Exit codes: 2 usage/bad name, 3 manifest invalid (runner's rule named), 4 not approved,
+# 5 systemctl missing or failed, 6 nothing to install (empty schedule) or a schedule the unit
+# syntax cannot carry, 7 a unit under our name that this program did not write (never touched).
+#
 # The units carry `X-AgentOS-Sha=` and `X-AgentOS-App=` so `list` and `remove` act only on units
 # this program wrote. Unit names come from manifest.name (R1: [a-z0-9-], ≤40), so they are valid
 # systemd unit names by construction.
@@ -66,6 +70,32 @@ def write_atomic(path, text):
     os.chmod(tmp, 0o644); os.replace(tmp, path)
 
 
+def unit_arg(p):
+    """Quote one ExecStart argument for systemd: double-quoted, C escapes, % doubled (specifier)."""
+    return '"' + p.replace("\\", "\\\\").replace('"', '\\"').replace("%", "%%").replace("$", "$$") + '"'
+
+
+def unit_value(v, allow_pct=False):
+    """A value that must sit on ONE unit line. Refuse control characters (a newline would start a
+    new key). % is refused too (systemd expands it) unless the caller doubles it itself."""
+    if any(ord(c) < 32 or ord(c) == 127 for c in v) or ("%" in v and not allow_pct):
+        raise R.ManifestError("value cannot be carried in a unit file (control character or %%): %r" % v)
+    return v
+
+
+def app_tag(appdir):
+    """X-AgentOS-App line: % doubled so the file stays specifier-safe; cmd_list undoes it."""
+    return unit_value(appdir, allow_pct=True).replace("%", "%%")
+
+
+def ours(path):
+    """None if absent, True if this program wrote it, False if something else did."""
+    if not os.path.exists(path):
+        return None
+    u = parse_unit(path)
+    return bool(u and "X-AgentOS-Sha" in u)
+
+
 def parse_unit(path):
     """Return {key: value} for the simple key=value lines of a unit this program wrote."""
     out = {}
@@ -85,34 +115,56 @@ def cmd_install(appdir):
     v = R.validate(m, appdir)
     sch = m.get("schedule") or ""
     if not sch:
-        print("agos-schedule: REFUSED: %s has no schedule (R10 empty); nothing to install" % m["name"], file=sys.stderr); return 3
+        print("agos-schedule: REFUSED: %s has no schedule (R10 empty); nothing to install" % m["name"], file=sys.stderr); return 6
     s = R.sha(m)
     if not R.approved(m, v["home"]):
         print("agos-schedule: REFUSED: manifest sha256 %s is not approved; approve it first (agos-approve approve %s)"
               % (s[:16], appdir), file=sys.stderr); return 4
     if not shutil.which("systemctl"):
         print("agos-schedule: REFUSED: systemctl not on PATH; cannot activate a user timer", file=sys.stderr); return 5
+    try:
+        sch = unit_value(sch)  # belt: validate() only checks the calendar when systemd-analyze exists
+    except R.ManifestError as e:
+        print("agos-schedule: REFUSED: schedule %s" % e, file=sys.stderr); return 6
     name = m["name"]; appdir_real = v["appdir"]
     svc, tmr = unit_paths(name)
+    for p in (svc, tmr):
+        if ours(p) is False:
+            print("agos-schedule: REFUSED: %s exists and was not written by agos-schedule; move it by hand" % p, file=sys.stderr); return 7
+    path_env = os.environ.get("PATH", "")
     service = ("# written by agos-schedule; do not edit, re-run `agos-schedule install` instead\n"
                "[Unit]\nDescription=Agent OS app %s (sandboxed by agos-run)\n"
                "X-AgentOS-App=%s\nX-AgentOS-Sha=%s\n\n"
-               "[Service]\nType=oneshot\nExecStart=%s %s\nTimeoutStartSec=%d\n"
-               % (name, appdir_real, s, RUNNER, appdir_real, v["limits"]["wall_s"] + 60))
+               "[Service]\nType=oneshot\nExecStart=%s %s\nTimeoutStartSec=%d\n%s"
+               % (name, app_tag(appdir_real), s, unit_arg(RUNNER), unit_arg(appdir_real),
+                  v["limits"]["wall_s"] + 60,
+                  ("Environment=PATH=%s\n" % unit_arg(path_env)) if path_env else ""))
     timer = ("# written by agos-schedule; do not edit, re-run `agos-schedule install` instead\n"
              "[Unit]\nDescription=Agent OS app %s schedule\nX-AgentOS-App=%s\nX-AgentOS-Sha=%s\n\n"
              "[Timer]\nOnCalendar=%s\nPersistent=false\nAccuracySec=1min\nUnit=%s%s.service\n\n"
-             "[Install]\nWantedBy=timers.target\n" % (name, appdir_real, s, sch, PREFIX, name))
+             "[Install]\nWantedBy=timers.target\n" % (name, app_tag(appdir_real), s, sch, PREFIX, name))
     os.makedirs(unit_dir(), exist_ok=True)
+    previous = {}
+    for p in (svc, tmr):  # a re-install keeps the old units in hand so a failed activation restores them
+        try:
+            with open(p) as fh: previous[p] = fh.read()
+        except OSError:
+            previous[p] = None
     write_atomic(svc, service); write_atomic(tmr, timer)
     try:
         systemctl("daemon-reload")
         systemctl("enable", "--now", PREFIX + name + ".timer")
+        systemctl("restart", PREFIX + name + ".timer")  # re-arm: enable --now leaves an active timer on its old OnCalendar
     except R.ManifestError as e:
-        for p in (svc, tmr):
-            try: os.unlink(p)
-            except OSError: pass
-        print("agos-schedule: REFUSED: %s; units removed again" % e, file=sys.stderr); return 5
+        for p, text in previous.items():
+            if text is None:
+                try: os.unlink(p)
+                except OSError: pass
+            else:
+                write_atomic(p, text)
+        try: systemctl("daemon-reload")
+        except R.ManifestError: pass
+        print("agos-schedule: REFUSED: %s; %s" % (e, "previous units restored" if any(previous.values()) else "units removed again"), file=sys.stderr); return 5
     print("installed %s: %s -> %s (sha %s)" % (PREFIX + name + ".timer", sch, tmr, s[:8])); return 0
 
 
@@ -126,7 +178,7 @@ def cmd_remove(name):
     for p in present:
         u = parse_unit(p)
         if not u or "X-AgentOS-Sha" not in u:
-            print("agos-schedule: REFUSED: %s was not written by agos-schedule; remove it by hand" % p, file=sys.stderr); return 2
+            print("agos-schedule: REFUSED: %s was not written by agos-schedule; remove it by hand" % p, file=sys.stderr); return 7
     try:
         systemctl("disable", "--now", PREFIX + name + ".timer")
     except R.ManifestError as e:
@@ -164,7 +216,7 @@ def cmd_list():
         t = parse_unit(os.path.join(d, PREFIX + name + ".timer")) or {}
         if "X-AgentOS-Sha" not in t:
             continue  # not ours
-        rows.append((name, t.get("OnCalendar", "?"), t["X-AgentOS-Sha"][:8], status_of(t.get("X-AgentOS-App", ""), t["X-AgentOS-Sha"])))
+        rows.append((name, t.get("OnCalendar", "?"), t["X-AgentOS-Sha"][:8], status_of(t.get("X-AgentOS-App", "").replace("%%", "%"), t["X-AgentOS-Sha"])))
     if not rows:
         print("no app timers installed"); return 0
     for name, sch, s, st in rows:
