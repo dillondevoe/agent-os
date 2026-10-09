@@ -155,6 +155,8 @@ def load_manifest(appdir):
             return json.loads(fh.read().decode("utf-8"))
     except FileNotFoundError:
         raise ManifestError("R12 no manifest.json in %s" % appdir)
+    except OSError as e:
+        raise ManifestError("R12 manifest.json unreadable: %s" % e)
     except (ValueError, UnicodeDecodeError) as e:
         raise ManifestError("R12 manifest.json is not valid JSON: %s" % e)
 
@@ -164,10 +166,8 @@ def approved(m, h):
     try:
         with open(p) as fh:
             db = json.load(fh)
-    except FileNotFoundError:
-        return False
-    except ValueError:
-        return False  # a corrupt approvals file approves nothing
+    except (OSError, ValueError):
+        return False  # a missing, unreadable or corrupt approvals file approves nothing
     entry = db.get(sha(m)) if isinstance(db, dict) else None
     return isinstance(entry, dict) and entry.get("name") == m["name"]
 
@@ -185,7 +185,7 @@ def user_manager_available():
         return False
 
 
-def make_private_dirs(path, h):
+def make_private_dirs(path):
     """mkdir -p with 0700 on EVERY component created, never following a file. Raises OSError."""
     parts = []
     cur = path
@@ -248,7 +248,7 @@ def main(args):
         print(json.dumps({"sha256": sha(m), "argv": argv, "create": v["create"]})); return 0
     try:
         for d in v["create"]:  # R13 exception: an approved, missing rw path is a directory the app owns
-            make_private_dirs(d, v["home"])
+            make_private_dirs(d)
     except OSError as e:
         print("agos-run: REFUSED: R15 cannot create rw path %s: %s" % (d, e.strerror or e), file=sys.stderr); return 6
     os.execvp(argv[0], argv)
