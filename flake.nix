@@ -1880,7 +1880,10 @@
               touch $out
             '';
 
-        # A UNIT THAT CANNOT TIME OUT IS A BOOT THAT CANNOT FAIL LOUDLY. agos-boot-prewarm is
+        # HISTORY: written while agos-boot-prewarm was a oneshot. Since #322 it is Type=exec with
+        # a soft in-script bound (see prewarm-does-not-block-boot); this check still guards that
+        # TimeoutStartSec is never an infinity spelling. Original rationale follows.
+        # A UNIT THAT CANNOT TIME OUT IS A BOOT THAT CANNOT FAIL LOUDLY. agos-boot-prewarm was
         # `Type=oneshot RemainAfterExit=yes wantedBy=multi-user.target`, and systemd's default
         # TimeoutStartSec for a oneshot is INFINITY — so a WEDGED prewarm and a merely SLOW one
         # are BYTE-IDENTICAL from every vantage: same `activating`, same empty
@@ -1981,9 +1984,8 @@
             assert lib.assertMsg (finite realSc)
               ("prewarm-start-timeout-is-finite: agos-boot-prewarm has no finite TimeoutStartSec "
                + "(got " + (toString (realSc.TimeoutStartSec or "<unset -> oneshot default = infinity>"))
-               + "). It is wantedBy=multi-user.target, so an unbounded start blocks the target with "
-               + "no failed unit and no observable — a wedged prewarm is indistinguishable from a "
-               + "slow one, forever.");
+               + "). An unbounded start is a hang with no failed unit and no observable — a wedged "
+               + "prewarm is indistinguishable from a slow one, forever.");
             assert lib.assertMsg (! (finite armAbsent))
               "prewarm-start-timeout-is-finite: PRE-FIX ARM 1 (no TimeoutStartSec — the shape measured on the Dell) was ACCEPTED; the predicate cannot detect what it was written for.";
             assert lib.assertMsg (! (finite armInfinity))
