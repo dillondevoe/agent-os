@@ -58,6 +58,7 @@
 #   app-approve-battery.py        10 criteria — bin/cap-app-approve (T2 app.approve impl): binds the approval to what the human read
 #   agos-store-paths-battery.py   11 criteria — agos tools: approvals store / apps root precedence (image constants > env > $HOME), A3/A5
 #   agos-schedule-battery.py      12 criteria — bin/agos-schedule manifest schedule -> systemd user timer, control-armed (fake systemctl)
+#   wall-launch-battery.py        9 criteria — bin/agent-os-wall-launch: peer bound to the agent uid, one request line, nothing spawned on refusal
 #   agent-loop-wall-socket-battery.py 7 criteria — agent-loop's production wall seam (unix socket): no fallback, overall deadline, deny on every failure
 #   agent-loop-dispatch-battery.py  8 checks — agent-loop tool-dispatch mechanics vs bin/mcp + broker-stub
 #
@@ -247,6 +248,9 @@ if need "$BIN/agent-loop" agent-loop-dispatch && need "$T/broker-stub.py" agent-
     "$PY" "$T/agent-loop-dispatch-battery.py"
 fi
 # agent-loop-wall-socket-battery.py — the socket seam to the wall service (fake server; no model).
+if need "$BIN/agent-os-wall-launch" wall-launch; then
+  run wall-launch "$PY" "$T/wall-launch-battery.py"
+fi
 if need "$BIN/agent-loop" agent-loop-wall-socket; then
   run agent-loop-wall-socket env PYTHONPATH="$ROOT/modules" "$PY" "$T/agent-loop-wall-socket-battery.py"
 fi
