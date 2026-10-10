@@ -23,7 +23,7 @@
 # this module already ships. The plug emoji 🔌 (U+1F50C) is NOT in DejaVu and was rejected for that
 # reason. If the bar's font is ever swapped away from DejaVu, re-verify or fall back to ASCII "chg".
 
-{ config, pkgs, ... }:
+{ config, pkgs, lib, ... }:
 
 let
   user = "agent";
@@ -331,7 +331,23 @@ let
     #battery.critical { color: #f7768e; }
   '';
 in
-{
+lib.mkMerge [
+  # Hardware, whatever the desktop (audio for agos-sys volume, brightness control).
+  {
+  # Audio server (the Waybar volume module and agos-sys read it).
+  security.rtkit.enable = true;
+  services.pipewire = {
+    enable = true;
+    alsa.enable = true;
+    pulse.enable = true;
+  };
+  users.users.${user}.extraGroups = [ "video" ];
+  services.udev.packages = [ pkgs.brightnessctl ];
+  }
+
+  # The Hyprland desktop: only when agentos.desktop = "hyprland" (surfaces-and-first-login.md §9
+  # item 4; default "hyprland" in the open lane, so the default system is unchanged).
+  (lib.mkIf (config.agentos.desktop == "hyprland") {
   # Wayland compositor. programs.hyprland pulls in the hyprland portal + graphics defaults and
   # sets up the session; hardware.graphics is already enabled in configuration-open.nix.
   # Exposed so the `hyprland-config-parses` flake check can feed the EXACT derivation
@@ -348,13 +364,6 @@ in
     extraPortals = [ pkgs.xdg-desktop-portal-gtk ];   # GTK file-chooser (firefox up/downloads)
   };
 
-  # Audio server so the Waybar volume module has something to read (ambient-bar completeness).
-  security.rtkit.enable = true;
-  services.pipewire = {
-    enable = true;
-    alsa.enable = true;
-    pulse.enable = true;
-  };
 
   fonts.packages = with pkgs; [ dejavu_fonts ];
 
@@ -482,8 +491,6 @@ in
   # via services.udev.packages + putting the agent in `video` is the canonical rootless path.
   # extraGroups is listOf str, so this concatenates with configuration-open.nix's [ "wheel"
   # "networkmanager" ] rather than clashing.
-  users.users.${user}.extraGroups = [ "video" ];
-  services.udev.packages = [ pkgs.brightnessctl ];
 
   # Seed the reproducible baseline into the agent's config. Force-symlink to the store so the
   # RUNNING config always == the verified Nix source (reproducibility guarantee). Live per-user
@@ -506,4 +513,5 @@ in
       exec Hyprland
     fi
   '';
-}
+})
+]

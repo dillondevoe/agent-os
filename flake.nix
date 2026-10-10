@@ -1618,6 +1618,7 @@
             dfltSys = self.nixosConfigurations.agentos-open;
             altSys = mkOpenSystem [ { agentos.terminal = "foot"; agentos.shell = "fish"; } ];
             dflt = dfltSys.config; alt = altSys.config;
+            none = (mkOpenSystem [ { agentos.desktop = "none"; } ]).config;
             names = c: map (p: p.name or "") c.environment.systemPackages;
             bad = (builtins.tryEval (builtins.deepSeq
               (mkOpenSystem [ { agentos.terminal = "xterm"; } ]).config.agentos.surfaceInternal.terminalCmd true)).success;
@@ -1631,6 +1632,18 @@
             "surface-options: the agent account keeps bash whatever the human picks";
           assert lib.assertMsg (lib.any (n: lib.hasPrefix "foot-" n) (names alt)) "surface-options: the chosen terminal must be installed";
           assert lib.assertMsg (!bad) "surface-options: an unknown terminal evaluated";
+          # agentos.desktop = "none" (order of work item 4): no compositor, no brain-home desktop unit,
+          # no `exec Hyprland` on tty1, audio and brightness kept, the adapter told via AGENTOS_DESKTOP;
+          # the default sets no AGENTOS_DESKTOP at all.
+          assert lib.assertMsg (!none.programs.hyprland.enable && !(none.systemd.user.services ? brain-home)
+                                && !(none.systemd.user.services ? waybar) && none.services.pipewire.enable
+                                && !(lib.hasInfix "exec Hyprland" none.environment.loginShellInit)
+                                && (none.environment.variables.AGENTOS_DESKTOP or "") == "none")
+            "surface-options: agentos.desktop = none must drop the Hyprland desktop and keep audio/brightness";
+          assert lib.assertMsg (builtins.tryEval (builtins.deepSeq none.system.build.toplevel.drvPath true)).success
+            "surface-options: a desktop = none system must evaluate end to end";
+          assert lib.assertMsg (dflt.programs.hyprland.enable && !(dflt.environment.variables ? AGENTOS_DESKTOP))
+            "surface-options: the default desktop stays hyprland and sets no AGENTOS_DESKTOP";
           assert lib.assertMsg (!(lib.any (n: lib.hasPrefix "foot-" n || lib.hasPrefix "ghostty-" n || lib.hasPrefix "alacritty-" n) (names dflt)))
             "surface-options: the default system must not gain a second terminal";
           nixpkgs.legacyPackages.${system}.runCommand "surface-options-check" { } ''

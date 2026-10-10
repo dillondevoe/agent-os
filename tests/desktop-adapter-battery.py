@@ -124,5 +124,15 @@ reset()
 check(isinstance(N.notify("hi"), D.Unsupported), "G: absent notify-send -> Unsupported")
 ok("G notify: message after --, capped at 500; absent tool -> Unsupported")
 
+# H — adapter() follows agentos.desktop: AGENTOS_DESKTOP=none -> NoDesktop; unset or hyprland -> Hyprland
+os.environ.pop("AGENTOS_DESKTOP", None)
+check(isinstance(D.adapter(), D.HyprlandAdapter), "H: unset -> Hyprland (the default system sets nothing)")
+os.environ["AGENTOS_DESKTOP"] = "hyprland"
+check(isinstance(D.adapter(), D.HyprlandAdapter), "H: hyprland -> Hyprland")
+os.environ["AGENTOS_DESKTOP"] = "none"
+check(isinstance(D.adapter(), D.NoDesktop) and isinstance(D.adapter().windows(), D.Unsupported), "H: none -> NoDesktop")
+os.environ.pop("AGENTOS_DESKTOP")
+ok("H adapter() follows AGENTOS_DESKTOP (none -> NoDesktop; unset/hyprland -> Hyprland)")
+
 os.environ["PATH"] = REAL_PATH
 print("desktop-adapter-battery: PASS (%d criteria)" % len(passed))

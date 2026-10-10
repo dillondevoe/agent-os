@@ -19,7 +19,7 @@
 # config `hyprctl dispatch` EVALUATES its argument as Lua. So arrange() only ever passes a value
 # from the closed ARRANGE table, looked up by key; a caller string is never interpolated into a
 # dispatch. Every call is a direct argv, never a shell.
-import json, shutil, subprocess
+import json, os, shutil, subprocess
 
 
 class Unsupported:
@@ -96,7 +96,9 @@ def _notify_send(msg):
 
 
 def adapter():
-    """The adapter for this box. Hyprland whenever it is configured (its config module is what
-    installs hyprctl); everything else is NoDesktop until sway/Plasma adapters land. The choice
-    is made per call so a battery's monkeypatch of shutil.which is honoured."""
+    """The adapter for this box, from agentos.desktop (surface-options.nix sets AGENTOS_DESKTOP only
+    for a non-default desktop): "none" -> NoDesktop; unset or "hyprland" -> HyprlandAdapter, whose
+    own verbs say so when hyprctl is absent. Chosen per call, so tests can set the environment."""
+    if os.environ.get("AGENTOS_DESKTOP") == "none":
+        return NoDesktop()
     return HyprlandAdapter()

@@ -23,6 +23,15 @@ let
 in
 {
   options.agentos = {
+    desktop = lib.mkOption {
+      type = lib.types.enum [ "none" "hyprland" ];
+      default = "hyprland";
+      description = ''
+        The desktop: "hyprland" (today's open-lane desktop) or "none" (terminal only). sway and
+        Plasma follow (surfaces-and-first-login.md §6). With "none", the brain's desktop adapter
+        answers Unsupported for window verbs instead of probing a compositor that is not there.
+      '';
+    };
     terminal = lib.mkOption {
       type = lib.types.enum (lib.attrNames terminals);
       default = "kitty";
@@ -53,6 +62,9 @@ in
     };
     # kitty is already installed by desktop-open.nix (the brain's window and the cheatsheet use it),
     # so only a non-default terminal adds a package; the default system stays byte-identical.
+    # Read by modules/agos_desktop.py adapter(); set only for a non-default desktop, so the default
+    # system's environment is unchanged.
+    environment.variables = lib.mkIf (cfg.desktop != "hyprland") { AGENTOS_DESKTOP = cfg.desktop; };
     environment.systemPackages = lib.optional (cfg.terminal != "kitty") terminals.${cfg.terminal}.pkg;
     # NixOS needs the shell enabled system-wide to be a valid login shell (/etc/shells, vendor init).
     programs.fish.enable = lib.mkIf (cfg.shell == "fish") true;
