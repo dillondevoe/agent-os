@@ -25,11 +25,12 @@ let
     # The brain lives on workspace 1. Keyed to the dedicated app_id, not to every kitty.
     assign [app_id="brain-home"] workspace number 1
     for_window [app_id="brain-home"] border none
+    # The browser opens on workspace 2, so open_url (or $mod+b) never splits the brain window.
+    assign [app_id="firefox"] workspace number 2
 
     # The session environment reaches the user manager before the brain unit is poked (same reason as
     # the Hyprland desktop: the unit, not a bare exec, owns the window's lifetime).
-    exec dbus-update-activation-environment --systemd WAYLAND_DISPLAY SWAYSOCK XDG_CURRENT_DESKTOP
-    exec systemctl --user restart brain-home.service
+    exec dbus-update-activation-environment --systemd WAYLAND_DISPLAY SWAYSOCK XDG_CURRENT_DESKTOP && systemctl --user restart brain-home.service
 
     bindsym $mod+Return exec ${term}
     bindsym $mod+b exec firefox

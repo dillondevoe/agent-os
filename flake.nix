@@ -1662,6 +1662,10 @@
                                 && (sway.environment.variables.AGENTOS_DESKTOP or "") == "sway"
                                 && sway.security.rtkit.enable)
             "surface-options: agentos.desktop = sway must give sway (not Hyprland), the brain window, and keep audio";
+          assert lib.assertMsg (lib.elem sway.programs.sway.package sway.systemd.user.services.brain-home.path)
+            "surface-options: the sway brain-home unit must have sway (swaymsg) on its PATH, or windows() is Unsupported on every boot";
+          assert lib.assertMsg (lib.all (c: lib.any (r: lib.hasInfix "kitty/kitty.conf" r) c.systemd.tmpfiles.rules) [ dflt sway ])
+            "surface-options: the brain window's kitty.conf must be seeded on every desktop with a brain window";
           assert lib.assertMsg (builtins.tryEval (builtins.deepSeq sway.system.build.toplevel.drvPath true)).success
             "surface-options: a desktop = sway system must evaluate end to end";
           assert lib.assertMsg (lib.hasInfix "while true; do agent-brain" none.environment.loginShellInit)
@@ -1675,6 +1679,10 @@
               echo "surface-options: agentos.terminal = foot does not bind foot" >&2; exit 1; }
             grep -qF 'assign [app_id="brain-home"] workspace number 1' ${sway.system.build.swayConf} || {
               echo "surface-options: the sway config lost the brain-home workspace rule" >&2; exit 1; }
+            grep -qF 'assign [app_id="firefox"] workspace number 2' ${sway.system.build.swayConf} || {
+              echo "surface-options: the sway config lost the browser-on-workspace-2 rule" >&2; exit 1; }
+            grep -qF '&& systemctl --user restart brain-home.service' ${sway.system.build.swayConf} || {
+              echo "surface-options: the sway config must start brain-home only after the environment import" >&2; exit 1; }
             grep -qF 'bindsym $mod+Return exec foot' ${sway.system.build.swayConf} || {
               echo "surface-options: the sway config does not bind the chosen terminal" >&2; exit 1; }
             grep -qF 'DESKTOP_DEFAULT = "none"' ${noneBrain}/modules/agos_desktop.py || {
