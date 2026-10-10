@@ -3,8 +3,9 @@
 #
 # Every other app-approval check stops short of the human: the impl battery fakes the store root,
 # the wall checks never reach a T2 decision. This test drives the production path the spec
-# describes: the agent asks with `agos-approve call` -> the REAL broker (started by systemd, clean
-# environment, as root: the privileged broker the spec's §6 says production still needs) -> the
+# describes: the agent builds the call with `agos-approve call` and sends it with the installed
+# agent-loop's own dispatch() (running as the agent, socket path compiled in) -> /run/agent-os/wall.sock
+# -> a wall instance (root, clean systemd environment; docs/design/broker-service.md) -> the
 # REAL confirm wrapper -> telegram is unconfigured, so the getty channel on /dev/tty2 -> the
 # operator reads the code off the console (/dev/vcs2) and types the answer into tty2 (TIOCSTI, as
 # root) -> the app.approve impl in its derived sandbox -> the root-owned store -> the agent's
@@ -97,24 +98,33 @@ pkgs.testers.runNixOSTest {
     assert run_rc(demo) == 4, "an approval in the agent's own $HOME store must not count on the image"
     print("leg 1 OK  (refused; no --approve-for-test; the agent's own store is ignored)")
 
-    # ── the confirm round trip
-    broker = box.succeed("command -v broker").strip()
-    box.succeed("mkdir -p /run/aat")
+    # ── the confirm round trip, asked FROM THE AGENT through the wall socket
+    loop = box.succeed("command -v agent-loop").strip()
+    runuser, py = (box.succeed(f"command -v {x}").strip() for x in ("runuser", "python3"))
+    box.succeed("mkdir -p /run/aat && chown agent: /run/aat")
+    # The agent-side asker: the installed agent-loop's own dispatch(), exactly what the model's
+    # tool call goes through. Writes [ok, result] as JSON.
+    put("/run/aat/ask.py",
+        "import json,sys\n"
+        "src=open(sys.argv[1]).read();ns={'__name__':'aat','__file__':sys.argv[1]}\n"
+        "exec(compile(src,sys.argv[1],'exec'),ns)\n"
+        "c=json.load(open(sys.argv[2]))\n"
+        "json.dump(ns['dispatch'](c['capability'],c['arguments']),open(sys.argv[3],'w'))\n")
+    box.succeed("chmod 0644 /run/aat/ask.py")
     seq = [0]
 
     def ask(d):
-        """Start the real broker (systemd service: clean env) on one app.approve call; return
+        """Have the agent send one app.approve call through agent-loop -> the wall socket; return
         (unit, out path, code shown on tty2)."""
         seq[0] += 1
         n = seq[0]
-        c = json.loads(box.succeed(AS_AGENT + f"agos-approve call {d}"))
-        verdict = {"ok": True, "method": "tools/call", "id": n, "name": c["capability"], "arguments": c["arguments"]}
-        put(f"/run/aat/v{n}.json", json.dumps(verdict))
+        box.succeed(AS_AGENT + f"sh -c 'agos-approve call {d} > /run/aat/c{n}.json'")
         box.succeed("chvt 1; printf '\\033c' > /dev/tty2")   # clear the console so the code read is this one
-        unit = f"aat-broker-{n}"
+        unit = f"aat-ask-{n}"
         box.succeed(
             f"systemd-run --unit={unit} --property=RemainAfterExit=yes "
-            f"/bin/sh -c 'exec {broker} run < /run/aat/v{n}.json > /run/aat/o{n}.json 2>/dev/null'"
+            f"{runuser} -u agent -- /usr/bin/env HOME=/home/agent {py} /run/aat/ask.py {loop} "
+            f"/run/aat/c{n}.json /run/aat/o{n}.json"
         )
         # The owner switches to the confirm console (Alt-F2). No login may start there: a getty
         # would clear the frame and put an agent-uid shell on the console (modules/confirm.nix).
@@ -135,16 +145,21 @@ pkgs.testers.runNixOSTest {
         )
 
     def result(unit, out):
-        box.wait_until_succeeds(f"test -s {out}", timeout=150)
+        box.wait_until_succeeds(f"test -s {out}", timeout=200)
         box.wait_until_succeeds(f"! systemctl is-active --quiet {unit} || systemctl show -p SubState {unit} | grep -q exited", timeout=30)
-        return json.loads(box.succeed(f"cat {out}").strip().splitlines()[-1])
+        ok, res = json.loads(box.succeed(f"cat {out}"))
+        return {"ok": ok, "result": res}
 
     # ── 2. approve
     unit, out, code = ask(demo)
     answer(f"approve {code}")
     r = result(unit, out)
     print("approve result: " + json.dumps(r))
-    assert r.get("ok") is True and "approved demo " + sha[:12] in json.dumps(r), r
+    assert r["ok"] is True and "approved demo " + sha[:12] in json.dumps(r), r
+    recs = [json.loads(line) for line in box.succeed("cat /var/lib/agent-os/audit/audit.log").splitlines() if line.strip()]
+    rec = [x.get("payload", x) for x in recs if x.get("payload", x).get("event") == "route"][-1]
+    assert rec.get("capability") == "app.approve" and rec.get("peer_uid") == int(box.succeed("id -u agent")), (
+        "the approval must have been asked by the agent through the wall: %r" % rec)
     s = store()
     assert s.get(sha, {}).get("name") == "demo" and s[sha].get("via") == "confirm", s
     box.succeed(f"test \"$(stat -c '%U %G %a' {STORE})\" = 'root root 644'")
@@ -158,7 +173,7 @@ pkgs.testers.runNixOSTest {
     answer("deny")
     r = result(unit, out)
     print("deny result: " + json.dumps(r))
-    assert r.get("ok") is False and r.get("error", {}).get("message") == "confirm: getty-denied", (
+    assert r["ok"] is False and "getty-denied" in json.dumps(r["result"]), (
         "the denial must come from the typed answer, not a timeout: " + json.dumps(r))
     assert sha2 not in store() and run_rc(demo2) == 4, "a denied app must not be approved"
     print("leg 3 OK  (denied on tty2 -> nothing written -> refused)")
