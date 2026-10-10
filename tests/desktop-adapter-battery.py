@@ -73,6 +73,11 @@ check(w == [{"class": "kitty", "title": "a terminal", "workspace": "1"}, {"class
 check(calls() == [["hyprctl", "clients", "-j"]], "A: direct argv: %r" % calls())
 ok("A windows() parses hyprctl clients -j via direct argv")
 
+reset(("hyprctl", json.dumps([{"class": None, "title": None, "workspace": None}])))
+w = H.windows()
+check(w == [{"class": "?", "title": "", "workspace": ""}], "A: null fields become the old defaults: %r" % w)
+ok("A2 null class/title/workspace -> '?', '', '' (no TypeError downstream)")
+
 # B
 reset()
 w = H.windows()
@@ -85,8 +90,12 @@ w = H.windows()
 check(isinstance(w, D.Unsupported) and "no readable answer" in w.reason, "C: %r" % w)
 ok("C garbage -> Unsupported")
 
-# D
-for act, disp in H.ARRANGE.items():
+# D — the four dispatch values pinned as LITERALS here (taking them from H.ARRANGE would let a changed
+# table value pass its own arm).
+PINNED = {"close": "hl.dsp.window.close()", "fullscreen": "hl.dsp.window.fullscreen()",
+          "cycle": "hl.dsp.window.cycle_next()", "split": 'hl.dsp.layout("togglesplit")'}
+check(H.ARRANGE == PINNED, "D: the arrange table changed: %r" % H.ARRANGE)
+for act, disp in PINNED.items():
     reset("hyprctl")
     r = H.arrange(act)
     check(calls() == [["hyprctl", "dispatch", disp]] and r == "desktop: %s done" % act, "D %s: %r %r" % (act, calls(), r))

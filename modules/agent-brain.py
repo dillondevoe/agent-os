@@ -5,8 +5,11 @@ import json, re, subprocess, sys, urllib.request, urllib.error, datetime, os, ha
 # The desktop adapter (surfaces-and-first-login.md §6): every compositor call goes through it.
 # Installed beside this file by genesis-open.nix; a hard import, so a packaging miss fails loudly.
 # This file's own directory goes on the path first, so the sibling resolves however the brain is
-# loaded (installed binary, a battery's spec loader, an exec from a test).
-_HERE = os.path.dirname(os.path.abspath(__file__))
+# loaded (installed binary, a battery's spec loader, an exec from a test). realpath, not abspath:
+# installed, the brain runs via /run/current-system/sw/bin/agent-brain (a symlink), and abspath would
+# put the whole merged profile bin dir first on sys.path; realpath equals sys.path[0] there, so
+# nothing is inserted.
+_HERE = os.path.dirname(os.path.realpath(__file__))
 if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
 import agos_desktop

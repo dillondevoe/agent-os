@@ -49,8 +49,9 @@ class HyprlandAdapter:
         try:
             r = subprocess.run([hyprctl, "clients", "-j"], capture_output=True, text=True, timeout=4)
             d = json.loads(r.stdout)
-            return [{"class": w.get("class", "?"), "title": w.get("title", ""),
-                     "workspace": (w.get("workspace") or {}).get("name", "")} for w in d]
+            return [{"class": str(w.get("class") or "?"), "title": str(w.get("title") or ""),
+                     "workspace": str((w.get("workspace") or {}).get("name", "")
+                                      if isinstance(w.get("workspace"), dict) else "")} for w in d]
         except Exception:
             return Unsupported("hyprctl gave no readable answer")
 
