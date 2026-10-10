@@ -49,6 +49,9 @@ def _strict_mapping(loader, node, deep=False):
 
 _StrictLoader.add_constructor(yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, _strict_mapping)
 
+# Edit REQUIRED whenever the branch-protection contexts change. The contract arm (--check-tree)
+# catches a name here that no job defines; it cannot see a context that protection requires and
+# this list omits.
 REQUIRED = ("gate", "flake-check", "installer-honesty", "pin-freshness", "vm-tests-all")
 WF_DIR = ".github/workflows"
 

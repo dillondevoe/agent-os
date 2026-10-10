@@ -15,6 +15,8 @@ name: workflow-integrity
 # path filter never reports on the PRs it skips. Every PR runs it; it costs a few API calls.
 on:
   pull_request_target:
+    # `edited` so a base retarget re-decides (same as vm-tests.yml); no matrix here, so a body edit is cheap.
+    types: [opened, synchronize, reopened, edited]
 permissions:
   contents: read
   pull-requests: write
@@ -22,7 +24,7 @@ jobs:
   workflow-integrity:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           ref: ${{ github.event.pull_request.base.sha }}
           persist-credentials: false
