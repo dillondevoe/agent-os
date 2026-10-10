@@ -2991,6 +2991,21 @@
         # AGENT_OS_MCP / AGENT_OS_BROKER / PYTHONPATH env vars are still passed explicitly per
         # the battery's own documented contract. Before this check this battery ran in NEITHER
         # gate. A regression fails `nix flake check`.
+        # bin/agent-loop's production wall seam (docs/design/broker-service.md §2.5): one request
+        # per unix-socket connection, never a fallback wall when pinned, deny on every failure.
+        agent-loop-wall-socket-contract =
+          nixpkgs.legacyPackages.${system}.runCommand "agent-loop-wall-socket-contract-check"
+            { nativeBuildInputs = [ nixpkgs.legacyPackages.${system}.python3 ]; } ''
+              work="$(mktemp -d)"
+              mkdir -p "$work/bin" "$work/tests" "$work/modules"
+              cp ${./bin/agent-loop} "$work/bin/agent-loop"
+              cp ${./bin/mcp} "$work/bin/mcp"
+              cp ${./tests/agent-loop-wall-socket-battery.py} "$work/tests/agent-loop-wall-socket-battery.py"
+              cd "$work"
+              PYTHONPATH="$work/modules" python3 tests/agent-loop-wall-socket-battery.py
+              touch $out
+            '';
+
         agent-loop-dispatch-contract =
           nixpkgs.legacyPackages.${system}.runCommand "agent-loop-dispatch-contract-check"
             { nativeBuildInputs = [ nixpkgs.legacyPackages.${system}.python3 ]; } ''
