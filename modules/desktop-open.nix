@@ -27,6 +27,17 @@
 
 let
   user = "agent";
+  # agentos.desktopShell: which user unit hyprland.lua pokes for the shell layer (bar and friends).
+  barUnit = if config.agentos.desktopShell == "noctalia" then "noctalia" else "waybar";
+  # One time per account: Noctalia starts on Hyprland's own anime wallpaper (what an unset Hyprland
+  # wallpaper shows); after that the user's pick sticks (the marker stops it ever running again).
+  noctaliaWallOnce = pkgs.writeShellScript "agentos-noctalia-wall-once" ''
+    m="$HOME/.local/state/agentos-wall2-set"
+    [ -e "$m" ] && exit 0
+    sleep 4
+    ${pkgs.noctalia}/bin/noctalia msg wallpaper-set ${pkgs.hyprland}/share/hypr/wall2.png \
+      && mkdir -p "''${m%/*}" && touch "$m"
+  '';
 
   # Reproducible Hyprland config = the Dell live baseline (dwindle tiling, tokyonight gradient
   # borders, blur/rounding/shadows/animations). `$mod`/`$(...)` are literal in Nix '' strings.
@@ -53,7 +64,7 @@ let
     -- instead of a fire-and-forget exec — it survives waybar crashes and config reloads.
     -- First hand the unit the Wayland session env, then start it.
     hl.exec_cmd("dbus-update-activation-environment --systemd WAYLAND_DISPLAY XDG_CURRENT_DESKTOP HYPRLAND_INSTANCE_SIGNATURE")
-    hl.exec_cmd("systemctl --user restart waybar.service")
+    hl.exec_cmd("systemctl --user restart ${barUnit}.service")
     -- The session Dillon actually lands in is this Hyprland/kitty desktop, not bare tty1;
     -- agent-shell.nix's respawn loop (PR #52) only covers the tty1-console path. "The brain
     -- IS the desktop" means THIS session opens as the brain and respawns in place on exit.
@@ -396,7 +407,19 @@ lib.mkMerge [
   # shell (loginShellInit below), so graphical-session.target never activates —
   # hyprland's exec-once starts the unit explicitly after importing the Wayland
   # env into the user manager (dbus-update-activation-environment line above).
-  systemd.user.services.waybar = {
+  # Noctalia (agentos.desktopShell = "noctalia") in place of waybar: same unit shape, poked by
+  # hyprland.lua, Restart=always.
+  systemd.user.services.noctalia = lib.mkIf (config.agentos.desktopShell == "noctalia") {
+    description = "Noctalia desktop shell (bar, launcher, notifications, control center)";
+    serviceConfig = {
+      ExecStart = "${pkgs.noctalia}/bin/noctalia";
+      ExecStartPost = "${noctaliaWallOnce}";
+      Restart = "always";
+      RestartSec = 2;
+    };
+  };
+
+  systemd.user.services.waybar = lib.mkIf (config.agentos.desktopShell == "waybar") {
     description = "Waybar ambient status bar";
     serviceConfig = {
       ExecStart = "${pkgs.waybar}/bin/waybar";
@@ -495,10 +518,9 @@ lib.mkMerge [
     };
   };
 
-  environment.systemPackages = with pkgs; [
+  environment.systemPackages = (with pkgs; [
     firefox                     # GPU-accelerated browser (baseline)
     kitty                       # terminal (baseline)
-    waybar                      # ambient status bar
     wofi                        # launcher — keyboard-first fuzzy search (Super+D / Super+R)
     nwg-drawer                  # full-screen icon-grid app drawer ("phone home screen" browse mode)
     grim slurp wl-clipboard     # screenshots + clipboard
@@ -507,7 +529,7 @@ lib.mkMerge [
     brightnessctl               # backlight control for the XF86MonBrightness* Fn keys
     playerctl                   # MPRIS transport for the XF86AudioPlay/Next/Prev keys
     bibata-cursors              # Bibata-Modern-Amber — the OS's default cursor identity (orange + shadow)
-  ];
+  ]) ++ (if config.agentos.desktopShell == "noctalia" then [ pkgs.noctalia ] else [ pkgs.waybar ]);   # the shell layer
 
   # Seed the reproducible baseline into the agent's config. Force-symlink to the store so the
   # RUNNING config always == the verified Nix source (reproducibility guarantee). Live per-user
@@ -515,8 +537,9 @@ lib.mkMerge [
   systemd.tmpfiles.rules = [
     "d /home/${user}/.config 0755 ${user} users - -"
     "d /home/${user}/.config/hypr 0755 ${user} users - -"
-    "d /home/${user}/.config/waybar 0755 ${user} users - -"
     "L+ /home/${user}/.config/hypr/hyprland.lua - - - - ${hyprConf}"
+  ] ++ lib.optionals (config.agentos.desktopShell == "waybar") [
+    "d /home/${user}/.config/waybar 0755 ${user} users - -"
     "L+ /home/${user}/.config/waybar/config.jsonc - - - - ${waybarConf}"
     "L+ /home/${user}/.config/waybar/style.css - - - - ${waybarStyle}"
   ];
