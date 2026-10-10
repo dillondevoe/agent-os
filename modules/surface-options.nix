@@ -1,0 +1,57 @@
+# The human's terminal and shell (docs/design/surfaces-and-first-login.md §4.3/§4.4, order of work
+# item 2: "add agentos.terminal and agentos.shell with current defaults (no behaviour change)").
+#
+# Defaults are what the open image ships today (kitty, bash), so importing this module changes
+# nothing. The choices only ever select among packages already in nixpkgs at the pinned revision
+# (all seven checked 2026-10-10); first login will later pick among them without building anything.
+#
+# Scope, per the design's fixed rules (§3, §5): this is the HUMAN's surface. The agent account keeps
+# bash and its tty1 loop; the brain's own window stays kitty (files the brain depends on are
+# system-owned, §4.4). What the terminal choice changes is the human's "open a terminal" binding
+# and which terminal package is installed; the shell choice sets the operator's login shell.
+{ config, pkgs, lib, ... }:
+
+let
+  cfg = config.agentos;
+  terminals = {
+    kitty = { pkg = pkgs.kitty; cmd = "kitty"; };
+    ghostty = { pkg = pkgs.ghostty; cmd = "ghostty"; };
+    foot = { pkg = pkgs.foot; cmd = "foot"; };
+    alacritty = { pkg = pkgs.alacritty; cmd = "alacritty"; };
+  };
+  shells = { bash = pkgs.bash; fish = pkgs.fish; zsh = pkgs.zsh; };   # bash = exactly what the operator had
+in
+{
+  options.agentos = {
+    terminal = lib.mkOption {
+      type = lib.types.enum (lib.attrNames terminals);
+      default = "kitty";
+      description = "The human's terminal: what Super+Return opens, and which terminal package is installed.";
+    };
+    shell = lib.mkOption {
+      type = lib.types.enum (lib.attrNames shells);
+      default = "bash";
+      description = "The human operator's interactive login shell. The agent account always keeps bash.";
+    };
+    surfaceInternal = lib.mkOption {
+      type = lib.types.attrs;
+      internal = true;
+      readOnly = true;
+      description = "Resolved terminal command/package and shell package for the surface modules.";
+    };
+  };
+
+  config = {
+    agentos.surfaceInternal = {
+      terminalCmd = terminals.${cfg.terminal}.cmd;
+      terminalPkg = terminals.${cfg.terminal}.pkg;
+      shellPkg = shells.${cfg.shell};
+    };
+    # kitty is already installed by desktop-open.nix (the brain's window and the cheatsheet use it),
+    # so only a non-default terminal adds a package; the default system stays byte-identical.
+    environment.systemPackages = lib.optional (cfg.terminal != "kitty") terminals.${cfg.terminal}.pkg;
+    # NixOS needs the shell enabled system-wide to be a valid login shell (/etc/shells, vendor init).
+    programs.fish.enable = lib.mkIf (cfg.shell == "fish") true;
+    programs.zsh.enable = lib.mkIf (cfg.shell == "zsh") true;
+  };
+}

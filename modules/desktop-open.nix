@@ -125,7 +125,7 @@ let
     -- Cheatsheet popup stays a normal floating window — never tiled away or yanked.
     hl.window_rule({ name = "cheatsheet",     match = { title = "^(cheatsheet)$" },   float = true })
 
-    hl.bind("SUPER+RETURN",  hl.dsp.exec_cmd("kitty"))
+    hl.bind("SUPER+RETURN",  hl.dsp.exec_cmd("${config.agentos.surfaceInternal.terminalCmd}"))
     hl.bind("SUPER+B",       hl.dsp.exec_cmd("firefox"))
     hl.bind("SUPER+R",       hl.dsp.exec_cmd("wofi --show drun"))
     hl.bind("SUPER+D",       hl.dsp.exec_cmd("wofi --show drun"))

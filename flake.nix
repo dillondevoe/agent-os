@@ -1582,6 +1582,40 @@
             touch $out
           '';
 
+        # agentos.terminal / agentos.shell (surfaces-and-first-login.md §4.3/§4.4, order of work item 2).
+        # Defaults change nothing (operator keeps exactly pkgs.bash, Super+Return opens kitty); a
+        # non-default choice binds the chosen terminal, installs it, and sets the operator's shell
+        # (enabling fish/zsh system-wide); the agent account keeps bash either way; an unknown value
+        # fails evaluation.
+        surface-options =
+          let
+            lib = nixpkgs.lib;
+            dfltSys = self.nixosConfigurations.agentos-open;
+            altSys = mkOpenSystem [ { agentos.terminal = "foot"; agentos.shell = "fish"; } ];
+            dflt = dfltSys.config; alt = altSys.config;
+            names = c: map (p: p.name or "") c.environment.systemPackages;
+            bad = (builtins.tryEval (builtins.deepSeq
+              (mkOpenSystem [ { agentos.terminal = "xterm"; } ]).config.agentos.surfaceInternal.terminalCmd true)).success;
+          in
+          assert lib.assertMsg (dflt.users.users.operator.shell.drvPath == dfltSys.pkgs.bash.drvPath)
+            "surface-options: the default operator shell must stay exactly pkgs.bash";
+          assert lib.assertMsg (alt.users.users.operator.shell.drvPath == altSys.pkgs.fish.drvPath && alt.programs.fish.enable)
+            "surface-options: agentos.shell = fish must give the operator fish and enable it system-wide";
+          assert lib.assertMsg (dflt.users.users.agent.shell.drvPath == dfltSys.pkgs.bash.drvPath
+                                && alt.users.users.agent.shell.drvPath == altSys.pkgs.bash.drvPath)
+            "surface-options: the agent account keeps bash whatever the human picks";
+          assert lib.assertMsg (lib.any (n: lib.hasPrefix "foot-" n) (names alt)) "surface-options: the chosen terminal must be installed";
+          assert lib.assertMsg (!bad) "surface-options: an unknown terminal evaluated";
+          nixpkgs.legacyPackages.${system}.runCommand "surface-options-check" { } ''
+            grep -qF 'hl.bind("SUPER+RETURN",  hl.dsp.exec_cmd("kitty"))' ${dflt.system.build.hyprlandConf} || {
+              echo "surface-options: default Super+Return is no longer kitty" >&2; exit 1; }
+            grep -qF 'hl.bind("SUPER+RETURN",  hl.dsp.exec_cmd("foot"))' ${alt.system.build.hyprlandConf} || {
+              echo "surface-options: agentos.terminal = foot does not bind foot" >&2; exit 1; }
+            grep -qF 'exec_cmd("kitty --title cheatsheet' ${alt.system.build.hyprlandConf} || {
+              echo "surface-options: system-owned kitty windows must stay kitty" >&2; exit 1; }
+            touch $out
+          '';
+
         cap-wrapper-pinned =
           let
             pkgs = nixpkgs.legacyPackages.${system};
