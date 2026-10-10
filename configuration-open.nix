@@ -357,13 +357,19 @@ in {
   # Tailscale auto-join. The daemon is declarative here; the PRE-AUTH key is a runtime
   # secret placed by install.sh at authKeyFile (NOT committed). With authKeyFile set,
   # NixOS's tailscaled-autoconnect oneshot runs `tailscale up --auth-key file:... --ssh`
-  # on boot. If the file is absent (no TS_AUTHKEY given), autoconnect fails non-fatally
-  # and Rabbot runs `tailscale up` by hand. Tailscale SSH (--ssh) is a bonus in-path.
+  # on boot. If the file is absent (no TS_AUTHKEY given), autoconnect is SKIPPED (below) and
+  # `tailscale up --ssh` is run by hand. Tailscale SSH (--ssh) is a bonus in-path.
   services.tailscale = {
     enable = true;
     authKeyFile = "/var/lib/tailscale/authkey";
     extraUpFlags = [ "--ssh" ];
   };
+  # Keyless install: without this the oneshot waits for an interactive login URL, times out
+  # after 90 s and FAILS on every boot and every switch, so `switch-to-configuration` exits 4 on
+  # every deploy, indistinguishable from a real unit failure (#319, the dellon deploy VM). A
+  # failed Condition is a clean skip, not a failure. A keyed box behaves exactly as before.
+  systemd.services.tailscaled-autoconnect.unitConfig.ConditionPathExists =
+    config.services.tailscale.authKeyFile;
 
   # --- brain: BAKED INTO THE IMAGE, not pulled ---------------------------------
   # Ollama daemon ready. The weights are NOT downloaded on first boot (no brain.nix
