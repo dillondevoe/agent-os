@@ -1,5 +1,5 @@
 name: workflow-integrity
-# Interim control for PRs that edit .github/ (Geist ruling 2026-10-10; logic and limits in
+# Interim control against PRs that redefine required checks (Geist ruling 2026-10-10; logic and limits in
 # tools/workflow-integrity.py). Fails only when a REQUIRED check name is defined twice, or when a
 # head workflow file cannot be parsed. Announces (PR comment, no failure) a changed or missing
 # required job.
@@ -10,9 +10,11 @@ name: workflow-integrity
 # data. No `${{ }}` expression is interpolated into a script; values cross through `env:` only.
 # Output that can carry PR-controlled text (file paths) is printed inside a per-run stop-commands
 # token, so a crafted path cannot inject runner commands.
+# No `paths:` filter, on purpose (security review): a filter is a second judgment about which PRs
+# matter, made by a different matcher than the one this job enforces, and a required check behind a
+# path filter never reports on the PRs it skips. Every PR runs it; it costs a few API calls.
 on:
   pull_request_target:
-    paths: ['.github/**']
 permissions:
   contents: read
   pull-requests: write
@@ -31,6 +33,7 @@ jobs:
           BASE: ${{ github.event.pull_request.base.sha }}
           HEAD: ${{ github.event.pull_request.head.sha }}
           PR: ${{ github.event.pull_request.number }}
+        timeout-minutes: 10
         run: |
           python3 -c 'import yaml' 2>/dev/null || pip install --user 'pyyaml==6.0.2'
           python3 tools/workflow-integrity.py --selftest
