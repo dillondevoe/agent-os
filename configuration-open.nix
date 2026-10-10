@@ -115,7 +115,12 @@ in {
   # ignores both and supplies its own disk.
   fileSystems."/"     = lib.mkDefault { device = "/dev/disk/by-label/nixos"; fsType = "ext4"; };
   fileSystems."/boot" = lib.mkDefault { device = "/dev/disk/by-label/BOOT";  fsType = "vfat";  };
-  boot.initrd.availableKernelModules = [ "vmd" "nvme" "xhci_pci" "thunderbolt" "usb_storage" "sd_mod" ];
+  boot.initrd.availableKernelModules = [ "vmd" "nvme" "xhci_pci" "thunderbolt" "usb_storage" "sd_mod"
+    # VM / cloud disks. Without these the image cannot find its root on a virtio disk and
+    # drops to emergency mode (the dellon deploy VM, 2026-10-09). AVAILABLE only, not forced:
+    # they autoload when a virtio device exists, so the bare-metal NVMe path is unchanged.
+    # AWS Nitro is NVMe anyway; GCE is virtio-scsi; most other hypervisors are virtio-blk.
+    "virtio_pci" "virtio_blk" "virtio_scsi" ];
   # FORCE-load vmd + nvme at initrd start: the 5440's NVMe sits behind Intel VMD; a
   # vmd-less initrd leaves the disk hidden → emergency mode (lived 2026-07-29, fb5b20b).
   boot.initrd.kernelModules = [ "vmd" "nvme" ];
