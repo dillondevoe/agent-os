@@ -125,7 +125,7 @@ let
     -- Cheatsheet popup stays a normal floating window — never tiled away or yanked.
     hl.window_rule({ name = "cheatsheet",     match = { title = "^(cheatsheet)$" },   float = true })
 
-    hl.bind("SUPER+RETURN",  hl.dsp.exec_cmd("kitty"))
+    hl.bind("SUPER+RETURN",  hl.dsp.exec_cmd("${config.agentos.surfaceInternal.terminalCmd}"))
     hl.bind("SUPER+B",       hl.dsp.exec_cmd("firefox"))
     hl.bind("SUPER+R",       hl.dsp.exec_cmd("wofi --show drun"))
     hl.bind("SUPER+D",       hl.dsp.exec_cmd("wofi --show drun"))
@@ -194,7 +194,7 @@ let
 
       Super + 1         brain home (workspace 1 — the brain always lives here)
       Super + `         brain overlay from anywhere (tap again to hide)
-      Super + Return    open terminal (kitty)
+      Super + Return    open terminal (${config.agentos.surfaceInternal.terminalCmd})
       Super + B         open Firefox (opens on workspace 2)
       Super + D         app launcher (wofi, fuzzy search)
       Super + R         app launcher (wofi — same as Super+D)

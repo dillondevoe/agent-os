@@ -78,6 +78,7 @@ in {
   imports = [
     ./modules/calendar-open.nix
     ./modules/desktop-open.nix
+    ./modules/surface-options.nix # agentos.terminal / agentos.shell (defaults: today's kitty / bash)
     ./modules/settings-open.nix
     ./modules/model-open.nix
     ./modules/model-3b-open.nix   # additive, NON-DEFAULT 2nd brain (qwen2.5:3b-augur); default unchanged
@@ -305,7 +306,7 @@ in {
     isNormalUser = true;
     description = "Human operator (console + mesh SSH) — wheel, passwordless sudo";
     extraGroups = [ "wheel" "networkmanager" ];
-    shell = pkgs.bash;
+    shell = config.agentos.surfaceInternal.shellPkg;   # agentos.shell (default bash)
     openssh.authorizedKeys.keys = meshPubKeys;
   };
 
