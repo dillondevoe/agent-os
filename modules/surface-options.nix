@@ -23,10 +23,21 @@ let
 in
 {
   options.agentos = {
+    desktop = lib.mkOption {
+      type = lib.types.enum [ "none" "hyprland" ];
+      default = "hyprland";
+      description = ''
+        The desktop: "hyprland" (today's open-lane desktop) or "none" (terminal only: the brain runs
+        on tty1 in a respawn loop, and its desktop adapter answers Unsupported for window and browser
+        verbs instead of probing a display that is not there). sway and Plasma follow
+        (surfaces-and-first-login.md §6). The choice is compiled into the installed adapter, so it
+        holds for the brain however it is started.
+      '';
+    };
     terminal = lib.mkOption {
       type = lib.types.enum (lib.attrNames terminals);
       default = "kitty";
-      description = "The human's terminal: what Super+Return opens, and which terminal package is installed.";
+      description = "The human's terminal: what Super+Return opens on a desktop, and which terminal package is installed.";
     };
     shell = lib.mkOption {
       type = lib.types.enum (lib.attrNames shells);
@@ -51,8 +62,12 @@ in
       terminalPkg = terminals.${cfg.terminal}.pkg;
       shellPkg = shells.${cfg.shell};
     };
-    # kitty is already installed by desktop-open.nix (the brain's window and the cheatsheet use it),
-    # so only a non-default terminal adds a package; the default system stays byte-identical.
+    # With the Hyprland desktop, kitty is already installed by desktop-open.nix (the brain's window
+    # and the cheatsheet use it), so only a non-default terminal adds a package there; the default
+    # system stays byte-identical.
+    # Read by modules/agos_desktop.py adapter(); set only for a non-default desktop, so the default
+    # system's environment is unchanged.
+    environment.variables = lib.mkIf (cfg.desktop != "hyprland") { AGENTOS_DESKTOP = cfg.desktop; };
     environment.systemPackages = lib.optional (cfg.terminal != "kitty") terminals.${cfg.terminal}.pkg;
     # NixOS needs the shell enabled system-wide to be a valid login shell (/etc/shells, vendor init).
     programs.fish.enable = lib.mkIf (cfg.shell == "fish") true;

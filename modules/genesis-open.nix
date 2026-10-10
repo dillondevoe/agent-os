@@ -115,6 +115,9 @@ let
     cp ${./spend_ceiling.py} "$out/modules/spend_ceiling.py"
     cp ${./providers.py}     "$out/modules/providers.py"
     cp ${./agos_desktop.py}  "$out/modules/agos_desktop.py"   # the desktop adapter (hard import)
+    # agentos.desktop compiled in: a systemd unit never sees environment.variables (the OLLAMA_THINK scar).
+    substituteInPlace "$out/modules/agos_desktop.py" \
+      --replace-fail '"@AGENTOS_DESKTOP@"' '"${config.agentos.desktop}"'
     ln -s ../modules/spend_ceiling.py "$out/bin/spend_ceiling.py"
     ln -s ../modules/providers.py     "$out/bin/providers.py"
     ln -s ../modules/agos_desktop.py  "$out/bin/agos_desktop.py"

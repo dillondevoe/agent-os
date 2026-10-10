@@ -124,5 +124,25 @@ reset()
 check(isinstance(N.notify("hi"), D.Unsupported), "G: absent notify-send -> Unsupported")
 ok("G notify: message after --, capped at 500; absent tool -> Unsupported")
 
+# H — adapter() follows agentos.desktop: AGENTOS_DESKTOP=none -> NoDesktop; unset or hyprland -> Hyprland
+os.environ.pop("AGENTOS_DESKTOP", None)
+check(isinstance(D.adapter(), D.HyprlandAdapter), "H: unset -> Hyprland (the default system sets nothing)")
+os.environ["AGENTOS_DESKTOP"] = "hyprland"
+check(isinstance(D.adapter(), D.HyprlandAdapter), "H: hyprland -> Hyprland")
+os.environ["AGENTOS_DESKTOP"] = "none"
+check(isinstance(D.adapter(), D.NoDesktop) and isinstance(D.adapter().windows(), D.Unsupported), "H: none -> NoDesktop")
+os.environ.pop("AGENTOS_DESKTOP")
+D.DESKTOP_DEFAULT = "none"                 # what genesis-open compiles in for agentos.desktop = none
+check(isinstance(D.adapter(), D.NoDesktop), "H: the compiled default is honoured with no env")
+os.environ["AGENTOS_DESKTOP"] = "hyprland"
+check(isinstance(D.adapter(), D.HyprlandAdapter), "H: the env still overrides the compiled default")
+os.environ.pop("AGENTOS_DESKTOP"); D.DESKTOP_DEFAULT = "@AGENTOS_DESKTOP@"
+check(open(MOD).read().count('DESKTOP_DEFAULT = "@AGENTOS_DESKTOP@"') == 1, "H: substitution target present once")
+check(D.HyprlandAdapter.graphical is True and D.NoDesktop.graphical is False, "H: graphical flags")
+reset()
+r = H.arrange("close")
+check(isinstance(r, D.Unsupported) and calls() == [], "H: arrange with no hyprctl -> Unsupported, not a crash: %r" % r)
+ok("H adapter() follows AGENTOS_DESKTOP and the compiled default; arrange without hyprctl is Unsupported")
+
 os.environ["PATH"] = REAL_PATH
 print("desktop-adapter-battery: PASS (%d criteria)" % len(passed))
