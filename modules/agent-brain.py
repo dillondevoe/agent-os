@@ -2,6 +2,14 @@
 # Agent OS local brain — WITH HANDS + CONTEXT ANTENNA.
 # Talk to it; it acts (browse, run commands, arrange windows) AND it knows the real NOW.
 import json, re, subprocess, sys, urllib.request, urllib.error, datetime, os, hashlib, time, threading, shutil, contextlib, platform, glob
+# The desktop adapter (surfaces-and-first-login.md §6): every compositor call goes through it.
+# Installed beside this file by genesis-open.nix; a hard import, so a packaging miss fails loudly.
+# This file's own directory goes on the path first, so the sibling resolves however the brain is
+# loaded (installed binary, a battery's spec loader, an exec from a test).
+_HERE = os.path.dirname(os.path.abspath(__file__))
+if _HERE not in sys.path:
+    sys.path.insert(0, _HERE)
+import agos_desktop
 
 # ── UX v2 slice 1: INPUT LOCK (rabbot-to-page-P2-ux-v2-spec 2026-08-02, Dillon msg 9315) ──
 # prompt_toolkit PromptSession + patch_stdout = a bottom input line that background output
@@ -775,21 +783,16 @@ def live_context():
     except (OSError, ValueError, KeyError, IndexError):
         lines.append("Memory: unavailable (/proc/meminfo unreadable)")
 
-    # Windows — the ONE genuinely external instrument. Direct argv, never through a shell:
-    # the file's own doctrine (see run_command's hyprctl guard) is that a shell here could
-    # reach `hyprctl dispatch`. `which` returning None is an absent INSTRUMENT and says so —
-    # this line was dead on every Dell boot and nothing showed it.
-    hyprctl=shutil.which("hyprctl")
-    if not hyprctl:
-        lines.append("Open windows right now: unavailable (hyprctl not on this unit's PATH)")
+    # Windows — the ONE genuinely external instrument, via the desktop adapter (direct argv, never
+    # a shell: a shell here could reach `hyprctl dispatch`). An adapter that cannot answer returns
+    # Unsupported and the line SAYS unavailable — this line was dead on every Dell boot and nothing
+    # showed it.
+    wins=agos_desktop.adapter().windows()
+    if isinstance(wins, agos_desktop.Unsupported):
+        lines.append("Open windows right now: unavailable ("+wins.reason+")")
     else:
-        try:
-            r=subprocess.run([hyprctl,"clients","-j"],capture_output=True,text=True,timeout=4)
-            d=json.loads(r.stdout)
-            lines.append("Open windows right now: "+("; ".join(
-                w.get("class","?")+": "+(w.get("title","")[:40]) for w in d) or "none"))
-        except Exception:
-            lines.append("Open windows right now: unavailable (hyprctl gave no readable answer)")
+        lines.append("Open windows right now: "+("; ".join(
+            w["class"]+": "+(w["title"][:40]) for w in wins) or "none"))
 
     # Installed-app awareness (rabbot-to-page-ADD-to-pack-brain-blindspot 2026-08-01: brain
     # looped `nix profile install steam` into the unfree wall while Steam was already on the
@@ -1360,8 +1363,7 @@ def tool_progress_label(name,args):
 # well; measuring it would cost a rebuild of the Dell back to the pre-Lua generation. A
 # dwindle-appropriate replacement is a product change, not a translation, so it is out of scope
 # here (Rabbot ruling, 2026-08-30).
-HYPR={"close":"hl.dsp.window.close()","fullscreen":"hl.dsp.window.fullscreen()",
-      "cycle":"hl.dsp.window.cycle_next()","split":'hl.dsp.layout("togglesplit")'}
+HYPR=agos_desktop.HyprlandAdapter.ARRANGE   # the table now lives in the adapter (agos_desktop.py)
 def do_tool(name,args):
     if name=="open_url":
         url=args.get("url","")
@@ -1389,14 +1391,11 @@ def do_tool(name,args):
             return ((o.stdout+o.stderr).strip() or "(done, no output)")[:1500]
         except Exception as e: return f"error: {e}"
     if name=="arrange_windows":
-        act=args.get("action","").lower(); disp=HYPR.get(act)
-        # Unknown key: return the error as data and DISPATCH NOTHING. The early return is the
-        # control that keeps `act` off the command line entirely.
-        if not disp: return f"unknown window action '{act}'"
-        # argv, not `bash -c`: `disp` is a fixed value from the table above, but routing a
-        # compositor dispatch through a shell adds a second interpreter for no benefit.
-        subprocess.run(["hyprctl","dispatch",disp],capture_output=True,text=True,timeout=6)
-        return f"desktop: {act} done"
+        # The adapter looks `act` up in its closed table and dispatches nothing for an unknown key;
+        # `act` never reaches a command line (see agos_desktop.py's header).
+        act=args.get("action","").lower()
+        r=agos_desktop.adapter().arrange(act)
+        return ("desktop: unavailable ("+r.reason+")") if isinstance(r, agos_desktop.Unsupported) else r
     if name in ("calendar.now","calendar.agenda","calendar.add","calendar.cals"):
         return _agos(name,args)
     # the ambient-dozen hands — thin wrappers over the agos-* CLIs (each emits JSON, exits 0 on success)

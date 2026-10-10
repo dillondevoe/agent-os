@@ -259,6 +259,9 @@ fi
 # eval sink is UNREACHABLE from open_url (a Lua-escape payload in the url produces zero hyprctl
 # invocations) and that arrange_windows only ever dispatches fixed table values. Runs from the
 # repo ROOT — it resolves modules/agent-brain.py relative to cwd, same as wiring-battery.py.
+if need "$ROOT/modules/agos_desktop.py" desktop-adapter; then
+  run desktop-adapter "$PY" "$T/desktop-adapter-battery.py"
+fi
 if need "$ROOT/modules/agent-brain.py" brain-dispatch; then
   run brain-dispatch env PYTHONPATH="$ROOT/modules" \
     sh -c 'cd "$1" && "$2" tests/brain-dispatch-battery.py' _ "$ROOT" "$PY"

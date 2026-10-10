@@ -1582,6 +1582,18 @@
             touch $out
           '';
 
+        # modules/agos_desktop.py — the desktop adapter (surfaces-and-first-login.md §6): Unsupported is a
+        # third state, arrange() is a closed table with no interpolation, notify puts the message after --.
+        desktop-adapter-contract =
+          nixpkgs.legacyPackages.${system}.runCommand "desktop-adapter-contract-check"
+            { nativeBuildInputs = [ nixpkgs.legacyPackages.${system}.python3 ]; } ''
+              work="$(mktemp -d)"; mkdir -p "$work/modules" "$work/tests"
+              cp ${./modules/agos_desktop.py} "$work/modules/agos_desktop.py"
+              cp ${./tests/desktop-adapter-battery.py} "$work/tests/desktop-adapter-battery.py"
+              cd "$work"; python3 tests/desktop-adapter-battery.py
+              touch $out
+            '';
+
         cap-wrapper-pinned =
           let
             pkgs = nixpkgs.legacyPackages.${system};
@@ -2438,6 +2450,7 @@
             mkdir -p "$work/modules" "$work/tests"
             cp ${./modules/providers.py} "$work/modules/providers.py"
             cp ${./modules/agent-brain.py} "$work/modules/agent-brain.py"
+            cp ${./modules/agos_desktop.py} "$work/modules/agos_desktop.py"
             cp ${./tests/providers-battery.py} "$work/tests/providers-battery.py"
             cp ${./tests/wiring-battery.py} "$work/tests/wiring-battery.py"
             cp ${./tests/cost-cap-battery.py} "$work/tests/cost-cap-battery.py"
@@ -2627,6 +2640,7 @@
               work="$(mktemp -d)"
               mkdir -p "$work/modules" "$work/tests"
               cp ${./modules/agent-brain.py} "$work/modules/agent-brain.py"
+              cp ${./modules/agos_desktop.py} "$work/modules/agos_desktop.py"
               cp ${./modules/providers.py} "$work/modules/providers.py"
               cp ${./tests/ttsr-battery.py} "$work/tests/ttsr-battery.py"
               cd "$work"
@@ -2670,6 +2684,7 @@
               work="$(mktemp -d)"
               mkdir -p "$work/modules" "$work/tests"
               cp ${./modules/agent-brain.py} "$work/modules/agent-brain.py"
+              cp ${./modules/agos_desktop.py} "$work/modules/agos_desktop.py"
               cp ${./modules/providers.py} "$work/modules/providers.py"
               cp ${./tests/brain-dispatch-battery.py} "$work/tests/brain-dispatch-battery.py"
               cd "$work"
@@ -2701,6 +2716,7 @@
               work="$(mktemp -d)"
               mkdir -p "$work/modules" "$work/tests"
               cp ${./modules/agent-brain.py} "$work/modules/agent-brain.py"
+              cp ${./modules/agos_desktop.py} "$work/modules/agos_desktop.py"
               cp ${./modules/providers.py} "$work/modules/providers.py"
               cp ${./tests/brain-stderr-journal-battery.py} "$work/tests/brain-stderr-journal-battery.py"
               cd "$work"
@@ -2846,6 +2862,7 @@
               work="$(mktemp -d)"
               mkdir -p "$work/modules" "$work/tests"
               cp ${./modules/agent-brain.py} "$work/modules/agent-brain.py"
+              cp ${./modules/agos_desktop.py} "$work/modules/agos_desktop.py"
               cp ${./modules/providers.py} "$work/modules/providers.py"
               cp ${./tests/brain-context-battery.py} "$work/tests/brain-context-battery.py"
               cd "$work"
@@ -2864,6 +2881,7 @@
               work="$(mktemp -d)"
               mkdir -p "$work/modules" "$work/tests"
               cp ${./modules/agent-brain.py} "$work/modules/agent-brain.py"
+              cp ${./modules/agos_desktop.py} "$work/modules/agos_desktop.py"
               cp ${./modules/providers.py} "$work/modules/providers.py"
               cp ${./modules/genesis-open.nix} "$work/modules/genesis-open.nix"
               cp ${./tests/shell-resolve-battery.py} "$work/tests/shell-resolve-battery.py"
@@ -2886,6 +2904,7 @@
               work="$(mktemp -d)"
               mkdir -p "$work/modules" "$work/tests"
               cp ${./modules/agent-brain.py} "$work/modules/agent-brain.py"
+              cp ${./modules/agos_desktop.py} "$work/modules/agos_desktop.py"
               cp ${./tests/xml-toolcall-battery.py} "$work/tests/xml-toolcall-battery.py"
               cd "$work"
               python3 tests/xml-toolcall-battery.py
@@ -2908,6 +2927,7 @@
               work="$(mktemp -d)"
               mkdir -p "$work/modules" "$work/tests"
               cp ${./modules/agent-brain.py} "$work/modules/agent-brain.py"
+              cp ${./modules/agos_desktop.py} "$work/modules/agos_desktop.py"
               cp ${./modules/spend_ceiling.py} "$work/modules/spend_ceiling.py"
               cp ${./tests/spend-ceiling-battery.py} "$work/tests/spend-ceiling-battery.py"
               cd "$work"
