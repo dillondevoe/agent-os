@@ -1606,6 +1606,8 @@
             "surface-options: the agent account keeps bash whatever the human picks";
           assert lib.assertMsg (lib.any (n: lib.hasPrefix "foot-" n) (names alt)) "surface-options: the chosen terminal must be installed";
           assert lib.assertMsg (!bad) "surface-options: an unknown terminal evaluated";
+          assert lib.assertMsg (!(lib.any (n: lib.hasPrefix "foot-" n || lib.hasPrefix "ghostty-" n || lib.hasPrefix "alacritty-" n) (names dflt)))
+            "surface-options: the default system must not gain a second terminal";
           nixpkgs.legacyPackages.${system}.runCommand "surface-options-check" { } ''
             grep -qF 'hl.bind("SUPER+RETURN",  hl.dsp.exec_cmd("kitty"))' ${dflt.system.build.hyprlandConf} || {
               echo "surface-options: default Super+Return is no longer kitty" >&2; exit 1; }

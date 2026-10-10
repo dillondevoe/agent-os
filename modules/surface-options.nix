@@ -31,7 +31,11 @@ in
     shell = lib.mkOption {
       type = lib.types.enum (lib.attrNames shells);
       default = "bash";
-      description = "The human operator's interactive login shell. The agent account always keeps bash.";
+      description = ''
+        The operator account's login shell (su - operator, ssh, other consoles). The open desktop
+        session runs as the agent account, so this does not change what Super+Return opens there;
+        the agent account always keeps bash.
+      '';
     };
     surfaceInternal = lib.mkOption {
       type = lib.types.attrs;

@@ -194,7 +194,7 @@ let
 
       Super + 1         brain home (workspace 1 — the brain always lives here)
       Super + `         brain overlay from anywhere (tap again to hide)
-      Super + Return    open terminal (kitty)
+      Super + Return    open terminal (${config.agentos.surfaceInternal.terminalCmd})
       Super + B         open Firefox (opens on workspace 2)
       Super + D         app launcher (wofi, fuzzy search)
       Super + R         app launcher (wofi — same as Super+D)
