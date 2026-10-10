@@ -1621,6 +1621,9 @@
             none = (mkOpenSystem [ { agentos.desktop = "none"; } ]).config;
             noct = (mkOpenSystem [ { agentos.desktopShell = "noctalia"; } ]).config;
             sway = (mkOpenSystem [ { agentos.desktop = "sway"; agentos.terminal = "foot"; } ]).config;
+            des = lib.genAttrs [ "plasma" "gnome" "cosmic" ] (de: (mkOpenSystem [ { agentos.desktop = de; } ]).config);
+            deStart = { plasma = "/bin/startplasma-wayland"; gnome = "/bin/gnome-session"; cosmic = "/bin/start-cosmic"; };
+            deEnabled = c: de: c.services.desktopManager.${if de == "plasma" then "plasma6" else de}.enable;
             brainOf = c: lib.findFirst (p: (p.name or "") == "agent-brain") null c.environment.systemPackages;
             noneBrain = brainOf none; dfltBrain = brainOf dflt;
             names = c: map (p: p.name or "") c.environment.systemPackages;
@@ -1679,6 +1682,34 @@
             "surface-options: the brain window's kitty.conf must be seeded on every desktop with a brain window";
           assert lib.assertMsg (builtins.tryEval (builtins.deepSeq sway.system.build.toplevel.drvPath true)).success
             "surface-options: a desktop = sway system must evaluate end to end";
+          # agentos.desktop = plasma | gnome | cosmic (desktop-de-open.nix): that desktop and no other, started
+          # from tty1 with NO display manager (open question 6 stays open), the brain window hung off
+          # graphical-session.target, no Hyprland bar, the adapter told, audio kept, and the whole system
+          # evaluates (GNOME's core-apps block loops against genesis-open; the module turns it off).
+          assert lib.assertMsg (lib.all (de: let c = des.${de}; in
+              deEnabled c de && lib.all (o: o == de || !(deEnabled c o)) [ "plasma" "gnome" "cosmic" ]
+              && !c.programs.hyprland.enable && !c.programs.sway.enable
+              && !c.services.displayManager.enable && !c.services.displayManager.sddm.enable
+              && !c.services.displayManager.gdm.enable && !c.services.displayManager.cosmic-greeter.enable
+              && !c.services.greetd.enable && !c.services.xserver.enable
+              && c.systemd.user.services ? brain-home
+              && lib.elem "graphical-session.target" c.systemd.user.services.brain-home.wantedBy
+              && !(c.systemd.user.services ? waybar) && !(c.systemd.user.services ? noctalia)
+              && lib.hasInfix deStart.${de} c.environment.loginShellInit
+              && lib.hasInfix "/dev/tty1" c.environment.loginShellInit
+              && !(lib.hasInfix "exec Hyprland" c.environment.loginShellInit)
+              && (c.environment.variables.AGENTOS_DESKTOP or "") == de
+              && c.security.rtkit.enable && c.services.pipewire.enable
+              && lib.any (n: lib.hasPrefix "libnotify-" n) (names c)
+              && (builtins.tryEval (builtins.deepSeq c.system.build.toplevel.drvPath true)).success)
+            [ "plasma" "gnome" "cosmic" ])
+            "surface-options: agentos.desktop = plasma/gnome/cosmic must give that desktop alone, no display manager, the brain window on graphical-session.target, and evaluate end to end";
+          assert lib.assertMsg (lib.all (de: lib.elem des.${de}.system.build.brainAutostart des.${de}.environment.systemPackages) [ "plasma" "gnome" "cosmic" ])
+            "surface-options: the brain-home autostart entry must be installed on every full desktop";
+          assert lib.assertMsg (lib.any (n: lib.hasPrefix "nautilus-" n) (names des.gnome))
+            "surface-options: the GNOME desktop must still have Files (nautilus) with core-apps off";
+          assert lib.assertMsg (lib.hasInfix "XDG_SESSION_TYPE=wayland exec" des.gnome.environment.loginShellInit)
+            "surface-options: GNOME from tty1 needs XDG_SESSION_TYPE=wayland";
           assert lib.assertMsg (lib.hasInfix "while true; do agent-brain" none.environment.loginShellInit)
             "surface-options: with desktop = none the brain must run on tty1 in a respawn loop";
           assert lib.assertMsg (!(lib.any (n: lib.hasPrefix "foot-" n || lib.hasPrefix "ghostty-" n || lib.hasPrefix "alacritty-" n) (names dflt)))
@@ -1715,6 +1746,12 @@
               echo "surface-options: the default env import line must be unchanged" >&2; exit 1; }
             grep -qF 'DESKTOP_DEFAULT = "none"' ${noneBrain}/modules/agos_desktop.py || {
               echo "surface-options: the none system's installed adapter does not have the desktop compiled in" >&2; exit 1; }
+            ${lib.concatMapStrings (de: ''
+              grep -qF 'DESKTOP_DEFAULT = "${de}"' ${brainOf des.${de}}/modules/agos_desktop.py || {
+                echo "surface-options: the ${de} system's installed adapter does not have ${de} compiled in" >&2; exit 1; }
+              grep -qF 'systemctl --user start brain-home.service' ${des.${de}.system.build.brainAutostart}/etc/xdg/autostart/agentos-brain-home.desktop || {
+                echo "surface-options: the ${de} system lacks the brain-home autostart entry" >&2; exit 1; }
+            '') [ "plasma" "gnome" "cosmic" ]}
             grep -qF 'DESKTOP_DEFAULT = "hyprland"' ${dfltBrain}/modules/agos_desktop.py || {
               echo "surface-options: the default system's installed adapter does not say hyprland" >&2; exit 1; }
             grep -qF 'exec_cmd("kitty --title cheatsheet' ${alt.system.build.hyprlandConf} || {
