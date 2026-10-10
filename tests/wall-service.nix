@@ -29,6 +29,7 @@ pkgs.testers.runNixOSTest {
   testScript = ''
     import base64
     import json
+    import re
 
     SOCK = "/run/agent-os/wall.sock"
     AUDIT = "/var/lib/agent-os/audit/audit.log"
@@ -81,15 +82,17 @@ pkgs.testers.runNixOSTest {
     # ── B1
     box.fail(AS_AGENT + f"sh -c 'echo x >> {AUDIT}'")
     box.fail(AS_AGENT + "sh -c 'echo x > /var/lib/agent-os/taint/session'")
-    box.fail(AS_AGENT + "systemd-run --unit=agent-os-cap-evil /bin/true")
+    rc, out = box.execute(AS_AGENT + "systemd-run --unit=agent-os-cap-evil /bin/sh -c true 2>&1")
+    assert rc != 0 and re.search(r"Access denied|Interactive authentication required|not authorized|Permission denied", out), (
+        "the agent must be DENIED starting a system unit (not merely fail for another reason): " + out)
     print("B1 OK  (agent cannot append audit, write taint, or start a system unit)")
 
     # ── B3
-    rc, out = box.execute("runuser -u nobody -- python3 /run/wallc.py " + base64.b64encode(req("file.read", {"path": "/x"})).decode())
-    assert rc != 0, "nobody must not be able to connect: " + out
+    rc, out = box.execute("runuser -u nobody -- python3 /run/wallc.py " + base64.b64encode(req("file.read", {"path": "/x"})).decode() + " 2>&1")
+    assert rc != 0 and "Permission denied" in out, "nobody must get EACCES on the socket: " + out
     n0 = len(routes())
     rc, out = call("root", req("capabilities.list", {}))
-    assert out == b"", "root (not the agent) must get no verdict: %r" % out
+    assert rc == 0 and out == b"", "root (not the agent) connects but must get no verdict: rc=%d %r" % (rc, out)
     assert len(routes()) == n0, "a refused connection must write no audit record"
     print("B3 OK  (nobody: EACCES; root: no verdict, no audit record)")
 

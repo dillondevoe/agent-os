@@ -1516,13 +1516,14 @@
               ProtectControlGroups = true; RestrictNamespaces = true; RestrictRealtime = true;
               LockPersonality = true; RestrictSUIDSGID = true; SystemCallArchitectures = "native";
               DevicePolicy = "closed"; IPAddressDeny = "any"; StandardInput = "socket";
-              StandardOutput = "socket"; RuntimeMaxSec = 180;
+              StandardOutput = "socket"; RuntimeMaxSec = 180; TimeoutStopSec = 10; KillMode = "control-group";
             };
             badProps = lib.filter (k: (sc.${k} or null) != want.${k}) (lib.attrNames want);
             agentLoop = lib.findFirst (p: (p.name or "") == "agent-loop") null c.environment.systemPackages;
-            intruder = builtins.tryEval (builtins.deepSeq
-              (mkSystem [ { users.users.intruder = { isNormalUser = true; extraGroups = [ "agent-os-wall" ]; }; } ])
-                .config.system.build.toplevel.drvPath true);
+            intrudes = m: (builtins.tryEval (builtins.deepSeq (mkSystem [ m ]).config.system.build.toplevel.drvPath true)).success;
+            intruder = { success = intrudes { users.users.intruder = { isNormalUser = true; extraGroups = [ "agent-os-wall" ]; }; }
+                                   || intrudes { users.users.intruder2.isNormalUser = true; users.groups.agent-os-wall.members = [ "intruder2" ]; }; };
+            wi = c.agentos.wallInternal;
           in
           assert lib.assertMsg (sock.listenStreams == [ "/run/agent-os/wall.sock" ]
               && sock.socketConfig.Accept == true && sock.socketConfig.MaxConnections == 1
@@ -1540,10 +1541,44 @@
           assert lib.assertMsg (agentLoop != null) "wall-service-unit: agent-loop is not installed";
           assert lib.assertMsg (!intruder.success) "wall-service-unit: a second account in agent-os-wall evaluated — the group assertion is not enforced";
           nixpkgs.legacyPackages.${system}.runCommand "wall-service-unit-check" { } ''
+            for b in ${wi.mcpBin} ${wi.brokerBin}; do
+              case "$b" in /nix/store/*) ;; *) echo "wall-service-unit: pipeline binary $b is not store-pinned" >&2; exit 1;; esac
+              grep -qF "\"$b\"" ${wi.launcher}/bin/agent-os-wall-launch || {
+                echo "wall-service-unit: the launcher does not carry the pinned $b" >&2; exit 1; }
+            done
             grep -qF 'IMAGE_WALL_SOCKET = "/run/agent-os/wall.sock"' ${agentLoop}/bin/agent-loop || {
               echo "wall-service-unit: the installed agent-loop does not carry the compiled wall socket" >&2; exit 1; }
             grep -qF 'WALL_SOCKET_TIMEOUT_S = 190' ${agentLoop}/bin/agent-loop || {
               echo "wall-service-unit: the installed agent-loop's deadline is not 190 s" >&2; exit 1; }
+            touch $out
+          '';
+
+        # Spec broker-service §2.3: the wall launcher's AGENT_OS_PEER_* (and anything else in the
+        # wall's environment) never reach a capability impl. cap-invoke builds the impl environment
+        # explicitly; this drives it with a recording fake systemd-run and asserts the impl gets
+        # exactly PATH and AGENT_OS_REGISTRY (Fable code review of #328, finding 2).
+        wall-peer-env-not-in-impl =
+          let
+            pkgs = nixpkgs.legacyPackages.${system};
+            reg = import ./modules/capability-registry.nix { lib = nixpkgs.lib; };
+            registryJson = pkgs.writeText "agent-os-registry.json" (builtins.toJSON reg.registry);
+            policy = pkgs.writeText "policy.json" (import ./modules/cap-sandbox.nix { lib = nixpkgs.lib; }).policyJson;
+          in pkgs.runCommand "wall-peer-env-not-in-impl-check" { nativeBuildInputs = [ pkgs.python3 ]; } ''
+            work=$(mktemp -d); mkdir -p $work/capbin
+            cp ${./bin/cap-capabilities-list} $work/capbin/cap-capabilities-list; chmod +x $work/capbin/cap-capabilities-list
+            patchShebangs $work/capbin
+            # cap-invoke starts the runner with a minimal environment, so the record path is baked in.
+            printf '#!%s\nprintf "%%s\\n" "$@" > %s/argv\nwhile [ "$1" != "--" ]; do shift; done; shift\nexec "$@"\n' \
+              "${pkgs.runtimeShell}" "$work" > $work/systemd-run
+            chmod +x $work/systemd-run
+            echo '{"capability":"capabilities.list","arguments":{}}' | \
+              AGENT_OS_REGISTRY=${registryJson} AGENT_OS_CAP_BIN_DIR=$work/capbin \
+              AGENT_OS_CAP_SANDBOX=${policy} AGENT_OS_SYSTEMD_RUN=$work/systemd-run AGENT_OS_CAP_PATH=/x/bin \
+              AGENT_OS_PEER_UID=1000 AGENT_OS_PEER_PID=4242 AGENT_OS_PLANTED=zz \
+              python3 ${./bin/cap-invoke} > $work/out
+            grep -q '"ok": *true' $work/out || { echo "positive control: the impl did not run: $(cat $work/out)" >&2; exit 1; }
+            got=$(grep -o '^--setenv=[A-Z_]*' $work/argv | sed 's/^--setenv=//' | sort | tr '\n' ' ')
+            [ "$got" = "AGENT_OS_REGISTRY PATH " ] || { echo "wall-peer-env-not-in-impl: the impl got [$got], want exactly AGENT_OS_REGISTRY PATH" >&2; exit 1; }
             touch $out
           '';
 

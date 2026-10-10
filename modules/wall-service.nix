@@ -30,10 +30,15 @@ let
   runtimeMaxS = confirmPkg.brokerTimeout + capInvoke.capTimeoutS + reapS + marginS;
   clientTimeoutS = runtimeMaxS + 10;
 
-  # The installed wrappers the VM tests drive (python3 -I, seams pinned). Same derivations as
-  # modules/mcp.nix and modules/broker.nix install, taken from the system profile's packages.
-  mcpBin = "/run/current-system/sw/bin/mcp";
-  brokerBin = "/run/current-system/sw/bin/broker";
+  # The installed wrappers (python3 -I, seams pinned), STORE-PINNED: the exact derivations
+  # modules/mcp.nix and modules/broker.nix install, found by name in this system's packages, so a
+  # wall instance of generation N runs generation N's mcp and broker, and wall-service-unit can
+  # assert which ones (Fable code review of #328, finding 1).
+  pkgNamed = n:
+    let p = lib.findFirst (x: (x.name or "") == n) null config.environment.systemPackages;
+    in assert lib.assertMsg (p != null) "wall-service: no '${n}' package in environment.systemPackages"; p;
+  mcpBin = "${pkgNamed "mcp"}/bin/mcp";
+  brokerBin = "${pkgNamed "broker"}/bin/broker";
 
   launcher = pkgs.runCommand "agent-os-wall-launch" { nativeBuildInputs = [ pkgs.python3 ]; } ''
     mkdir -p $out/bin
@@ -46,7 +51,7 @@ let
     patchShebangs $out/bin
   '';
 
-  relayIsIp = builtins.match "[0-9]{1,3}(\\.[0-9]{1,3}){3}|[0-9a-fA-F:]+" confirmPkg.relayAddr != null;
+  relayIsIp = builtins.match "[0-9]{1,3}(\\.[0-9]{1,3}){3}|[0-9a-fA-F]*:[0-9a-fA-F:.]*" confirmPkg.relayAddr != null;
   wallMembers = lib.attrNames (lib.filterAttrs (_: u: lib.elem group (u.extraGroups or [ ]) || (u.group or "") == group)
     config.users.users);
 in
@@ -118,6 +123,8 @@ in
         StandardOutput = "socket";
         StandardError = "journal";
         RuntimeMaxSec = runtimeMaxS;
+        TimeoutStopSec = reapS;           # the "unit reap" term of the derivation, enforced
+        KillMode = "control-group";
         NoNewPrivileges = true;
         ProtectSystem = "strict";
         ReadWritePaths = [ "/var/lib/agent-os/audit" "/var/lib/agent-os/taint"
@@ -142,6 +149,6 @@ in
     };
 
     # For modules/agent-shell.nix (the installed agent-loop's compiled socket path and deadline).
-    agentos.wallInternal = { inherit socketPath clientTimeoutS runtimeMaxS; };
+    agentos.wallInternal = { inherit socketPath clientTimeoutS runtimeMaxS mcpBin brokerBin launcher; };
   };
 }

@@ -42,10 +42,10 @@ def peer_creds(fd):
     """(pid, uid, gid) of the peer of the unix socket on fd, from the kernel (SO_PEERCRED)."""
     s = socket.socket(fileno=os.dup(fd))
     try:
-        raw = s.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i"))
+        raw = s.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("iII"))
     finally:
         s.close()
-    return struct.unpack("3i", raw)
+    return struct.unpack("iII", raw)    # struct ucred: pid_t, uid_t, gid_t
 
 
 def read_one_line(fd):
@@ -58,7 +58,7 @@ def read_one_line(fd):
         if len(buf) > MAX_LINE + 1 and b"\n" not in buf[:MAX_LINE + 1]:
             refuse("request over 1 MiB")
     line = buf.split(b"\n", 1)[0] + b"\n"
-    if len(line) > MAX_LINE + 1:
+    if len(line) > MAX_LINE + 1:      # belt: unreachable given the in-loop bound, kept on purpose
         refuse("request over 1 MiB")
     return line
 

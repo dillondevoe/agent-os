@@ -103,7 +103,7 @@ def peer_fields():
     out = {}
     for env, key in (("AGENT_OS_PEER_UID", "peer_uid"), ("AGENT_OS_PEER_PID", "peer_pid")):
         v = os.environ.get(env, "")
-        if v.isdigit():
+        if v.isascii() and v.isdecimal():
             out[key] = int(v)
     return out
 
