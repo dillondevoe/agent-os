@@ -1619,6 +1619,7 @@
             altSys = mkOpenSystem [ { agentos.terminal = "foot"; agentos.shell = "fish"; } ];
             dflt = dfltSys.config; alt = altSys.config;
             none = (mkOpenSystem [ { agentos.desktop = "none"; } ]).config;
+            noct = (mkOpenSystem [ { agentos.desktopShell = "noctalia"; } ]).config;
             sway = (mkOpenSystem [ { agentos.desktop = "sway"; agentos.terminal = "foot"; } ]).config;
             brainOf = c: lib.findFirst (p: (p.name or "") == "agent-brain") null c.environment.systemPackages;
             noneBrain = brainOf none; dfltBrain = brainOf dflt;
@@ -1645,6 +1646,16 @@
             "surface-options: agentos.desktop = none must drop the Hyprland desktop and keep audio/brightness";
           assert lib.assertMsg (builtins.tryEval (builtins.deepSeq none.system.build.toplevel.drvPath true)).success
             "surface-options: a desktop = none system must evaluate end to end";
+          # agentos.desktopShell = "noctalia": the Noctalia unit replaces waybar's (same shape), no waybar
+          # config is seeded, noctalia is installed; the default keeps waybar.
+          assert lib.assertMsg (noct.systemd.user.services ? noctalia && !(noct.systemd.user.services ? waybar)
+                                && lib.hasInfix "/bin/noctalia" noct.systemd.user.services.noctalia.serviceConfig.ExecStart
+                                && noct.systemd.user.services.noctalia.serviceConfig.Restart == "always"
+                                && !(lib.any (r: lib.hasInfix "waybar" r) noct.systemd.tmpfiles.rules)
+                                && lib.any (p: lib.hasPrefix "noctalia-" (p.name or "")) noct.environment.systemPackages)
+            "surface-options: desktopShell = noctalia must run Noctalia in place of waybar";
+          assert lib.assertMsg (dflt.systemd.user.services ? waybar && !(dflt.systemd.user.services ? noctalia))
+            "surface-options: the default shell layer stays waybar";
           assert lib.assertMsg (dflt.programs.hyprland.enable && !(dflt.environment.variables ? AGENTOS_DESKTOP))
             "surface-options: the default desktop stays hyprland and sets no AGENTOS_DESKTOP";
           assert lib.assertMsg (lib.all (c: c.security.rtkit.enable && lib.elem "video" c.users.users.agent.extraGroups
@@ -1685,6 +1696,23 @@
               echo "surface-options: the sway config must start brain-home only after the environment import" >&2; exit 1; }
             grep -qF 'bindsym $mod+Return exec foot' ${sway.system.build.swayConf} || {
               echo "surface-options: the sway config does not bind the chosen terminal" >&2; exit 1; }
+            grep -qF 'systemctl --user restart noctalia.service' ${noct.system.build.hyprlandConf} || {
+              echo "surface-options: with Noctalia, hyprland.lua must poke noctalia.service" >&2; exit 1; }
+            grep -qF 'systemctl --user restart waybar.service' ${dflt.system.build.hyprlandConf} || {
+              echo "surface-options: the default hyprland.lua must still poke waybar.service" >&2; exit 1; }
+            wallOnce='${noct.systemd.user.services.noctalia.serviceConfig.ExecStartPost}'
+            case "$wallOnce" in -/*) ;; *)
+              echo "surface-options: the one-time wallpaper step must be '-'-prefixed (a failure must not fail the shell)" >&2; exit 1;; esac
+            grep -qF 'share/hypr/wall2.png' "''${wallOnce#-}" || {
+              echo "surface-options: Noctalia's one-time wallpaper must be Hyprland's wall2.png" >&2; exit 1; }
+            test -e ${dfltSys.pkgs.hyprland}/share/hypr/wall2.png || {
+              echo "surface-options: the pinned Hyprland no longer ships share/hypr/wall2.png" >&2; exit 1; }
+            if grep -qE '^[[:space:]]*(sleep|mkdir|touch|seq)[[:space:]]' "''${wallOnce#-}"; then
+              echo "surface-options: the one-time wallpaper script uses a bare tool name (user-unit PATH is narrow)" >&2; exit 1; fi
+            grep -qF 'environment --systemd WAYLAND_DISPLAY XDG_CURRENT_DESKTOP HYPRLAND_INSTANCE_SIGNATURE DISPLAY XCURSOR_THEME XCURSOR_SIZE")' ${noct.system.build.hyprlandConf} || {
+              echo "surface-options: with Noctalia (it launches apps), the env import must carry DISPLAY and the cursor theme" >&2; exit 1; }
+            grep -qF 'environment --systemd WAYLAND_DISPLAY XDG_CURRENT_DESKTOP HYPRLAND_INSTANCE_SIGNATURE")' ${dflt.system.build.hyprlandConf} || {
+              echo "surface-options: the default env import line must be unchanged" >&2; exit 1; }
             grep -qF 'DESKTOP_DEFAULT = "none"' ${noneBrain}/modules/agos_desktop.py || {
               echo "surface-options: the none system's installed adapter does not have the desktop compiled in" >&2; exit 1; }
             grep -qF 'DESKTOP_DEFAULT = "hyprland"' ${dfltBrain}/modules/agos_desktop.py || {

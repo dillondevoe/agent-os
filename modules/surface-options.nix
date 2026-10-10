@@ -34,6 +34,16 @@ in
         holds for the brain however it is started.
       '';
     };
+    desktopShell = lib.mkOption {
+      type = lib.types.enum [ "waybar" "noctalia" ];
+      default = "waybar";
+      description = ''
+        The shell layer on the Hyprland desktop: "waybar" (today's bar) or "noctalia" (Noctalia: bar,
+        launcher, notifications, control center, wallpaper, OSD in one; it also gives the brain's
+        notify() a notification daemon). Noctalia starts on Hyprland's own anime wallpaper once;
+        after that the user's pick sticks.
+      '';
+    };
     terminal = lib.mkOption {
       type = lib.types.enum (lib.attrNames terminals);
       default = "kitty";
