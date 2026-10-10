@@ -80,9 +80,13 @@ name: vm-tests (slow lane)
 on:
   # NO path filter on pull_request (2026-10-10): `vm-tests-all` is a REQUIRED check on main, and a
   # workflow skipped by a path filter never reports, so a docs-only PR would wait on it forever.
-  # The path list, and its rationale, moved into the `changes` job below, which skips the slow
-  # matrix instead of the whole workflow.
+  # The `changes` job below decides instead: it skips the slow matrix only when every changed
+  # path is on a docs allowlist (the old trigger path list survives there as history comments).
+  # `edited` too: retargeting a PR to another base fires `edited`, and the decision depends on
+  # the base. Without it a check computed against one base stays attached to the head SHA after
+  # a retarget to main (security review #2 of #327).
   pull_request:
+    types: [opened, synchronize, reopened, edited]
   push:
     branches: [main]
     paths:
@@ -186,7 +190,12 @@ jobs:
           echo "::stop-commands::$stop"
           tr '\0' '\n' < "$RUNNER_TEMP/changed.z"
           echo "::$stop::"
-          if grep -zEq '^(modules/|tests/|bin/|scripts/|flake\.nix$|flake\.lock$|configuration\.nix$|configuration-open\.nix$|\.github/workflows/vm-tests\.yml$)' "$RUNNER_TEMP/changed.z"; then
+          # FAIL-SAFE DIRECTION (security review #2 of #327): skip the matrix only when EVERY changed
+          # path is on an explicit docs allowlist. A deny-list of build paths missed GENESIS.md,
+          # install.sh, evals/ and supply-chain/, all of which the images consume; an allowlist
+          # makes any path nobody thought of RUN the matrix instead of skipping it. Nothing on this
+          # list is read by any .nix file (checked 2026-10-10). Other workflow files are NOT on it.
+          if grep -zvEq '^(docs/|README\.md$|CONTRIBUTING\.md$|SECURITY\.md$|ROADMAP\.md$|LICENSE$|NOTICE$|\.github/(ISSUE_TEMPLATE/|PULL_REQUEST_TEMPLATE|CODEOWNERS$))' "$RUNNER_TEMP/changed.z"; then
             echo "run=true" >> "$GITHUB_OUTPUT"
           else
             echo "run=false" >> "$GITHUB_OUTPUT"
