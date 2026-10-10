@@ -912,6 +912,20 @@
               touch $out
             '';
 
+        # workflow-integrity -- 8 arms (A1/A5 permitting twins, A8 vacuity) plus a contract arm on
+        # the REAL tree: every required check name defined exactly once. The contract arm is what
+        # stops tools/workflow-integrity.py's REQUIRED list drifting from the jobs branch protection
+        # actually requires; the CI job runs the same selftest before it trusts itself.
+        workflow-integrity-selftest =
+          nixpkgs.legacyPackages.${system}.runCommand "workflow-integrity-selftest"
+            { nativeBuildInputs = [ (nixpkgs.legacyPackages.${system}.python3.withPackages (ps: [ ps.pyyaml ])) ]; } ''
+              cp -r ${./.}/. src && chmod -R u+w src
+              cd src
+              python3 tools/workflow-integrity.py --selftest
+              python3 tools/workflow-integrity.py --check-tree .
+              touch $out
+            '';
+
         # pr-currency-selftest -- 18 arms, 6 of them controls.
         #
         # It ran BY HAND ONLY until 2026-09-05, and that is the exact shape the tool it tests was
