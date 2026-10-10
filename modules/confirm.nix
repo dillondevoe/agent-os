@@ -66,6 +66,15 @@ in
 
   # The seen-destinations store (§4.4): 0700 root, a protected path no capability impl may write
   # (mirrors audit/taint). The model cannot pre-seed it to suppress the first-time banner.
+  # The confirm console must never carry a login. logind's NAutoVTs starts autovt@<tty> the
+  # moment the owner switches to it (Alt-F2), and agent-shell.nix's autologin applies to the whole
+  # getty@ template: that getty would clear the frame and put an agent-uid shell on the console,
+  # competing with this client for the typed answer (INV-1: confirmation never happens on a surface
+  # the agent holds). Masked, so the VT stays the client's alone; tests/app-approve-confirm.nix
+  # switches to it (chvt) before answering.
+  systemd.services."autovt@${cpkg.gettyTty}".enable = false;
+  systemd.services."getty@${cpkg.gettyTty}".enable = false;
+
   systemd.tmpfiles.rules = [
     "d /var/lib/agent-os 0755 root root - -"
     "d ${cpkg.confirmDir} 0700 root root - -"

@@ -120,7 +120,7 @@ status_is TAINTED
 for bad in '"false"' '1' '[1]' 'NaN'; do
   cat > "$SEAMDIR/truthy" <<SEAM
 #!/bin/sh
-cat > /dev/null
+while read -r _; do :; done
 printf '{"approved":$bad,"reason":"truthy-non-true must NOT clear taint"}'
 SEAM
   chmod +x "$SEAMDIR/truthy"

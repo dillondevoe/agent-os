@@ -173,15 +173,26 @@ def cmd_list():
     return 0
 
 
+def cmd_call(appdir):
+    """Print the app.approve capability call for this app (the request the agent sends through the
+    broker on the image). Read-only, so no tty or session check: it approves nothing; the human
+    answers on the confirm channel."""
+    m = R.load_manifest(appdir)
+    v = R.validate(m, appdir)
+    print(json.dumps(R.approve_call(m, v["home"]), sort_keys=True))
+    return 0
+
+
 def main(argv):
     try:
         if len(argv) == 2 and argv[0] == "show":    return cmd_show(argv[1])
         if len(argv) == 2 and argv[0] == "approve": return cmd_approve(argv[1])
         if len(argv) == 2 and argv[0] == "revoke":  return cmd_revoke(argv[1])
         if len(argv) == 1 and argv[0] == "list":    return cmd_list()
+        if len(argv) == 2 and argv[0] == "call":    return cmd_call(argv[1])
     except R.ManifestError as e:
         print("agos-approve: REFUSED manifest: %s" % e, file=sys.stderr); return 2
-    print("usage: agos-approve show <appdir> | approve <appdir> | revoke <name|sha> | list", file=sys.stderr); return 2
+    print("usage: agos-approve show <appdir> | approve <appdir> | revoke <name|sha> | list | call <appdir>", file=sys.stderr); return 2
 
 
 if __name__ == "__main__":

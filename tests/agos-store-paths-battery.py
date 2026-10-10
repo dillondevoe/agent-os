@@ -26,6 +26,11 @@
 #   I. agos-build writes into AGOS_APPS (fake backend), not the $HOME default.
 #   J. Image hardening: a copy with only ONE constant substituted refuses everything (no half
 #      fallback); --approve-for-test does not exist in an image copy (control: it works on dev).
+#   L. Image extras (app-approval PR 3): a substituted IMAGE_RUNNER is what the timer ExecStarts
+#      (a path that survives rebuilds); `agos-approve call` prints the exact app.approve call
+#      (app = <apps root>/<name>, sha, field_json fields) with no tty, from the image apps root on
+#      an image copy; agos-build on an image copy prints that call instead of the local
+#      `agos-approve approve` step (control: a dev copy still prints the local step).
 #   K. A store directly in $HOME protects the file, not all of $HOME (a normal file still binds;
 #      the store file itself is refused R5); a `$` in a store path reaches the unit single.
 #
@@ -310,5 +315,63 @@ rc, unit, out = install(os.path.join(BIN, "agos-schedule"), a, AGOS_APPROVALS=do
 check(rc == 0 and ('Environment=AGOS_APPROVALS="%s"' % dollar) in unit and "$$" not in unit.split("Environment=AGOS_APPROVALS")[1].split("\n")[0],
       "K: `$` must reach the Environment= value single:\n" + unit)
 ok("K store in $HOME protects the file only; `$` stays single in Environment=")
+
+# L ── image extras
+reset()
+imgstore = os.path.join(TMP, "image", "app-approvals", "approvals.json"); imgapps = os.path.join(TMP, "image", "apps")
+ib = image_bin(imgstore, imgapps)
+sch = open(os.path.join(ib, "agos-schedule")).read()
+check(sch.count('IMAGE_RUNNER = ""') == 1, "L: agos-schedule must carry one substitutable IMAGE_RUNNER line")
+open(os.path.join(ib, "agos-schedule"), "w").write(sch.replace('IMAGE_RUNNER = ""', 'IMAGE_RUNNER = "/run/current-system/sw/bin/agos-run"'))
+a = mk_app(imgapps); approve_in(imgstore)
+rc, unit, out = install(os.path.join(ib, "agos-schedule"), a)
+check(rc == 0 and 'ExecStart="/run/current-system/sw/bin/agos-run"' in unit, "L: the timer must ExecStart IMAGE_RUNNER:\n" + unit)
+
+def approve_call(binary, appdir, **env):
+    p = subprocess.run([sys.executable, binary, "call", appdir], env=dict(BASE_ENV, **env),
+                       stdin=subprocess.DEVNULL, capture_output=True, text=True)
+    check(p.returncode == 0, "L: agos-approve call rc=%d %s" % (p.returncode, p.stderr))
+    return json.loads(p.stdout)
+c = approve_call(os.path.join(ib, "agos-approve"), a)
+want = {"app": os.path.join(os.path.realpath(imgapps), GOOD["name"]), "sha256": R.sha(GOOD), "name": GOOD["name"],
+        "version": GOOD["version"], "schedule": GOOD["schedule"]}
+want.update({k: R.field_json(GOOD[k]) for k in ("entry", "files", "network", "limits", "devices")})
+check(c == {"capability": "app.approve", "arguments": want}, "L: image call must be exact:\n%r\n%r" % (c, want))
+short = {k: v for k, v in GOOD.items() if k != "devices"}; a5 = mk_app(imgapps, dict(short, name="five-keys"))
+p = subprocess.run([sys.executable, os.path.join(ib, "agos-approve"), "call", a5], env=BASE_ENV,
+                   stdin=subprocess.DEVNULL, capture_output=True, text=True)
+check(p.returncode == 2 and "all eight manifest keys" in p.stderr and not p.stdout.strip(),
+      "L: a manifest missing a key must not produce a call: rc=%d %s %s" % (p.returncode, p.stdout, p.stderr))
+reset()
+envapps = os.path.join(TMP, "envapps"); a = mk_app(envapps)
+c = approve_call(os.path.join(BIN, "agos-approve"), a, AGOS_APPS=envapps)
+check(c["arguments"]["app"] == os.path.join(os.path.realpath(envapps), GOOD["name"]), "L: dev call uses AGOS_APPS: %r" % c)
+
+def stage_evals():
+    """agos-build reads ../evals beside its bin dir; copy contents only (store copies are read-only)."""
+    if not os.path.isdir(os.path.join(TMP, "evals")):
+        shutil.copytree(os.path.join(REPO, "evals"), os.path.join(TMP, "evals"), copy_function=shutil.copyfile)
+stage_evals()
+fake = os.path.join(TMP, "answers2.json")
+def build_out(binary, **env):
+    json.dump([{"content": "", "tool_calls": [{"function": {"name": "propose_app", "arguments": {
+        "name": "gym-spending", "plan": "1. print", "manifest": {"files": [{"path": "~/notes/todo.md", "mode": "r"}],
+        "network": [], "schedule": "", "devices": []},
+        "entry": {"filename": "app.py", "source": "print(1)\n"}}}}]}], open(fake, "w"))
+    for f in (fake + ".cursor",):
+        if os.path.exists(f): os.unlink(f)
+    p = subprocess.run([sys.executable, binary, "track my gym spending", "--backend", "fake"],
+                       env=dict(BASE_ENV, AGOS_BUILD_FAKE=fake, **env), capture_output=True, text=True)
+    return p.returncode, p.stdout + p.stderr
+reset(); ib = image_bin(imgstore, imgapps); os.makedirs(imgapps, exist_ok=True)
+stage_evals()
+rc, out = build_out(os.path.join(ib, "agos-build"))
+check(rc == 0 and '"capability": "app.approve"' in out and "agos-approve approve" not in out,
+      "L: image agos-build must print the app.approve call, not the local step: rc=%d\n%s" % (rc, out[-800:]))
+reset()
+rc, out = build_out(os.path.join(BIN, "agos-build"))
+check(rc == 0 and "agos-approve approve" in out and '"capability": "app.approve"' not in out,
+      "L control: a dev agos-build prints the local step: rc=%d\n%s" % (rc, out[-800:]))
+ok("L image extras: IMAGE_RUNNER timer, exact agos-approve call, agos-build prints the confirm-channel call")
 
 print("agos-store-paths-battery: PASS (%d criteria)" % len(passed))

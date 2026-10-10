@@ -94,6 +94,23 @@ def sha(m):
     return hashlib.sha256(canonical(m)).hexdigest()
 
 
+def approve_call(m, h):
+    """The `app.approve` capability call for manifest m (docs/design/app-approval-confirm.md §3.2):
+    the eight fields as the confirm frame will show them, the app path the capability requires
+    (exactly <apps root>/<name>) and the manifest sha. Read-only; it approves nothing. A manifest
+    without all eight keys is refused here: the capability refuses it after the human's yes
+    (manifest-structure), so asking would only burn a confirmation and show "null" fields."""
+    if not isinstance(m, dict) or set(m) != ALLOWED_KEYS:
+        raise ManifestError("R12 the app.approve call needs all eight manifest keys (%s); add the missing ones "
+                            "or approve locally with agos-approve" % ", ".join(sorted(ALLOWED_KEYS)))
+    args = {"app": os.path.join(apps_root(h), m["name"]), "sha256": sha(m)}
+    for k in ("name", "version", "schedule"):
+        args[k] = m.get(k, "")
+    for k in ("entry", "files", "network", "limits", "devices"):
+        args[k] = field_json(m.get(k))
+    return {"capability": "app.approve", "arguments": args}
+
+
 def field_json(v):
     """The per-FIELD encoder for the app.approve call (docs/design/app-approval-confirm.md §3.2):
     ASCII-only, so what agos-build prints and what the capability compares cannot disagree. The

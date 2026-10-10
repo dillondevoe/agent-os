@@ -194,6 +194,13 @@ jobs:
           # itself). This is the only scheduled thing that drives the REAL broker wrapper and so
           # the only one that can observe the wiring rather than the mechanism.
           - test-cap-composed-path
+          # APP APPROVAL, end to end. Same rule: added in the same commit as
+          # tests/app-approve-confirm.nix. The only thing that drives a T2 decision through the REAL
+          # confirm wrapper to a human answer (typed on tty2, read off /dev/vcs2) and on into a
+          # capability impl, and the only runtime witness that the app-approval store is root-owned
+          # and agent-unwritable on the image (A2) and that the image's agos-run ignores every other
+          # store (A3).
+          - test-app-approve-confirm
           # SURVIVABILITY. Same rule a fourth time: added in the same commit as
           # tests/watchdog-armed.nix. Different subject from every entry above — those watch a
           # wall that keeps something OUT, this watches the mechanism that gets the box BACK.
