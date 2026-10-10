@@ -84,6 +84,22 @@ _NS_RE = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
 
 
 # ── Child-process plumbing (taint / audit / seams) ───────────────────────────
+
+# Environment for wall-internal children (seams, taint, audit): the wall's own names only —
+# AGENT_OS_* plus TAINT_BIN / AUDIT_BIN — and never the confirm getty TEST hooks, PATH, HOME,
+# LD_* or PYTHON*. Production wrappers re-pin their own values on top, so this costs nothing
+# there; what it stops is PROPAGATION: whatever reached this process does not flow further.
+# It is not a boundary against a caller on the same uid (that caller owns the process anyway);
+# AGENT_OS_AUDIT_SIGNER / _REQUIRE_SIGNED ride the prefix, so a signer set in the environment
+# keeps signing.
+_WALL_ENV_EXTRA = ("TAINT_BIN", "AUDIT_BIN")
+_WALL_ENV_DROP = ("AGENT_OS_CONFIRM_GETTY_IN", "AGENT_OS_CONFIRM_GETTY_OUT")
+
+
+def wall_env():
+    return {k: v for k, v in os.environ.items()
+            if (k.startswith("AGENT_OS_") or k in _WALL_ENV_EXTRA) and k not in _WALL_ENV_DROP}
+
 def _argv(binpath, *args):
     """A plain (non-executable) file is run with THIS interpreter (repo bin/ in tests); an
     installed shell wrapper is exec'd directly (production). Mirrors bin/taint's dispatch."""
@@ -108,6 +124,7 @@ def _run(binpath, args, stdin_bytes=None, capture=False, timeout=None):
         p = subprocess.run(
             _argv(binpath, *args),
             input=stdin_bytes,
+            env=wall_env(),
             stdout=(subprocess.PIPE if capture else subprocess.DEVNULL),
             stderr=subprocess.DEVNULL,
             timeout=timeout,

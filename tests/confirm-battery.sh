@@ -329,7 +329,7 @@ import sys, json, os
 try: req = json.load(sys.stdin)
 except Exception: req = {}
 out = {"ok": True, "content": "INVOKED-" + json.dumps(req.get("arguments", {}), sort_keys=True)}
-if "INVOKE_KEY" in os.environ: out["meta"] = {"key": os.environ["INVOKE_KEY"]}
+if "AGENT_OS_TEST_INVOKE_KEY" in os.environ: out["meta"] = {"key": os.environ["AGENT_OS_TEST_INVOKE_KEY"]}
 sys.stdout.write(json.dumps(out))
 PYEOF
 
@@ -337,7 +337,7 @@ jf() { printf '%s' "$1" | "$PY" -c 'import sys,json
 o=json.load(sys.stdin); v=eval(sys.argv[1])
 sys.stdout.write("true" if v is True else "false" if v is False else "None" if v is None else str(v))' "$2"; }
 
-# broker_confirm <verdict-json> <RELAY_DECISION> [INVOKE_KEY]: start a one-shot relay, run the
+# broker_confirm <verdict-json> <RELAY_DECISION> [AGENT_OS_TEST_INVOKE_KEY]: start a one-shot relay, run the
 # REAL broker with bin/confirm as the confirm seam, echo the broker's result line.
 broker_confirm() {
   local ready; ready="$(mktemp "$SCRATCH/ready.XXXXXX")"; rm -f "$ready"
@@ -347,7 +347,7 @@ broker_confirm() {
   local out
   out="$( printf '%s\n' "$1" | env \
       AGENT_OS_CONFIRM_SEAM="$CONFIRM" AGENT_OS_INVOKE_SEAM="$SEAM_INVOKE" \
-      ${3:+INVOKE_KEY="$3"} \
+      ${3:+AGENT_OS_TEST_INVOKE_KEY="$3"} \
       AGENT_OS_CONFIRM_CHANNELS=telegram AGENT_OS_CONFIRM_RELAY_ADDR=127.0.0.1 \
       AGENT_OS_CONFIRM_RELAY_PORT="$port" AGENT_OS_CONFIRM_RELAY_SECRET_FILE="$SECRET" \
       AGENT_OS_CONFIRM_DILLON_USER_ID="$DILLON" AGENT_OS_CONFIRM_HUMAN_WINDOW_S=5 \
@@ -357,7 +357,7 @@ broker_confirm() {
   printf '%s' "$out"
 }
 
-# T1 mem.remember, approved -> stamped -> DATA-fenced content. The stub's INVOKE_KEY is a BLESSED
+# T1 mem.remember, approved -> stamped -> DATA-fenced content. The stub's AGENT_OS_TEST_INVOKE_KEY is a BLESSED
 # runtime key (`<leaf>.<ns>.<16hex>.md`) — the exact shape cap-mem-remember emits for namespace
 # "session" — so it passes the broker's _meta_key_ok provenance fence (which mirrors cap-invoke's
 # meta.key gate and rejects slash/dotdot/control/oversized keys). An old slash-style key would now

@@ -55,6 +55,9 @@ let
   #       not added — but the sandbox now runs every impl in its own transient-unit cgroup, so a
   #       spawning impl's descendants are reaped with the unit rather than orphaned.
   reg = (import ./capability-registry.nix { inherit lib; }).registry;
+  # Byte-identical to broker.nix's registryJson (same name, same toJSON of the same validated
+  # registry), so it is the same store path the broker's /etc/agent-os/registry symlink targets.
+  registryJson = pkgs.writeText "agent-os-registry.json" (builtins.toJSON reg);
 
   # The caps whose impls are direct-exec'd through the seam in A2. Both the source file
   # AND the $out/bin filename are DERIVED from reg.<name>.impl, so the header's
@@ -121,6 +124,12 @@ let
     # spawn-free, so this is inert defense-in-depth today; it exists so the FIRST impl that spawns
     # a helper by bare name resolves it from the store, never from an attacker-controlled dir.
     export AGENT_OS_CAP_PATH=${pkgs.coreutils}/bin
+    # Pinned here too, not only in the broker's wrapper one layer up: a direct cap-invoke call
+    # must resolve impls from the shipped capBinDir against the shipped registry (the store copy of
+    # the same JSON broker.nix materializes at /etc/agent-os/registry), with the documented timeout.
+    export AGENT_OS_CAP_BIN_DIR=${capBinDir}/bin
+    export AGENT_OS_REGISTRY=${registryJson}
+    export AGENT_OS_CAP_TIMEOUT_S=30
     # GATE #5(a): the per-cap systemd fs-confinement, DERIVED from the registry sandbox decl, and
     # the launcher that applies it. Both are pinned HERE — in the seam's own wrapper, the same
     # discipline as AGENT_OS_CAP_PATH — so no ambient env can point the dispatcher at a weaker
@@ -130,7 +139,7 @@ let
       export AGENT_OS_CAP_SANDBOX=${sandboxPolicy}
       export AGENT_OS_SYSTEMD_RUN=${pkgs.systemd}/bin/systemd-run
     ''}
-    exec ${pkgs.python3}/bin/python3 ${../bin/cap-invoke} "$@"
+    exec ${pkgs.python3}/bin/python3 -I ${../bin/cap-invoke} "$@"
   '';
 
   cpLines = lib.concatMapStrings (name:

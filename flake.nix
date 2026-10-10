@@ -1392,6 +1392,78 @@
         # requiring their ABSENCE from `unconfinedWrapper` catches the opposite drift, where someone
         # "fixes" seam-live by confining the test wrapper and the documented delta between the two
         # builds — exactly two exports and nothing else — quietly stops being true.
+        # The wall's wrappers must not let inherited environment PROPAGATE into a decision. Scope:
+        # this is not a boundary against a caller on the same uid (who owns the process; LD_* lands
+        # in the bash wrapper before its first line); that boundary is the broker on its own uid
+        # with a clean environment (spec app-approval §6). Two propagation classes, each proven at
+        # runtime with a control that shows it WORKS without the wrapper:
+        #   1. confirm's getty TEST hooks: a caller pre-writes "approve <code>" into a file and points
+        #      AGENT_OS_CONFIRM_GETTY_IN at it. The wrapper must deny (hooks unset; no real tty2 here);
+        #      bin/confirm run bare with the same env approves.
+        #   2. PYTHONPATH: a planted json.py that drops a marker on import. No wall wrapper may import
+        #      it (python3 -I); plain python3 on the same script does.
+        # broker and mcp wrap inside NixOS modules and are not importable here, so their exec line is
+        # checked in source instead (same -I flag, same reason).
+        wall-wrapper-env =
+          let
+            pkgs = nixpkgs.legacyPackages.${system};
+            confirmPkg = import ./modules/confirm-pkg.nix { inherit pkgs; };
+            capInvoke = import ./modules/cap-invoke-pkg.nix { inherit pkgs; };
+            taintW = import ./modules/taint-pkg.nix { inherit pkgs; };
+            auditW = import ./modules/audit-pkg.nix { inherit pkgs; };
+          in pkgs.runCommand "wall-wrapper-env-check" { nativeBuildInputs = [ pkgs.python3 pkgs.coreutils ]; } ''
+            set -u
+            work=$(mktemp -d); cd "$work"
+            nonce=00112233445566778899aabbccddeeff
+            code=$(python3 -c "import base64;print(base64.b32encode(bytes.fromhex('$nonce')).decode()[:8])")
+            printf 'approve %s\n' "$code" > gin; : > gout
+            printf '{"capability":"file.write","destination":null,"nonce":"%s","provenance":"TRUSTED","session_id":"s","tier":"T1","typed_args":{"path":"/x"}}' "$nonce" > req.json
+
+            # 1. getty hooks — control first: the bare script, hooks honoured, approves.
+            ctl=$(AGENT_OS_CONFIRM_CHANNELS=getty AGENT_OS_CONFIRM_DIR="$work/cd" AGENT_OS_CONFIRM_HUMAN_WINDOW_S=5 \
+                  AGENT_OS_CONFIRM_GETTY_IN="$work/gin" AGENT_OS_CONFIRM_GETTY_OUT="$work/gout" \
+                  timeout 30 python3 ${./bin/confirm} < req.json)
+            echo "control (bare bin/confirm, hooks set): $ctl"
+            case "$ctl" in *'"approved": true'*) ;; *) echo "wall-wrapper-env: CONTROL did not approve; the arm below proves nothing" >&2; exit 1;; esac
+            : > gout
+            got=$(AGENT_OS_CONFIRM_GETTY_IN="$work/gin" AGENT_OS_CONFIRM_GETTY_OUT="$work/gout" \
+                  timeout 60 ${confirmPkg.wrapper}/bin/confirm < req.json)
+            echo "wrapper with hooks set: $got"
+            case "$got" in *'"approved": false'*'confirm-console-unavailable'*) ;; *) echo "wall-wrapper-env: the confirm WRAPPER honoured the getty test hooks (or denied for another reason: $got)" >&2; exit 1;; esac
+            [ ! -s gout ] || { echo "wall-wrapper-env: the confirm wrapper wrote the frame to the caller's file" >&2; exit 1; }
+
+            # 2. PYTHONPATH — control: plain python3 imports the planted json.
+            mkdir evil
+            printf 'import os\nopen(os.environ["MARK"], "w").write("x")\nraise SystemExit(0)\n' > evil/json.py
+            MARK="$work/ctl.mark" PYTHONPATH="$work/evil" timeout 20 python3 ${./bin/confirm} < /dev/null >/dev/null 2>&1 || true
+            [ -e ctl.mark ] || { echo "wall-wrapper-env: CONTROL — plain python3 did not import the planted json.py" >&2; exit 1; }
+            for w in ${confirmPkg.wrapper}/bin/confirm ${taintW}/bin/taint ${auditW}/bin/audit ${capInvoke.wrapper}/bin/cap-invoke; do
+              m="$work/$(basename $w).mark"
+              MARK="$m" PYTHONPATH="$work/evil" timeout 30 "$w" status < /dev/null >/dev/null 2>&1 || true
+              [ ! -e "$m" ] || { echo "wall-wrapper-env: $w imported a module from the caller's PYTHONPATH" >&2; exit 1; }
+            done
+
+            # 4. the broker and taint forward only wall names to their children (bin/* wall_env).
+            for prog in ${./bin/broker} ${./bin/taint}; do
+              FOO=1 PYTHONPATH=/x LD_PRELOAD=/x.so AGENT_OS_CONFIRM_GETTY_IN=/x AGENT_OS_CONFIRM_GETTY_OUT=/x \
+              AGENT_OS_KEEP=1 AGENT_OS_AUDIT_SIGNER=s TAINT_BIN=/t AUDIT_BIN=/a python3 -I -c '
+            import importlib.machinery, importlib.util, sys
+            l = importlib.machinery.SourceFileLoader("w", sys.argv[1]); m = importlib.util.module_from_spec(importlib.util.spec_from_loader("w", l)); l.exec_module(m)
+            e = m.wall_env()
+            assert {"AGENT_OS_KEEP", "AGENT_OS_AUDIT_SIGNER", "TAINT_BIN", "AUDIT_BIN"} <= set(e), e
+            bad = {"FOO", "PYTHONPATH", "LD_PRELOAD", "AGENT_OS_CONFIRM_GETTY_IN", "AGENT_OS_CONFIRM_GETTY_OUT", "PATH", "HOME"} & set(e)
+            assert not bad, bad
+            ' "$prog" || { echo "wall-wrapper-env: $prog wall_env() forwards the wrong names" >&2; exit 1; }
+            done
+
+            # 3. broker and mcp exec lines, in source.
+            for pair in "broker.nix:broker" "mcp.nix:mcp"; do
+              f=''${pair%%:*}; b=''${pair##*:}
+              grep -qF "exec \''${pkgs.python3}/bin/python3 -I \''${../bin/$b}" ${./modules}/$f || { echo "wall-wrapper-env: modules/$f does not exec bin/$b with python3 -I" >&2; exit 1; }
+            done
+            touch $out
+          '';
+
         cap-wrapper-pinned =
           let
             pkgs = nixpkgs.legacyPackages.${system};

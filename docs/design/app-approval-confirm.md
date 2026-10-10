@@ -285,6 +285,20 @@ impls run as root, codifies that with the uid guard (3.3 step 1) and measures it
 broker reaches the system manager in production is the T2 go-live slice's problem, and it
 blocks PR 3's VM test from being an end-to-end production claim until it is solved.
 
+**The launch path and the environment (added 2026-10-09 with the wall-environment fix).** Two
+facts the privilege slice must change, not just the uid:
+- `bin/agent-loop` runs `[sys.executable, <sibling "broker">]`: bare `bin/broker`, not the
+  installed wrapper, and `AGENT_OS_BROKER` / `AGENT_OS_MCP` are set nowhere in `modules/`. On the
+  image the sibling does not exist, so every tool call dies in the wall: "deny by absence", not
+  "deny by decision", and none of the wrapper pins are on the production path yet.
+- While the broker runs as the agent's uid with the agent's environment, the wall gives no
+  guarantee against the agent account itself: that caller owns the process (a `LD_PRELOAD` lands
+  in the bash wrapper before its first line). The slice MUST start the broker as a systemd service
+  on its own uid with a clean environment, reached over a socket. What the wall does today is stop
+  PROPAGATION: the broker and taint forward only wall names to their children (`wall_env()`, never
+  the confirm getty test hooks, `PATH`, `LD_*` or `PYTHON*`), the confirm wrapper unsets the getty
+  hooks, and every wall wrapper runs `python3 -I`.
+
 ## 7. Spec-review rulings (Fable, 2026-10-09)
 
 1. **Tier:** T2 is right. No new class; `app.approve` is never-auto by name (3.2).

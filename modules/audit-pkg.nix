@@ -49,5 +49,5 @@ pkgs.writeShellScriptBin "audit" ''
   export AGENT_OS_AUDIT_DIR=/var/lib/agent-os/audit
   export AGENT_OS_MODULES=${../modules}
   export AGENT_OS_IDENTITY_ROOT=${identityRoot}
-  exec ${pkgs.python3}/bin/python3 ${../bin/audit} "$@"
+  exec ${pkgs.python3}/bin/python3 -I ${../bin/audit} "$@"
 ''

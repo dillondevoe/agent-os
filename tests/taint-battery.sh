@@ -72,14 +72,16 @@ status_is TAINTED
 SEAMDIR="$SCRATCH/reset-seams"; mkdir -p "$SEAMDIR"
 # approve seam: CAPTURES the request frame it was handed (so we can assert its shape), then approves.
 # deny seam: refuses. Both mimic the confirm client's terminal {approved,reason} contract.
+# Builtins only: the wall forwards no PATH to its children (bin/taint wall_env), so a stub seam
+# must not depend on resolving `cat` by name.
 cat > "$SEAMDIR/approve" <<SEAM
 #!/bin/sh
-cat > "$SEAMDIR/req.json"
+while IFS= read -r l || [ -n "\$l" ]; do printf '%s\n' "\$l"; done > "$SEAMDIR/req.json"
 printf '{"approved":true,"reason":"operator approved"}'
 SEAM
 cat > "$SEAMDIR/deny" <<'SEAM'
 #!/bin/sh
-cat > /dev/null
+while read -r _; do :; done
 printf '{"approved":false,"reason":"operator denied"}'
 SEAM
 chmod +x "$SEAMDIR/approve" "$SEAMDIR/deny"

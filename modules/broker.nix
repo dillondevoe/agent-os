@@ -93,7 +93,7 @@ let
     # bin/cap-invoke's documented default (its os.environ.get fallback, cap-invoke:180) — so this is
     # behavior-neutral: it only makes the value authoritative, same discipline as the seam vars above.
     export AGENT_OS_CAP_TIMEOUT_S=30
-    exec ${pkgs.python3}/bin/python3 ${../bin/broker} "$@"
+    exec ${pkgs.python3}/bin/python3 -I ${../bin/broker} "$@"
   '';
 in
 {

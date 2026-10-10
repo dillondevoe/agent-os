@@ -55,7 +55,17 @@ let
   relaySecretFile = "/etc/agent-os/credentials/confirm-relay-secret";
   dillonUserId    = "";                     # operator-set; empty => telegram fail-closed-unreachable
 
+  # The getty backend's TEST hooks (AGENT_OS_CONFIRM_GETTY_IN/_OUT redirect the console to files)
+  # must never reach production: if they propagated into this seam (the broker now forwards only
+  # wall names and drops these two, bin/broker wall_env()), "the second console" would be files
+  # someone else chose, the code readable off the frame, and the request self-approvable. Unset,
+  # not pinned — tests/confirm-battery.sh drives bin/confirm directly and keeps them. `python3 -I`
+  # likewise stops PYTHONPATH/PYTHONHOME/user-site from propagating into the seam. Scope, stated
+  # honestly: this stops PROPAGATION. It is not a boundary against a caller on the same uid, who
+  # owns the process (and whose LD_PRELOAD lands in this bash wrapper before its first line); that
+  # boundary is the broker running on its own uid with a clean environment (spec app-approval §6).
   wrapper = pkgs.writeShellScriptBin "confirm" ''
+    unset AGENT_OS_CONFIRM_GETTY_IN AGENT_OS_CONFIRM_GETTY_OUT
     export AGENT_OS_CONFIRM_DIR=${confirmDir}
     export AGENT_OS_CONFIRM_CHANNELS=${channels}
     export AGENT_OS_CONFIRM_HUMAN_WINDOW_S=${toString humanWindow}
@@ -64,7 +74,7 @@ let
     export AGENT_OS_CONFIRM_RELAY_SECRET_FILE=${relaySecretFile}
     export AGENT_OS_CONFIRM_DILLON_USER_ID=${dillonUserId}
     export AGENT_OS_CONFIRM_GETTY_TTY=/dev/${gettyTty}
-    exec ${pkgs.python3}/bin/python3 ${../bin/confirm} "$@"
+    exec ${pkgs.python3}/bin/python3 -I ${../bin/confirm} "$@"
   '';
 
   # The egress allowance the confirm.nix sandbox asserts is EXACTLY one pinned endpoint.
