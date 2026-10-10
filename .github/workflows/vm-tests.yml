@@ -173,7 +173,7 @@ jobs:
           # A failed diff RUNS the matrix: unknown is never read as "nothing changed".
           files="$(git diff --name-only "$BASE...$HEAD")" || { echo "diff failed: running the matrix"; echo "run=true" >> "$GITHUB_OUTPUT"; exit 0; }
           printf '%s\n' "$files"
-          if printf '%s\n' "$files" | grep -Eq '^(modules/|tests/|bin/|scripts/|flake\.nix$|flake\.lock$|configuration\.nix$|configuration-open\.nix$|\.github/workflows/vm-tests\.yml$)'; then
+          if grep -Eq '^(modules/|tests/|bin/|scripts/|flake\.nix$|flake\.lock$|configuration\.nix$|configuration-open\.nix$|\.github/workflows/vm-tests\.yml$)' <<<"$files"; then
             echo "run=true" >> "$GITHUB_OUTPUT"
           else
             echo "run=false" >> "$GITHUB_OUTPUT"
