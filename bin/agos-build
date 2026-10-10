@@ -311,6 +311,14 @@ def main(argv):
         print("\n== approval render ==")
         r = subprocess.run([sys.executable, os.path.join(HERE, "agos-approve"), "show", final], capture_output=True, text=True)
         sys.stdout.write(r.stdout or r.stderr)
+        if R.IMAGE_APPROVALS:
+            # The image: the owner answers on the confirm channel, never at this terminal.
+            print("\n== next: ask the owner through the confirm channel (the broker sends this call) ==")
+            print("  " + json.dumps(R.approve_call(manifest, h), sort_keys=True))
+            if manifest["schedule"]:
+                print("  then: agos-schedule install %s" % final)
+            print("  then: agos-run %s" % final)
+            return 0
         print("\n== next (a human, outside the agent session) ==")
         print("  agos-approve approve %s" % final)
         if manifest["schedule"]:

@@ -22,6 +22,7 @@
         ./modules/mcp.nix
         ./modules/broker.nix
         ./modules/confirm.nix
+        ./modules/apps.nix          # agent-built apps: agos tools with store/apps paths compiled in (app-approval PR 3)
         ./modules/seal-check.nix
         ./modules/break-glass.nix   # PR-A: the ONE interactive root door (tty3, password-gated)
         ./modules/mesh-wireguard-sealed.nix  # WP-S1: sealed-lane mesh (options only; enabled per-variant below)
@@ -258,6 +259,17 @@
         # vm-tests.yml matrix in the same commit, per that file's own rule. Run on demand:
         #   nix build .#test-cap-composed-path
         test-cap-composed-path = import ./tests/cap-composed-path.nix {
+          pkgs = nixpkgs.legacyPackages.${system};
+          inherit baseModules;
+        };
+
+        # App approval through the REAL confirm channel on a booted image (app-approval-confirm.md
+        # §5, PR 3): agos-approve call -> real broker (systemd, clean env) -> real confirm wrapper
+        # -> getty on tty2, answered from the console -> app.approve impl -> root store -> image
+        # agos-run. Approve, deny, and edit-during-prompt legs; A2/A3 asserted. Out of `checks`
+        # (boots a VM); in the vm-tests.yml matrix in the same commit.
+        #   nix build .#test-app-approve-confirm
+        test-app-approve-confirm = import ./tests/app-approve-confirm.nix {
           pkgs = nixpkgs.legacyPackages.${system};
           inherit baseModules;
         };
@@ -1506,6 +1518,9 @@
           let
             reg = import ./modules/capability-registry.nix { lib = nixpkgs.lib; };
             pkgs = nixpkgs.legacyPackages.${system};
+            # Read by the BARE broker this check drives. The cap-invoke wrapper pins its own store
+            # copy of the same JSON (#317), so for the dispatcher this argument is content-identical
+            # and shadowed, not consulted.
             registryJson = pkgs.writeText "registry.json" (builtins.toJSON reg.registry);
             capInvoke = import ./modules/cap-invoke-pkg.nix { inherit pkgs; };
           in pkgs.runCommand "seam-live-check" { nativeBuildInputs = [ pkgs.python3 ]; } ''

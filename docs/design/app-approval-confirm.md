@@ -270,7 +270,8 @@ image wiring): broker + `bin/confirm` with a scripted getty answer. Approve → 
 2. **`app.approve`**: registry entry + `exclusivePaths` check (A1) + `bin/cap-app-approve` +
    battery + `shippedCaps` and the copied helpers (A4) + the one-line `ORIGIN_BY_CAP` entry.
    Wall code: Fable code review before merge.
-3. **Image wiring** (note: scheduled units name a store path for `ExecStart`, so a rebuild
+3. **Image wiring** — SHIPPED with `modules/apps.nix` + `tests/app-approve-confirm.nix` (approve,
+   deny and edit-during-prompt legs on a booted image, answered on the real tty2; A2/A3). (note: scheduled units name a store path for `ExecStart`, so a rebuild
    leaves old timers pointing at a collectable path; pre-existing `agos-schedule` behaviour that
    this PR must handle or document): a module that packages the agos tools with the constants substituted,
    creates `/var/lib/agent-os/apps` (agent-owned) and the store directory (root-owned, tmpfiles),

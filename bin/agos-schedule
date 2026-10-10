@@ -41,7 +41,11 @@ def load_runner():
 
 
 R = load_runner()
-RUNNER = os.path.join(HERE, "agos-run")
+# The image substitutes a path that survives rebuilds (the system profile's agos-run), so a timer
+# installed today does not point at a store path a later rebuild garbage-collects. Empty on dev
+# boxes: the runner beside this file.
+IMAGE_RUNNER = ""
+RUNNER = IMAGE_RUNNER or os.path.join(HERE, "agos-run")
 
 
 def unit_dir():

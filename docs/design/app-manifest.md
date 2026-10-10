@@ -90,6 +90,7 @@ an approval and must never be used by the agent.
     agos-approve approve <appdir>     # same render, then type the first 8 hex of the sha to record it
     agos-approve revoke  <name|sha>   # delete the entry; the runner refuses from then on
     agos-approve list
+    agos-approve call    <appdir>     # print the app.approve capability call (read-only; the image path)
 
 `approve` refuses (exit 3) unless it is a human outside the agent session: stdin must be a tty,
 `AGENT_OS_ACTIVE` (the marker `agent-shell.nix` exports when the agent session starts) must be
