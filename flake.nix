@@ -1920,6 +1920,34 @@
         # `infinity` are the SAME VALUE to systemd (all disable the timeout), so a predicate that merely asserts the
         # attribute EXISTS accepts a unit that is exactly as unbounded as it was before — the
         # "a control that lives only in a name is not a control" shape, in a config value.
+        # A WARM-UP MUST NEVER HOLD OR FAIL THE BOOT (issue #322, measured on the dellon deploy
+        # VM 2026-10-10): a oneshot wantedBy=multi-user.target holds the target (targets are
+        # implicitly After= their Wants=), and when the prefill outran its timeout the unit
+        # FAILED and the box read DEGRADED. Two properties, one predicate each:
+        #   1. not a oneshot  -> the target does not wait on it;
+        #   2. the script bounds itself softly (`timeout` + exit 0) -> slow is never a failure.
+        prewarm-does-not-block-boot =
+          let
+            lib = nixpkgs.lib;
+            unit = self.nixosConfigurations.agentos-open.config.systemd.services.agos-boot-prewarm;
+            nonBlocking = sc: lib.elem (sc.Type or "simple") [ "exec" "simple" ];
+            softBound = script: lib.hasInfix "/bin/timeout " script && ! (lib.hasInfix "set -e" script);
+          in
+            assert lib.assertMsg (nonBlocking unit.serviceConfig)
+              ("prewarm-does-not-block-boot: agos-boot-prewarm is Type=" + (unit.serviceConfig.Type or "?")
+               + "; a oneshot wanted by multi-user.target holds the target until the prefill ends (#322).");
+            assert lib.assertMsg (softBound unit.script)
+              "prewarm-does-not-block-boot: the prewarm script has no in-script `timeout`, so a slow prefill is unbounded or ends as a failed unit (#322).";
+            # PRE-FIX ARMS: the shape that shipped must be rejected by the same predicates.
+            assert lib.assertMsg (! (nonBlocking { Type = "oneshot"; RemainAfterExit = true; }))
+              "prewarm-does-not-block-boot: PRE-FIX ARM (Type=oneshot) was ACCEPTED; the predicate cannot see the bug.";
+            assert lib.assertMsg (! (softBound "agent-brain --once warmup >/dev/null 2>&1 || true"))
+              "prewarm-does-not-block-boot: PRE-FIX ARM (unbounded script) was ACCEPTED.";
+            nixpkgs.legacyPackages.${system}.runCommand "prewarm-does-not-block-boot" { } ''
+              echo "agos-boot-prewarm is Type=${unit.serviceConfig.Type} with an in-script soft timeout; oneshot + unbounded arms rejected"
+              touch $out
+            '';
+
         prewarm-start-timeout-is-finite =
           let
             lib = nixpkgs.lib;

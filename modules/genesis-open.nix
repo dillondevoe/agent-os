@@ -197,8 +197,14 @@ in {
     # single cause of the slowness this unit was written to fix.
     environment = lib.seq _prewarmModelAsserted sessionOllamaEnv;
     serviceConfig = {
-      Type = "oneshot";
-      RemainAfterExit = true;
+      # NOT a oneshot (2026-10-10, issue #322). A target is implicitly ordered AFTER every unit
+      # it Wants (DefaultDependencies), so a oneshot wantedBy=multi-user.target DOES hold the
+      # target until it finishes. MEASURED on the dellon deploy VM: `systemctl list-jobs` showed
+      # `multi-user.target start waiting` + `graphical.target start waiting` with only this unit
+      # running, and at 8 GB the prefill outran its 30-min TimeoutStartSec, failed the unit and
+      # left the box DEGRADED. That settles the UNVERIFIED question the comment below records.
+      # `exec`: the unit is active the moment the warm-up starts, so boot never waits on it.
+      Type = "exec";
       # HTTP-only against the loopback Ollama API — no ollama store access needed, so this
       # unit does NOT need agos-seed-model's DynamicUser+StateDirectory namespace join.
       DynamicUser = true;
@@ -237,7 +243,12 @@ in {
       TimeoutStartSec = 1800;
     };
     script = ''
-      ${agent-brain}/bin/agent-brain --once "boot warmup — reply with one word" >/dev/null 2>&1 || true
+      # SOFT bound: a warm-up is an optimisation, so running long must never fail the unit or
+      # degrade the box. `timeout` stops it and the script still exits 0; the in-process warmup
+      # in agent-brain.py stays as belt. (TimeoutStartSec above now only bounds process start.)
+      if ! ${pkgs.coreutils}/bin/timeout 1800 ${agent-brain}/bin/agent-brain --once "boot warmup — reply with one word" >/dev/null 2>&1; then
+        echo "agos-boot-prewarm: warm-up did not finish (timed out after 1800s or errored); KV cache stays cold this boot — not a failure"
+      fi
     '';
   };
 }
