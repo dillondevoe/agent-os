@@ -114,8 +114,10 @@ let
     # dirname(dirname(__file__))/modules. Both land on the same file, so the two cannot drift.
     cp ${./spend_ceiling.py} "$out/modules/spend_ceiling.py"
     cp ${./providers.py}     "$out/modules/providers.py"
+    cp ${./agos_desktop.py}  "$out/modules/agos_desktop.py"   # the desktop adapter (hard import)
     ln -s ../modules/spend_ceiling.py "$out/bin/spend_ceiling.py"
     ln -s ../modules/providers.py     "$out/bin/providers.py"
+    ln -s ../modules/agos_desktop.py  "$out/bin/agos_desktop.py"
 
     # The counter CLI the ceiling's own error text tells the operator to run
     # ("run `agent-os-budget init`"). Advice that names an absent command is not advice.
