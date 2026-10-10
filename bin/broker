@@ -96,6 +96,18 @@ _WALL_ENV_EXTRA = ("TAINT_BIN", "AUDIT_BIN")
 _WALL_ENV_DROP = ("AGENT_OS_CONFIRM_GETTY_IN", "AGENT_OS_CONFIRM_GETTY_OUT")
 
 
+def peer_fields():
+    """The wall launcher's SO_PEERCRED result (docs/design/broker-service.md §2.4), for the audit
+    `route` record. peer_pid is advisory (pids are reused), never a key. Absent or malformed -> no
+    field (the broker run by hand or by a battery has no peer)."""
+    out = {}
+    for env, key in (("AGENT_OS_PEER_UID", "peer_uid"), ("AGENT_OS_PEER_PID", "peer_pid")):
+        v = os.environ.get(env, "")
+        if v.isascii() and v.isdecimal():
+            out[key] = int(v)
+    return out
+
+
 def wall_env():
     return {k: v for k, v in os.environ.items()
             if (k.startswith("AGENT_OS_") or k in _WALL_ENV_EXTRA) and k not in _WALL_ENV_DROP}
@@ -663,7 +675,7 @@ class Broker:
         # Stage 7 — audit the routing decision BEFORE any effect (no-log -> no-execute).
         nonce = os.urandom(16).hex() if decision == "REQUIRE-CONFIRM" else None
         if not self._audit("route", rid, capability=name, tier=tier, provenance=provenance,
-                           decision=decision, nonce=nonce):
+                           decision=decision, nonce=nonce, **peer_fields()):
             return deny(rid, "audit-failed (no-log->no-execute)")
 
         # Stage 8 — effect.

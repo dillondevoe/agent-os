@@ -17,8 +17,20 @@ let
   # the loop dispatches), not only chat. Same python3-shebang wrapping so it needs no
   # runtime deps. In v0.2 A1 its only wired tool is an inert echo; A2 routes real caps
   # through the mcp|broker wall. It sits on the UNTRUSTED side and makes no security decisions.
-  agentLoopBin = pkgs.writeScriptBin "agent-loop"
-    ("#!${pkgs.python3}/bin/python3\n" + builtins.readFile ../bin/agent-loop);
+  #
+  # The wall socket path is COMPILED IN (docs/design/broker-service.md §2.5): the installed copy
+  # never reads AGENT_OS_WALL_SOCKET, never spawns a wall of its own, and its deadline must equal
+  # the wall service's derived client timeout. Both are build-time assertions, not conventions.
+  agentLoopSrc = builtins.readFile ../bin/agent-loop;
+  wall = config.agentos.wallInternal;
+  agentLoopBin =
+    assert lib.assertMsg (lib.hasInfix "IMAGE_WALL_SOCKET = \"\"" agentLoopSrc)
+      "agent-shell: bin/agent-loop lost its IMAGE_WALL_SOCKET substitution target";
+    assert lib.assertMsg (lib.hasInfix "WALL_SOCKET_TIMEOUT_S = ${toString wall.clientTimeoutS}" agentLoopSrc)
+      "agent-shell: bin/agent-loop's WALL_SOCKET_TIMEOUT_S must equal the wall's derived client timeout (${toString wall.clientTimeoutS}s)";
+    pkgs.writeScriptBin "agent-loop"
+      ("#!${pkgs.python3}/bin/python3\n" + builtins.replaceStrings
+        [ "IMAGE_WALL_SOCKET = \"\"" ] [ "IMAGE_WALL_SOCKET = \"${wall.socketPath}\"" ] agentLoopSrc);
   # The launcher lives in the repo so it's easy to iterate; installed to /run/current-system.
   # It calls `mem`, `agent-loop`, and `brain-ollama` by bare name (PATH), so all must be
   # installed alongside it.
