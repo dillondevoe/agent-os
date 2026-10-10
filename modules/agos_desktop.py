@@ -76,6 +76,55 @@ class HyprlandAdapter:
         return _notify_send(msg)
 
 
+class SwayAdapter:
+    """sway, via swaymsg (surfaces-and-first-login.md §6, the second adapter). swaymsg takes a sway
+    COMMAND, which sway parses (`;` and `,` separate commands), so arrange() passes only a value from
+    the closed table below, looked up by key; a caller string never reaches swaymsg."""
+    name = "sway"
+    graphical = True
+    ARRANGE = {"close": "kill", "fullscreen": "fullscreen toggle",
+               "cycle": "focus next", "split": "layout toggle split"}
+
+    def windows(self):
+        swaymsg = shutil.which("swaymsg")
+        if not swaymsg:
+            return Unsupported("swaymsg not on this unit's PATH")
+        try:
+            r = subprocess.run([swaymsg, "-t", "get_tree", "-r"], capture_output=True, text=True, timeout=4)
+            tree = json.loads(r.stdout)
+        except Exception:
+            return Unsupported("swaymsg gave no readable answer")
+        out = []
+
+        def walk(node, ws):
+            if node.get("type") == "workspace":
+                ws = str(node.get("name") or "")
+            if node.get("type") in ("con", "floating_con") and node.get("pid"):
+                out.append({"class": str(node.get("app_id") or (node.get("window_properties") or {}).get("class") or "?"),
+                            "title": str(node.get("name") or ""), "workspace": ws})
+            for k in ("nodes", "floating_nodes"):
+                for child in node.get(k) or []:
+                    walk(child, ws)
+        try:
+            walk(tree, "")
+        except Exception:
+            return Unsupported("swaymsg gave no readable answer")
+        return out
+
+    def arrange(self, action):
+        cmd = self.ARRANGE.get(action)
+        if not cmd:
+            return "unknown window action '%s'" % action
+        swaymsg = shutil.which("swaymsg")
+        if not swaymsg:
+            return Unsupported("swaymsg not on this unit's PATH")
+        subprocess.run([swaymsg, cmd], capture_output=True, text=True, timeout=6)
+        return "desktop: %s done" % action
+
+    def notify(self, msg):
+        return _notify_send(msg)
+
+
 class NoDesktop:
     """A terminal-only box: no window list, no arranging; notify still has a portable path when a
     notification daemon exists, else says so."""
@@ -112,4 +161,6 @@ def adapter():
     d = os.environ.get("AGENTOS_DESKTOP") or ("" if DESKTOP_DEFAULT.startswith("@") else DESKTOP_DEFAULT)
     if d == "none":
         return NoDesktop()
+    if d == "sway":
+        return SwayAdapter()
     return HyprlandAdapter()

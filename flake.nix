@@ -1619,6 +1619,7 @@
             altSys = mkOpenSystem [ { agentos.terminal = "foot"; agentos.shell = "fish"; } ];
             dflt = dfltSys.config; alt = altSys.config;
             none = (mkOpenSystem [ { agentos.desktop = "none"; } ]).config;
+            sway = (mkOpenSystem [ { agentos.desktop = "sway"; agentos.terminal = "foot"; } ]).config;
             brainOf = c: lib.findFirst (p: (p.name or "") == "agent-brain") null c.environment.systemPackages;
             noneBrain = brainOf none; dfltBrain = brainOf dflt;
             names = c: map (p: p.name or "") c.environment.systemPackages;
@@ -1654,6 +1655,15 @@
                                 && lib.hasInfix "exec Hyprland" dflt.environment.loginShellInit
                                 && !(lib.hasInfix "AGENTOS_BRAIN_LOOP" dflt.environment.loginShellInit))
             "surface-options: the default (hyprland) desktop lost a piece (portal, brain-home, waybar, seeded config, exec Hyprland)";
+          assert lib.assertMsg (sway.programs.sway.enable && !sway.programs.hyprland.enable
+                                && sway.systemd.user.services ? brain-home && !(sway.systemd.user.services ? waybar)
+                                && lib.hasInfix "exec sway" sway.environment.loginShellInit
+                                && !(lib.hasInfix "exec Hyprland" sway.environment.loginShellInit)
+                                && (sway.environment.variables.AGENTOS_DESKTOP or "") == "sway"
+                                && sway.security.rtkit.enable)
+            "surface-options: agentos.desktop = sway must give sway (not Hyprland), the brain window, and keep audio";
+          assert lib.assertMsg (builtins.tryEval (builtins.deepSeq sway.system.build.toplevel.drvPath true)).success
+            "surface-options: a desktop = sway system must evaluate end to end";
           assert lib.assertMsg (lib.hasInfix "while true; do agent-brain" none.environment.loginShellInit)
             "surface-options: with desktop = none the brain must run on tty1 in a respawn loop";
           assert lib.assertMsg (!(lib.any (n: lib.hasPrefix "foot-" n || lib.hasPrefix "ghostty-" n || lib.hasPrefix "alacritty-" n) (names dflt)))
@@ -1663,12 +1673,37 @@
               echo "surface-options: default Super+Return is no longer kitty" >&2; exit 1; }
             grep -qF 'hl.bind("SUPER+RETURN",  hl.dsp.exec_cmd("foot"))' ${alt.system.build.hyprlandConf} || {
               echo "surface-options: agentos.terminal = foot does not bind foot" >&2; exit 1; }
+            grep -qF 'assign [app_id="brain-home"] workspace number 1' ${sway.system.build.swayConf} || {
+              echo "surface-options: the sway config lost the brain-home workspace rule" >&2; exit 1; }
+            grep -qF 'bindsym $mod+Return exec foot' ${sway.system.build.swayConf} || {
+              echo "surface-options: the sway config does not bind the chosen terminal" >&2; exit 1; }
             grep -qF 'DESKTOP_DEFAULT = "none"' ${noneBrain}/modules/agos_desktop.py || {
               echo "surface-options: the none system's installed adapter does not have the desktop compiled in" >&2; exit 1; }
             grep -qF 'DESKTOP_DEFAULT = "hyprland"' ${dfltBrain}/modules/agos_desktop.py || {
               echo "surface-options: the default system's installed adapter does not say hyprland" >&2; exit 1; }
             grep -qF 'exec_cmd("kitty --title cheatsheet' ${alt.system.build.hyprlandConf} || {
               echo "surface-options: system-owned kitty windows must stay kitty" >&2; exit 1; }
+            touch $out
+          '';
+
+        # The generated sway config must load in sway itself (headless wlroots backend, no display needed),
+        # the hyprland-config-parses pattern. CONTROL: a config with one unknown command must fail, so a
+        # validator that accepts anything cannot pass this check.
+        sway-config-parses =
+          let
+            pkgs = nixpkgs.legacyPackages.${system};
+            conf = (mkOpenSystem [ { agentos.desktop = "sway"; } ]).config.system.build.swayConf;
+          in pkgs.runCommand "sway-config-parses-check" { } ''
+            export HOME=$(mktemp -d) XDG_RUNTIME_DIR=$(mktemp -d)
+            chmod 700 $XDG_RUNTIME_DIR
+            export WLR_BACKENDS=headless WLR_RENDERER=pixman WLR_LIBINPUT_NO_DEVICES=1
+            # sway-unwrapped: the wrapped sway starts a D-Bus session first, and a build sandbox has no
+            # dbus-daemon, so it fails for that reason alone (and the control below would pass vacuously).
+            printf 'set $mod Mod4\nnotacommand x\n' > bad.conf
+            if ${pkgs.sway-unwrapped}/bin/sway -C -c bad.conf >/dev/null 2>&1; then
+              echo "sway-config-parses: CONTROL — sway accepted a config with an unknown command" >&2; exit 1
+            fi
+            ${pkgs.sway-unwrapped}/bin/sway -C -c ${conf} || { echo "sway-config-parses: the generated sway config does not load" >&2; exit 1; }
             touch $out
           '';
 

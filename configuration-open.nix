@@ -78,6 +78,7 @@ in {
   imports = [
     ./modules/calendar-open.nix
     ./modules/desktop-open.nix
+    ./modules/desktop-sway-open.nix # agentos.desktop = "sway" (inert unless chosen)
     ./modules/surface-options.nix # agentos.terminal / agentos.shell (defaults: today's kitty / bash)
     ./modules/settings-open.nix
     ./modules/model-open.nix
