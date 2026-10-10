@@ -35,6 +35,11 @@ LINE_PREFIX = "│ "            # "│ "
 MAXPREVIEW = 512                    # hard cap on any single previewed value (§4.5)
 TRUNC = "…(truncated)"        # "…(truncated)"
 GETTY_MAX_RETRIES = 3              # ≤3-retry-then-deny for the 40-bit getty code (§4.2, Q2)
+# The whole frame must fit one Telegram message (4096 UTF-16 units). A longer frame would be split or
+# rejected by the relay, and on any channel it means the human approves bytes they may not see in
+# one screen. Denied for EVERY capability, before any channel is tried (docs/design/
+# app-approval-confirm.md §7 ruling 4). Measured on the longest shape (getty, never-seen banner).
+FRAME_MAX = 4096
 
 # C0 (except \t\n) + DEL + C1. Scrubbing these stops terminal-escape injection into the getty
 # frame and control bytes anywhere in the frame (the PR#1-B2 lesson, generalized §4.1).
@@ -493,6 +498,13 @@ def main():
         deny("confirm-malformed-request")
     if not isinstance(req, dict) or not req.get("nonce"):
         deny("confirm-malformed-request")
+
+    try:
+        longest = render_frame(req, True, for_getty=True, confirm_code="X" * 8)
+    except Exception:
+        deny("confirm-malformed-request")
+    if len(longest.encode("utf-16-le")) // 2 > FRAME_MAX:
+        deny("confirm-frame-too-long")
 
     channels = [c.strip() for c in os.environ.get("AGENT_OS_CONFIRM_CHANNELS", "").split(",")
                 if c.strip()]
