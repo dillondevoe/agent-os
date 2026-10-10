@@ -171,9 +171,16 @@ jobs:
           # .github/workflows/vm-tests.yml
           if [ "$EVENT" != pull_request ]; then echo "run=true" >> "$GITHUB_OUTPUT"; exit 0; fi
           # A failed diff RUNS the matrix: unknown is never read as "nothing changed".
-          files="$(git diff --name-only "$BASE...$HEAD")" || { echo "diff failed: running the matrix"; echo "run=true" >> "$GITHUB_OUTPUT"; exit 0; }
-          printf '%s\n' "$files"
-          if grep -Eq '^(modules/|tests/|bin/|scripts/|flake\.nix$|flake\.lock$|configuration\.nix$|configuration-open\.nix$|\.github/workflows/vm-tests\.yml$)' <<<"$files"; then
+          # --no-renames: a move out of modules/ must list the OLD path too, or moving a module
+          # to docs/ would read as docs-only and skip the matrix. -z: raw NUL-separated names;
+          # without it git QUOTES unusual names ("modules/\303\251.nix") and the ^ anchors miss.
+          # Matched with grep -z against a file: no pipe, so no SIGPIPE path to run=false.
+          # (security review of #327, 2026-10-10; both bypasses reproduced, then shown closed)
+          if ! git diff --no-renames --name-only -z "$BASE...$HEAD" > "$RUNNER_TEMP/changed.z"; then
+            echo "diff failed: running the matrix"; echo "run=true" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          tr '\0' '\n' < "$RUNNER_TEMP/changed.z"
+          if grep -zEq '^(modules/|tests/|bin/|scripts/|flake\.nix$|flake\.lock$|configuration\.nix$|configuration-open\.nix$|\.github/workflows/vm-tests\.yml$)' "$RUNNER_TEMP/changed.z"; then
             echo "run=true" >> "$GITHUB_OUTPUT"
           else
             echo "run=false" >> "$GITHUB_OUTPUT"
