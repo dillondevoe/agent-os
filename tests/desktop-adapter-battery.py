@@ -13,6 +13,7 @@
 #   F. NoDesktop: windows() and arrange() are Unsupported; its table is empty.
 #   G. notify(): argv is ["--app-name=Agent OS", "--", msg] with msg capped at 500 (so a message that
 #      starts with "-" is never read as a flag); notify-send absent -> Unsupported.
+#   J. DesktopEnv (Plasma, GNOME, COSMIC): window verbs Unsupported and run nothing; notify works.
 #
 # stdlib only.
 
@@ -173,6 +174,22 @@ os.environ["AGENTOS_DESKTOP"] = "sway"
 check(isinstance(D.adapter(), D.SwayAdapter) and D.SwayAdapter.graphical, "I: adapter() maps sway")
 os.environ.pop("AGENTOS_DESKTOP")
 ok("I SwayAdapter: get_tree parse, closed command table, injection strings dispatch nothing, adapter() maps sway")
+
+# J — DesktopEnv (Plasma, GNOME, COSMIC): graphical, window verbs Unsupported naming the desktop and
+# running nothing, notify goes through notify-send; adapter() maps each name to it.
+for de in ("plasma", "gnome", "cosmic"):
+    os.environ["AGENTOS_DESKTOP"] = de
+    A = D.adapter()
+    check(isinstance(A, D.DesktopEnv) and A.name == de and A.graphical is True, "J %s: adapter(): %r" % (de, A))
+    reset("hyprctl", "swaymsg")
+    w, a = A.windows(), A.arrange("close")
+    check(isinstance(w, D.Unsupported) and de in w.reason and isinstance(a, D.Unsupported) and calls() == [],
+          "J %s: window verbs must be Unsupported and run nothing: %r %r %r" % (de, w, a, calls()))
+    reset("notify-send")
+    check(A.notify("hi") == "notified" and calls() == [["notify-send", "--app-name=Agent OS", "--", "hi"]],
+          "J %s: notify: %r" % (de, calls()))
+os.environ.pop("AGENTOS_DESKTOP")
+ok("J DesktopEnv: plasma/gnome/cosmic map to it, graphical, window verbs Unsupported, notify via notify-send")
 
 os.environ["PATH"] = REAL_PATH
 print("desktop-adapter-battery: PASS (%d criteria)" % len(passed))

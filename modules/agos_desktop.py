@@ -4,7 +4,8 @@
 #
 # The brain never talks to a compositor directly any more; it calls one small interface, and each
 # desktop implements it. Today there are two implementations: Hyprland (the existing hyprctl calls,
-# moved here unchanged) and NoDesktop (terminal-only boxes). sway and Plasma come next.
+# moved here unchanged), sway (swaymsg), the full desktop environments (Plasma, GNOME, COSMIC: notify
+# only), and NoDesktop (terminal-only boxes).
 #
 #   verb            required  meaning
 #   windows()       optional  list of {class, title, workspace}, or UNSUPPORTED
@@ -125,6 +126,26 @@ class SwayAdapter:
         return _notify_send(msg)
 
 
+class DesktopEnv:
+    """Plasma, GNOME and COSMIC (desktop-de-open.nix). None offers a window IPC the agent user may drive
+    without a privileged D-Bus or script API (KWin scripting, Shell eval, cosmic-comp protocols), so
+    the window verbs are Unsupported by name and only notify works. A display exists: graphical."""
+    graphical = True
+    ARRANGE = {}
+
+    def __init__(self, name):
+        self.name = name
+
+    def windows(self):
+        return Unsupported("%s has no window list the agent may read" % self.name)
+
+    def arrange(self, action):
+        return Unsupported("%s has no window control the agent may use" % self.name)
+
+    def notify(self, msg):
+        return _notify_send(msg)
+
+
 class NoDesktop:
     """A terminal-only box: no window list, no arranging; notify still has a portable path when a
     notification daemon exists, else says so."""
@@ -163,4 +184,6 @@ def adapter():
         return NoDesktop()
     if d == "sway":
         return SwayAdapter()
+    if d in ("plasma", "gnome", "cosmic"):
+        return DesktopEnv(d)
     return HyprlandAdapter()
