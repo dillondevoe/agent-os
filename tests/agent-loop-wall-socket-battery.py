@@ -15,7 +15,9 @@
 #      the same marker script IS run (the fallback exists only when unpinned).
 #   F. A server that accepts and never answers -> deny within the (shortened) overall deadline,
 #      including one that trickles bytes with no newline (the deadline is overall, not per-recv).
-#   G. A reply larger than WALL_REPLY_MAX -> deny.
+#   G. A reply larger than WALL_REPLY_MAX -> deny (a well-formed allow; control: under the cap, allowed).
+#   H. A copy with IMAGE_WALL_SOCKET substituted uses it and ignores AGENT_OS_WALL_SOCKET (pointed at
+#      an absent path); the deadline is 190 s (RuntimeMaxSec 180 + 10, spec §2.5).
 #
 # stdlib only, no model, no real wall.
 
@@ -42,7 +44,7 @@ def check(c, msg):
         raise AssertionError(msg)
 
 
-def load_loop(socket_path):
+def load_loop(socket_path, compiled=None):
     if socket_path is None:
         os.environ.pop("AGENT_OS_WALL_SOCKET", None)
     else:
@@ -50,7 +52,11 @@ def load_loop(socket_path):
     path = os.path.join(REPO, "bin", "agent-loop")
     mod = type(sys)("agent_loop_ws")
     mod.__file__ = path
-    exec(compile(open(path, encoding="utf-8").read(), path, "exec"), mod.__dict__)
+    src = open(path, encoding="utf-8").read()
+    if compiled is not None:
+        check(src.count('IMAGE_WALL_SOCKET = ""') == 1, "agent-loop must carry one substitutable IMAGE_WALL_SOCKET line")
+        src = src.replace('IMAGE_WALL_SOCKET = ""', 'IMAGE_WALL_SOCKET = %r' % compiled)
+    exec(compile(src, path, "exec"), mod.__dict__)
     return mod
 
 
@@ -162,5 +168,13 @@ srv = Server(reply((json.dumps(big) + "\n").encode()))
 r = L.dispatch("file.read", {"path": "/x"}); srv.t.join(5)
 check(r[0] is True, "G control: the same reply under the cap is allowed")
 ok("G oversize reply -> deny")
+
+# H
+L = load_loop(os.path.join(TMP, "absent.sock"), compiled=SOCK)
+check(L.WALL_SOCKET == SOCK and L.WALL_SOCKET_TIMEOUT_S == 190, "H: compiled path wins; deadline 190")
+srv = Server(reply((json.dumps(DATA) + "\n").encode()))
+r = L.dispatch("file.read", {"path": "/x"}); srv.t.join(5)
+check(r[0] is True, "H: the compiled socket is the one used, whatever the env says: %r" % (r,))
+ok("H compiled IMAGE_WALL_SOCKET beats the environment; 190 s deadline")
 
 print("agent-loop-wall-socket-battery: PASS (%d criteria)" % len(passed))

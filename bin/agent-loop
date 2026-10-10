@@ -81,11 +81,14 @@ _req_seq = 0              # monotonic JSON-RPC id; single-flight (one request pe
 
 # THE PRODUCTION SEAM (docs/design/broker-service.md §2.5). On the image the wall is a system
 # service on the other side of a uid boundary, reached over a unix socket that carries ONE request
-# per connection; modules/agent-shell.nix pins the path. When it is set, the loop NEVER spawns a
-# wall of its own — a missing, refusing, silent, garbled or slow socket is the same fail-closed
-# deny as a broker deny. Unset (batteries, dev boxes): the subprocess pipeline below.
-WALL_SOCKET = os.environ.get("AGENT_OS_WALL_SOCKET", "")
-WALL_SOCKET_TIMEOUT_S = 160   # > the instance's RuntimeMaxSec (150) > the confirm backstop (120)
+# per connection. The installed agent-loop has the path COMPILED IN (IMAGE_WALL_SOCKET, substituted
+# by the image build, the IMAGE_APPROVALS pattern); the environment is read only where it is empty
+# (batteries, dev boxes). When a path is set, the loop NEVER spawns a wall of its own — a missing,
+# refusing, silent, garbled or slow socket is the same fail-closed deny as a broker deny. Unset:
+# the subprocess pipeline below. The far side only answers on EOF, so the half-close is mandatory.
+IMAGE_WALL_SOCKET = ""
+WALL_SOCKET = IMAGE_WALL_SOCKET or os.environ.get("AGENT_OS_WALL_SOCKET", "")
+WALL_SOCKET_TIMEOUT_S = 190   # RuntimeMaxSec (180) + 10; > confirm backstop (120) > human window (90)
 WALL_REPLY_MAX = 4 * 1024 * 1024
 
 

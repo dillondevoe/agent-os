@@ -58,7 +58,7 @@
 #   app-approve-battery.py        10 criteria — bin/cap-app-approve (T2 app.approve impl): binds the approval to what the human read
 #   agos-store-paths-battery.py   11 criteria — agos tools: approvals store / apps root precedence (image constants > env > $HOME), A3/A5
 #   agos-schedule-battery.py      12 criteria — bin/agos-schedule manifest schedule -> systemd user timer, control-armed (fake systemctl)
-#   agent-loop-wall-socket-battery.py 6 criteria — agent-loop's production wall seam (unix socket): no fallback, overall deadline, deny on every failure
+#   agent-loop-wall-socket-battery.py 7 criteria — agent-loop's production wall seam (unix socket): no fallback, overall deadline, deny on every failure
 #   agent-loop-dispatch-battery.py  8 checks — agent-loop tool-dispatch mechanics vs bin/mcp + broker-stub
 #
 # NOT COVERED HERE — these need a materialized Nix registry and/or store paths:
