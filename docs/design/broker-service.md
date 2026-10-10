@@ -1,7 +1,7 @@
 # The broker as a service (spec, v0)
 
-Status: SPEC, revised after the Fable spec review (2026-10-10: approve with required changes; all
-folded in below, rulings in section 7). No code in this PR. It closes the gap named in
+Status: SPEC, APPROVED by the Fable spec review (2026-10-10: first pass approve with required
+changes, all folded in; re-review approve; rulings in section 7). No code in this PR. It closes the gap named in
 `docs/design/app-approval-confirm.md` §6: today the wall decides nothing in production.
 
 Security surface (the wall's launch path, its privilege, its environment):
@@ -32,7 +32,7 @@ have the agent talk to it over a unix socket that carries one JSON-RPC request p
 - One wall run handles one request (`_wall` writes one line, reads one verdict). Audit and taint
   serialize their own state with `flock`. The broker is single-flight within one process.
 - `bin/mcp` does not flush per record: its verdict reaches the broker when `mcp` exits, i.e. on
-  stdin EOF. The client's half-close is therefore load-bearing (2.5).
+  stdin EOF. The launcher (2.2 step 2) therefore feeds `mcp` exactly one line and then EOF itself.
 
 ## 2. Design
 
@@ -70,6 +70,7 @@ agent-os-wall@.service    one instance per connection; StandardInput=socket, Sta
    journal line, if the lookup fails or the peer uid differs. The group gate and this check are
    redundant on purpose: the group stops other users; the uid check stops root tooling (root bypasses
    0660) from producing audit records attributed to no agent, and survives a group-membership mistake.
+   A lookup that raises, or returns uid 0, is a refusal.
    Export `AGENT_OS_PEER_UID` and `AGENT_OS_PEER_PID` (the pid is informational only: pids are
    reused and a connection fd can be passed to another process of the same uid).
 2. **Exactly one request.** Read bytes from fd 0 up to the first newline, at most 1 MiB; anything
@@ -121,7 +122,8 @@ and reach the confirm relay.
   impl environment explicitly, so they never reach a capability impl (asserted in PR 2).
 - **Ordering:** `After=` and `Requires=` on `systemd-tmpfiles-setup.service` and the identity
   minting unit, so a signing wall never starts before its identity and state directories exist (it
-  would deny every call with `audit-failed`).
+  would deny every call with `audit-failed`). An identity failure therefore stops the wall entirely:
+  deny by absence, the fail-closed direction.
 
 ### 2.4 Audit
 
@@ -135,7 +137,8 @@ unix connection includes the peer's pid and uid, so the journal carries the uid 
 - The installed `agent-loop` has the socket path compiled in (a substituted constant, the
   `IMAGE_APPROVALS` pattern; `AGENT_OS_WALL_SOCKET` is read only where the constant is empty, for
   batteries and dev boxes). When a socket path is set, `_wall` connects, writes the one request line,
-  **must** half-close its write side (the far side only produces a verdict on EOF, §1), and reads one
+  **must** half-close its write side (its half of the one-request contract: the launcher reads up to
+the first newline, and a client that never ends its line fails fast rather than holding the slot), and reads one
   line under an overall deadline of `RuntimeMaxSec + 10` = **190 s**, with a 4 MiB reply cap. Any
   failure (no socket, refused, closed without a line, garbled, oversize, timeout) is the existing
   fail-closed deny. It never falls back to spawning a broker, even when the socket is absent.
