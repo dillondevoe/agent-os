@@ -53,7 +53,7 @@ esac
 # this line back into the moving ref it replaced while still looking pinned.
 #
 # Override for testing an unmerged branch:  ... | FLAKE_REV=my-branch bash
-FLAKE_REV="${FLAKE_REV:-66aeaeb169c0d421cc6909a15035ef852830558a}"
+FLAKE_REV="${FLAKE_REV:-b12ac6c4817f76004d30dd4cc4a915740c00868b}"
 FLAKE="github:dillondevoe/agent-os/${FLAKE_REV}#${VARIANT}"
 DISK="${DISK:-/dev/nvme0n1}"   # override:  curl ... | DISK=/dev/sdX bash   (prefix on the piped bash)
 TS_AUTHKEY="${TS_AUTHKEY:-}"   # OPEN variant only — Tailscale pre-auth key (runtime secret, never committed)
@@ -275,8 +275,8 @@ if [ "$VARIANT" = agentos-open ]; then
   echo " OPEN/MESHED box. First boot: ethernet auto-DHCPs (wifi: log in on the console —"
   echo " it autologins to a bash shell — and run 'nmtui'). If you passed TS_AUTHKEY it joins"
   echo " your tailnet automatically (SSH: 'tailscale status' to see it); otherwise run"
-  echo " 'sudo tailscale up --ssh'. The ollama daemon is up with NO model — rsync the blobs"
-  echo " over the mesh. SSH is key-only for agent@ and root@ (mini's key baked in)."
+  echo " 'sudo tailscale up --ssh'. The brain is baked into the image — nothing to rsync."
+  echo " SSH is key-only for agent@ and root@ (the mini's and Mirror's keys are baked in)."
 else
   echo " First boot: it gets online (wifi: it offers a picker; ethernet: auto), installs"
   echo " its local brain, then you're talking to it at a  you ›  prompt."
