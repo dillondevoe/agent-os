@@ -328,13 +328,13 @@ brain.subprocess.Popen = _popen; brain.subprocess.run = _run
 CALLS.clear()
 os.environ["AGENTOS_DESKTOP"] = "none"
 try:
-    r = brain.do_tool("open_url", {"url": "https://example.org/"})
+    r = brain.do_tool("open_url", {"url": "http://127.0.0.1:9/"})
 finally:
     os.environ.pop("AGENTOS_DESKTOP")
 check("J open_url with no desktop says unavailable", r == "open_url: unavailable (no desktop on this box)", "got: " + repr(r))
 check("J and starts no process at all", CALLS == [], "saw: " + repr(CALLS))
 CALLS.clear()
-r = brain.do_tool("open_url", {"url": "https://example.org/"})
+r = brain.do_tool("open_url", {"url": "http://127.0.0.1:9/"})
 check("J control: with the default desktop the browser is started", any("firefox" in str(c[1][0]) for c in CALLS), "saw: " + repr(CALLS))
 
 print(("  brain-dispatch: FAIL" if EX else "  brain-dispatch: all checks passed"))
