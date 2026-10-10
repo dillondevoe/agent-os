@@ -24,13 +24,13 @@ in
 {
   options.agentos = {
     desktop = lib.mkOption {
-      type = lib.types.enum [ "none" "hyprland" ];
+      type = lib.types.enum [ "none" "hyprland" "sway" ];
       default = "hyprland";
       description = ''
         The desktop: "hyprland" (today's open-lane desktop) or "none" (terminal only: the brain runs
         on tty1 in a respawn loop, and its desktop adapter answers Unsupported for window and browser
-        verbs instead of probing a display that is not there). sway and Plasma follow
-        (surfaces-and-first-login.md §6). The choice is compiled into the installed adapter, so it
+        verbs instead of probing a display that is not there), or "sway" (modules/desktop-sway-open.nix,
+        the second adapter). Plasma follows (surfaces-and-first-login.md §6). The choice is compiled into the installed adapter, so it
         holds for the brain however it is started.
       '';
     };

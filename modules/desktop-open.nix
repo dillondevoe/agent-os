@@ -347,6 +347,13 @@ lib.mkMerge [
     # extraGroups is listOf str, so this concatenates with configuration-open.nix's lists.
     users.users.${user}.extraGroups = [ "video" ];
     services.udev.packages = [ pkgs.brightnessctl ];
+    # The brain window's kitty config (Ctrl+V paste etc.) on every desktop that has a brain window:
+    # Hyprland and sway both run brain-home in kitty; harmless with no desktop.
+    systemd.tmpfiles.rules = [
+      "d /home/${user}/.config 0755 ${user} users - -"
+      "d /home/${user}/.config/kitty 0755 ${user} users - -"
+      "L+ /home/${user}/.config/kitty/kitty.conf - - - - ${kittyConf}"
+    ];
   }
 
   # Terminal only (agentos.desktop = "none"): the brain's home is tty1 instead of a Hyprland window.
@@ -509,11 +516,9 @@ lib.mkMerge [
     "d /home/${user}/.config 0755 ${user} users - -"
     "d /home/${user}/.config/hypr 0755 ${user} users - -"
     "d /home/${user}/.config/waybar 0755 ${user} users - -"
-    "d /home/${user}/.config/kitty 0755 ${user} users - -"
     "L+ /home/${user}/.config/hypr/hyprland.lua - - - - ${hyprConf}"
     "L+ /home/${user}/.config/waybar/config.jsonc - - - - ${waybarConf}"
     "L+ /home/${user}/.config/waybar/style.css - - - - ${waybarStyle}"
-    "L+ /home/${user}/.config/kitty/kitty.conf - - - - ${kittyConf}"
   ];
 
   # Autologin (getty) already drops us on tty1 as `agent`. Launch Hyprland from the login shell on

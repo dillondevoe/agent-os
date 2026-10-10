@@ -144,5 +144,35 @@ r = H.arrange("close")
 check(isinstance(r, D.Unsupported) and calls() == [], "H: arrange with no hyprctl -> Unsupported, not a crash: %r" % r)
 ok("H adapter() follows AGENTOS_DESKTOP and the compiled default; arrange without hyprctl is Unsupported")
 
+# I — SwayAdapter (the second adapter): windows() walks `swaymsg -t get_tree -r` (app_id, title,
+# workspace; floating windows too); arrange() passes only the closed table's sway command; unknown and
+# command-injection strings (`;` separates sway commands) dispatch nothing; adapter() maps "sway".
+S = D.SwayAdapter()
+tree = {"type": "root", "nodes": [{"type": "output", "nodes": [
+    {"type": "workspace", "name": "1", "nodes": [{"type": "con", "pid": 10, "app_id": "brain-home", "name": "brain"}],
+     "floating_nodes": [{"type": "floating_con", "pid": 11, "app_id": None,
+                         "window_properties": {"class": "Steam"}, "name": "Steam"}]},
+    {"type": "workspace", "name": "2", "nodes": [{"type": "con", "pid": 12, "app_id": "firefox", "name": "page"},
+                                                 {"type": "con", "nodes": []}]}]}]}
+reset(("swaymsg", json.dumps(tree)))
+w = S.windows()
+check(w == [{"class": "brain-home", "title": "brain", "workspace": "1"}, {"class": "Steam", "title": "Steam", "workspace": "1"},
+            {"class": "firefox", "title": "page", "workspace": "2"}], "I: sway windows: %r" % w)
+check(calls() == [["swaymsg", "-t", "get_tree", "-r"]], "I: direct argv: %r" % calls())
+SPINNED = {"close": "kill", "fullscreen": "fullscreen toggle", "cycle": "focus next", "split": "layout toggle split"}
+check(S.ARRANGE == SPINNED, "I: the sway table changed: %r" % S.ARRANGE)
+for act, cmd in SPINNED.items():
+    reset("swaymsg")
+    check(S.arrange(act) == "desktop: %s done" % act and calls() == [["swaymsg", cmd]], "I %s: %r" % (act, calls()))
+for bad in ("tidy", "kill; exec rm -rf ~", ""):
+    reset("swaymsg")
+    check("unknown window action" in S.arrange(bad) and calls() == [], "I: %r must dispatch nothing" % bad)
+reset()
+check(isinstance(S.windows(), D.Unsupported) and isinstance(S.arrange("close"), D.Unsupported), "I: no swaymsg -> Unsupported")
+os.environ["AGENTOS_DESKTOP"] = "sway"
+check(isinstance(D.adapter(), D.SwayAdapter) and D.SwayAdapter.graphical, "I: adapter() maps sway")
+os.environ.pop("AGENTOS_DESKTOP")
+ok("I SwayAdapter: get_tree parse, closed command table, injection strings dispatch nothing, adapter() maps sway")
+
 os.environ["PATH"] = REAL_PATH
 print("desktop-adapter-battery: PASS (%d criteria)" % len(passed))
