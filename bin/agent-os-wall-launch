@@ -1,0 +1,111 @@
+#!/usr/bin/env python3
+# bin/agent-os-wall-launch — the wall launcher inside each agent-os-wall@.service instance
+# (docs/design/broker-service.md §2.2, the merged, Fable-reviewed spec).
+#
+# Security surface (the wall's front door): branch -> PR -> Fable(code) -> merge. Never direct-push.
+#
+# systemd hands this process ONE accepted connection on fd 0 and fd 1 (StandardInput/Output=socket,
+# Accept=yes) and a clean environment. It:
+#   1. checks the peer: SO_PEERCRED uid must equal the agent account's uid, resolved at runtime with
+#      getpwnam (the uid is allocated at install, not known at evaluation). A failed lookup, uid 0,
+#      or a different peer -> close without a verdict (the client reads that as a deny);
+#   2. reads EXACTLY one request: bytes up to the first newline, at most 1 MiB; no newline before EOF
+#      or more than 1 MiB -> close without a verdict. Anything after the newline is ignored;
+#   3. runs the pinned `mcp parse` with that one line then EOF on its stdin, piped into the pinned
+#      `broker run`, whose stdout is fd 1 (the socket). No shell; request bytes are never interpolated.
+#
+# The installed copy has WALL_AGENT_USER / WALL_MCP / WALL_BROKER compiled in (substituted by
+# modules/wall-service.nix with --replace-fail). Where a constant is empty (batteries only) the
+# matching AGENT_OS_WALL_* environment variable is read; the instance's environment is systemd's,
+# so the agent cannot set these in production.
+#
+# It writes request bytes to no log. Refusals write one fixed line to stderr (the journal).
+import os, pwd, socket, struct, subprocess, sys
+
+WALL_AGENT_USER = ""
+WALL_MCP = ""
+WALL_BROKER = ""
+MAX_LINE = 1024 * 1024
+
+
+def setting(constant, var):
+    return constant or os.environ.get(var, "")
+
+
+def refuse(reason):
+    sys.stderr.write("agent-os-wall: refused: %s\n" % reason)
+    sys.stderr.flush()
+    sys.exit(3)
+
+
+def peer_creds(fd):
+    """(pid, uid, gid) of the peer of the unix socket on fd, from the kernel (SO_PEERCRED)."""
+    s = socket.socket(fileno=os.dup(fd))
+    try:
+        raw = s.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("iII"))
+    finally:
+        s.close()
+    return struct.unpack("iII", raw)    # struct ucred: pid_t, uid_t, gid_t
+
+
+def read_one_line(fd):
+    buf = b""
+    while b"\n" not in buf:
+        chunk = os.read(fd, 65536)
+        if not chunk:
+            refuse("no newline before EOF")
+        buf += chunk
+        if len(buf) > MAX_LINE + 1 and b"\n" not in buf[:MAX_LINE + 1]:
+            refuse("request over 1 MiB")
+    line = buf.split(b"\n", 1)[0] + b"\n"
+    if len(line) > MAX_LINE + 1:      # belt: unreachable given the in-loop bound, kept on purpose
+        refuse("request over 1 MiB")
+    return line
+
+
+def main():
+    user = setting(WALL_AGENT_USER, "AGENT_OS_WALL_AGENT_USER")
+    mcp = setting(WALL_MCP, "AGENT_OS_WALL_MCP")
+    broker = setting(WALL_BROKER, "AGENT_OS_WALL_BROKER")
+    if not (user and mcp and broker):
+        refuse("launcher not configured")
+
+    # 1. peer
+    try:
+        pid, uid, _gid = peer_creds(0)
+    except OSError:
+        refuse("no peer credentials on fd 0")
+    try:
+        agent_uid = pwd.getpwnam(user).pw_uid
+    except KeyError:
+        refuse("agent account lookup failed")
+    if agent_uid == 0:
+        refuse("agent account resolves to uid 0")
+    if uid != agent_uid:
+        refuse("peer uid %d is not the agent" % uid)
+
+    # 2. one request
+    line = read_one_line(0)
+    try:
+        socket.socket(fileno=os.dup(0)).shutdown(socket.SHUT_RD)
+    except OSError:
+        pass
+
+    # 3. mcp parse | broker run, stdout -> the socket (fd 1)
+    env = dict(os.environ, AGENT_OS_PEER_UID=str(uid), AGENT_OS_PEER_PID=str(pid))
+    p_mcp = subprocess.Popen([mcp, "parse"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, env=env,
+                             close_fds=True)
+    p_brk = subprocess.Popen([broker, "run"], stdin=p_mcp.stdout, stdout=1, env=env, close_fds=True)
+    p_mcp.stdout.close()
+    try:
+        p_mcp.stdin.write(line)
+        p_mcp.stdin.close()
+    except (BrokenPipeError, OSError):
+        pass
+    rc_b = p_brk.wait()
+    p_mcp.wait()
+    sys.exit(0 if rc_b == 0 else 4)
+
+
+if __name__ == "__main__":
+    main()

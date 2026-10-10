@@ -256,6 +256,11 @@ jobs:
           # and agent-unwritable on the image (A2) and that the image's agos-run ignores every other
           # store (A3).
           - test-app-approve-confirm
+          # THE WALL AS A SERVICE. Same rule: added with tests/wall-service.nix. The only runtime
+          # witness that the agent reaches the wall through the socket and nothing else: modes, peer
+          # binding, clean environment, single-flight refusal, one request per instance, peer_uid in
+          # the audit record (broker-service.md §4).
+          - test-wall-service
           # SURVIVABILITY. Same rule a fourth time: added in the same commit as
           # tests/watchdog-armed.nix. Different subject from every entry above — those watch a
           # wall that keeps something OUT, this watches the mechanism that gets the box BACK.

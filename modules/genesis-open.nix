@@ -251,8 +251,10 @@ in {
       # SOFT bound: a warm-up is an optimisation, so running long must never fail the unit or
       # degrade the box. `timeout` stops it and the script still exits 0; the in-process warmup
       # in agent-brain.py stays as belt. (TimeoutStartSec above now only bounds process start.)
-      if ! ${pkgs.coreutils}/bin/timeout 1800 ${agent-brain}/bin/agent-brain --once "boot warmup — reply with one word" >/dev/null 2>&1; then
-        echo "agos-boot-prewarm: warm-up did not finish (timed out after 1800s or errored); KV cache stays cold this boot — not a failure"
+      # `-k 60`: the client was measured ignoring TERM for ~10 min on the #322 throttle run (unit
+      # ended at 39m45s), so KILL follows 60s after TERM. Exit 124 or 137 both take the branch below.
+      if ! ${pkgs.coreutils}/bin/timeout -k 60 1800 ${agent-brain}/bin/agent-brain --once "boot warmup — reply with one word" >/dev/null 2>&1; then
+        echo "agos-boot-prewarm: warm-up did not finish (timed out after 1800s + 60s grace, or errored); KV cache stays cold this boot — not a failure"
       fi
     '';
   };
