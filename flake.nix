@@ -22,6 +22,7 @@
         ./modules/mcp.nix
         ./modules/broker.nix
         ./modules/confirm.nix
+        ./modules/wall-service.nix  # the wall as a socket-activated system service (broker-service spec PR 2)
         ./modules/apps.nix          # agent-built apps: agos tools with store/apps paths compiled in (app-approval PR 3)
         ./modules/seal-check.nix
         ./modules/break-glass.nix   # PR-A: the ONE interactive root door (tty3, password-gated)
@@ -269,6 +270,15 @@
         # agos-run. Approve, deny, and edit-during-prompt legs; A2/A3 asserted. Out of `checks`
         # (boots a VM); in the vm-tests.yml matrix in the same commit.
         #   nix build .#test-app-approve-confirm
+        # The wall as a socket-activated system service on a booted image (broker-service.md §4,
+        # PR 2): B1-B6, B8 through the installed agent-loop and the real socket. Out of `checks`
+        # (boots a VM); in the vm-tests.yml matrix in the same commit.
+        #   nix build .#test-wall-service
+        test-wall-service = import ./tests/wall-service.nix {
+          pkgs = nixpkgs.legacyPackages.${system};
+          inherit baseModules;
+        };
+
         test-app-approve-confirm = import ./tests/app-approve-confirm.nix {
           pkgs = nixpkgs.legacyPackages.${system};
           inherit baseModules;
@@ -1473,6 +1483,67 @@
               f=''${pair%%:*}; b=''${pair##*:}
               grep -qF "exec \''${pkgs.python3}/bin/python3 -I \''${../bin/$b}" ${./modules}/$f || { echo "wall-wrapper-env: modules/$f does not exec bin/$b with python3 -I" >&2; exit 1; }
             done
+            touch $out
+          '';
+
+        # bin/agent-os-wall-launch — the front door of every wall instance (broker-service.md §2.2):
+        # peer bound to the agent uid, exactly one request line, nothing spawned on any refusal.
+        wall-launch-contract =
+          nixpkgs.legacyPackages.${system}.runCommand "wall-launch-contract-check"
+            { nativeBuildInputs = [ nixpkgs.legacyPackages.${system}.python3 ]; } ''
+              work="$(mktemp -d)"; mkdir -p "$work/bin" "$work/tests"
+              cp ${./bin/agent-os-wall-launch} "$work/bin/agent-os-wall-launch"
+              cp ${./tests/wall-launch-battery.py} "$work/tests/wall-launch-battery.py"
+              cd "$work"; python3 tests/wall-launch-battery.py
+              touch $out
+            '';
+
+        # The wall service as EVALUATED on the image (broker-service.md §2.1/§2.3/§2.5/§2.6), the
+        # cap-wrapper-pinned pattern at the NixOS level: socket mode/group/Accept/MaxConnections, every
+        # hardening property, the derived RuntimeMaxSec, the ordering, no signer env by default, the
+        # installed agent-loop carrying the compiled socket path, and a NEGATIVE control: a second
+        # account in the wall group must fail evaluation.
+        wall-service-unit =
+          let
+            lib = nixpkgs.lib;
+            c = self.nixosConfigurations.agentos.config;
+            sock = c.systemd.sockets.agent-os-wall;
+            svc = c.systemd.services."agent-os-wall@";
+            sc = svc.serviceConfig;
+            want = {
+              NoNewPrivileges = true; ProtectSystem = "strict"; ProtectHome = true; PrivateTmp = true;
+              ProtectKernelTunables = true; ProtectKernelModules = true; ProtectKernelLogs = true;
+              ProtectControlGroups = true; RestrictNamespaces = true; RestrictRealtime = true;
+              LockPersonality = true; RestrictSUIDSGID = true; SystemCallArchitectures = "native";
+              DevicePolicy = "closed"; IPAddressDeny = "any"; StandardInput = "socket";
+              StandardOutput = "socket"; RuntimeMaxSec = 180;
+            };
+            badProps = lib.filter (k: (sc.${k} or null) != want.${k}) (lib.attrNames want);
+            agentLoop = lib.findFirst (p: (p.name or "") == "agent-loop") null c.environment.systemPackages;
+            intruder = builtins.tryEval (builtins.deepSeq
+              (mkSystem [ { users.users.intruder = { isNormalUser = true; extraGroups = [ "agent-os-wall" ]; }; } ])
+                .config.system.build.toplevel.drvPath true);
+          in
+          assert lib.assertMsg (sock.listenStreams == [ "/run/agent-os/wall.sock" ]
+              && sock.socketConfig.Accept == true && sock.socketConfig.MaxConnections == 1
+              && sock.socketConfig.SocketMode == "0660" && sock.socketConfig.SocketGroup == "agent-os-wall"
+              && sock.socketConfig.SocketUser == "root")
+            "wall-service-unit: the socket is not root:agent-os-wall 0660, Accept=yes, MaxConnections=1 at /run/agent-os/wall.sock";
+          assert lib.assertMsg (badProps == [ ]) "wall-service-unit: wrong or missing unit properties: ${lib.concatStringsSep " " badProps}";
+          assert lib.assertMsg (sc.ReadWritePaths == [ "/var/lib/agent-os/audit" "/var/lib/agent-os/taint" "/var/lib/agent-os/broker" "/var/lib/agent-os/confirm" ])
+            "wall-service-unit: ReadWritePaths must be exactly the wall's four state directories";
+          assert lib.assertMsg (sc.DeviceAllow == [ "/dev/tty2 rw" ]) "wall-service-unit: DeviceAllow must be exactly the confirm console";
+          assert lib.assertMsg (lib.all (u: lib.elem u svc.after && lib.elem u svc.requires)
+              [ "systemd-tmpfiles-setup.service" "agent-os-identity-boot.service" ])
+            "wall-service-unit: the instance must order after (and require) tmpfiles and identity minting";
+          assert lib.assertMsg (!(svc.environment ? AGENT_OS_AUDIT_SIGNER)) "wall-service-unit: no signer by default";
+          assert lib.assertMsg (agentLoop != null) "wall-service-unit: agent-loop is not installed";
+          assert lib.assertMsg (!intruder.success) "wall-service-unit: a second account in agent-os-wall evaluated — the group assertion is not enforced";
+          nixpkgs.legacyPackages.${system}.runCommand "wall-service-unit-check" { } ''
+            grep -qF 'IMAGE_WALL_SOCKET = "/run/agent-os/wall.sock"' ${agentLoop}/bin/agent-loop || {
+              echo "wall-service-unit: the installed agent-loop does not carry the compiled wall socket" >&2; exit 1; }
+            grep -qF 'WALL_SOCKET_TIMEOUT_S = 190' ${agentLoop}/bin/agent-loop || {
+              echo "wall-service-unit: the installed agent-loop's deadline is not 190 s" >&2; exit 1; }
             touch $out
           '';
 

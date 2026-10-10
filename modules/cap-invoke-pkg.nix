@@ -57,6 +57,9 @@ let
   reg = (import ./capability-registry.nix { inherit lib; }).registry;
   # Byte-identical to broker.nix's registryJson (same name, same toJSON of the same validated
   # registry), so it is the same store path the broker's /etc/agent-os/registry symlink targets.
+  # The per-impl wall-clock timeout cap-invoke enforces (bin/cap-invoke's documented default). One
+  # value, read by both wrappers and by modules/wall-service.nix's derived RuntimeMaxSec.
+  capTimeoutS = 30;
   registryJson = pkgs.writeText "agent-os-registry.json" (builtins.toJSON reg);
 
   # The caps whose impls are direct-exec'd through the seam in A2. Both the source file
@@ -129,7 +132,7 @@ let
     # the same JSON broker.nix materializes at /etc/agent-os/registry), with the documented timeout.
     export AGENT_OS_CAP_BIN_DIR=${capBinDir}/bin
     export AGENT_OS_REGISTRY=${registryJson}
-    export AGENT_OS_CAP_TIMEOUT_S=30
+    export AGENT_OS_CAP_TIMEOUT_S=${toString capTimeoutS}
     # GATE #5(a): the per-cap systemd fs-confinement, DERIVED from the registry sandbox decl, and
     # the launcher that applies it. Both are pinned HERE — in the seam's own wrapper, the same
     # discipline as AGENT_OS_CAP_PATH — so no ambient env can point the dispatcher at a weaker
@@ -167,5 +170,5 @@ let
   unconfinedWrapper = mkWrapper false;
 in
 {
-  inherit wrapper unconfinedWrapper capBinDir;
+  inherit wrapper unconfinedWrapper capBinDir capTimeoutS;
 }
