@@ -1704,8 +1704,18 @@
               && (builtins.tryEval (builtins.deepSeq c.system.build.toplevel.drvPath true)).success)
             [ "plasma" "gnome" "cosmic" ])
             "surface-options: agentos.desktop = plasma/gnome/cosmic must give that desktop alone, no display manager, the brain window on graphical-session.target, and evaluate end to end";
-          assert lib.assertMsg (lib.all (de: lib.elem des.${de}.system.build.brainAutostart des.${de}.environment.systemPackages) [ "plasma" "gnome" "cosmic" ])
-            "surface-options: the brain-home autostart entry must be installed on every full desktop";
+          assert lib.assertMsg (lib.all (de: let c = des.${de}; in
+              !c.services.avahi.enable && !c.services.geoclue2.enable
+              && lib.hasInfix "export AGENTOS_DE_STARTED=1" c.environment.loginShellInit
+              && lib.hasInfix "[ -z \"\${AGENTOS_DE_STARTED:-}\" ]" c.environment.loginShellInit) [ "plasma" "gnome" "cosmic" ])
+            "surface-options: every full desktop must drop avahi and geoclue and guard tty1 against a second start";
+          assert lib.assertMsg (lib.hasInfix "/bin/start-cosmic --in-login-shell" des.cosmic.environment.loginShellInit)
+            "surface-options: start-cosmic must be told it is in a login shell, or it re-execs one that re-runs loginShellInit forever";
+          assert lib.assertMsg (let g = des.gnome.services; in !g.gnome.gnome-initial-setup.enable && !g.gnome.rygel.enable
+                                && !g.gnome.gnome-user-share.enable && !g.gnome.gnome-remote-desktop.enable && !g.dleyna.enable)
+            "surface-options: GNOME must not run its first-run wizard or its media/share/remote-desktop servers";
+          assert lib.assertMsg (lib.all (de: !(deEnabled dflt de)) [ "plasma" "gnome" "cosmic" ])
+            "surface-options: the default system must enable none of the full desktops";
           assert lib.assertMsg (lib.any (n: lib.hasPrefix "nautilus-" n) (names des.gnome))
             "surface-options: the GNOME desktop must still have Files (nautilus) with core-apps off";
           assert lib.assertMsg (lib.hasInfix "XDG_SESSION_TYPE=wayland exec" des.gnome.environment.loginShellInit)
@@ -1749,8 +1759,6 @@
             ${lib.concatMapStrings (de: ''
               grep -qF 'DESKTOP_DEFAULT = "${de}"' ${brainOf des.${de}}/modules/agos_desktop.py || {
                 echo "surface-options: the ${de} system's installed adapter does not have ${de} compiled in" >&2; exit 1; }
-              grep -qF 'systemctl --user start brain-home.service' ${des.${de}.system.build.brainAutostart}/etc/xdg/autostart/agentos-brain-home.desktop || {
-                echo "surface-options: the ${de} system lacks the brain-home autostart entry" >&2; exit 1; }
             '') [ "plasma" "gnome" "cosmic" ]}
             grep -qF 'DESKTOP_DEFAULT = "hyprland"' ${dfltBrain}/modules/agos_desktop.py || {
               echo "surface-options: the default system's installed adapter does not say hyprland" >&2; exit 1; }

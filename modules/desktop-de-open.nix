@@ -12,33 +12,30 @@
 # surface-options check asserts it.
 #
 # THE BRAIN WINDOW: the same user unit as the other desktops (kitty, class brain-home, Restart=always,
-# respawn loop, journal tee). All three start graphical-session.target once the session environment is
-# in the user manager, so the unit hangs off that target; an XDG autostart entry starts it too, for a
-# session that skips the target. `start` (not restart) so the two never open a second window.
+# respawn loop, journal tee). All three reach graphical-session.target (COSMIC's cosmic-session.target
+# BindsTo it; GNOME and Plasma are systemd-managed sessions), so the unit hangs off that target; if
+# WAYLAND_DISPLAY lands a beat late, Restart retries it.
+#
+# NO NEW LISTENERS OR LOOKUPS (surfaces-and-first-login.md §3): avahi (mDNS), geoclue (location lookup,
+# which runs as its own uid, outside the agent's per-uid wall), and GNOME's media/share/remote-desktop
+# servers and first-run wizard are forced off; the check asserts each.
 { config, pkgs, lib, ... }:
 
 let
   d = config.agentos.desktop;
   # What tty1 execs. Plasma and COSMIC have tty launchers; GNOME needs the session type spelled out.
+  # start-cosmic re-execs itself in a fresh login shell unless told it is already in one, and that shell
+  # would source this loginShellInit again and loop; we ARE in the agent's login shell, so say so.
   start = {
     plasma = "exec ${pkgs.kdePackages.plasma-workspace}/bin/startplasma-wayland";
     gnome = "XDG_SESSION_TYPE=wayland exec ${pkgs.gnome-session}/bin/gnome-session";
-    cosmic = "exec ${pkgs.cosmic-session}/bin/start-cosmic";
+    cosmic = "exec ${pkgs.cosmic-session}/bin/start-cosmic --in-login-shell";
   };
   isDe = lib.elem d [ "plasma" "gnome" "cosmic" ];
 
-  brainAutostart = pkgs.writeTextDir "etc/xdg/autostart/agentos-brain-home.desktop" ''
-    [Desktop Entry]
-    Type=Application
-    Name=Agent OS brain
-    Exec=${pkgs.bash}/bin/bash -c '${pkgs.dbus}/bin/dbus-update-activation-environment --systemd WAYLAND_DISPLAY DISPLAY XDG_CURRENT_DESKTOP && ${pkgs.systemd}/bin/systemctl --user start brain-home.service'
-    NoDisplay=true
-    X-GNOME-Autostart-Phase=Applications
-  '';
 in
 lib.mkIf isDe (lib.mkMerge [
   {
-    system.build.brainAutostart = brainAutostart;   # for the surface-options check (no closure build)
     systemd.user.services.brain-home = {
       description = "agent-brain home window (the desktop's primary surface)";
       wantedBy = [ "graphical-session.target" ];
@@ -52,12 +49,17 @@ lib.mkIf isDe (lib.mkMerge [
     };
 
     # notify-send for the adapter's notify(); every one of these desktops runs its own daemon.
-    environment.systemPackages = [ pkgs.kitty pkgs.libnotify pkgs.firefox brainAutostart ];
+    environment.systemPackages = [ pkgs.kitty pkgs.libnotify pkgs.firefox ];
     fonts.packages = [ pkgs.dejavu_fonts ];
 
+    services.avahi.enable = lib.mkForce false;
+    services.geoclue2.enable = lib.mkForce false;
+
     # Autologin drops us on tty1 as `agent`; start the desktop there only (SSH ptys are /dev/pts/*).
+    # AGENTOS_DE_STARTED: a launcher that opens a nested login shell must never start a second desktop.
     environment.loginShellInit = ''
-      if [ -z "''${WAYLAND_DISPLAY:-}" ] && [ "$(tty)" = "/dev/tty1" ]; then
+      if [ -z "''${WAYLAND_DISPLAY:-}" ] && [ -z "''${AGENTOS_DE_STARTED:-}" ] && [ "$(tty)" = "/dev/tty1" ]; then
+        export AGENTOS_DE_STARTED=1
         ${start.${d}}
       fi
     '';
@@ -73,6 +75,12 @@ lib.mkIf isDe (lib.mkMerge [
     environment.systemPackages = with pkgs; [
       nautilus gnome-console gnome-text-editor gnome-calculator gnome-system-monitor loupe papers
     ];
+    programs.bash.vteIntegration = true;   # was in core-apps: Console tabs keep the working directory
+    services.gnome.gnome-initial-setup.enable = lib.mkForce false;   # first login is Agent OS's (§4/§5)
+    services.gnome.rygel.enable = lib.mkForce false;
+    services.gnome.gnome-user-share.enable = lib.mkForce false;
+    services.gnome.gnome-remote-desktop.enable = lib.mkForce false;
+    services.dleyna.enable = lib.mkForce false;
   })
   (lib.mkIf (d == "cosmic") { services.desktopManager.cosmic.enable = true; })
 ])
