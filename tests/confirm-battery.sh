@@ -161,6 +161,36 @@ approved_is "$OUT" false; reason_has "$OUT" confirm-malformed-request
 OUT="$( AGENT_OS_CONFIRM_CHANNELS=getty "$PY" "$CONFIRM" <<<'[1,2,3]' )"
 approved_is "$OUT" false; reason_has "$OUT" confirm-malformed-request
 
+# ── 1b. FRAME SIZE: a frame longer than one Telegram message (4096 UTF-16 units) is denied for
+#        every capability BEFORE any channel is tried; the same request one value shorter passes.
+#        A value renders twice (PAYLOAD and ARGS), each capped at 512, so many keys are needed.
+mkbig() { "$PY" - "$NONCE" "$1" <<'PYEOF'
+import json, sys
+nonce, n = sys.argv[1], int(sys.argv[2])
+args = {"k%02d" % i: "v" * 500 for i in range(n)}
+print(json.dumps({"capability": "file.write", "tier": "T1", "provenance": "TRUSTED", "destination": None,
+                  "typed_args": args, "nonce": nonce, "session_id": 7}))
+PYEOF
+}
+fits_n="$("$PY" - "$CONFIRM" "$NONCE" <<'PYEOF'
+import importlib.machinery, importlib.util, json, sys
+l = importlib.machinery.SourceFileLoader("c", sys.argv[1]); m = importlib.util.module_from_spec(importlib.util.spec_from_loader("c", l)); l.exec_module(m)
+n = 1
+while len(m.render_frame({"capability": "file.write", "tier": "T1", "provenance": "TRUSTED", "destination": None,
+                          "typed_args": {"k%02d" % i: "v" * 500 for i in range(n + 1)}}, True, True, "X" * 8)) <= m.FRAME_MAX:
+    n += 1
+print(n)
+PYEOF
+)"
+: > "$GOUT"; printf 'approve %s\n' "$CODE" > "$GIN"
+OUT="$( AGENT_OS_CONFIRM_CHANNELS=getty AGENT_OS_CONFIRM_GETTY_IN="$GIN" AGENT_OS_CONFIRM_GETTY_OUT="$GOUT" \
+        AGENT_OS_CONFIRM_DIR="$SCRATCH/state" AGENT_OS_CONFIRM_HUMAN_WINDOW_S=5 "$PY" "$CONFIRM" <<<"$(mkbig $((fits_n + 1)))" )"
+approved_is "$OUT" false; reason_has "$OUT" confirm-frame-too-long
+[ ! -s "$GOUT" ] || fail "an oversize frame must be denied before any channel renders it"
+OUT="$( AGENT_OS_CONFIRM_CHANNELS=getty AGENT_OS_CONFIRM_GETTY_IN="$GIN" AGENT_OS_CONFIRM_GETTY_OUT="$GOUT" \
+        AGENT_OS_CONFIRM_DIR="$SCRATCH/state" AGENT_OS_CONFIRM_HUMAN_WINDOW_S=5 "$PY" "$CONFIRM" <<<"$(mkbig "$fits_n")" )"
+approved_is "$OUT" true; reason_has "$OUT" getty-approved
+
 # ── 2. FAIL-CLOSED CHANNELS (§8.2): none live -> deny; each channel that can't reach/authn is
 #       "unreachable" and falls to the NEXT, never to allow; last-resort is always deny. ───────
 OUT="$( AGENT_OS_CONFIRM_CHANNELS= "$PY" "$CONFIRM" <<<"$REQ" )"
