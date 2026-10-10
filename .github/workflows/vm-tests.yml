@@ -78,50 +78,15 @@
 name: vm-tests (slow lane)
 
 on:
+  # NO path filter on pull_request (2026-10-10): `vm-tests-all` is a REQUIRED check on main, and a
+  # workflow skipped by a path filter never reports, so a docs-only PR would wait on it forever.
+  # The `changes` job below decides instead: it skips the slow matrix only when every changed
+  # path is on a docs allowlist (the old trigger path list survives there as history comments).
+  # `edited` too: retargeting a PR to another base fires `edited`, and the decision depends on
+  # the base. Without it a check computed against one base stays attached to the head SHA after
+  # a retarget to main (security review #2 of #327).
   pull_request:
-    paths:
-      # Anything that can change what the wall does...
-      - 'modules/**'
-      - 'tests/**'
-      - 'flake.nix'
-      - 'flake.lock'
-      # ...including the two TOP-LEVEL configs. `./configuration.nix` is the FIRST entry in
-      # flake.nix's `baseModules`, so it is booted by every VM in the matrix below — it decides
-      # what those VMs actually are. Omitting it meant a PR could change the base every slow-lane
-      # VM boots and merge with only the fast lane having run. That is not hypothetical: PR #102
-      # (2026-08-16) edited configuration.nix and configuration-open.nix, and `gh pr view 102`
-      # listed exactly one check, `flake-check`. Found by editing the file and noticing the lane
-      # stayed quiet.
-      - 'configuration.nix'
-      - 'configuration-open.nix'
-      # ...and the capability binaries, for the same reason one level down.
-      # tests/cap-sandbox-confinement.nix executes `${../bin/cap-invoke}` directly (line 89), and
-      # modules/cap-invoke-pkg.nix copies `../bin/<impl>` into the package for every shipped cap
-      # (line 134). So bin/ is not adjacent to the slow lane — it is the payload the confinement
-      # VM runs. Editing a cap impl changes what test-cap-sandbox-confinement actually exercises.
-      #
-      # Stated honestly: nothing has slipped through yet. Every historical bin/ change also
-      # touched flake.nix, modules/, or tests/ and so triggered this lane anyway — 46a079c
-      # (bin/cap-invoke) and d83ed81 (bin/cap-file-read, bin/cap-file-write) both did. That is
-      # exactly the problem worth fixing BEFORE it bites: the coverage is real but INCIDENTAL,
-      # standing only on the habit of shipping impls alongside their registry and battery. A
-      # bin-only change — a shebang fix, a permissions change, a one-line bugfix in an impl —
-      # is the normal shape of a follow-up commit, and it would run zero VM tests while altering
-      # the binary under confinement. Coverage that depends on a commit's habits is not coverage.
-      - 'bin/**'
-      # ...and the scripts this job EXECUTES. Not adjacent to the lane — invoked by it.
-      # The `nix build` step runs scripts/flake-retry-decide.sh to decide whether a failure is
-      # retried and to emit the census marker the ledger counts, and the probe step runs
-      # scripts/vm-connect-probe.sh. Both change what this job DOES, and neither was reachable
-      # by any pattern above: a scripts-only change — a predicate fix, a marker reword — would
-      # have altered the retry decision and the census with this lane never running. Found while
-      # adding the probe, by asking the question this file's own header asks. Same shape as the
-      # `configuration.nix` omission recorded above: the filter was narrower than the thing it
-      # guards, and read exactly like full coverage.
-      - 'scripts/**'
-      # ...and this file itself. A harness excluded from its own trigger set cannot object to
-      # being gutted: without this line, a PR deleting the steps below would merge green.
-      - '.github/workflows/vm-tests.yml'
+    types: [opened, synchronize, reopened, edited]
   push:
     branches: [main]
     paths:
@@ -148,7 +113,97 @@ permissions:
   contents: read
 
 jobs:
+  # Does this event need the VM matrix? push/schedule/dispatch: always (push keeps its own path
+  # filter above). pull_request: only if it touches the paths that used to filter the trigger.
+  changes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      run: ${{ steps.decide.outputs.run }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          fetch-depth: 0
+      - id: decide
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          # The PR path list that used to filter the trigger (moved here verbatim, as comments):
+          # Anything that can change what the wall does...
+          # modules/**
+          # tests/**
+          # flake.nix
+          # flake.lock
+          # ...including the two TOP-LEVEL configs. `./configuration.nix` is the FIRST entry in
+          # flake.nix's `baseModules`, so it is booted by every VM in the matrix below — it decides
+          # what those VMs actually are. Omitting it meant a PR could change the base every slow-lane
+          # VM boots and merge with only the fast lane having run. That is not hypothetical: PR #102
+          # (2026-08-16) edited configuration.nix and configuration-open.nix, and `gh pr view 102`
+          # listed exactly one check, `flake-check`. Found by editing the file and noticing the lane
+          # stayed quiet.
+          # configuration.nix
+          # configuration-open.nix
+          # ...and the capability binaries, for the same reason one level down.
+          # tests/cap-sandbox-confinement.nix executes `${../bin/cap-invoke}` directly (line 89), and
+          # modules/cap-invoke-pkg.nix copies `../bin/<impl>` into the package for every shipped cap
+          # (line 134). So bin/ is not adjacent to the slow lane — it is the payload the confinement
+          # VM runs. Editing a cap impl changes what test-cap-sandbox-confinement actually exercises.
+          # 
+          # Stated honestly: nothing has slipped through yet. Every historical bin/ change also
+          # touched flake.nix, modules/, or tests/ and so triggered this lane anyway — 46a079c
+          # (bin/cap-invoke) and d83ed81 (bin/cap-file-read, bin/cap-file-write) both did. That is
+          # exactly the problem worth fixing BEFORE it bites: the coverage is real but INCIDENTAL,
+          # standing only on the habit of shipping impls alongside their registry and battery. A
+          # bin-only change — a shebang fix, a permissions change, a one-line bugfix in an impl —
+          # is the normal shape of a follow-up commit, and it would run zero VM tests while altering
+          # the binary under confinement. Coverage that depends on a commit's habits is not coverage.
+          # bin/**
+          # ...and the scripts this job EXECUTES. Not adjacent to the lane — invoked by it.
+          # The `nix build` step runs scripts/flake-retry-decide.sh to decide whether a failure is
+          # retried and to emit the census marker the ledger counts, and the probe step runs
+          # scripts/vm-connect-probe.sh. Both change what this job DOES, and neither was reachable
+          # by any pattern above: a scripts-only change — a predicate fix, a marker reword — would
+          # have altered the retry decision and the census with this lane never running. Found while
+          # adding the probe, by asking the question this file's own header asks. Same shape as the
+          # `configuration.nix` omission recorded above: the filter was narrower than the thing it
+          # guards, and read exactly like full coverage.
+          # scripts/**
+          # ...and this file itself. A harness excluded from its own trigger set cannot object to
+          # being gutted: without this line, a PR deleting the steps below would merge green.
+          # .github/workflows/vm-tests.yml
+          if [ "$EVENT" != pull_request ]; then echo "run=true" >> "$GITHUB_OUTPUT"; exit 0; fi
+          # A failed diff RUNS the matrix: unknown is never read as "nothing changed".
+          # --no-renames: a move out of modules/ must list the OLD path too, or moving a module
+          # to docs/ would read as docs-only and skip the matrix. -z: raw NUL-separated names;
+          # without it git QUOTES unusual names ("modules/\303\251.nix") and the ^ anchors miss.
+          # Matched with grep -z against a file: no pipe, so no SIGPIPE path to run=false.
+          # (security review of #327, 2026-10-10; both bypasses reproduced, then shown closed)
+          if ! git diff --no-renames --name-only -z "$BASE...$HEAD" > "$RUNNER_TEMP/changed.z"; then
+            echo "diff failed: running the matrix"; echo "run=true" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          # File names are PR-controlled text. Printed raw, a name like "::set-output name=run::false"
+          # is a WORKFLOW COMMAND to the runner, not a log line (security review, 2026-10-10). Pause
+          # command processing with a per-run random token around the listing, then resume it.
+          stop="$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
+          echo "::stop-commands::$stop"
+          tr '\0' '\n' < "$RUNNER_TEMP/changed.z"
+          echo "::$stop::"
+          # FAIL-SAFE DIRECTION (security review #2 of #327): skip the matrix only when EVERY changed
+          # path is on an explicit docs allowlist. A deny-list of build paths missed GENESIS.md,
+          # install.sh, evals/ and supply-chain/, all of which the images consume; an allowlist
+          # makes any path nobody thought of RUN the matrix instead of skipping it. Nothing on this
+          # list is read by any .nix file (checked 2026-10-10). Other workflow files are NOT on it.
+          if grep -zvEq '^(docs/|README\.md$|CONTRIBUTING\.md$|SECURITY\.md$|ROADMAP\.md$|LICENSE$|NOTICE$|\.github/(ISSUE_TEMPLATE/|PULL_REQUEST_TEMPLATE|CODEOWNERS$))' "$RUNNER_TEMP/changed.z"; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          fi
+
   vm-test:
+    needs: changes
+    if: needs.changes.outputs.run == 'true'
     runs-on: ubuntu-latest
     # Generous but finite. NOW MEASURED UNDER KVM — first green run of this lane, PR #89 head
     # 7a6fdd7, 2026-08-14: seal-faildown 7.2 min, egress-mesh-uid-scope 5.6, egress-uid-scope 5.1,
@@ -393,3 +448,24 @@ jobs:
           path: vm-build-attempt-*.log
           if-no-files-found: ignore
           retention-days: 30
+
+  # THE ONE REQUIRED CONTEXT for this lane (Geist, 2026-10-10). Always reports, so branch
+  # protection never chases matrix arm names and never waits on a skipped workflow:
+  #   - matrix not needed for this PR -> success (nothing VM-relevant changed);
+  #   - matrix ran -> success only if EVERY arm succeeded (failure, cancelled and skipped fail it).
+  vm-tests-all:
+    needs: [changes, vm-test]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - env:
+          RUN: ${{ needs.changes.outputs.run }}
+          CHANGES: ${{ needs.changes.result }}
+          MATRIX: ${{ needs.vm-test.result }}
+        run: |
+          echo "changes=$CHANGES run=$RUN vm-test=$MATRIX"
+          [ "$CHANGES" = success ] || { echo "the changes job did not succeed: cannot tell what to require"; exit 1; }
+          if [ "$RUN" != true ]; then echo "no VM-relevant paths changed: nothing to require"; exit 0; fi
+          [ "$MATRIX" = success ] || { echo "vm-test matrix result is '$MATRIX', not success"; exit 1; }
+
