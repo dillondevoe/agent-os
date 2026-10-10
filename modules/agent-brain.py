@@ -1386,6 +1386,10 @@ def do_tool(name,args):
         # injection. Allow only the two schemes the tool is documented to take.
         if not re.match(r"^https?://", url, re.I):
             return f"refused: open_url takes an http(s) URL, got {url!r}"
+        # No display (agentos.desktop = none): say so rather than start a browser that exits at once
+        # and report "opened" — the model would believe a page is on screen.
+        if not agos_desktop.adapter().graphical:
+            return "open_url: unavailable (no desktop on this box)"
         subprocess.Popen(["firefox","--new-window",url],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
         return f"opened {url} in the browser"
     if name=="run_command":

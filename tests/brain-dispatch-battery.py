@@ -118,6 +118,10 @@ for good in ("https://example.invalid/a?b=c", "http://example.invalid", "HTTPS:/
           "saw: " + repr(CALLS))
 
 # ── C: the closed enum dispatches the TABLE's value ──
+# hyprctl must RESOLVE for the adapter to dispatch (it says unavailable otherwise, arm C2), and a build
+# sandbox has none, so the lookup is stubbed exactly as brain-context-battery does.
+_real_which_c = brain.shutil.which
+brain.shutil.which = lambda name: "/stub/bin/" + name
 for act, expected in brain.HYPR.items():
     CALLS.clear()
     brain.do_tool("arrange_windows", {"action": act})
@@ -128,6 +132,13 @@ for act, expected in brain.HYPR.items():
               "saw: " + repr(hc[0]))
         check("C " + act + " -> no shell interpreter in the argv",
               not any(x in ("bash", "sh", "-c") for x in hc[0]), "saw: " + repr(hc[0]))
+
+brain.shutil.which = lambda name: None
+CALLS.clear()
+r = brain.do_tool("arrange_windows", {"action": "close"})
+check("C2 no hyprctl on PATH -> dispatches nothing", hyprctl_calls() == [], "saw: " + repr(CALLS))
+check("C2 and says unavailable instead of crashing", r == "desktop: unavailable (hyprctl not on this unit's PATH)", "got: " + repr(r))
+brain.shutil.which = _real_which_c
 
 # ── D: CONTROL ARM. Without this, a do_tool that dispatched nothing at all would satisfy A ──
 for bogus in ("tidy", "definitely-not-a-real-action", 'x"); os.execute("id'):
@@ -310,6 +321,21 @@ check("I5 and it names the trigger that must send a reader here",
 check("I5b the scanned block is genuinely bounded, not the whole file",
       0 < len(_block) < len(src) / 4,
       "scanned %d chars of a %d-char file" % (len(_block), len(src)))
+
+# J — no display (agentos.desktop = none): open_url answers unavailable and starts NO browser; the
+# control is that the same call with a desktop does start one (arm A already covers that side).
+brain.subprocess.Popen = _popen; brain.subprocess.run = _run
+CALLS.clear()
+os.environ["AGENTOS_DESKTOP"] = "none"
+try:
+    r = brain.do_tool("open_url", {"url": "https://example.org/"})
+finally:
+    os.environ.pop("AGENTOS_DESKTOP")
+check("J open_url with no desktop says unavailable", r == "open_url: unavailable (no desktop on this box)", "got: " + repr(r))
+check("J and starts no process at all", CALLS == [], "saw: " + repr(CALLS))
+CALLS.clear()
+r = brain.do_tool("open_url", {"url": "https://example.org/"})
+check("J control: with the default desktop the browser is started", any("firefox" in str(c[1][0]) for c in CALLS), "saw: " + repr(CALLS))
 
 print(("  brain-dispatch: FAIL" if EX else "  brain-dispatch: all checks passed"))
 sys.exit(EX)

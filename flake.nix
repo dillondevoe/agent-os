@@ -1619,6 +1619,8 @@
             altSys = mkOpenSystem [ { agentos.terminal = "foot"; agentos.shell = "fish"; } ];
             dflt = dfltSys.config; alt = altSys.config;
             none = (mkOpenSystem [ { agentos.desktop = "none"; } ]).config;
+            brainOf = c: lib.findFirst (p: (p.name or "") == "agent-brain") null c.environment.systemPackages;
+            noneBrain = brainOf none; dfltBrain = brainOf dflt;
             names = c: map (p: p.name or "") c.environment.systemPackages;
             bad = (builtins.tryEval (builtins.deepSeq
               (mkOpenSystem [ { agentos.terminal = "xterm"; } ]).config.agentos.surfaceInternal.terminalCmd true)).success;
@@ -1644,6 +1646,16 @@
             "surface-options: a desktop = none system must evaluate end to end";
           assert lib.assertMsg (dflt.programs.hyprland.enable && !(dflt.environment.variables ? AGENTOS_DESKTOP))
             "surface-options: the default desktop stays hyprland and sets no AGENTOS_DESKTOP";
+          assert lib.assertMsg (lib.all (c: c.security.rtkit.enable && lib.elem "video" c.users.users.agent.extraGroups
+                                             && lib.elem dfltSys.pkgs.brightnessctl c.services.udev.packages) [ dflt none ])
+            "surface-options: audio (rtkit) and brightness (video group, brightnessctl udev) must hold for every desktop";
+          assert lib.assertMsg (dflt.xdg.portal.enable && dflt.systemd.user.services ? brain-home && dflt.systemd.user.services ? waybar
+                                && lib.any (r: lib.hasInfix "hyprland.lua" r) dflt.systemd.tmpfiles.rules
+                                && lib.hasInfix "exec Hyprland" dflt.environment.loginShellInit
+                                && !(lib.hasInfix "AGENTOS_BRAIN_LOOP" dflt.environment.loginShellInit))
+            "surface-options: the default (hyprland) desktop lost a piece (portal, brain-home, waybar, seeded config, exec Hyprland)";
+          assert lib.assertMsg (lib.hasInfix "while true; do agent-brain" none.environment.loginShellInit)
+            "surface-options: with desktop = none the brain must run on tty1 in a respawn loop";
           assert lib.assertMsg (!(lib.any (n: lib.hasPrefix "foot-" n || lib.hasPrefix "ghostty-" n || lib.hasPrefix "alacritty-" n) (names dflt)))
             "surface-options: the default system must not gain a second terminal";
           nixpkgs.legacyPackages.${system}.runCommand "surface-options-check" { } ''
@@ -1651,6 +1663,10 @@
               echo "surface-options: default Super+Return is no longer kitty" >&2; exit 1; }
             grep -qF 'hl.bind("SUPER+RETURN",  hl.dsp.exec_cmd("foot"))' ${alt.system.build.hyprlandConf} || {
               echo "surface-options: agentos.terminal = foot does not bind foot" >&2; exit 1; }
+            grep -qF 'DESKTOP_DEFAULT = "none"' ${noneBrain}/modules/agos_desktop.py || {
+              echo "surface-options: the none system's installed adapter does not have the desktop compiled in" >&2; exit 1; }
+            grep -qF 'DESKTOP_DEFAULT = "hyprland"' ${dfltBrain}/modules/agos_desktop.py || {
+              echo "surface-options: the default system's installed adapter does not say hyprland" >&2; exit 1; }
             grep -qF 'exec_cmd("kitty --title cheatsheet' ${alt.system.build.hyprlandConf} || {
               echo "surface-options: system-owned kitty windows must stay kitty" >&2; exit 1; }
             touch $out

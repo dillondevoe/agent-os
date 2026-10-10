@@ -21,6 +21,11 @@
 # dispatch. Every call is a direct argv, never a shell.
 import json, os, shutil, subprocess
 
+# The installed copy has the box's agentos.desktop compiled in (genesis-open.nix substitutes it), so
+# the adapter is right however the brain is started: a systemd unit never sees environment.variables.
+# AGENTOS_DESKTOP still overrides (tests). The literal placeholder means "not substituted" (repo copy).
+DESKTOP_DEFAULT = "@AGENTOS_DESKTOP@"
+
 
 class Unsupported:
     """The third state: this desktop (or this box) cannot answer. Carries the reason a human reads."""
@@ -36,6 +41,7 @@ class Unsupported:
 
 class HyprlandAdapter:
     name = "hyprland"
+    graphical = True
     # The arrange_windows enum, mapped to Hyprland 0.56 Lua dispatch expressions (probed against a
     # live compositor on the Dell, 2026-08-30). CLOSED SET keyed by the tool's own enum; see the
     # module header for why a caller string must never reach these values.
@@ -60,7 +66,10 @@ class HyprlandAdapter:
         # Unknown key: return the error and DISPATCH NOTHING; `action` never reaches a command line.
         if not disp:
             return "unknown window action '%s'" % action
-        subprocess.run(["hyprctl", "dispatch", disp], capture_output=True, text=True, timeout=6)
+        hyprctl = shutil.which("hyprctl")
+        if not hyprctl:
+            return Unsupported("hyprctl not on this unit's PATH")
+        subprocess.run([hyprctl, "dispatch", disp], capture_output=True, text=True, timeout=6)
         return "desktop: %s done" % action
 
     def notify(self, msg):
@@ -71,6 +80,7 @@ class NoDesktop:
     """A terminal-only box: no window list, no arranging; notify still has a portable path when a
     notification daemon exists, else says so."""
     name = "none"
+    graphical = False      # no display: browser and window verbs are Unsupported
     ARRANGE = {}
 
     def windows(self):
@@ -99,6 +109,7 @@ def adapter():
     """The adapter for this box, from agentos.desktop (surface-options.nix sets AGENTOS_DESKTOP only
     for a non-default desktop): "none" -> NoDesktop; unset or "hyprland" -> HyprlandAdapter, whose
     own verbs say so when hyprctl is absent. Chosen per call, so tests can set the environment."""
-    if os.environ.get("AGENTOS_DESKTOP") == "none":
+    d = os.environ.get("AGENTOS_DESKTOP") or ("" if DESKTOP_DEFAULT.startswith("@") else DESKTOP_DEFAULT)
+    if d == "none":
         return NoDesktop()
     return HyprlandAdapter()
