@@ -40,5 +40,6 @@ pkgs.writeShellScriptBin "taint" ''
   export AGENT_OS_TAINT_DIR=/var/lib/agent-os/taint
   export AUDIT_BIN=${auditWrapper}/bin/audit
   export AGENT_OS_CONFIRM_SEAM=${confirmSeam}
+  export AGENT_OS_CONFIRM_TIMEOUT_S=${toString confirmPkg.brokerTimeout}
   exec ${pkgs.python3}/bin/python3 -I ${../bin/taint} "$@"
 ''

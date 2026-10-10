@@ -303,6 +303,23 @@ def load_hwm():
         return -1, True
 
 
+
+# Environment for wall-internal children (seams, taint, audit): the wall's own names only —
+# AGENT_OS_* plus TAINT_BIN / AUDIT_BIN — and never the confirm getty TEST hooks, PATH, HOME,
+# LD_* or PYTHON*. Production wrappers re-pin their own values on top, so this costs nothing
+# there; what it stops is PROPAGATION: whatever reached this process does not flow further.
+# It is not a boundary against a caller on the same uid (that caller owns the process anyway);
+# AGENT_OS_AUDIT_SIGNER / _REQUIRE_SIGNED ride the prefix, so a signer set in the environment
+# keeps signing.
+_WALL_ENV_EXTRA = ("TAINT_BIN", "AUDIT_BIN")
+_WALL_ENV_DROP = ("AGENT_OS_CONFIRM_GETTY_IN", "AGENT_OS_CONFIRM_GETTY_OUT")
+
+
+def wall_env():
+    return {k: v for k, v in os.environ.items()
+            if (k.startswith("AGENT_OS_") or k in _WALL_ENV_EXTRA) and k not in _WALL_ENV_DROP}
+
+
 def audit_log(record):
     """Record a taint decision through the Step-2 audit primitive. Fail-closed: a
     non-zero audit exit (or a missing audit binary) means the decision is unauditable."""
@@ -313,7 +330,7 @@ def audit_log(record):
     if os.path.isfile(audit_bin) and not os.access(audit_bin, os.X_OK):
         argv = [sys.executable, audit_bin, "append"]
     try:
-        p = subprocess.run(argv, input=json.dumps(record).encode("utf-8"),
+        p = subprocess.run(argv, input=json.dumps(record).encode("utf-8"), env=wall_env(),
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except OSError as e:
         raise OSError("audit binary unreachable (%s): %s" % (audit_bin, e))
@@ -372,7 +389,7 @@ def _confirm_reset(nonce, old_id, new_id):
     if os.path.isfile(seam) and not os.access(seam, os.X_OK):
         argv = [sys.executable, seam]
     try:
-        p = subprocess.run(argv, input=json.dumps(req).encode("utf-8"),
+        p = subprocess.run(argv, input=json.dumps(req).encode("utf-8"), env=wall_env(),
                            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                            timeout=_confirm_timeout_s())
     except subprocess.TimeoutExpired:
