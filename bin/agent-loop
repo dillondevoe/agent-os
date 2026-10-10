@@ -96,13 +96,14 @@ def _wall_socket(line):
     """One request over the wall socket: connect, send the line, half-close, read one reply line
     under an OVERALL deadline. Returns the parsed dict or None (deny) on any failure."""
     deadline = time.monotonic() + WALL_SOCKET_TIMEOUT_S
-    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    s = None
+    buf = b""
     try:
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         s.settimeout(max(0.1, deadline - time.monotonic()))
         s.connect(WALL_SOCKET)
         s.sendall(line)
         s.shutdown(socket.SHUT_WR)        # EOF ends `mcp parse` on the far side
-        buf = b""
         while b"\n" not in buf:
             left = deadline - time.monotonic()
             if left <= 0:
@@ -118,15 +119,16 @@ def _wall_socket(line):
         sys.stderr.write(_clean(f"[agent-loop] wall socket error: {e}") + "\n")
         return None
     finally:
-        try: s.close()
-        except Exception: pass
+        if s is not None:
+            try: s.close()
+            except Exception: pass
     first = buf.split(b"\n", 1)[0].strip()
     if not first:
         return None                       # closed without a verdict (refused peer, crash) → deny
     try:
         r = json.loads(first.decode("utf-8"))
-    except (ValueError, UnicodeDecodeError):
-        return None                       # garbage → deny
+    except Exception:                     # garbage, or nesting deep enough for RecursionError → deny
+        return None
     return r if isinstance(r, dict) else None
 
 def _wall(request):
@@ -171,8 +173,8 @@ def _wall(request):
             continue
         try:
             return json.loads(s.decode("utf-8"))
-        except (ValueError, UnicodeDecodeError):
-            return None               # garbage from the wall → deny (fail-closed)
+        except Exception:
+            return None               # garbage (or RecursionError) from the wall → deny (fail-closed)
     return None                       # no verdict at all → deny
 
 def dispatch(name, arguments):

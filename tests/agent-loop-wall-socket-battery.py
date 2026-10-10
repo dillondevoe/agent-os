@@ -124,10 +124,10 @@ ok("B broker deny -> (False, error)")
 
 # C, D
 for name, beh in (("C closed without verdict", lambda c, d: None), ("D garbage", reply(b"not json\n")),
-                  ("D non-object", reply(b"[1, 2]\n"))):
+                  ("D non-object", reply(b"[1, 2]\n")), ("D deep nesting", reply(b"[" * 200000 + b"\n"))):
     srv = Server(beh)
     r = L.dispatch("file.read", {"path": "/x"}); srv.t.join(5)
-    check(r[0] is False, "%s must deny: %r" % (name, r))
+    check(r[0] is False and srv.got, "%s must deny after the request reached the server: %r" % (name, r))
 ok("C/D closed, garbage, non-object -> deny")
 
 # E
@@ -145,7 +145,8 @@ ok("E absent socket -> deny, no fallback; control: unpinned uses the subprocess 
 L = load_loop(SOCK); L.WALL_SOCKET_TIMEOUT_S = 2
 srv = Server(lambda c, d: time.sleep(4))
 t0 = time.monotonic(); r = L.dispatch("file.read", {"path": "/x"}); dt = time.monotonic() - t0
-check(r[0] is False and dt < 3.5, "F: silent server must deny within the deadline (%.1fs): %r" % (dt, r))
+check(r[0] is False and 1.5 <= dt < 3.5 and srv.got is not None,
+      "F: silent server must deny AT the deadline, after connecting (%.1fs): %r" % (dt, r))
 def trickle(conn, data):
     for _ in range(8):
         try: conn.sendall(b"x")
@@ -153,7 +154,7 @@ def trickle(conn, data):
         time.sleep(0.5)
 srv = Server(trickle)
 t0 = time.monotonic(); r = L.dispatch("file.read", {"path": "/x"}); dt = time.monotonic() - t0
-check(r[0] is False and dt < 3.5, "F: a trickling server must still hit the overall deadline (%.1fs)" % dt)
+check(r[0] is False and 1.5 <= dt < 3.5, "F: a trickling server must still hit the overall deadline (%.1fs)" % dt)
 time.sleep(2.5)
 ok("F silent and trickling servers -> deny within the overall deadline")
 
