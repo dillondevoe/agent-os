@@ -337,6 +337,11 @@ want = {"app": os.path.join(os.path.realpath(imgapps), GOOD["name"]), "sha256": 
         "version": GOOD["version"], "schedule": GOOD["schedule"]}
 want.update({k: R.field_json(GOOD[k]) for k in ("entry", "files", "network", "limits", "devices")})
 check(c == {"capability": "app.approve", "arguments": want}, "L: image call must be exact:\n%r\n%r" % (c, want))
+short = {k: v for k, v in GOOD.items() if k != "devices"}; a5 = mk_app(imgapps, dict(short, name="five-keys"))
+p = subprocess.run([sys.executable, os.path.join(ib, "agos-approve"), "call", a5], env=BASE_ENV,
+                   stdin=subprocess.DEVNULL, capture_output=True, text=True)
+check(p.returncode == 2 and "all eight manifest keys" in p.stderr and not p.stdout.strip(),
+      "L: a manifest missing a key must not produce a call: rc=%d %s %s" % (p.returncode, p.stdout, p.stderr))
 reset()
 envapps = os.path.join(TMP, "envapps"); a = mk_app(envapps)
 c = approve_call(os.path.join(BIN, "agos-approve"), a, AGOS_APPS=envapps)

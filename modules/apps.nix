@@ -25,9 +25,13 @@ let
   agosTools = pkgs.runCommand "agent-os-apps-tools" { nativeBuildInputs = [ pkgs.python3 ]; } ''
     lib=$out/libexec/agent-os
     mkdir -p $lib/bin $lib/evals/tasks $out/bin
-    for t in agos-run agos-approve agos-schedule agos-build agos-net agos-fetch cap-net-fetch; do
-      cp ${../bin}/$t $lib/bin/$t
-    done
+    cp ${../bin/agos-run} $lib/bin/agos-run
+    cp ${../bin/agos-approve} $lib/bin/agos-approve
+    cp ${../bin/agos-schedule} $lib/bin/agos-schedule
+    cp ${../bin/agos-build} $lib/bin/agos-build
+    cp ${../bin/agos-net} $lib/bin/agos-net
+    cp ${../bin/agos-fetch} $lib/bin/agos-fetch
+    cp ${../bin/cap-net-fetch} $lib/bin/cap-net-fetch
     cp ${../evals/run.py} $lib/evals/run.py
     cp ${../evals/tasks/app-generation.json} $lib/evals/tasks/app-generation.json
     substituteInPlace $lib/bin/agos-run \
@@ -50,7 +54,6 @@ in
   environment.systemPackages = [ agosTools pkgs.bubblewrap ];
 
   systemd.tmpfiles.rules = [
-    "d /var/lib/agent-os 0755 root root - -"
     "d ${approvalsDir} 0755 root root - -"
     "d ${appsDir} 0755 agent ${config.users.users.agent.group} - -"
   ];

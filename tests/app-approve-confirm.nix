@@ -31,7 +31,7 @@ pkgs.testers.runNixOSTest {
     imports = baseModules;
     # Harness only (verdict files, the TIOCSTI injector, runuser). Everything under test is the
     # store-pinned production artefact baseModules installs.
-    environment.systemPackages = with pkgs; [ bash coreutils python3 systemd util-linux ];
+    environment.systemPackages = with pkgs; [ bash coreutils python3 systemd util-linux kbd procps ];
     # Root keeps CAP_SYS_ADMIN, which TIOCSTI needs on a tty that is not its controlling one; the
     # legacy knob is set as well so the injector does not depend on the kernel's default.
     boot.kernel.sysctl."dev.tty.legacy_tiocsti" = 1;
@@ -110,15 +110,19 @@ pkgs.testers.runNixOSTest {
         c = json.loads(box.succeed(AS_AGENT + f"agos-approve call {d}"))
         verdict = {"ok": True, "method": "tools/call", "id": n, "name": c["capability"], "arguments": c["arguments"]}
         put(f"/run/aat/v{n}.json", json.dumps(verdict))
-        box.succeed("printf '\\033c' > /dev/tty2")   # clear the console so the code read is this one
+        box.succeed("chvt 1; printf '\\033c' > /dev/tty2")   # clear the console so the code read is this one
         unit = f"aat-broker-{n}"
         box.succeed(
             f"systemd-run --unit={unit} --property=RemainAfterExit=yes "
             f"/bin/sh -c 'exec {broker} run < /run/aat/v{n}.json > /run/aat/o{n}.json 2>/dev/null'"
         )
-        box.wait_until_succeeds("grep -aoE 'approve [A-Z2-7]{8}' /dev/vcs2", timeout=60)
+        # The owner switches to the confirm console (Alt-F2). No login may start there: a getty
+        # would clear the frame and put an agent-uid shell on the console (modules/confirm.nix).
+        box.succeed("chvt 2")
+        box.wait_until_succeeds("grep -aoE 'type: +approve [A-Z2-7]{8}' /dev/vcs2", timeout=60)
+        box.fail("pgrep -t tty2 -x agetty")
+        box.fail("systemctl is-active --quiet autovt@tty2 getty@tty2")
         screen = box.succeed("cat /dev/vcs2")
-        assert "CAPABILITY: app.approve" in screen and "TIER: T2" in screen, screen
         code = re.findall(r"type: +approve ([A-Z2-7]{8})", screen)[-1]
         return unit, f"/run/aat/o{n}.json", code
 
@@ -154,8 +158,9 @@ pkgs.testers.runNixOSTest {
     answer("deny")
     r = result(unit, out)
     print("deny result: " + json.dumps(r))
+    assert r.get("ok") is False and r.get("error", {}).get("message") == "confirm: getty-denied", (
+        "the denial must come from the typed answer, not a timeout: " + json.dumps(r))
     assert sha2 not in store() and run_rc(demo2) == 4, "a denied app must not be approved"
-    assert "approved demo2" not in json.dumps(r), r
     print("leg 3 OK  (denied on tty2 -> nothing written -> refused)")
 
     # ── 4. edited while the prompt is up
