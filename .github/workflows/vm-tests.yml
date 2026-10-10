@@ -179,7 +179,13 @@ jobs:
           if ! git diff --no-renames --name-only -z "$BASE...$HEAD" > "$RUNNER_TEMP/changed.z"; then
             echo "diff failed: running the matrix"; echo "run=true" >> "$GITHUB_OUTPUT"; exit 0
           fi
+          # File names are PR-controlled text. Printed raw, a name like "::set-output name=run::false"
+          # is a WORKFLOW COMMAND to the runner, not a log line (security review, 2026-10-10). Pause
+          # command processing with a per-run random token around the listing, then resume it.
+          stop="$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
+          echo "::stop-commands::$stop"
           tr '\0' '\n' < "$RUNNER_TEMP/changed.z"
+          echo "::$stop::"
           if grep -zEq '^(modules/|tests/|bin/|scripts/|flake\.nix$|flake\.lock$|configuration\.nix$|configuration-open\.nix$|\.github/workflows/vm-tests\.yml$)' "$RUNNER_TEMP/changed.z"; then
             echo "run=true" >> "$GITHUB_OUTPUT"
           else
