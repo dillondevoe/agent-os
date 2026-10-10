@@ -34,10 +34,21 @@ let
   noctaliaWallOnce = pkgs.writeShellScript "agentos-noctalia-wall-once" ''
     m="$HOME/.local/state/agentos-wall2-set"
     [ -e "$m" ] && exit 0
-    sleep 4
-    ${pkgs.noctalia}/bin/noctalia msg wallpaper-set ${pkgs.hyprland}/share/hypr/wall2.png \
-      && mkdir -p "''${m%/*}" && touch "$m"
+    # Poll the shell's IPC for up to 30s (QML load time varies); a user unit's PATH is narrow,
+    # so every tool is a store path. Cosmetic: the unit runs it with "-", a failure never fails the shell.
+    for _ in $(${pkgs.coreutils}/bin/seq 30); do
+      if ${pkgs.noctalia}/bin/noctalia msg wallpaper-set ${pkgs.hyprland}/share/hypr/wall2.png; then
+        ${pkgs.coreutils}/bin/mkdir -p "''${m%/*}" && ${pkgs.coreutils}/bin/touch "$m"
+        exit 0
+      fi
+      ${pkgs.coreutils}/bin/sleep 1
+    done
+    exit 1
   '';
+  # Noctalia's launcher starts apps, so it also needs the cursor theme and Xwayland's DISPLAY;
+  # waybar never launches anything, so the default import line stays as it was.
+  envImport = "WAYLAND_DISPLAY XDG_CURRENT_DESKTOP HYPRLAND_INSTANCE_SIGNATURE"
+    + lib.optionalString (config.agentos.desktopShell == "noctalia") " DISPLAY XCURSOR_THEME XCURSOR_SIZE";
 
   # Reproducible Hyprland config = the Dell live baseline (dwindle tiling, tokyonight gradient
   # borders, blur/rounding/shadows/animations). `$mod`/`$(...)` are literal in Nix '' strings.
@@ -63,7 +74,7 @@ let
     -- 9293/9295): the bar is a systemd user unit (Restart=always, declared below in Nix)
     -- instead of a fire-and-forget exec — it survives waybar crashes and config reloads.
     -- First hand the unit the Wayland session env, then start it.
-    hl.exec_cmd("dbus-update-activation-environment --systemd WAYLAND_DISPLAY XDG_CURRENT_DESKTOP HYPRLAND_INSTANCE_SIGNATURE")
+    hl.exec_cmd("dbus-update-activation-environment --systemd ${envImport}")
     hl.exec_cmd("systemctl --user restart ${barUnit}.service")
     -- The session Dillon actually lands in is this Hyprland/kitty desktop, not bare tty1;
     -- agent-shell.nix's respawn loop (PR #52) only covers the tty1-console path. "The brain
@@ -413,7 +424,7 @@ lib.mkMerge [
     description = "Noctalia desktop shell (bar, launcher, notifications, control center)";
     serviceConfig = {
       ExecStart = "${pkgs.noctalia}/bin/noctalia";
-      ExecStartPost = "${noctaliaWallOnce}";
+      ExecStartPost = "-${noctaliaWallOnce}";
       Restart = "always";
       RestartSec = 2;
     };
