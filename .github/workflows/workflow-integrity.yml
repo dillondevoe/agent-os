@@ -1,0 +1,46 @@
+name: workflow-integrity
+# Interim control for PRs that edit .github/ (Geist ruling 2026-10-10; logic and limits in
+# tools/workflow-integrity.py). Fails only when a REQUIRED check name is defined twice, or when a
+# head workflow file cannot be parsed. Announces (PR comment, no failure) a changed or missing
+# required job.
+#
+# SECURITY: `pull_request_target` runs THIS file from the BASE branch with a token that can comment.
+# So nothing from the PR is ever checked out or executed: checkout is pinned to the base sha with
+# credentials not persisted, and the head's workflow files are read through the contents API as
+# data. No `${{ }}` expression is interpolated into a script; values cross through `env:` only.
+# Output that can carry PR-controlled text (file paths) is printed inside a per-run stop-commands
+# token, so a crafted path cannot inject runner commands.
+on:
+  pull_request_target:
+    paths: ['.github/**']
+permissions:
+  contents: read
+  pull-requests: write
+jobs:
+  workflow-integrity:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          persist-credentials: false
+      - name: check the head's workflow tree against the required check names
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          python3 -c 'import yaml' 2>/dev/null || pip install --user 'pyyaml==6.0.2'
+          python3 tools/workflow-integrity.py --selftest
+          stop="$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
+          echo "::stop-commands::$stop"
+          rc=0
+          python3 tools/workflow-integrity.py --repo "$REPO" --base "$BASE" --head "$HEAD" \
+            --report "$RUNNER_TEMP/report.md" || rc=$?
+          echo "::$stop::"
+          if [ -s "$RUNNER_TEMP/report.md" ]; then
+            gh pr comment "$PR" --repo "$REPO" --body-file "$RUNNER_TEMP/report.md" || true
+          fi
+          exit "$rc"
