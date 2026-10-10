@@ -197,8 +197,14 @@ in {
     # single cause of the slowness this unit was written to fix.
     environment = lib.seq _prewarmModelAsserted sessionOllamaEnv;
     serviceConfig = {
-      Type = "oneshot";
-      RemainAfterExit = true;
+      # NOT a oneshot (2026-10-10, issue #322). A target is implicitly ordered AFTER every unit
+      # it Wants (DefaultDependencies), so a oneshot wantedBy=multi-user.target DOES hold the
+      # target until it finishes. MEASURED on the dellon deploy VM: `systemctl list-jobs` showed
+      # `multi-user.target start waiting` + `graphical.target start waiting` with only this unit
+      # running, and at 8 GB the prefill outran its 30-min TimeoutStartSec, failed the unit and
+      # left the box DEGRADED. That settles the UNVERIFIED question the comment below records.
+      # `exec`: the unit is active the moment the warm-up starts, so boot never waits on it.
+      Type = "exec";
       # HTTP-only against the loopback Ollama API — no ollama store access needed, so this
       # unit does NOT need agos-seed-model's DynamicUser+StateDirectory namespace join.
       DynamicUser = true;
@@ -220,13 +226,18 @@ in {
       # transaction. Whether targets actually queue behind it is UNVERIFIED and the
       # discriminator is `systemctl list-jobs` during a Dell boot window. The claim was
       # inherited from docs/log-console-spec.md:86 rather than read off the unit.
+      # ANSWERED 2026-10-10 (#322): yes. list-jobs on the deploy VM showed multi-user and
+      # graphical `start waiting` behind this unit while it was a oneshot, which is why it is
+      # Type=exec now (top of this block).
       #
-      # 1800s is ~2.7x that prefill — but the prefill is n=1, so this threshold is sized
+      # HISTORY (oneshot era) below. 1800s is ~2.7x that prefill — but the prefill is n=1, so this threshold is sized
       # from a single observation and should be revisited once a second boot is timed. When
       # it DOES fire the unit goes `failed`, which `systemctl --failed` reports — note that
       # is a MANUAL observable: nothing in this repo runs it automatically, it appears only
-      # in acceptance prose. The unit sets no `Restart=` and `RemainAfterExit=yes`, so a
-      # timeout is sticky for that boot: degraded brain, not a retry loop. The cost of the
+      # in acceptance prose. As a oneshot (no `Restart=`, `RemainAfterExit=yes`) a fired timeout
+      # was sticky for that boot: a degraded box, not a retry loop. Since #322 the long-running
+      # bound lives in the script and never fails the unit; this value only bounds process
+      # spawn under Type=exec, and stays finite for prewarm-start-timeout-is-finite. The cost of the
       # bound is a cold KV cache on that one boot (the in-process warmup in agent-brain.py
       # stays as belt); the cost of no bound is the indistinguishability above.
       #
@@ -237,7 +248,12 @@ in {
       TimeoutStartSec = 1800;
     };
     script = ''
-      ${agent-brain}/bin/agent-brain --once "boot warmup — reply with one word" >/dev/null 2>&1 || true
+      # SOFT bound: a warm-up is an optimisation, so running long must never fail the unit or
+      # degrade the box. `timeout` stops it and the script still exits 0; the in-process warmup
+      # in agent-brain.py stays as belt. (TimeoutStartSec above now only bounds process start.)
+      if ! ${pkgs.coreutils}/bin/timeout 1800 ${agent-brain}/bin/agent-brain --once "boot warmup — reply with one word" >/dev/null 2>&1; then
+        echo "agos-boot-prewarm: warm-up did not finish (timed out after 1800s or errored); KV cache stays cold this boot — not a failure"
+      fi
     '';
   };
 }
