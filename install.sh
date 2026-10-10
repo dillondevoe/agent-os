@@ -53,7 +53,7 @@ esac
 # this line back into the moving ref it replaced while still looking pinned.
 #
 # Override for testing an unmerged branch:  ... | FLAKE_REV=my-branch bash
-FLAKE_REV="${FLAKE_REV:-66aeaeb169c0d421cc6909a15035ef852830558a}"
+FLAKE_REV="${FLAKE_REV:-b12ac6c4817f76004d30dd4cc4a915740c00868b}"
 FLAKE="github:dillondevoe/agent-os/${FLAKE_REV}#${VARIANT}"
 DISK="${DISK:-/dev/nvme0n1}"   # override:  curl ... | DISK=/dev/sdX bash   (prefix on the piped bash)
 TS_AUTHKEY="${TS_AUTHKEY:-}"   # OPEN variant only — Tailscale pre-auth key (runtime secret, never committed)
