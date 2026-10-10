@@ -36,7 +36,7 @@ RELIABILITY (Geist §3): 7B-class function-calling is mediocre under a big tool
 
 stdlib only (urllib) so it runs anywhere Python does, incl. the built VM.
 """
-import json, os, re, subprocess, sys, urllib.request, urllib.error, http.client
+import json, os, re, socket, subprocess, sys, time, urllib.request, urllib.error, http.client
 
 HOST  = os.environ.get("OLLAMA_HOST", "http://127.0.0.1:11434").rstrip("/")
 if not HOST.startswith(("http://", "https://")):     # env-sourced, not model — but harden as knobs multiply
@@ -79,6 +79,53 @@ BROKER  = os.environ.get("AGENT_OS_BROKER", os.path.join(_BINDIR, "broker"))
 WALL_TIMEOUT_S = 90       # a hung wall must never freeze the login shell → timeout ≡ deny
 _req_seq = 0              # monotonic JSON-RPC id; single-flight (one request per wall run)
 
+# THE PRODUCTION SEAM (docs/design/broker-service.md §2.5). On the image the wall is a system
+# service on the other side of a uid boundary, reached over a unix socket that carries ONE request
+# per connection; modules/agent-shell.nix pins the path. When it is set, the loop NEVER spawns a
+# wall of its own — a missing, refusing, silent, garbled or slow socket is the same fail-closed
+# deny as a broker deny. Unset (batteries, dev boxes): the subprocess pipeline below.
+WALL_SOCKET = os.environ.get("AGENT_OS_WALL_SOCKET", "")
+WALL_SOCKET_TIMEOUT_S = 160   # > the instance's RuntimeMaxSec (150) > the confirm backstop (120)
+WALL_REPLY_MAX = 4 * 1024 * 1024
+
+
+def _wall_socket(line):
+    """One request over the wall socket: connect, send the line, half-close, read one reply line
+    under an OVERALL deadline. Returns the parsed dict or None (deny) on any failure."""
+    deadline = time.monotonic() + WALL_SOCKET_TIMEOUT_S
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        s.settimeout(max(0.1, deadline - time.monotonic()))
+        s.connect(WALL_SOCKET)
+        s.sendall(line)
+        s.shutdown(socket.SHUT_WR)        # EOF ends `mcp parse` on the far side
+        buf = b""
+        while b"\n" not in buf:
+            left = deadline - time.monotonic()
+            if left <= 0:
+                raise TimeoutError("wall socket deadline")
+            s.settimeout(left)
+            chunk = s.recv(65536)
+            if not chunk:
+                break
+            buf += chunk
+            if len(buf) > WALL_REPLY_MAX:
+                raise ValueError("wall reply too large")
+    except Exception as e:
+        sys.stderr.write(_clean(f"[agent-loop] wall socket error: {e}") + "\n")
+        return None
+    finally:
+        try: s.close()
+        except Exception: pass
+    first = buf.split(b"\n", 1)[0].strip()
+    if not first:
+        return None                       # closed without a verdict (refused peer, crash) → deny
+    try:
+        r = json.loads(first.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        return None                       # garbage → deny
+    return r if isinstance(r, dict) else None
+
 def _wall(request):
     """Run ONE JSON-RPC request object through `mcp parse | broker run` and return the
     broker's single response dict — or None on ANY failure (the caller then denies,
@@ -86,6 +133,8 @@ def _wall(request):
     interpreter. Both stages run under THIS python3 (sys.executable) so neither depends on
     a `#!/usr/bin/env python3` shebang resolving (the nix-sandbox ENOEXEC trap)."""
     line = (json.dumps(request, separators=(",", ":"), ensure_ascii=True) + "\n").encode()
+    if WALL_SOCKET:
+        return _wall_socket(line)         # pinned: never fall back to spawning a wall
     p_mcp = p_brk = None
     out = b""
     try:
