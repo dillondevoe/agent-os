@@ -13,8 +13,9 @@
 #
 #   - the DESKTOP (slice 2): every offered desktop other than the image's own is a specialisation,
 #     so it is in the closure and in the boot menu before the box ever seals. `agentos-boot-default`
-#     (root, every boot and after a rebuild) makes the stored one the boot default by selecting its
-#     existing boot entry. No generation is created and nothing is built. UEFI + systemd-boot only:
+#     (root, every boot and whenever the boot loader is installed) makes the stored one the boot
+#     default by selecting its existing entry IN THE GENERATION THE SYSTEM PROFILE POINTS TO, so the
+#     chosen desktop follows updates. No generation is created and nothing is built. UEFI + systemd-boot only:
 #     without EFI variables the desktop is not asked and the image's own desktop runs.
 #
 # Owed with the wall slice (3): the audit-chain line the spec asks for on a fallback. The chain has
@@ -27,7 +28,7 @@ let
   s = cfg.surfaceInternal;
   choiceConfig = {
     offered = {
-      desktop = cfg.firstLogin.desktops;
+      desktop = offeredDesktops;
       terminal = lib.attrNames s.terminals;
       shell = lib.attrNames s.shells;
     };
@@ -49,6 +50,12 @@ let
     tokens = "/run/agentos-firstlogin/choice";
     tokens_user = "agentos-setup";
   };
+
+  # The desktop is a BOOT ENTRY, and only systemd-boot has the entries this selects among. With any
+  # other boot loader (GRUB on UEFI has EFI variables but no /boot/loader/entries) only the image's
+  # own desktop is offered and no specialisation is built: asking for a choice that can never take
+  # effect would be worse than not asking.
+  offeredDesktops = if config.boot.loader.systemd-boot.enable then cfg.firstLogin.desktops else [ cfg.firstLogin.defaultDesktop ];
 
   # One python file, five commands, each with its role fixed in the wrapper. `-I`: no user site, no
   # PYTHON* environment, no cwd on sys.path. The JSON is double-encoded: a JSON string literal is a
@@ -81,7 +88,7 @@ in
         assertion = lib.elem cfg.desktop cfg.firstLogin.desktops;
         message = "agentos.firstLogin.desktops must include the image's own desktop (agentos.desktop = ${cfg.desktop}).";
       } ];
-      specialisation = lib.genAttrs (lib.filter (d: d != cfg.desktop) cfg.firstLogin.desktops) (d: {
+      specialisation = lib.genAttrs (lib.filter (d: d != cfg.desktop) offeredDesktops) (d: {
         configuration = {
           agentos.desktop = lib.mkForce d;
           agentos.firstLogin.defaultDesktop = cfg.desktop;
@@ -91,6 +98,7 @@ in
 
     (lib.mkIf cfg.firstLogin.enable {
       system.build.agosChoice = agos-choice;
+      system.build.agosChoiceConfig = choiceConfig;      # what is compiled in, for the eval checks
       environment.systemPackages = [ agos-choice ] ++ lib.mapAttrsToList (_: t: t.pkg) s.terminals;
       # A login shell has to be listed; fish and zsh also need their system-wide setup.
       environment.shells = [ "${agos-choice}/bin/agentos-shell" ];
@@ -188,29 +196,34 @@ in
         };
         serviceConfig = {
           Type = "oneshot";
-          ExecStart = "${agos-choice}/libexec/agentos-boot-default";
+          # --at-boot: only this unit may reboot into a desktop chosen on this boot (the same program
+          # runs at boot-loader install, where a reboot would be a rebuild restarting the box).
+          ExecStart = "${agos-choice}/libexec/agentos-boot-default --at-boot";
           PrivateNetwork = true;
           ProtectSystem = "strict";       # /sys stays writable under strict: the EFI variable is the one write
           ProtectHome = true;
           PrivateTmp = true;
           NoNewPrivileges = true;
+          ProtectKernelModules = true;
+          ProtectControlGroups = true;
+          RestrictAddressFamilies = "AF_UNIX";       # systemctl reboot talks to pid 1 over a unix socket
           ReadWritePaths = [ "-/run/agentos-surface" ];
+          # Writing an EFI variable needs CAP_SYS_ADMIN, and bootctl clears the variable's immutable
+          # flag first (CAP_LINUX_IMMUTABLE). Everything else it does is root reading root-owned files.
+          CapabilityBoundingSet = [ "CAP_SYS_ADMIN" "CAP_LINUX_IMMUTABLE" ];
           SystemCallArchitectures = "native";
         };
       };
 
-      # After a rebuild the generation number changes and the EFI variable names the old one (nixpkgs
-      # rewrites loader.conf, not the variable), so re-assert against the generation being activated.
-      # The bootloader is installed before activation runs. Not at early boot (no systemd yet: the unit
-      # above covers boots) and not on a dry run.
-      system.activationScripts.agentosBootDefault = {
-        supportsDryActivation = false;
-        text = ''
-          if [ -e /run/systemd/system ] && [ -d /sys/firmware/efi/efivars ]; then
-            ${agos-choice}/libexec/agentos-boot-default --system "$systemConfig" || true
-          fi
-        '';
-      };
+      # After a rebuild the EFI variable still names the OLD generation's entry, and that entry still
+      # exists (nixpkgs rewrites loader.conf, not the variable). Left alone the box would boot the old
+      # generation and the unit above would re-select it: no update would ever land. So the default is
+      # re-selected every time the boot loader is installed, which `switch` and `boot` both do, after
+      # the profile points at the new generation and its entries exist. `|| true`: installing the boot
+      # loader must not fail because of this; the per-boot unit is the backstop.
+      boot.loader.systemd-boot.extraInstallCommands = lib.mkIf config.boot.loader.systemd-boot.enable ''
+        ${agos-choice}/libexec/agentos-boot-default || true
+      '';
     })
   ];
 }

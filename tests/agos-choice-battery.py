@@ -25,12 +25,12 @@
 #   J. The installed copy (placeholder substituted) ignores AGOS_CHOICE_CONFIG.
 #   K. A compiled-in default that is not offered is refused at start; the placeholder appears once.
 #   L. Writes are atomic: no temp file is left, the file and its directory are fsynced.
-#   M. The boot default: the entry chosen is the one whose `options` boots the wanted specialisation OF
-#      THE RUNNING GENERATION (from the parent, from inside another specialisation, and after a
-#      rollback to an older generation); the image's default desktop clears the default; a look-alike
-#      entry is not matched; no entry, no generation, or no EFI variables means bootctl is not run; a
-#      bad store means the image default; `--system` must be a system in the store; a reboot happens
-#      only for a choice made on this boot that differs from the running desktop, and only once.
+#   M. The boot default: the entry chosen is the one whose `options` boots the wanted specialisation of
+#      THE GENERATION THE PROFILE POINTS TO, whatever is running (running an old generation must not
+#      pin the box to it); the image's own desktop clears the default; a look-alike entry is not
+#      matched; a chosen desktop with no entry in the current generation CLEARS the default; no EFI
+#      variables means bootctl is not run; a bad store means the image default; a reboot happens only
+#      for a choice made on this boot that differs from the running desktop, and only once.
 #
 # stdlib only.
 
@@ -86,7 +86,7 @@ def cfg(**over):
          "tokens": TOKENS, "tokens_uid": ME, "tokens_dev": TMP,
          # the boot default (arm M): a fake store, profile, ESP and tools, all under TMP
          "default_desktop": "hyprland", "this_desktop": "hyprland", "efivars": EFIVARS,
-         "profiles": PROFILES, "entries": ENTRIES, "current_system": CURRENT, "store_prefix": NIXSTORE + "/",
+         "profiles": PROFILES, "entries": ENTRIES, "current_system": CURRENT,
          "bootctl": BOOTCTL, "systemctl": SYSTEMCTL, "applied_marker": MARKER}
     c.update(over)
     return c
@@ -526,27 +526,38 @@ put(os.path.join(ENTRIES, "nixos-0000.conf"), "title init=%s/init\noptions init=
 put(os.path.join(ENTRIES, "nixos-0001.conf"), "title x\noptions root=fstab xinit=%s/init\n" % (g2 + "-spec-sway"))
 gone(MARKER); SYS.lines.clear()
 
-boot_into(g2); store_desktop("sway")
-check(A.boot_default(cfg()) == 0 and tool_calls() == [["bootctl", ["set-default", "nixos-bbb2.conf"]]], "M: from the parent")
-boot_into(g2 + "-spec-none"); store_desktop("sway")
-check(A.boot_default(cfg(this_desktop="none")) == 0 and tool_calls() == [["bootctl", ["set-default", "nixos-bbb2.conf"]]],
-      "M: from inside another specialisation the parent must be found through the profile")
-boot_into(g1 + "-spec-sway"); store_desktop("none")           # a rollback boot of generation 1
-check(A.boot_default(cfg(this_desktop="sway")) == 0 and tool_calls() == [["bootctl", ["set-default", "nixos-ccc1.conf"]]],
-      "M: after a rollback the entry must belong to the BOOTED generation, not the newest")
-boot_into(g2 + "-spec-sway"); store_desktop("hyprland")
-check(A.boot_default(cfg(this_desktop="sway")) == 0 and tool_calls() == [["bootctl", ["set-default", ""]]], "M: the image default clears the boot default")
+# The profile points at generation 2 throughout; what is RUNNING must not matter.
+def want_entry(running, desktop, this="hyprland"):
+    boot_into(running); store_desktop(desktop)
+    rc = A.boot_default(cfg(this_desktop=this))
+    return rc, tool_calls()
+
+
+check(want_entry(g2, "sway") == (0, [["bootctl", ["set-default", "nixos-bbb2.conf"]]]), "M: running the current generation")
+check(want_entry(g2 + "-spec-none", "sway", "none") == (0, [["bootctl", ["set-default", "nixos-bbb2.conf"]]]), "M: running another specialisation")
+# Running the OLD generation (a rebuild that takes effect at next boot, or an old entry picked by
+# hand): the default must select the CURRENT generation's entry, or the box is pinned to the old one.
+check(want_entry(g1 + "-spec-sway", "sway", "sway") == (0, [["bootctl", ["set-default", "nixos-bbb2.conf"]]]),
+      "M: running an old generation must still select the current generation's entry (no pinning)")
+check(want_entry(g1, "none") == (0, [["bootctl", ["set-default", "nixos-ccc2.conf"]]]), "M: old generation running, other desktop")
+check(want_entry(g2 + "-spec-sway", "hyprland", "sway") == (0, [["bootctl", ["set-default", ""]]]), "M: the image default clears the boot default")
 boot_into(g2); put(STORE, "garbage")
 check(A.boot_default(cfg()) == 0 and tool_calls() == [["bootctl", ["set-default", ""]]], "M: a bad store means the image default")
-ok("M1 the entry is the wanted specialisation of the running generation; the default desktop clears it")
+ok("M1 the entry is the chosen desktop in the generation the profile points to, whatever is running")
 
-boot_into(g2); store_desktop("sway")
-os.rename(os.path.join(ENTRIES, "nixos-bbb2.conf"), os.path.join(TMP, "bbb2.aside"))
-check(A.boot_default(cfg()) == 1 and tool_calls() == [], "M: with only look-alike entries nothing may be selected")
+# The chosen desktop is missing from the current generation: CLEAR the default (boot the new
+# generation's own desktop), never leave an older generation's entry selected.
+os.rename(os.path.join(ENTRIES, "nixos-bbb2.conf"), os.path.join(TMP, "bbb2.aside"))      # only look-alikes left for g2 sway
+check(want_entry(g2, "sway") == (1, [["bootctl", ["set-default", ""]]]), "M: no entry for the chosen desktop: the default must be cleared")
 os.rename(os.path.join(TMP, "bbb2.aside"), os.path.join(ENTRIES, "nixos-bbb2.conf"))
-stray = system("stray-system"); boot_into(stray + "/specialisation")           # not a generation, no specialisations of its own
-os.rmdir(os.path.join(stray, "specialisation")); boot_into(stray)
-check(A.boot_default(cfg()) == 1 and tool_calls() == [], "M: an unknown running system must change nothing")
+g3 = system("g3-system", ("none",)); entry("nixos-aaa3.conf", g3); entry("nixos-ccc3.conf", g3 + "-spec-none", "NixOS (none)")
+os.unlink(os.path.join(PROFILES, "system")); os.symlink(g3, os.path.join(PROFILES, "system-3-link")); os.symlink("system-3-link", os.path.join(PROFILES, "system"))
+check(want_entry(g2 + "-spec-sway", "sway", "sway") == (1, [["bootctl", ["set-default", ""]]]),
+      "M: a new generation without the chosen desktop: cleared, not left on the old generation's entry")
+os.unlink(os.path.join(PROFILES, "system")); os.unlink(os.path.join(PROFILES, "system-3-link")); os.symlink("system-2-link", os.path.join(PROFILES, "system"))
+os.unlink(os.path.join(PROFILES, "system")); os.symlink("system-9-link", os.path.join(PROFILES, "system"))                # a dangling profile
+check(want_entry(g2, "sway") == (1, [["bootctl", ["set-default", ""]]]), "M: a dangling profile link: cleared")
+os.unlink(os.path.join(PROFILES, "system")); os.symlink("system-2-link", os.path.join(PROFILES, "system"))
 boot_into(g2); os.rename(EFIVARS, EFIVARS + ".off")
 try:
     check(A.boot_default(cfg()) == 0 and tool_calls() == [], "M: no EFI variables: bootctl must not run")
@@ -555,36 +566,39 @@ try:
 finally:
     os.rename(EFIVARS + ".off", EFIVARS)
 tool(BOOTCTL, rc=1)
-check(A.boot_default(cfg()) == 1 and len(tool_calls()) == 1, "M: a failing bootctl must be reported")
-tool(BOOTCTL)
-ok("M2 no entry, an unknown system, no EFI variables or a failing bootctl: nothing is claimed")
-
-boot_into(g1); store_desktop("sway")                          # --system names the generation being activated
-check(A.boot_default(cfg(), system=g2) == 0 and tool_calls() == [["bootctl", ["set-default", "nixos-bbb2.conf"]]], "M: --system must be used")
-for bad in ("/etc", os.path.join(TMP, "nope"), TMP, "relative"):
-    check(A.boot_default(cfg(), system=bad) == 1 and tool_calls() == [], "M: --system %r must be refused" % bad)
-# A complete, bootable-looking system OUTSIDE the store, with its own profile link and boot entry:
-# everything else would accept it, so only the store check refuses it.
-outside = os.path.join(TMP, "outside-system"); os.makedirs(os.path.join(outside, "specialisation"))
-os.makedirs(outside + "-sway"); os.symlink(outside + "-sway", os.path.join(outside, "specialisation", "sway"))
-os.symlink(outside, os.path.join(PROFILES, "system-3-link")); entry("nixos-out.conf", outside + "-sway", "NixOS (sway)")
-check(A.boot_default(cfg(), system=outside) == 1 and tool_calls() == [], "M: a --system outside the store was accepted")
-os.unlink(os.path.join(PROFILES, "system-3-link")); os.unlink(os.path.join(ENTRIES, "nixos-out.conf"))
-ok("M3 --system selects the generation being activated and must be a system in the store")
+check(want_entry(g2, "sway")[0] == 1, "M: a failing bootctl must be reported")
+tool(BOOTCTL); tool_calls()
+ok("M2 a chosen desktop missing from the current generation clears the default; no EFI or a failing bootctl claims nothing")
 
 boot_into(g2); store_desktop("sway"); put(MARKER, "1\n", 0o600)
-check(A.boot_default(cfg()) == 0 and tool_calls() == [["bootctl", ["set-default", "nixos-bbb2.conf"]], ["systemctl", ["--no-block", "reboot"]]]
+# Not the per-boot unit (the boot loader is being installed by a rebuild): never a reboot, and the
+# marker is left for the unit.
+check(A.boot_default(cfg()) == 0 and tool_calls() == [["bootctl", ["set-default", "nixos-bbb2.conf"]]] and os.path.exists(MARKER),
+      "M: outside the per-boot unit the marker must be ignored: a rebuild must never reboot the box")
+check(A.boot_default(cfg(), at_boot=True) == 0 and tool_calls() == [["bootctl", ["set-default", "nixos-bbb2.conf"]], ["systemctl", ["--no-block", "reboot"]]]
       and not os.path.exists(MARKER), "M: a choice made on this boot for another desktop reboots, once")
-check(A.boot_default(cfg()) == 0 and tool_calls() == [["bootctl", ["set-default", "nixos-bbb2.conf"]]], "M: no marker, no reboot")
+check(A.boot_default(cfg(), at_boot=True) == 0 and tool_calls() == [["bootctl", ["set-default", "nixos-bbb2.conf"]]], "M: no marker, no reboot")
 put(MARKER, "1\n", 0o600); boot_into(g2 + "-spec-sway")
-check(A.boot_default(cfg(this_desktop="sway")) == 0 and [c[0] for c in tool_calls()] == ["bootctl"] and not os.path.exists(MARKER),
+check(A.boot_default(cfg(this_desktop="sway"), at_boot=True) == 0 and [c[0] for c in tool_calls()] == ["bootctl"] and not os.path.exists(MARKER),
       "M: the chosen desktop is already running: no reboot")
 put(MARKER, "1\n", 0o600); boot_into(g2); os.rename(os.path.join(ENTRIES, "nixos-bbb2.conf"), os.path.join(TMP, "bbb2.aside"))
-check(A.boot_default(cfg()) == 1 and tool_calls() == [], "M: the default could not be set: no reboot")
+check(A.boot_default(cfg(), at_boot=True) == 1 and [c[0] for c in tool_calls()] == ["bootctl"] and not os.path.exists(MARKER),
+      "M: the chosen desktop could not be selected: no reboot")
+# An entry file that reaches the read limit is skipped: a word cut at the limit could read as ours.
+big = os.path.join(ENTRIES, "nixos-0002.conf")
+# The program reads ENTRY_MAX + 1 bytes to detect "too big". The fixture puts the end of the wanted
+# word exactly there, followed by "-evil": read without the size check, the cut-off word IS the wanted one.
+READ = A.ENTRY_MAX + 1
+word = "init=%s/init" % (g2 + "-spec-sway")
+put(big, "options " + "x" * (READ - len("options ") - 1 - len(word)) + " " + word + "-evil root=fstab\n")
+check(open(big).read()[:READ].split()[-1] == word and open(big).read().split()[2] == word + "-evil",
+      "M: the oversize fixture must end its first ENTRY_MAX + 1 bytes on the wanted word")
+check(A.boot_default(cfg()) == 1 and tool_calls() == [["bootctl", ["set-default", ""]]], "M: a cut-off look-alike in an oversize entry was matched")
+os.unlink(big)
 os.rename(os.path.join(TMP, "bbb2.aside"), os.path.join(ENTRIES, "nixos-bbb2.conf")); gone(MARKER)
 gone(STORE); gone(TOKENS); put(TOKENS, "sway foot zsh\n", 0o600)
 check(A.apply(cfg()) == 0 and os.path.exists(MARKER) and (os.stat(MARKER).st_mode & 0o777) == 0o600, "M: apply must leave the made-on-this-boot marker")
 gone(MARKER)
-ok("M4 a reboot only for a choice made on this boot that differs from the running desktop, and only once")
+ok("M3 a reboot only for a choice made on this boot that differs from the running desktop, and only once")
 
 print("agos-choice-battery: PASS (%d criteria)" % len(passed))

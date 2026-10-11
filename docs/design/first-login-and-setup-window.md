@@ -281,30 +281,39 @@ list, and validation happens before any value reaches an `exec`.
   desktops), and leaves the default desktop reachable only through a parent that garbage
   collection may delete.
 - Instead a root unit, `agentos-boot-default.service`, selects the boot entry that already exists
-  for the booted generation's specialisation: `bootctl set-default <entry>` (or clears it for the
+  for the chosen desktop's specialisation: `bootctl set-default <entry>` (or clears it for the
   image's own desktop).
-- **Correction from the slice 2 proof (2026-10-11).** v0-v3 of this spec assumed entries named
-  `nixos-generation-<N>-specialisation-<name>.conf`. On this pin they are named by content hash
-  (`nixos-<sha256>.conf`, title `NixOS (<name>)`), so the entry is found by what it boots: the one
-  whose `options` line has the exact word `init=<specialisation toplevel>/init`. The desktop name
-  comes from the validated store and a closed list; the path comes from the running generation.
-- The generation is never the profile's newest link (wrong after a rollback boot). At boot it is
-  the one the booted system belongs to. Inside a specialisation `/run/current-system` has no
-  specialisations of its own, so the parent is found by scanning the system profile's links for
-  the generation whose toplevel, or one of whose specialisations, is the booted system. In the
-  activation snippet it is the generation being activated (`--system "$systemConfig"`, which must
-  be a system in the store). `nixos-rebuild boot` runs no activation, so after it the variable is
-  stale until the next boot's re-assert, and that one boot lands on the `loader.conf` default;
-  acceptable, and stated.
+- **Corrections from the slice 2 proof (2026-10-11).** Two things in v0-v3 of this spec were wrong.
+  - *Entry names.* The spec assumed `nixos-generation-<N>-specialisation-<name>.conf`. On this pin
+    entries are named by content hash (`nixos-<sha256>.conf`, title `NixOS (<name>)`), and the
+    names change every time the boot loader is installed. So the entry is found by what it boots:
+    the one whose `options` line has the exact word `init=<specialisation toplevel>/init`. The
+    desktop name comes from the validated store and a closed list.
+  - *Which generation.* The spec said "the booted generation". That pins the box: after a rebuild
+    the machine is still running the old generation, the unit would re-select the old
+    generation's entry, the next boot would be the old generation again, and no update (security
+    updates included) would ever land. The generation is the one **the system profile points
+    to**, which is what `loader.conf`'s own default tracks: the chosen desktop follows the box's
+    updates exactly as an unmodified NixOS follows them. An old entry picked by hand in the boot
+    menu is a one-off, as it is on any NixOS.
+- When the chosen desktop has no entry in the profile's generation (a rebuild that no longer
+  offers it), the default is **cleared**, so the box boots the new generation's own desktop. It is
+  never left on an older generation's entry.
+- The re-select runs in two places: the per-boot unit, and
+  `boot.loader.systemd-boot.extraInstallCommands`, which both `nixos-rebuild switch` and
+  `nixos-rebuild boot` run after the profile points at the new generation and its entries exist.
+  That closes the `boot` case this spec previously accepted as "one boot on the wrong default".
 - A desktop chosen on this boot that differs from the one running is entered by rebooting, once,
-  before the agent's getty: the root helper leaves a marker in `/run`, the boot-default unit
-  removes it and reboots. Gone after the reboot, so it cannot loop.
+  before the agent's getty: the root helper leaves a marker in `/run`, and the per-boot unit
+  (`--at-boot`) removes it and reboots. Only that unit honours the marker: the same program
+  running during a rebuild never reboots the box.
+- Only systemd-boot has the entries this selects among. With any other boot loader (GRUB on UEFI
+  has EFI variables but no `/boot/loader/entries`) only the image's own desktop is offered and no
+  specialisation is built.
 - `bootctl set-default` writes the EFI variable `LoaderEntryDefault`, which takes precedence over
-  the `default` line in `loader.conf`. nixpkgs rewrites `loader.conf` on every
-  `switch-to-configuration` and does not touch the variable, so after a rebuild the variable names
-  a generation that is no longer newest: the re-assert is required, not belt and braces. The unit
-  runs at every boot, and an activation snippet runs it after the bootloader install step of a
-  switch (before it, the entry it names is about to be rewritten).
+  the `default` line in `loader.conf`. nixpkgs rewrites `loader.conf` and the entry files on every
+  boot-loader install and does not touch the variable, so after a rebuild the variable names an
+  entry that no longer exists: the re-select at install time is required, not belt and braces.
 - When the variable names an entry that no longer exists, systemd-boot falls back to the
   `loader.conf` default. That is the un-specialised entry of the newest generation, which is
   desktop `none`: the tty floor. The fallback is safe because of what nixpkgs writes there, not
@@ -323,14 +332,18 @@ list, and validation happens before any value reaches an `exec`.
   the closure budget is set (owner question B).
 - The seal step refuses if the chosen desktop's specialisation is not in the running closure.
 - This selection mechanism was the part of the spec least proven on paper. Slice 2 demonstrates it
-  in a UEFI VM with a real systemd-boot (`tests/surface-boot-default.nix`): a first-login choice
-  boots the chosen variant with no new generation, a later change takes effect at the next boot,
-  the image's own desktop clears the default, a stale default falls back to the image's own
-  desktop and is re-asserted on that boot, and the agent cannot change any of it. NOT yet
-  demonstrated in a VM: a rebuild in the middle and a rollback boot (the entry-selection logic for
-  both is covered by the contract battery against a fake profile and ESP; the activation snippet
-  is asserted at evaluation only). The fallback if it ever fails to hold is the generation switch
-  with a GC root for the parent, recorded here so the choice is not relitigated from scratch.
+  in a UEFI VM with a real systemd-boot (`tests/surface-boot-default.nix`, seven boots): a
+  first-login choice boots the chosen variant with no new generation and before the agent has a
+  session; a later change takes effect at the next boot; the image's own desktop clears the
+  default; a stale default falls back to the image's own desktop and is re-selected on that boot;
+  the agent cannot change any of it; **a rebuild in the middle** (a second generation installed
+  with `switch-to-configuration boot`) moves the default to the new generation's entry at install
+  time and the next boot runs the new generation; and running the old generation by hand does not
+  pin the box to it. NOT demonstrated: `nixos-rebuild switch --rollback` (the profile moving
+  backwards; the same code path as a rebuild, in the other direction), and real desktops (in the
+  test node a desktop is a variable). The fallback if the mechanism ever fails to hold is the
+  generation switch with a GC root for the parent, recorded here so the choice is not relitigated
+  from scratch.
 
 ### 3.3 Terminal and shell: no switch at all
 

@@ -1707,16 +1707,29 @@
                                   (mkOpenSystem [ { agentos.firstLogin.enable = true; agentos.firstLogin.desktops = [ "sway" ]; } ]).config.system.build.toplevel.drvPath true)).success)
             "surface-choice: offering desktops without the image's own must fail evaluation";
           assert lib.assertMsg (let bd = on.systemd.services.agentos-boot-default; in
-                                bd.serviceConfig.ExecStart == "${pkg}/libexec/agentos-boot-default" && !(bd.serviceConfig ? User)
+                                bd.serviceConfig.ExecStart == "${pkg}/libexec/agentos-boot-default --at-boot" && !(bd.serviceConfig ? User)
+                                && bd.serviceConfig.CapabilityBoundingSet == [ "CAP_SYS_ADMIN" "CAP_LINUX_IMMUTABLE" ]
+                                && bd.serviceConfig.RestrictAddressFamilies == "AF_UNIX" && bd.serviceConfig.NoNewPrivileges
+                                && !(lib.hasInfix "--at-boot" (builtins.unsafeDiscardStringContext on.boot.loader.systemd-boot.extraInstallCommands))
                                 && bd.unitConfig.ConditionPathExists == "/sys/firmware/efi/efivars"
                                 && lib.elem "agentos-surface-apply.service" bd.after && lib.elem "getty@tty1.service" bd.before
                                 && bd.serviceConfig.ProtectSystem == "strict" && bd.serviceConfig.PrivateNetwork
                                 && bd.serviceConfig.ReadWritePaths == [ "-/run/agentos-surface" ]
                                 && !(bd.serviceConfig ? StandardInput)
                                 && ap.serviceConfig.RuntimeDirectory == "agentos-surface" && ap.serviceConfig.RuntimeDirectoryPreserve == "yes"
-                                && lib.hasInfix "libexec/agentos-boot-default --system \"$systemConfig\"" on.system.activationScripts.agentosBootDefault.text
-                                && !(dflt.systemd.services ? agentos-boot-default) && !(dflt.system.activationScripts ? agentosBootDefault))
-            "surface-choice: the boot-default unit (after the helper, before the agent's getty, EFI only, no terminal) or its activation re-assert is wrong";
+                                && lib.hasInfix (builtins.unsafeDiscardStringContext "${pkg}/libexec/agentos-boot-default || true")
+                                     (builtins.unsafeDiscardStringContext on.boot.loader.systemd-boot.extraInstallCommands)
+                                && !(dflt.systemd.services ? agentos-boot-default)
+                                && !(lib.hasInfix "agentos-boot-default" (builtins.unsafeDiscardStringContext dflt.boot.loader.systemd-boot.extraInstallCommands)))
+            "surface-choice: the boot-default unit (after the helper, before the agent's getty, EFI only, no terminal) or its re-select on boot-loader install is wrong";
+          # Not systemd-boot (GRUB on UEFI has EFI variables but no entries to select): only the image's
+          # own desktop is offered, and no specialisation is built for a choice that could not take effect.
+          assert lib.assertMsg (let g = (mkOpenSystem [ { agentos.firstLogin.enable = true; boot.loader.systemd-boot.enable = lib.mkForce false;
+                                                           boot.loader.grub.enable = true; boot.loader.grub.device = "nodev"; boot.loader.grub.efiSupport = true; } ]).config; in
+                                g.specialisation == { } && g.agentos.firstLogin.enable
+                                && g.system.build.agosChoiceConfig.offered.desktop == [ "hyprland" ]
+                                && on.system.build.agosChoiceConfig.offered.desktop == [ "hyprland" "sway" "none" ])
+            "surface-choice: without systemd-boot only the image's own desktop may be offered and no specialisation built (the choice could never take effect)";
           assert lib.assertMsg (!dflt.agentos.firstLogin.enable && !(dflt.systemd.services ? agentos-firstlogin)
                                 && !(dflt.systemd.services ? agentos-surface-apply) && !(dflt.users.users ? agentos-setup))
             "surface-choice: with first login off (the default) none of it may exist";
@@ -1768,7 +1781,7 @@
             assert c["entries"] == "/boot/loader/entries" and c["profiles"] == "/nix/var/nix/profiles", c
             assert c["bootctl"].startswith("/nix/store/") and c["bootctl"].endswith("/bin/bootctl"), c["bootctl"]
             assert c["systemctl"].startswith("/nix/store/") and c["applied_marker"] == "/run/agentos-surface/applied", c
-            assert "efivars" not in c and "store_prefix" not in c and "current_system" not in c, c
+            assert "efivars" not in c and "current_system" not in c, c
             assert c["defaults"] == {"desktop": "hyprland", "terminal": "kitty", "shell": "bash"}, c["defaults"]
             assert c["store"] == "/var/lib/agent-os/surface.toml" and c["tokens"] == "/run/agentos-firstlogin/choice", c
             assert c["tokens_user"] == "agentos-setup" and "tokens_uid" not in c and "store_uid" not in c and "store_dev" not in c, c

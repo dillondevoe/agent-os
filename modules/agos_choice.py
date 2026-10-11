@@ -9,7 +9,7 @@
 #   agentos-terminal          exec the chosen terminal   } from a compiled-in table of store paths;
 #   agentos-shell             exec the chosen shell      } the environment never decides which.
 #   agentos-surface           print the validated choice (read-only).
-#   agentos-boot-default      root, at every boot and after a rebuild: make the chosen desktop the
+#   agentos-boot-default      root, at every boot and whenever the boot loader is installed: make the chosen desktop the
 #                             boot default by selecting the boot entry that ALREADY exists for it.
 #                             Reads only the validated store; types nothing; builds nothing.
 #
@@ -28,6 +28,14 @@
 # entry is found by what it boots: the one whose `options` line has init=<that specialisation>/init.
 # A default that names an entry which no longer exists falls back to loader.conf's, which is the
 # image's default desktop.
+#
+# WHICH GENERATION: the one the system profile points to, never "the one that is running". That is
+# what loader.conf's own default tracks, so the chosen desktop follows the box's updates exactly as
+# an unmodified NixOS would. Re-asserting the RUNNING generation's entry would pin the box to it: after
+# a rebuild that takes effect at the next boot, the old entry still exists, the box would boot it and
+# re-select it, and no update would ever land. For the same reason, when the chosen desktop has no
+# entry in the profile's generation the default is CLEARED (boot the new generation's own desktop),
+# not left pointing at an older generation.
 #
 # The lists, the defaults, the exec tables and the paths are compiled in by surface-choice.nix.
 # The literal placeholder means "repo copy", and ONLY the repo copy reads AGOS_CHOICE_CONFIG (tests);
@@ -349,29 +357,18 @@ def _real(path):
         return None
 
 
-def _parent_of(booted, c):
-    """The generation the booted system belongs to: itself, or the one it is a specialisation of.
-    Inside a specialisation /run/current-system has no specialisations of its own, so the parent is
-    found among the system profile's generations."""
-    names = c["offered"]["desktop"]
-    for link in sorted(glob.glob(os.path.join(glob.escape(c["profiles"]), "system-*-link"))):
-        top = _real(link)
-        if top is None:
-            continue
-        if top == booted or any(_real(os.path.join(top, "specialisation", n)) == booted for n in names):
-            return top
-    return booted if os.path.isdir(os.path.join(booted, "specialisation")) else None
-
-
 def _entry_for(toplevel, c):
     """The boot entry file whose `options` line boots exactly `toplevel`, or None."""
     want = "init=" + toplevel + "/init"
     for path in sorted(glob.glob(os.path.join(glob.escape(c["entries"]), "*.conf"))):
         try:
             with open(path, "rb") as f:
-                text = f.read(ENTRY_MAX).decode("utf-8", "replace")
+                raw = f.read(ENTRY_MAX + 1)
         except OSError:
             continue
+        if len(raw) > ENTRY_MAX:                     # a cut-off word could read as the one we want
+            continue
+        text = raw.decode("utf-8", "replace")
         for line in text.splitlines():
             words = line.split()
             if words[:1] == ["options"] and want in words[1:]:
@@ -386,8 +383,12 @@ def _tool(argv):
         return 1
 
 
-def boot_default(c=None, system=None):
-    """Make the stored desktop the boot default. 0 = set (or nothing to do), 1 = could not."""
+def boot_default(c=None, at_boot=False):
+    """Make the stored desktop the boot default, in the generation the system profile points to.
+    0 = the default now selects the chosen desktop (or the image's own); 1 = it could not be set, or
+    the chosen desktop is not in that generation and the default was cleared instead.
+    `at_boot` is the per-boot unit: only it may reboot into a desktop chosen on this boot. The same
+    code also runs whenever the boot loader is installed, and a rebuild must never reboot the box."""
     c = c or config()
     if not os.path.isdir(c.get("efivars", "/sys/firmware/efi/efivars")):
         log("boot-default: no EFI variables on this box; the desktop stays the image's default")
@@ -396,47 +397,39 @@ def boot_default(c=None, system=None):
     if why:
         log("boot-default: store %s; using the default" % why)
     want = choice["desktop"]
-    if system is not None:                           # the activation snippet names the generation being activated
-        booted = _real(system)
-        if booted is None or not booted.startswith(c.get("store_prefix", "/nix/store/")) or not os.path.isdir(booted):
-            log("boot-default refused: --system is not a system in the store")
-            return 1
-    else:
-        booted = _real(c.get("current_system", "/run/current-system"))
-    parent = _parent_of(booted, c) if booted else None
-    if parent is None:
-        log("boot-default: cannot tell which generation is running; left as it was")
-        return 1
-    if want == c["default_desktop"]:
-        entry = ""                                   # clear: loader.conf's default is the image's default desktop
-    else:
-        spec = _real(os.path.join(parent, "specialisation", want))
-        entry = _entry_for(spec, c) if spec else None
-        if not entry:
-            log("boot-default: no boot entry for desktop=%s in the running generation; left as it was" % want)
-            return 1
+    entry, rc = "", 0                                # "" clears: loader.conf's default is the image's own desktop
+    if want != c["default_desktop"]:
+        current = _real(os.path.join(c["profiles"], "system"))
+        spec = _real(os.path.join(current, "specialisation", want)) if current else None
+        found = _entry_for(spec, c) if spec else None
+        if found:
+            entry = found
+        else:                                        # never leave an older generation's entry selected
+            log("boot-default: desktop=%s has no boot entry in the current generation; default cleared" % want)
+            rc = 1
     if _tool([c["bootctl"], "set-default", entry]) != 0:
         log("boot-default: bootctl set-default failed")
         return 1
-    log("boot-default: desktop=%s entry=%s" % (want, entry or "(image default)"))
+    if rc == 0:
+        log("boot-default: desktop=%s entry=%s" % (want, entry or "(image default)"))
     # A choice made on this boot for a desktop other than the one running takes effect by rebooting,
     # once. The marker is in /run (gone after the reboot) and removed first, so this cannot loop.
     marker = c.get("applied_marker")
-    if marker and os.path.exists(marker):
+    if at_boot and marker and os.path.exists(marker):
         try:
             os.unlink(marker)
         except OSError:
-            return 0
-        if want != c["this_desktop"]:
+            return rc
+        if rc == 0 and want != c["this_desktop"]:
             log("boot-default: rebooting into desktop=%s" % want)
             _tool([c["systemctl"], "--no-block", "reboot"])
-    return 0
+    return rc
 
 
 def main(argv):
     role = argv[1] if len(argv) > 1 else ""
-    if role == "boot-default" and (len(argv) == 2 or (len(argv) == 4 and argv[2] == "--system")):
-        return boot_default(system=argv[3] if len(argv) == 4 else None)
+    if role == "boot-default" and (len(argv) == 2 or argv[2:] == ["--at-boot"]):
+        return boot_default(at_boot=len(argv) == 3)
     if role == "firstlogin" and len(argv) == 2:
         firstlogin()
         return 0
@@ -452,7 +445,7 @@ def main(argv):
         if why:
             sys.stderr.write("store %s; these are the defaults\n" % why)
         return 0
-    sys.stderr.write("usage: agos_choice.py firstlogin | apply | boot-default [--system PATH] | terminal [args] | shell [args] | read\n")
+    sys.stderr.write("usage: agos_choice.py firstlogin | apply | boot-default [--at-boot] | terminal [args] | shell [args] | read\n")
     return 2
 
 

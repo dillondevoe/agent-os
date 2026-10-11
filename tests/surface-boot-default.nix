@@ -8,7 +8,8 @@
 # which variant booted. The node has no route off the VM: every switch below happens from the store.
 #
 #   D1  first login asks for the desktop; the answer becomes the boot default and the machine reboots
-#       into it ONCE, by itself, before the agent ever gets a session.
+#       into it ONCE, by itself, before the agent ever gets a session (read from that boot's journal,
+#       with a positive control on the next boot).
 #   D2  after that reboot: the chosen variant is running, the questions are not asked again, no new
 #       generation exists, and the boot default is the entry of the running generation.
 #   D3  a later change (root edits the store) takes effect at the next boot; choosing the image's own
@@ -16,27 +17,43 @@
 #   D4  a boot default that names an entry which does not exist boots the image's own desktop, and that
 #       same boot puts the chosen one back.
 #   D5  the agent cannot set the boot default, write the ESP, or touch the system profile.
+#   D6  A REBUILD IN THE MIDDLE. A second generation is installed with `switch-to-configuration boot`
+#       (the case with no activation). The boot default moves to the NEW generation's entry for the
+#       chosen desktop at install time, and the next boot runs the new generation: the choice follows
+#       updates instead of pinning the box to the generation it was made on.
+#   D7  running an OLD generation (its entry picked by hand) does not pin the box to it either.
 { pkgs }:
 
 pkgs.testers.runNixOSTest {
   name = "agentos-surface-boot-default";
 
-  nodes.box = { config, ... }: {
-    imports = [ ../modules/surface-options.nix ../modules/surface-choice.nix ];
-    virtualisation.useBootLoader = true;
-    virtualisation.useEFIBoot = true;
-    boot.loader.systemd-boot.enable = true;
-    boot.loader.efi.canTouchEfiVariables = true;
-    boot.loader.timeout = 1;
-    agentos.desktop = "none";
-    agentos.firstLogin.enable = true;
-    agentos.firstLogin.desktops = [ "none" "sway" "hyprland" ];
-    users.users.agent = { isNormalUser = true; };
-    users.users.operator = { isNormalUser = true; shell = config.agentos.surfaceInternal.shellPkg; };
-    services.getty.autologinUser = "agent";
-    environment.systemPackages = with pkgs; [ coreutils util-linux procps ];
-    virtualisation.memorySize = 2048;
-  };
+  nodes.box = { config, lib, extendModules, ... }:
+    let
+      # A second, different system for D6: this same node plus a marker file. The flag stops the
+      # second from depending on a third.
+      gen2 = (extendModules { modules = [ { test.isGen2 = true; environment.etc."gen2".text = "2\n"; } ]; }).config.system.build.toplevel;
+    in
+    {
+      imports = [ ../modules/surface-options.nix ../modules/surface-choice.nix ];
+      options.test.isGen2 = lib.mkOption { type = lib.types.bool; default = false; };
+      config = {
+        virtualisation.useBootLoader = true;
+        virtualisation.useEFIBoot = true;
+        boot.loader.systemd-boot.enable = true;
+        boot.loader.efi.canTouchEfiVariables = true;
+        boot.loader.timeout = 1;
+        agentos.desktop = "none";
+        agentos.firstLogin.enable = true;
+        agentos.firstLogin.desktops = [ "none" "sway" "hyprland" ];
+        users.users.agent = { isNormalUser = true; };
+        users.users.operator = { isNormalUser = true; shell = config.agentos.surfaceInternal.shellPkg; };
+        services.getty.autologinUser = "agent";
+        environment.systemPackages = with pkgs; [ coreutils util-linux procps ];
+        virtualisation.memorySize = 2048;
+        system.extraDependencies = lib.mkIf (!config.test.isGen2) [ gen2 ];
+        environment.etc."gen2-path" = lib.mkIf (!config.test.isGen2) { text = "${gen2}\n"; };
+      };
+    };
 
   testScript = ''
     STORE = "/var/lib/agent-os/surface.toml"
@@ -50,8 +67,10 @@ pkgs.testers.runNixOSTest {
         return box.succeed("bootctl status --no-pager 2>/dev/null | sed -n 's/^ *Default Entry: *//p' | head -1; "
                            "cat /sys/firmware/efi/efivars/LoaderEntryDefault-* 2>/dev/null | tr -d '\\000' | tail -c +5").strip()
 
-    def entry_of(name):
-        spec = box.succeed("readlink -f /nix/var/nix/profiles/system/specialisation/" + name).strip()
+    def entry_of(name, generation="/nix/var/nix/profiles/system"):
+        # Looked up by what the entry boots, every time: the file names are content hashes and change
+        # whenever the boot loader is installed.
+        spec = box.succeed("readlink -f " + generation + "/specialisation/" + name).strip()
         return box.succeed("grep -l -- 'init=" + spec + "/init' /boot/loader/entries/*.conf | xargs basename").strip()
 
     def generations():
@@ -79,6 +98,12 @@ pkgs.testers.runNixOSTest {
     box.wait_for_shutdown()
     box.start()
     box.wait_for_unit("multi-user.target")
+    # ...proven from the journal of the boot that asked: the agent's getty never started there and no
+    # session was opened for the agent. (The same two greps succeed on THIS boot: see D2.)
+    box.succeed("journalctl -b -1 --no-pager -n 1 | grep -q .")           # the previous boot's journal is there
+    box.fail("journalctl -b -1 --no-pager -o cat -u getty@tty1.service | grep -q .")
+    box.fail("journalctl -b -1 --no-pager | grep -q 'session opened for user agent'")
+    box.succeed("journalctl -b -1 --no-pager -t agos-choice | grep -q 'rebooting into desktop=sway'")
 
     # D2 — the chosen variant is running; nothing was built; the default is this generation's entry.
     assert running() == "sway", "D2: booted " + running()
@@ -87,6 +112,9 @@ pkgs.testers.runNixOSTest {
     assert entry_of("sway") in boot_default(), "D2: the boot default is not the sway entry: " + boot_default()
     box.wait_for_unit("getty@tty1.service")
     box.wait_until_succeeds("pgrep -u agent", timeout=60)
+    # Positive control for the D1 proof: on a boot where the agent does get its session, both show.
+    box.wait_until_succeeds("journalctl -b --no-pager | grep -q 'session opened for user agent'", timeout=60)
+    box.succeed("journalctl -b --no-pager -o cat -u getty@tty1.service | grep -q .")
     assert box.succeed("systemctl show -p ConditionResult --value agentos-firstlogin.service").strip() == "no", "D2: asked again"
     box.succeed("journalctl -t agos-choice -b --no-pager | grep -q 'boot-default: desktop=sway entry=nixos-'")
     box.fail("journalctl -t agos-choice -b --no-pager | grep -q rebooting")       # once, not again
@@ -123,5 +151,34 @@ pkgs.testers.runNixOSTest {
     box.fail("runuser -u agent -- systemctl start agentos-boot-default.service")
     box.fail("runuser -u agent -- sh -c 'command -v agentos-boot-default'")
     assert boot_default() == before, "D5: the boot default changed"
+
+    # D6 — a rebuild in the middle, installed with `boot` (no activation): the default must move to
+    # the NEW generation's entry for the chosen desktop when the boot loader is installed.
+    # Read from the PARENT system: every variant computes its own "second system", and the one a
+    # specialisation computes is a specialisation of a specialisation, with no variants of its own.
+    gen2 = box.succeed("cat /nix/var/nix/profiles/system/etc/gen2-path").strip()
+    box.fail("test -e /etc/gen2")
+    box.succeed(f"test -e {gen2}/specialisation/sway && test -e {gen2}/specialisation/hyprland")
+    before_install = boot_default()
+    box.succeed(f"ln -sfn {gen2} /nix/var/nix/profiles/system-2-link && ln -sfn system-2-link /nix/var/nix/profiles/system")
+    box.succeed(f"{gen2}/bin/switch-to-configuration boot")
+    new_entry = entry_of("sway")
+    old_entry = entry_of("sway", "/nix/var/nix/profiles/system-1-link")     # the old generation is still in the menu
+    assert new_entry != old_entry, "D6: the new generation has no entry of its own for sway"
+    assert new_entry not in before_install, "D6: the default already named the new entry before the install"
+    assert new_entry in boot_default(), "D6: installing the boot loader did not move the default to the new generation: " + boot_default()
+    reboot()
+    assert running() == "sway", "D6: " + running()
+    box.succeed("test -e /etc/gen2")                                # the NEW generation is what booted
+    assert new_entry in boot_default(), "D6: the boot moved the default off the new generation"
+
+    # D7 — running the old generation (its entry picked once, by hand) does not pin the box to it.
+    box.succeed("bootctl set-oneshot " + old_entry)
+    reboot()
+    box.fail("test -e /etc/gen2")                                   # the old generation, this once
+    assert running() == "sway", "D7: " + running()
+    assert new_entry in boot_default(), "D7: running the old generation re-selected its own entry (pinning)"
+    reboot()
+    box.succeed("test -e /etc/gen2")
   '';
 }
