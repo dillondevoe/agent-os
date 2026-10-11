@@ -2226,9 +2226,16 @@
           assert lib.assertMsg (win.serviceConfig.TimeoutStopSec == "180s")
             "setup-window: the window unit's stop timeout must exceed the lock wait (150 s), or the shutdown stamp is killed";
           assert lib.assertMsg (lib.count (l: l == "set setup_uid {") cOn == 1 && lib.count (l: l == r1) cOn == 1 && lib.count (l: l == r2) cOn == 1
-                                && lib.count (l: lib.hasInfix "setup_uid" l) cOn == 3 && lib.elem "typeof meta skuid" cOn
+                                && lib.count (l: lib.hasInfix "setup_uid" l) cOn == 4 && lib.elem "typeof meta skuid" cOn
                                 && !(lib.any (l: lib.hasInfix "elements" l) cOn))
-            "setup-window: the set must be declared once, EMPTY, and referenced by exactly its two rules";
+            "setup-window: the set must be declared once, EMPTY, and referenced by exactly its two accepts and its guard";
+          # THE GUARD: before the conntrack accept (so it also ends a connection already open), naming the
+          # fetcher's uid as a number, exempting loopback only, and NOT v4-pinned (a narrow drop fails open).
+          assert lib.assertMsg (let g = "oifname != \"lo\" meta skuid 351 meta skuid != @setup_uid drop"; in
+                                lib.count (l: l == g) cOn == 1 && idx g cOn >= 0 && idx g cOn < idx "ct state established" cOn
+                                && lib.count (l: lib.hasSuffix "drop" l && lib.hasInfix "setup_uid" l) cOn == 1
+                                && !(lib.any (l: lib.hasInfix "setup_uid" l && lib.hasSuffix "drop" l && lib.hasInfix "nfproto" l) cOn))
+            "setup-window: the guard (the fetcher sends nothing off-box unless it is in the set) must sit before the conntrack accept, unpinned";
           assert lib.assertMsg (idx "oifname \"lo\" accept" cOn >= 0 && idx "ct state established" cOn >= 0
                                 && idx "ct state established" cOn < idx r1 cOn && idx "oifname \"lo\" accept" cOn < idx r1 cOn
                                 && idx r1 cOn < idx r2 cOn && idx r2 cOn < idx "meta skuid 0" cOn)

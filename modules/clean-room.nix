@@ -51,6 +51,20 @@ let
     ""
     ""
   ]);
+  # THE GUARD: sealed means NO egress for the fetcher, not "no new connections". Flushing the set
+  # removes the two accepts further down, but a download already in flight would keep going: its
+  # packets match `ct state established` first. So, BEFORE that rule, anything the fetcher's uid sends
+  # off-box is dropped unless the uid is in the set. With the set empty this is "the fetcher has no
+  # off-box traffic at all", effective the instant the set is flushed and without depending on the
+  # fetcher being restarted. Loopback is exempt (it serves the model there). NOT v4-pinned: scoping a
+  # DROP narrowly fails open (the same reasoning as the proxy-port guard above).
+  setupWindowGuard = lib.optionalString sw.enable (lib.concatStringsSep "\n          " [
+    "# The setup window's guard: the fetcher's uid sends nothing off-box unless it is in `setup_uid`,"
+    "# established connections included. Rationale at `setupWindowGuard` in modules/clean-room.nix."
+    "oifname != \"lo\" meta skuid ${toString sw.fetchUid} meta skuid != @setup_uid drop"
+    ""
+    ""
+  ]);
   # Placed after the conntrack and loopback rules and BEFORE any uid-0 accept; nothing else in the
   # table refers to the set. v4-pinned like every other scoped accept here. No port 80. tcp/53 is
   # there because a resolver falls back to TCP on truncation (the fetch-uid rule allows it too).
@@ -162,7 +176,7 @@ in {
         ${setupWindowSet}chain output {
           type filter hook output priority 0; policy drop;
 
-          # return traffic for connections we already allowed
+          ${setupWindowGuard}# return traffic for connections we already allowed
           ct state established,related accept
           ct state invalid drop
 

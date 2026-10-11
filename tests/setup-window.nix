@@ -17,7 +17,9 @@
 #   W5  a reboot inside the window reopens it with what was left, less one floor: not a fresh budget.
 #   W6  the budget runs out: the box seals itself (the tick flushes the set and writes the marker), the
 #       fetcher is restarted, the pull and its retry timer are stopped and cannot start again, and the
-#       fetcher's uid cannot reach 443 any more.
+#       fetcher's uid cannot reach 443 any more. A CONNECTION OPENED INSIDE THE WINDOW AND HELD ACROSS
+#       THE SEAL IS DEAD (the spec's setup-window-seal-ends-flow): sealed means no egress, not "no new
+#       connections". Control in W2: the same held connection works while the window is open.
 #   W7  sealed stays sealed: across an nftables reload and restart, and across a reboot.
 #   W8  re-provisioning is root removing the state: a garbage window.json seals ("invalid state").
 #   W9  an empty `sealed` file is not a seal and not a first boot: the unit fails, the set stays empty.
@@ -46,6 +48,23 @@ let
         sys.exit(0 if s.recvfrom(64)[0] == b"q" else 1)
     except OSError:
         sys.exit(28)          # sent, never answered
+  '';
+  # Hold one TCP connection to the peer's 443 open; when the trigger file appears, try to USE it.
+  # "alive" = a request sent on the old connection was answered; "dead-..." = it was not.
+  hold443 = pkgs.writeText "hold443.py" ''
+    import os, socket, sys, time
+    peer, ready, trigger, result = sys.argv[1:5]
+    s = socket.create_connection((peer, 443), timeout=5)
+    open(ready, "w").write("ready")
+    while not os.path.exists(trigger):
+        time.sleep(0.2)
+    try:
+        s.settimeout(6)
+        s.sendall(b"GET / HTTP/1.0\r\n\r\n")
+        res = "alive" if s.recv(64).startswith(b"HTTP/") else "dead-no-reply"
+    except OSError as e:
+        res = "dead-" + e.__class__.__name__
+    open(result, "w").write(res)
   '';
 in
 pkgs.testers.runNixOSTest {
@@ -114,6 +133,18 @@ pkgs.testers.runNixOSTest {
         # refused the send (EPERM), which is what a dropped UDP packet looks like; 28 = sent, no answer.
         return box.execute(f"runuser -u {user} -- python3 ${probe53} {peer_ip}")[0]
 
+    def hold(tag):
+        # A connection to the peer's 443, opened NOW as the fetcher's uid and kept. Returns when it is up.
+        box.succeed(f"install -d -m 1777 /tmp/hold && rm -f /tmp/hold/{tag}.*")
+        box.succeed(f"systemd-run --quiet --collect --unit=hold-{tag} --uid={UID} python3 ${hold443} {peer_ip} /tmp/hold/{tag}.ready /tmp/hold/{tag}.go /tmp/hold/{tag}.result")
+        box.wait_until_succeeds(f"test -e /tmp/hold/{tag}.ready", timeout=20)
+
+    def use(tag):
+        # Try to use that old connection; "alive" or "dead-...".
+        box.succeed(f"touch /tmp/hold/{tag}.go")
+        box.wait_until_succeeds(f"test -e /tmp/hold/{tag}.result", timeout=30)
+        return box.succeed(f"cat /tmp/hold/{tag}.result").strip()
+
     def wait_open():
         box.wait_until_succeeds("nft -j list set inet agentos_egress setup_uid | grep -q '\"elem\"'", timeout=30)
 
@@ -133,6 +164,8 @@ pkgs.testers.runNixOSTest {
     assert dns("root") == 0, "W2: control: the UDP echo fixture works (root's own DNS accept)"
     assert dns("ollama") == 0, f"W2: the fetcher's uid must reach DNS while the window is open: {dns('ollama')}"
     assert curl("ollama", 80) == 28, f"W2: port 80 must stay closed for the fetcher: {curl('ollama', 80)}"
+    hold("control")
+    assert use("control") == "alive", "W2: CONTROL for W6: with the window open, a held connection must still work"
     assert curl("agent", 443) == 28 and curl("agent", 80) == 28, "W2: the agent's uid must reach nothing"
     assert dns("agent") == 27, f"W2: the agent's uid must not reach DNS (27 = dropped at the wall): {dns('agent')}"
     assert curl("root", 80) == 28, "W2: root must gain nothing from the window (80 stays closed)"
@@ -175,7 +208,10 @@ pkgs.testers.runNixOSTest {
     assert w5["remaining"] <= stamped - 60, f"W5: the new boot was not charged its floor: {w5}"
     assert curl("ollama", 443) == 0, "W5: the window did not reopen"
 
-    # W6 — the budget runs out; the box seals itself
+    # W6 — the budget runs out; the box seals itself. A connection the fetcher's uid opened while the
+    # window was open is held across the seal: sealed must mean it is DEAD, not merely that no new one
+    # can be made. (It is a separate process, so restarting the fetcher does not close it: only the wall can.)
+    hold("inflight")
     box.succeed("systemctl start ollama.service; systemctl start agent-os-pull-model.timer || true")
     ollama_before = box.succeed("systemctl show -p ActiveEnterTimestampMonotonic --value ollama.service").strip()
     box.wait_until_succeeds(f"test -e {STATE}/sealed", timeout=int(w5["remaining"]) + 150)
@@ -184,6 +220,8 @@ pkgs.testers.runNixOSTest {
     assert marker["toplevel"] == box.succeed("readlink -f /run/current-system").strip(), "W6: the marker names another system"
     assert elements() == [], f"W6: sealed with a non-empty set: {elements()}"
     assert curl("ollama", 443) == 28, "W6: the fetcher's uid still reaches 443 after the seal"
+    after = use("inflight")
+    assert after.startswith("dead-"), f"W6: a connection opened inside the window still works after the seal: {after}"
     assert curl("root", 443) == 0, "W6: control: the network is alive"
     box.wait_until_succeeds("systemctl is-active --quiet ollama.service", timeout=60)
     assert box.succeed("systemctl show -p ActiveEnterTimestampMonotonic --value ollama.service").strip() != ollama_before, "W6: the fetcher was not restarted"

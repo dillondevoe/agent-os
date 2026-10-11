@@ -299,12 +299,28 @@ check(A.tick(cfg()) == 1 and calls() == [CLOSE], "I: a tick that cannot write th
 reset(); A.recompute(cfg()); Clock.mono = 100.0 + LENGTH + 1; calls()
 check(A.tick(cfg(), final=True) == 0 and calls() == [] and window()["remaining"] == 0 and not os.path.exists(os.path.join(STATE, "sealed")),
       "I: the stop stamp writes the budget and never seals")
+reset(); A.recompute(cfg()); boot(2); Clock.mono = 100.0 + 900; before = window(); calls()     # the clock has moved: a stamp would show
+check(A.tick(cfg(), final=True) == 0 and calls() == [] and window() == before, "I: the stop stamp never touches a window from another boot, or the set")
 reset(); A.recompute(cfg()); put("sealed", GOOD_SEALED); calls()
 check(A.tick(cfg()) == 0 and calls() == [CLOSE], "I: sealed: a tick only flushes")
 reset(); A.recompute(cfg()); boot(2); calls(); before = window()
-check(A.tick(cfg()) == 0 and calls() == [CLOSE] and window() == before, "I: a window from another boot: the tick flushes and writes nothing")
+check(A.tick(cfg()) == 0 and calls() == [CLOSE] and window() == before and not os.path.exists(os.path.join(STATE, "sealed")),
+      "I: a window from another boot with budget left: the tick flushes, writes nothing, and does NOT open")
 os.unlink(BOOTID); calls()
 check(A.tick(cfg()) == 0 and calls() == [CLOSE] and window() == before, "I: no boot id: the tick flushes and writes nothing")
+# Closed must not stay unmarked: where the per-boot decision would seal, the tick seals.
+reset(); A.recompute(cfg()); Clock.mono = 100.0 + LENGTH - 30; A.tick(cfg(), final=True); boot(2); Clock.mono = 1.0; calls()
+check(A.tick(cfg()) == 0 and json.load(open(os.path.join(STATE, "sealed")))["reason"] == "budget" and OPEN not in calls(),
+      "I: a spent budget from an earlier boot must be SEALED by the tick, not left closed and unmarked")
+reset(); A.recompute(cfg()); boot(2); Clock.mono = 1.0; Clock.wall = BUILD + 86400.0 + LENGTH + 1; calls()
+check(A.tick(cfg()) == 0 and json.load(open(os.path.join(STATE, "sealed")))["reason"] == "deadline", "I: a passed deadline from an earlier boot must be sealed by the tick")
+reset(); put("window.json", "garbage"); calls()
+check(A.tick(cfg()) == 0 and json.load(open(os.path.join(STATE, "sealed")))["reason"] == "invalid state" and calls()[0] == CLOSE,
+      "I: a malformed window.json must be sealed by the tick")
+reset(); calls()
+check(A.tick(cfg()) == 0 and calls() == [CLOSE] and state_files() == [], "I: no window yet: the tick flushes and creates nothing")
+reset(); A.recompute(cfg()); tool(NFT, rc=1); put("sealed", GOOD_SEALED); calls()
+check(A.tick(cfg()) == 1 and calls() == [CLOSE], "I: sealed but the flush fails: the tick must report it")
 ok("I tick flushes before sealing, flushes when it cannot write, and its stop form never seals")
 
 # J — the seal sequence and marker

@@ -71,7 +71,19 @@ Two things have to become true, and they are separable:
   ```
 
   Empty set = no extra accepts = sealed. The two rules sit after the `ct state` and
-  `oifname "lo"` rules and before any uid-0 accept, and nothing else refers to the set. No port 80.
+  `oifname "lo"` rules and before any uid-0 accept. No port 80.
+- **The guard (added in slice 3a).** One more rule, *before* the conntrack accept:
+
+  ```
+  oifname != "lo" meta skuid <fetch uid> meta skuid != @setup_uid drop
+  ```
+
+  The fetcher's uid sends nothing off-box unless it is in the set, on a connection it already has
+  as much as on a new one. Without it, flushing the set stops new connections while a download in
+  flight carries on, because its packets match `ct state established` first. The slice 3a VM test
+  shows exactly that with the rule removed. It is not v4-pinned: a drop scoped narrowly fails
+  open. With the guard, "sealed" is true at the wall the instant the set is flushed; restarting
+  the fetcher afterwards is tidying, and the seal does not depend on it succeeding.
   tcp/53 is included because the resolver falls back to TCP on truncation, as the existing
   fetch-uid rule already allows.
 - Every accept that can be active during the window carries the v4 pin and names exactly one uid
@@ -209,10 +221,11 @@ overlap:
   plus a margin. "Model present" is decided by one detector: the daemon's own `GET /api/tags` on
   loopback lists the configured model.
 - It waits on first login by ordering: `After=agentos-surface-apply.service`.
-- After the flush and before it writes `sealed` it ends the fetch: `systemctl restart
-  ollama.service` (step 2 of the sequence in 2.1). Flushing the set does not end a download
-  already in flight, because the `ct state established` rule above the set rules keeps an open
-  connection alive. The restart ends it, so "sealed" means no egress and not "no new egress". A
+- "Sealed" means no egress and not "no new egress": the guard rule (2.1) drops the fetcher's
+  off-box packets the moment the set is flushed, including on a connection opened inside the
+  window. After the flush the seal also restarts the fetcher (`systemctl restart ollama.service`,
+  step 2 of the sequence in 2.1) so that it does not sit retrying, but the seal's truth does not
+  rest on that restart. A
   half-pulled model is absent from `/api/tags`, so the detector cannot mistake it for a model.
 - tty1 between the first-login questions and the agent's getty is owned by one small unit,
   `agentos-setup-progress.service` (`Type=oneshot`, `TTYPath=/dev/tty1`,

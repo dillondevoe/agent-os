@@ -35,6 +35,11 @@
 # The window unit's stop timeout is set above both (setup-window.nix), or systemd would kill the
 # shutdown stamp while it waits.
 #
+# SEALED MEANS NO EGRESS, not "no new connections". The ruleset carries a guard ahead of the
+# conntrack accept: whatever the fetcher's uid sends off-box is dropped unless the uid is in the set.
+# So the instant the set is flushed a download in flight is dead at the wall. Restarting the fetcher
+# afterwards is tidying (it should not sit there retrying), not what makes the seal true.
+#
 # THE MARKER NEVER LIES. `sealed` is written only after nft has confirmed the flush. If the flush
 # fails, nothing else in the seal happens and there is no marker: the budget is still spent, so the
 # next tick tries again, a minute later, for as long as it takes.
@@ -368,13 +373,29 @@ def tick(c, final=False):
 
 def _tick(c, final):
     sealed, window = load_sealed(c), load_window(c)
-    if c.get("sealed_by_build") or sealed[0] != "absent" or window[0] != "valid":
-        close_set(c)                                 # sealed, down, or no window: nothing to count
-        return 0 if (c.get("sealed_by_build") or sealed[0] == "valid") else (1 if sealed[0] == "malformed" else 0)
+    if c.get("sealed_by_build") or sealed[0] == "valid":
+        return 0 if close_set(c) else 1              # sealed: nothing to count, keep the set empty
+    if sealed[0] == "malformed":
+        close_set(c)
+        return 1                                     # the wall is DOWN (seal-check acts on it)
+    if final:
+        if window[0] == "valid" and window[1]["boot_id"] == _boot_id(c):
+            try:                                     # the shutdown stamp: write the budget, nothing else
+                _write(os.path.join(c["state_dir"], "window.json"), dict(window[1], remaining=remaining_now(window[1], time.monotonic())))
+            except OSError:
+                return 1
+        return 0
+    # The tick never OPENS. Whenever the window is not one this boot opened, it does what the per-boot
+    # decision would do short of opening: a state that says "seal" is sealed here and now, not left
+    # closed-but-unmarked until something happens to run recompute.
+    boot_id = _boot_id(c)
+    if window[0] != "valid" or not boot_id or window[1]["boot_id"] != boot_id:
+        close_set(c)
+        if window[0] == "absent" or not boot_id:
+            return 0                                 # no window yet (recompute opens it), or no boot id
+        act = decide(c, sealed, window, boot_id, time.monotonic(), time.time())
+        return _seal(c, act[1]) if act[0] == "seal" else 0
     s = window[1]
-    if s["boot_id"] != _boot_id(c):
-        close_set(c)                                 # not opened in this boot (or no boot id): recompute
-        return 0                                     # owns opening; closing is always safe
     left = remaining_now(s, time.monotonic())
     try:
         _write(os.path.join(c["state_dir"], "window.json"), dict(s, remaining=left))
@@ -382,8 +403,6 @@ def _tick(c, final):
         close_set(c)                                 # an enforcer that cannot keep its books closes the window
         log("tick: the state cannot be written (%s); window closed" % e.__class__.__name__)
         return 1
-    if final:
-        return 0
     # The wall deadline too, by the same rule as `decide`: monotonic time stands still while a box is
     # suspended, so a box that slept through its deadline must not wake with its window still open.
     now_wall = time.time()
