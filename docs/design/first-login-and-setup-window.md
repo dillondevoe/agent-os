@@ -1,6 +1,7 @@
 # First login and the setup window (spec, v3)
 
-Status: SPEC. Fable spec review 2026-10-10: approve with required changes (twelve, folded into v1);
+Status: SPEC, APPROVED by the Fable spec review (four passes, 2026-10-10 to 2026-10-11; the last:
+APPROVE, no contradictions). Fable spec review 2026-10-10: approve with required changes (twelve, folded into v1);
 re-review 2026-10-11: all twelve confirmed, seven further required changes from the rewrite itself,
 folded into v2; final pass 2026-10-11: all seven confirmed, three more required (R1-R3) plus
 implementation notes, folded into this v3. Rulings in section 8. No code in this PR. It
@@ -94,6 +95,9 @@ Two things have to become true, and they are separable:
 - The tick is also the enforcer of the budget: when it computes `remaining ≤ 0` it applies the
   empty set itself, in the same run, and then starts the seal. Closing the window never depends
   on the seal unit succeeding.
+- The tick is not conditioned on the state directory being writable. If it cannot write the
+  state (a read-only remount in the middle of the window), it flushes the set first and then
+  fails: an enforcer that cannot keep its books closes the window.
 - What re-runs it on `switch-to-configuration`: `nftables.service` embeds the path of the rules
   file, so a changed ruleset changes the unit text, `reloadIfChanged` reloads it, and the reload
   propagates. If the window unit's own text changed in the same switch it is restarted instead.
@@ -115,9 +119,10 @@ Two things have to become true, and they are separable:
 
 ### 2.2 State
 
-One root-owned directory, `/var/lib/agent-os/seal/` (0700 root). The window oneshot, its tick
-service and the seal unit all carry
-`RequiresMountsFor=/var/lib/agent-os` and `ConditionPathIsReadWrite=/var/lib/agent-os/seal`: if
+One root-owned directory, `/var/lib/agent-os/seal/` (0700 root). The window oneshot and the seal
+unit carry
+`RequiresMountsFor=/var/lib/agent-os` and `ConditionPathIsReadWrite=/var/lib/agent-os/seal` (the
+tick carries only the mount requirement, see 2.1): if
 the state cannot be written (read-only filesystem, no space), the window does not open. Writes
 are temp file, `fsync`, `rename`, then `fsync` of the directory.
 
