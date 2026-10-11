@@ -171,7 +171,12 @@ Noctalia's IPC (`noctalia msg`) is a socket any agent-uid process can reach, so 
 clipboard-history panel are reachable that way. Screenshot tools (grim) and wl-clipboard were already
 installed, so the reach is not new; what is new is that clipboard history persists and screenshots are
 saved to the agent's home. `launch_apps_as_systemd_services` runs launcher apps as user units (the uid
-wall is unaffected). Noctalia's polkit agent and lock screen are off. Revisit both before the sealed
+wall is unaffected). Noctalia's polkit agent and lock screen are off. So is everything Noctalia does
+on the network by itself (an anonymous startup ping to api.noctalia.dev, IP-based location, weather,
+community palettes and templates, exchange rates, calendar sign-in): the seeded settings turn on its
+own "offline mode" and turn the ping off in its own right, and its first-run "Welcome" wizard, which
+opened over the agent's window, is off (modules/noctalia/config.toml; found on the deploy VM, 2026-10-11).
+The seed is copied once, so a box that already has a config keeps what it has. Revisit both before the sealed
 product image ships a screenshot or clipboard capability (section 6: not enabled by default).
 
 ## 6. The adapter interface

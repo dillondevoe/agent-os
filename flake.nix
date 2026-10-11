@@ -1889,11 +1889,15 @@
             "surface-options: the Noctalia desktop must seed its settings copy-once and install btop/hyprpicker";
           assert lib.assertMsg (let t = builtins.fromTOML (builtins.readFile ./modules/noctalia/config.toml); in
                                 t.shell.polkit_agent == false
+                                # Nothing in the shell reaches the network by itself, the anonymous ping is
+                                # off in its own right, and the first thing on screen is the agent, not a wizard.
+                                && t.shell.offline_mode == true && t.shell.telemetry_enabled == false
+                                && t.shell.setup_wizard_enabled == false
                                 && !(lib.elem "kitty" t.theme.templates.builtin_ids)
                                 && !(lib.any (a: lib.hasPrefix "lock" a.action) t.shell.session.actions)
                                 && !(lib.any (l: !(lib.hasPrefix "#" l) && lib.hasInfix "swash" l)
                                        (lib.splitString "\n" (builtins.readFile ./modules/noctalia/config.toml))))
-            "surface-options: the seeded Noctalia settings must keep polkit off, no lock action (passwordless agent), no swash";
+            "surface-options: the seeded Noctalia settings must keep polkit off, offline mode on, the ping and the welcome wizard off, no lock action (passwordless agent), no swash";
           assert lib.assertMsg (dflt.programs.hyprland.enable && !(dflt.environment.variables ? AGENTOS_DESKTOP))
             "surface-options: the default desktop stays hyprland and sets no AGENTOS_DESKTOP";
           assert lib.assertMsg (lib.all (c: c.security.rtkit.enable && lib.elem "video" c.users.users.agent.extraGroups
@@ -1960,6 +1964,16 @@
           assert lib.assertMsg (!(lib.any (n: lib.hasPrefix "foot-" n || lib.hasPrefix "ghostty-" n || lib.hasPrefix "alacritty-" n) (names dflt)))
             "surface-options: the default system must not gain a second terminal";
           nixpkgs.legacyPackages.${system}.runCommand "surface-options-check" { } ''
+            # The seeded settings only mean something if the PINNED Noctalia knows the keys: a key it does
+            # not know is ignored without a word, and "offline" would be a line in a file. Each key must be
+            # a word in its string table, and the central offline gate must be in this build.
+            noct=${dfltSys.pkgs.noctalia}/bin/.noctalia-wrapped
+            test -f "$noct" || { echo "surface-options: the pinned Noctalia has no bin/.noctalia-wrapped to check keys against" >&2; exit 1; }
+            for key in offline_mode telemetry_enabled setup_wizard_enabled polkit_agent launch_apps_as_systemd_services; do
+              grep -aqw -- "$key" "$noct" || { echo "surface-options: the pinned Noctalia does not know the setting '$key' (the seed would be ignored)" >&2; exit 1; }
+            done
+            grep -aqF 'skipped in offline mode' "$noct" || { echo "surface-options: the pinned Noctalia has no offline gate" >&2; exit 1; }
+            if grep -aqw -- 'no_such_setting_zz' "$noct"; then echo "surface-options: the key check matches anything" >&2; exit 1; fi
             grep -qF 'hl.bind("SUPER+RETURN",  hl.dsp.exec_cmd("kitty"))' ${dflt.system.build.hyprlandConf} || {
               echo "surface-options: default Super+Return is no longer kitty" >&2; exit 1; }
             grep -qF 'hl.bind("SUPER+RETURN",  hl.dsp.exec_cmd("foot"))' ${alt.system.build.hyprlandConf} || {
