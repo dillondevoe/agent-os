@@ -1616,6 +1616,45 @@
               cd "$work"; python3 tests/desktop-adapter-battery.py
               touch $out
             '';
+        # Quick-ask (surfaces-and-first-login.md §7): the contract battery (one call, no tools, loopback
+        # literal only, no redirect, no files, sizes-only trace), then the INSTALLED copy: the box's model,
+        # the model's loopback address and a store-path launcher compiled in, run under `python3 -I`, and
+        # bound to Super+I on every desktop that has binds, with the key on both cheatsheets.
+        quick-ask =
+          let
+            lib = nixpkgs.lib;
+            p = nixpkgs.legacyPackages.${system};
+            dflt = self.nixosConfigurations.agentos-open.config;
+            wb = (mkOpenSystem [ { agentos.desktopShell = "waybar"; } ]).config;
+            sway = (mkOpenSystem [ { agentos.desktop = "sway"; } ]).config;
+            ask = dflt.system.build.agosAsk;
+          in
+          assert lib.assertMsg (lib.elem ask dflt.environment.systemPackages) "quick-ask: agos-ask is not installed";
+          p.runCommand "quick-ask-check" { nativeBuildInputs = [ p.python3 ]; } ''
+            work="$(mktemp -d)"; mkdir -p "$work/modules" "$work/tests"
+            cp ${./modules/agos_ask.py} "$work/modules/agos_ask.py"
+            cp ${./tests/agos-ask-battery.py} "$work/tests/agos-ask-battery.py"
+            ( cd "$work"; python3 tests/agos-ask-battery.py )
+            src=${ask}/libexec/agos_ask.py
+            grep -qF 'MODEL_DEFAULT = "${dflt.environment.variables.OLLAMA_MODEL}"' "$src" || {
+              echo "quick-ask: the installed copy does not have the box's model compiled in" >&2; exit 1; }
+            grep -qF 'HOST_DEFAULT = "127.0.0.1:${toString dflt.services.ollama.port}"' "$src" || {
+              echo "quick-ask: the installed copy does not have the model's loopback address compiled in" >&2; exit 1; }
+            grep -qE '^LAUNCHER_DEFAULT = "/nix/store/[^ ]+/bin/wofi --dmenu ' "$src" || {
+              echo "quick-ask: the launcher must be a store path" >&2; exit 1; }
+            if grep -q '@AGOS_ASK_' "$src"; then echo "quick-ask: a placeholder survived in the installed copy" >&2; exit 1; fi
+            grep -qF -- "-I ${ask}/libexec/agos_ask.py" ${ask}/bin/agos-ask || {
+              echo "quick-ask: the wrapper must run python3 -I on the installed copy" >&2; exit 1; }
+            for conf in ${dflt.system.build.hyprlandConf} ${wb.system.build.hyprlandConf}; do
+              grep -qE 'hl\.bind\("SUPER\+I", +hl\.dsp\.exec_cmd\("agos-ask"\)\)' "$conf" || {
+                echo "quick-ask: $conf does not bind Super+I to agos-ask" >&2; exit 1; }
+              sheet=$(grep -oE '/nix/store/[^ "]+-cheatsheet\.txt' "$conf" | head -1)
+              grep -q 'Super + I .*quick-ask' "$sheet" || { echo "quick-ask: the cheatsheet of $conf does not list Super+I" >&2; exit 1; }
+            done
+            grep -qF 'bindsym $mod+i exec agos-ask' ${sway.system.build.swayConf} || {
+              echo "quick-ask: the sway config does not bind Mod+i to agos-ask" >&2; exit 1; }
+            touch $out
+          '';
         # agentos.terminal / agentos.shell (surfaces-and-first-login.md §4.3/§4.4, order of work item 2).
         # Defaults change nothing (operator keeps exactly pkgs.bash, Super+Return opens kitty); a
         # non-default choice binds the chosen terminal, installs it, and sets the operator's shell
