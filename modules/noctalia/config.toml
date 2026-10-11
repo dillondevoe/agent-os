@@ -7,6 +7,14 @@
 #   - no "kitty" theme template: ~/.config/kitty/kitty.conf is a store symlink the brain window depends on;
 #   - no lock / lock-and-suspend: the agent account autologins with no password, so a lock screen could
 #     never be unlocked; suspend takes the lock-and-suspend slot.
+#   - offline_mode = true: Noctalia reaches out by itself for an anonymous startup ping, IP-based
+#     location, weather, community palettes and templates, exchange rates and calendar sign-in. Its own
+#     switch "Block all outgoing network requests" is on, so none of that happens by construction, not by
+#     each feature's upstream default. telemetry_enabled = false is set as well, so the ping stays off
+#     even if someone later turns offline mode off;
+#   - setup_wizard_enabled = false: its "Welcome to Noctalia" dialog opened centred over the agent's
+#     window on first boot. The first thing a new user sees is the agent; the wallpaper and palette the
+#     wizard asks about are already set here.
 # Seeded once (tmpfiles C): after first boot this file is the user's, and Noctalia's settings UI owns it.
 [accessibility]
 ui_scale = 1.20
@@ -35,8 +43,11 @@ thickness = 35
 
 [shell]
 launch_apps_as_systemd_services = true
+offline_mode = true
 polkit_agent = false
 settings_show_advanced = true
+setup_wizard_enabled = false
+telemetry_enabled = false
 
     [shell.panel]
     open_near_click_control_center = true
