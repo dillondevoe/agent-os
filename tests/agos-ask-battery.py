@@ -21,6 +21,10 @@
 #   L. The repo copy (placeholders unsubstituted) says "not configured" and makes no request; each
 #      placeholder appears exactly once.
 #   M. A proxy in the environment is ignored.
+#   N. The answer is untrusted: terminal control characters and bidi overrides never reach stdout, the
+#      clipboard or the notification; the notification's title and body are markup-escaped; an answer
+#      that is only control characters is "no answer".
+#   O. Child tools never inherit this process's stdin.
 #
 # stdlib only.
 
@@ -29,10 +33,21 @@ SIDE_EFFECTS = []  # loopback sockets and a temp dir, removed at exit
 import atexit, builtins, importlib.util, io, json, os, shutil, sys, tempfile, threading, types
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
+# Launched with stdin closed, the first socket this battery opens would BE fd 0, and arm O (which
+# swaps fd 0) would swap the fake model away. Occupy fd 0 first.
+try:
+    os.fstat(0)
+except OSError:
+    os.open(os.devnull, os.O_RDONLY)
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 MOD = os.path.abspath(os.path.join(HERE, "..", "modules", "agos_ask.py"))
 spec = importlib.util.spec_from_file_location("agos_ask", MOD)
 A = importlib.util.module_from_spec(spec); spec.loader.exec_module(A)
+# The desktop-tool timeout is not under test; the fakes are python scripts, slower to start than the
+# real tools. (Arm H once failed for a different reason, pinned in arm O: the children inherited this
+# process's stdin, so the result depended on how the battery was launched.)
+A.TOOL_TIMEOUT = 60
 
 TMP = tempfile.mkdtemp(prefix="agos-ask-battery.")
 atexit.register(shutil.rmtree, TMP, True)
@@ -71,7 +86,10 @@ class Fake:
 
             def log_message(self, *a):
                 pass
-        self.srv = HTTPServer(("127.0.0.1", 0), H)
+        class Quiet(HTTPServer):
+            def handle_error(self, request, client_address):
+                pass    # a client that stops reading (the oversize arm) is expected, not a traceback
+        self.srv = Quiet(("127.0.0.1", 0), H)
         self.port = self.srv.server_address[1]
         threading.Thread(target=self.srv.serve_forever, daemon=True).start()
 
@@ -294,6 +312,39 @@ finally:
     os.environ.pop("http_proxy"); os.environ.pop("HTTP_PROXY")
 check(r == (True, "direct"), "M: the proxy was used: %r" % (r,))
 ok("M a proxy in the environment is ignored")
+
+# N — the answer is untrusted text
+evil = "ok\x1b]52;c;ZXZpbA==\x07 \x1b[2J<a href=\"http://127.0.0.1:1/\">x</a> & \u202egpj.exe\u202c \x9b31m line2\nnext\ttab"
+want = "ok]52;c;ZXZpbA== [2J<a href=\"http://127.0.0.1:1/\">x</a> & gpj.exe 31m line2\nnext\ttab"
+configure(); tools(); S.answer(evil)
+rc, out, err, lines = run_main(["q"])
+check(rc == 0 and out == want + "\n", "N: stdout: %r" % out)
+check(not any(ord(ch) < 32 and ch not in "\n\t" or 0x7f <= ord(ch) <= 0x9f or ord(ch) in (0x202e, 0x202c) for ch in out), "N: control/bidi reached stdout")
+configure(launcher="fake-launcher"); S.answer(evil)
+tools(fake_launcher="<b>bold</b> & \x1b[31mred\n", wl_copy="", notify_send="")
+rc, out, err, lines = run_main([])
+c = calls()
+check(c[2][0] == "wl-copy" and c[2][2] == want, "N: clipboard: %r" % (c[2],))
+title, bodytext = c[3][1][-2], c[3][1][-1]
+check(title == "ask: &lt;b&gt;bold&lt;/b&gt; &amp; [31mred", "N: notification title not escaped/cleaned: %r" % title)
+check("<a " not in bodytext and "&lt;a href=" in bodytext and "&amp;" in bodytext and "\x1b" not in bodytext, "N: notification body: %r" % bodytext)
+configure(); tools(); S.answer("\x1b\x07\x9b")
+check(A.ask("q") == (False, "the model gave no answer"), "N: a control-only answer must be no answer")
+ok("N control characters and bidi overrides are stripped everywhere; notification text is markup-escaped")
+
+# O — a child tool never inherits our stdin (it gets /dev/null), whatever ours is
+configure(launcher="fake-launcher"); S.answer("x")
+tools(fake_launcher="q\n", wl_paste="sel", wl_copy="", notify_send="")
+r_fd, w_fd = os.pipe(); os.write(w_fd, b"PARENT-STDIN-BYTES")        # left open: a read would block or see these
+saved = os.dup(0); os.dup2(r_fd, 0)
+try:
+    rc, out, err, lines = run_main([])
+finally:
+    os.dup2(saved, 0); os.close(saved); os.close(r_fd); os.close(w_fd)
+c = calls()
+check(rc == 0 and [x[0] for x in c] == ["fake-launcher", "wl-paste", "notify-send", "wl-copy", "notify-send"], "O: %r" % [x[0] for x in c])
+check(all("PARENT-STDIN" not in x[2] for x in c) and c[1][2] == "" and c[2][2] == "", "O: a child read our stdin: %r" % [x[2] for x in c])
+ok("O child tools get /dev/null, never this process's stdin")
 
 os.environ["PATH"] = REAL_PATH
 print("agos-ask-battery: PASS (%d criteria)" % len(passed))
