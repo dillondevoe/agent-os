@@ -28,6 +28,7 @@
         ./modules/break-glass.nix   # PR-A: the ONE interactive root door (tty3, password-gated)
         ./modules/mesh-wireguard-sealed.nix  # WP-S1: sealed-lane mesh (options only; enabled per-variant below)
         ./modules/fetch-proxy.nix   # WP-S5: hostname-allowlisted fetch path (options only; INERT unless enabled)
+        ./modules/setup-window.nix  # the setup window (first-login spec section 2; options only; INERT unless enabled)
         ./modules/system-set.nix    # PR-A: SCAFFOLD for the root-side system.set executor (impl in PR-J)
         ./modules/boot-branding.nix
       ];
@@ -79,7 +80,9 @@
       };
       mkSystem = extraModules: nixpkgs.lib.nixosSystem {
         inherit system;
-        modules = baseModules ++ [ revModule ] ++ extraModules;
+        # buildEpoch: "a clock earlier than the image was built is a clock with no battery" (the setup
+        # window, modules/setup-window.nix). Unused unless the window is enabled.
+        modules = baseModules ++ [ revModule { agentos.cleanRoom.setupWindow.buildEpoch = self.lastModified or 1767225600; } ] ++ extraModules;
       };
       # OPEN / MESHED variant (`agentos-open`, Dillon msg 8926). A deliberately
       # PERMISSIVE dev box — OpenSSH + Tailscale + full-power user + real bash shell
@@ -275,6 +278,16 @@
         # (boots a VM); in the vm-tests.yml matrix in the same commit.
         #   nix build .#test-wall-service
         test-wall-service = import ./tests/wall-service.nix {
+          pkgs = nixpkgs.legacyPackages.${system};
+          inherit baseModules;
+        };
+
+        # The setup window by PACKET FATE on a booted box (first-login spec section 2, slice 3a): only
+        # the fetcher's uid, only DNS + 443, only while the set holds it; emptied by any nftables
+        # reload and put back by the unit; a reboot does not refresh the budget; the box seals itself
+        # when the budget is spent and stays sealed. Out of `checks` (boots VMs, waits out a budget).
+        #   nix build .#test-setup-window
+        test-setup-window = import ./tests/setup-window.nix {
           pkgs = nixpkgs.legacyPackages.${system};
           inherit baseModules;
         };
@@ -2175,6 +2188,112 @@
               echo "agentos.fetchProxy.allowedHosts would be accepted and IGNORED." >&2
               exit 1
             fi
+            touch $out
+          '';
+
+        # THE SETUP WINDOW (first-login spec section 2, slice 3a; modules/setup-window.nix, INERT unless
+        # enabled). (1) the contract battery for the state machine; (2) the ruleset WITH the window, as
+        # text: the set is declared once and empty, its two rules sit after the loopback accept and before
+        # any uid-0 accept, nothing else refers to it, there is no uid-blind accept and no port 80;
+        # (3) a PARSE gate for the OPEN state: the rendered table followed by the exact file the unit
+        # feeds nft, through the same lkl check nixpkgs uses, with a control that must fail; (4) the
+        # units, the fetcher's fixed uid, sealed-by-build; (5) the window OFF changes nothing.
+        setup-window =
+          let
+            lib = nixpkgs.lib;
+            p = nixpkgs.legacyPackages.${system};
+            off = self.nixosConfigurations.agentos.config;
+            on = (mkSystem [ { agentos.cleanRoom.setupWindow.enable = true; } ]).config;
+            onSealed = (mkSystem [ { agentos.cleanRoom.setupWindow.enable = true; agentos.cleanRoom.sealed = true; } ]).config;
+            content = c: c.networking.nftables.tables.agentos_egress.content;
+            code = c: lib.filter (l: l != "" && !(lib.hasPrefix "#" l)) (map (l: lib.trim l) (lib.splitString "\n" (content c)));
+            idx = needle: lines: lib.lists.findFirstIndex (l: lib.hasInfix needle l) (-1) lines;
+            cOn = code on;
+            r1 = "meta nfproto ipv4 meta skuid @setup_uid udp dport 53 accept";
+            r2 = "meta nfproto ipv4 meta skuid @setup_uid tcp dport { 53, 443 } accept";
+            win = on.systemd.services.agentos-setup-window;
+            tick = on.systemd.services.agentos-setup-window-tick;
+            wc = on.system.build.agosWindowConfig;
+            rulesScript = lib.last on.systemd.services.nftables.serviceConfig.ExecStart;
+          in
+          assert lib.assertMsg (on.networking.nftables.checkRuleset) "setup-window would false-PASS: checkRuleset is false";
+          assert lib.assertMsg (lib.count (l: l == "set setup_uid {") cOn == 1 && lib.count (l: l == r1) cOn == 1 && lib.count (l: l == r2) cOn == 1
+                                && lib.count (l: lib.hasInfix "setup_uid" l) cOn == 3 && lib.elem "typeof meta skuid" cOn
+                                && !(lib.any (l: lib.hasInfix "elements" l) cOn))
+            "setup-window: the set must be declared once, EMPTY, and referenced by exactly its two rules";
+          assert lib.assertMsg (idx "oifname \"lo\" accept" cOn >= 0 && idx "ct state established" cOn >= 0
+                                && idx "ct state established" cOn < idx r1 cOn && idx "oifname \"lo\" accept" cOn < idx r1 cOn
+                                && idx r1 cOn < idx r2 cOn && idx r2 cOn < idx "meta skuid 0" cOn)
+            "setup-window: the two rules must sit after the conntrack and loopback rules and before any uid-0 accept";
+          assert lib.assertMsg (!(lib.any (l: lib.hasSuffix "accept" l && lib.hasInfix "dport" l && !(lib.hasInfix "skuid" l) && !(lib.hasInfix "daddr" l)) cOn)
+                                && !(lib.any (l: lib.hasInfix "80" l && lib.hasInfix "dport" l && lib.hasSuffix "accept" l) cOn)
+                                && lib.all (l: lib.hasInfix "meta nfproto ipv4" l) (lib.filter (l: lib.hasSuffix "accept" l && lib.hasInfix "skuid" l) cOn))
+            "setup-window: with the window on there must be no uid-blind accept, no port 80, and every scoped accept must carry the v4 pin";
+          assert lib.assertMsg (lib.any (l: lib.hasInfix "dport { 80, 443 } accept" l) (code off) && !(lib.any (l: lib.hasInfix "setup_uid" l) (code off))
+                                && !(off.systemd.services ? agentos-setup-window) && !(off.systemd.timers ? agentos-setup-window-tick)
+                                && (off.users.users.ollama.uid or null) != 351 && off.services.ollama.user != "ollama")
+            "setup-window: with the window OFF (the default) nothing may change: the old provisioning block, no set, no units, no pinned uid";
+          assert lib.assertMsg (on.users.users.ollama.uid == 351 && on.services.ollama.user == "ollama" && on.users.groups.ollama.gid == 351
+                                && wc.fetch_uid == 351 && wc.length == 7200 && wc.state_dir == "/var/lib/agent-os/seal"
+                                && wc.restart_units == [ "ollama.service" ] && wc.stop_units == [ "agent-os-pull-model.timer" "agent-os-pull-model.service" ]
+                                && on.systemd.services.agent-os-pull-model.unitConfig.ConditionPathExists == "!/var/lib/agent-os/seal/sealed"
+                                && on.systemd.timers.agent-os-pull-model.unitConfig.ConditionPathExists == "!/var/lib/agent-os/seal/sealed"
+                                && !(off.systemd.timers.agent-os-pull-model.unitConfig ? ConditionPathExists)
+                                && !wc.sealed_by_build && !(wc ? store_prefix) && !(wc ? boot_id_path) && !(wc ? toplevel)
+                                && wc.build_epoch > 1767000000)
+            "setup-window: the fetcher's uid must be the fixed one and the compiled-in configuration must be the reviewed one";
+          assert lib.assertMsg (win.serviceConfig.Type == "oneshot" && win.serviceConfig.RemainAfterExit
+                                && win.serviceConfig.ExecStart == win.serviceConfig.ExecReload && lib.hasSuffix " recompute" win.serviceConfig.ExecStart
+                                && lib.hasSuffix " stop" win.serviceConfig.ExecStop
+                                && lib.elem "nftables.service" win.after && lib.elem "nftables.service" win.partOf
+                                && win.unitConfig.ReloadPropagatedFrom == [ "nftables.service" ]
+                                && win.unitConfig.ConditionPathIsReadWrite == "/var/lib/agent-os/seal"
+                                && win.serviceConfig.CapabilityBoundingSet == [ "CAP_NET_ADMIN" ] && win.serviceConfig.ProtectSystem == "strict"
+                                && win.serviceConfig.ReadWritePaths == [ "/var/lib/agent-os/seal" ] && win.serviceConfig.NoNewPrivileges)
+            "setup-window: the window unit must be an idempotent RemainAfterExit oneshot that follows nftables' restarts AND reloads, with its stop stamp";
+          assert lib.assertMsg (lib.hasSuffix " tick" tick.serviceConfig.ExecStart && !(tick.unitConfig ? ConditionPathIsReadWrite)
+                                && on.systemd.timers.agentos-setup-window-tick.timerConfig.OnUnitActiveSec == "1min"
+                                && lib.elem "timers.target" on.systemd.timers.agentos-setup-window-tick.wantedBy)
+            "setup-window: the tick runs once a minute and is NOT conditioned on a writable state directory (it must run to close the window)";
+          assert lib.assertMsg (!(onSealed.systemd.services ? agentos-setup-window) && !(onSealed.systemd.timers ? agentos-setup-window-tick)
+                                && onSealed.system.build.agosWindowConfig.sealed_by_build
+                                && lib.count (l: l == "set setup_uid {") (code onSealed) == 1)
+            "setup-window: sealed-by-build has the set (always empty) and none of the units";
+          assert lib.assertMsg (!(builtins.tryEval (builtins.deepSeq
+                                  (mkSystem [ { agentos.cleanRoom.setupWindow.enable = true; agentos.cleanRoom.setupWindow.seconds = 14401; } ]).config.system.build.agosWindowConfig true)).success)
+            "setup-window: a window longer than 4 hours must fail evaluation";
+          p.runCommand "setup-window-check" { nativeBuildInputs = [ p.python3 ]; } ''
+            work="$(mktemp -d)"; mkdir -p "$work/modules" "$work/tests"
+            cp ${./modules/agos_window.py} "$work/modules/agos_window.py"
+            cp ${./tests/agos-window-battery.py} "$work/tests/agos-window-battery.py"
+            ( cd "$work"; python3 tests/agos-window-battery.py )
+            if grep -q '@AGOS_WINDOW_CONFIG@' ${on.system.build.agosWindow}/libexec/agos_window.py; then
+              echo "setup-window: the placeholder survived in the installed copy" >&2; exit 1; fi
+            grep -aqF -- "--add-flags '-I ${on.system.build.agosWindow}/libexec/agos_window.py'" ${on.system.build.agosWindow}/libexec/agentos-setup-window || {
+              echo "setup-window: the wrapper must run python3 -I" >&2; exit 1; }
+            [ ! -e ${on.system.build.agosWindow}/bin ] || { echo "setup-window: nothing of the window may be on PATH" >&2; exit 1; }
+            # The exact files the unit feeds nft.
+            grep -qxF 'flush set inet agentos_egress setup_uid' ${wc.close_file} && [ "$(wc -l < ${wc.close_file})" = 1 ] || {
+              echo "setup-window: the close file must be exactly one flush" >&2; exit 1; }
+            [ "$(cat ${wc.open_file})" = "flush set inet agentos_egress setup_uid
+            add element inet agentos_egress setup_uid { 351 }" ] || { echo "setup-window: the open file must be the flush and the one fixed uid" >&2; exit 1; }
+            # PARSE GATE for the open state: the rendered ruleset, then the open file, in one nft --check
+            # (the same lkl check nixpkgs' module runs on the ruleset alone).
+            check() {
+              LD_PRELOAD="${p.libredirect}/lib/libredirect.so ${p.lklWithFirewall.lib}/lib/liblkl-hijack.so" \
+                ${p.nftables}/bin/nft --check --file "$1"
+            }
+            sed 's|^include .*||' ${rulesScript} > base.conf
+            cat base.conf ${wc.open_file} > open.conf
+            check open.conf || { echo "setup-window: the ruleset plus the OPEN file does not parse" >&2; exit 1; }
+            cat base.conf ${wc.close_file} > close.conf
+            check close.conf || { echo "setup-window: the ruleset plus the CLOSE file does not parse" >&2; exit 1; }
+            # CONTROL: a name instead of a number must fail (no user database here, as on the gate), so
+            # a check that accepts anything cannot pass this.
+            { cat base.conf; echo 'add element inet agentos_egress setup_uid { ollama }'; } > bad.conf
+            if check bad.conf 2>/dev/null; then echo "setup-window: the parse gate accepted a uid NAME; it proves nothing" >&2; exit 1; fi
+            { cat base.conf; echo 'add element inet agentos_egress no_such_set { 351 }'; } > bad2.conf
+            if check bad2.conf 2>/dev/null; then echo "setup-window: the parse gate accepted an element for a set that does not exist" >&2; exit 1; fi
             touch $out
           '';
 

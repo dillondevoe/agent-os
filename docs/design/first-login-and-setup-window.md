@@ -109,8 +109,11 @@ Two things have to become true, and they are separable:
 - The `agent-os-pull-model` probe stops running as root: it runs as the ollama uid (or is dropped),
   so the window's subject is the only uid that ever needs the registry.
 - Sealing is `agentos-seal.service` (2.4). Its sequence is fixed: (1) flush the set, (2) restart
-  the ollama daemon so it comes up with the set already empty, (3) stop and mask the
-  `agent-os-pull-model` retry timer, (4) write `sealed`. Flushing an empty set is a no-op, so
+  the ollama daemon so it comes up with the set already empty, (3) stop the `agent-os-pull-model`
+  service and its retry timer, (4) write `sealed`. Both pull units carry
+  `ConditionPathExists=!/var/lib/agent-os/seal/sealed`, so they cannot start again while the
+  marker exists. (v3 said "stop and mask". A runtime mask is gone after a reboot and the timer
+  would be back; the condition holds across reboots. Changed in slice 3a.) Flushing an empty set is a no-op, so
   sealing is idempotent. It also carries `ExecStopPost=` flush-and-write-`sealed` (reason:
   timeout), so a seal that fails or times out still leaves the set empty and the box marked.
 - `nixos-rebuild` is not involved. `agentos.cleanRoom.sealed` stays for one release with a changed
@@ -148,9 +151,14 @@ that clock would be wrong for the life of the box.
 - The 60-second floor means every boot that opens the window costs at least a minute, so a reboot
   loop cannot hold it open on sub-minute boots. A power loss loses at most the 59 seconds since
   the last tick, which the next boot's floor bounds.
-- The wall-clock deadline is honoured only when the clock is later than the image's build date
-  (compiled in). A clock earlier than that is "unknown": the budget alone decides. A clock far in
-  the future cannot shorten a window either, for the same reason.
+- The wall-clock deadline is a second, closing-only limit. It is recorded only if the clock was
+  believable (later than the image's build date, compiled in) when the window first opened, and
+  honoured only if it is believable now. A clock earlier than the build date is "unknown": the
+  budget alone decides, so a box with no RTC battery still gets its window. (v3 also said a clock
+  far in the future "cannot shorten a window". That was wrong as written: if the window opened
+  under a believable clock and the clock later jumps past the deadline, the window closes early.
+  That is the safe direction, and it is what slice 3a implements. The budget is immune to clocks
+  in both directions.)
 
 Decision table, evaluated on every run of `agentos-setup-window.service`:
 
@@ -417,7 +425,8 @@ Split in two (ruling 4), so that no root process reads keyboard bytes:
 |---|---|---|---|
 | 1 | Choice store, validator, front end, root helper, `agentos-terminal`, `agentos-shell` | developer image; Fable code review (root helper, console input) | Wired into the developer image's desktops; validator, input and helper batteries; the `agentos-setup` account; `surface-choice-store` VM test |
 | 2 | Desktop specialisations and `agentos-boot-default` | developer image | hyprland / sway / none specialisations (the heavy desktops stay build-time choices); the UEFI VM proof of 3.2; `surface-offline-switch` |
-| 3 | The setup window | wall; Fable code review | The set and its rules, the window oneshot and its tick, the seal unit and the progress unit, the state table, the budget, agent ordering, audit lines, the seal-check extension, the static ollama uid; the VM tests in section 6 |
+| 3a | The setup window: the mechanism | wall; Fable code review | `agentos.cleanRoom.setupWindow.enable` (default OFF, the existing rulesets byte-identical): the set and its rules, the fetcher's fixed uid, the state machine (`modules/agos_window.py`), the window oneshot following nftables' restarts and reloads, the tick that closes and seals on the budget, the pull units conditioned on the marker. VM test `tests/setup-window.nix` (W1-W10) |
+| 3b | The setup window: around it | wall; Fable code review | The agent's session waiting on the seal (2.4), the "model is in" seal and its detector, the tty1 progress unit, the seal-check assertions (2.5), the audit-chain lines (window and surface choice). **Until 3b lands the option must stay off on a real box**: the agent's uid gets no accept, but the agent can run while the fetcher has egress |
 | 4 | Product path | wall; Fable code review | Surfaces and first login in `agentos`; a human account; `agentos-sealed` retired once the window has acceptance evidence |
 
 Slices 1 and 2 touch no wall code and can land while 3 is in review.

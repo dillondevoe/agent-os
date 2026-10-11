@@ -28,6 +28,40 @@ let
   # WP-S5. `or` guards the case where fetch-proxy.nix is not in the module list at all, matching
   # how `mw` is read above — clean-room must still evaluate for a variant that composes neither.
   fp = config.agentos.fetchProxy or { enable = false; };
+  # The setup window (modules/setup-window.nix; docs/design/first-login-and-setup-window.md §2). `or`
+  # for the same reason as the two above: clean-room must evaluate without that module.
+  sw = cfg.setupWindow or { enable = false; };
+
+  # With the window ON the ruleset is ALWAYS the sealed one, plus one named set and two rules that
+  # accept DNS and 443 for the uids IN the set. The set is declared empty, so the loaded ruleset is
+  # the sealed box; modules/agos_window.py is its only writer, and the only thing it ever puts there
+  # is the model fetcher's uid. An nftables reload or restart recreates the table, and so the set,
+  # empty: the window fails closed, and the window unit re-derives it from its state.
+  #
+  # Rendered INCLUDING their comment lines and joined with an explicit "\n          ", exactly like
+  # `proxyPortGuard` above and for the same two reasons: with the window off these contribute
+  # literally nothing (the existing rulesets stay byte-identical), and a multi-line `''` block
+  # interpolated here would only indent its first line.
+  setupWindowSet = lib.optionalString sw.enable (lib.concatStringsSep "\n        " [
+    "# The setup window's subject. EMPTY as loaded: an empty set is the sealed box. One writer"
+    "# (agentos-setup-window), one possible element (the model fetcher's uid)."
+    "set setup_uid {"
+    "  typeof meta skuid"
+    "}"
+    ""
+    ""
+  ]);
+  # Placed after the conntrack and loopback rules and BEFORE any uid-0 accept; nothing else in the
+  # table refers to the set. v4-pinned like every other scoped accept here. No port 80. tcp/53 is
+  # there because a resolver falls back to TCP on truncation (the fetch-uid rule allows it too).
+  setupWindowRules = lib.optionalString sw.enable (lib.concatStringsSep "\n          " [
+    "# The setup window: DNS + 443 for the uids in `setup_uid`, and for nobody else. Empty set = no"
+    "# packet matches. Rationale at the `setupWindowSet` binding in modules/clean-room.nix."
+    "meta nfproto ipv4 meta skuid @setup_uid udp dport 53 accept"
+    "meta nfproto ipv4 meta skuid @setup_uid tcp dport { 53, 443 } accept"
+    ""
+    ""
+  ]);
 
   # The S5 rule delta, in full. Two lines become two lines; only the uid they name changes, and
   # that is the entire security difference. Written as an EXCHANGE rendered from one option
@@ -125,7 +159,7 @@ in {
     networking.nftables.tables.agentos_egress = {
       family = "inet";
       content = ''
-        chain output {
+        ${setupWindowSet}chain output {
           type filter hook output priority 0; policy drop;
 
           # return traffic for connections we already allowed
@@ -135,7 +169,7 @@ in {
           ${proxyPortGuard}# on-box IPC: the local brain (127.0.0.1:11434), mem, everything loopback
           oifname "lo" accept
 
-          # nixpkgs-only survivor: nix-daemon substituter fetches + fwupd, both root-initiated.
+          ${setupWindowRules}# nixpkgs-only survivor: nix-daemon substituter fetches + fwupd, both root-initiated.
           # SCOPED (PR-A, Fix 1 interim) — was a blanket `meta skuid 0 accept`, which let ANY
           # skuid-0 process egress anywhere and so defeated the seal from ONE compromised root
           # process (Advisory A / geist v0.2 ruling — the exact class modules/system-set.nix
@@ -270,7 +304,7 @@ in {
             "          meta nfproto ipv4 ip daddr ${lib.elemAt ep 0} udp sport ${toString mw.listenPort} udp dport ${lib.elemAt ep 1} accept"
           ) (lib.filter (p: p.endpoint != null) mw.peers)}
         ''}
-        ${lib.optionalString (!cfg.sealed) ''
+        ${lib.optionalString (!cfg.sealed && !sw.enable) ''
           # PROVISIONING (unsealed) — removed by `sealed = true` + rebuild. Lets
           # setup-brain.sh resolve + fetch the model weights (and, transiently, lets the
           # ollama daemon's update-ping out; sealing kills it).
@@ -306,7 +340,7 @@ in {
       }
     ];
 
-    warnings = lib.optional (!cfg.sealed)
+    warnings = lib.optional (!cfg.sealed && !sw.enable)
       ("agentos.cleanRoom.sealed = false (PROVISIONING): egress to DNS + 80/443 is open so "
       + "the model can be pulled. Set sealed = true and rebuild once the weights are present.");
   };
