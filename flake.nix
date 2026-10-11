@@ -773,7 +773,9 @@
         hyprland-config-parses =
           let
             p = nixpkgs.legacyPackages.${system};
+            # Both shell layers write their own hyprland.lua: the default (Noctalia, CachyOS's config) and waybar.
             conf = self.nixosConfigurations.agentos-open.config.system.build.hyprlandConf;
+            confWaybar = (mkOpenSystem [ { agentos.desktopShell = "waybar"; } ]).config.system.build.hyprlandConf;
           in p.runCommand "hyprland-config-parses" {
             nativeBuildInputs = [ p.hyprland ];
           } ''
@@ -788,13 +790,15 @@
             export HOME="$(mktemp -d)"
 
             echo "oracle: $(Hyprland --version 2>&1 | head -1)"
-            echo "config: ${conf}"
+
+            for conf in ${conf} ${confWaybar}; do
+            echo "config: $conf"
 
             # --verify-config parses and exits; it never opens a display. Capture BOTH
             # streams: 0.56 prints config errors to stdout and the summary to stderr, so
             # a check reading only one of them can miss the whole finding.
             set +e
-            verify="$(Hyprland --verify-config -c ${conf} 2>&1)"
+            verify="$(Hyprland --verify-config -c "$conf" 2>&1)"
             rc=$?
             set -e
             printf '%s\n' "$verify"
@@ -802,7 +806,8 @@
             # rc alone is NOT sufficient and that is the point: 0.56 exits 0 while printing
             # `invalid field ...` for every rejected line, so a check keyed on the exit code
             # is green on the exact config that spews errors at boot. Key on the errors.
-            if printf '%s' "$verify" | grep -qiE 'invalid field|error|deprecated'; then
+            # The Lua manager words them `unknown field` / `unknown config key` (and exits 1).
+            if printf '%s' "$verify" | grep -qiE 'invalid field|unknown field|unknown config key|error|deprecated'; then
               echo ""
               echo "hyprland-config-parses: the PINNED compositor rejects this config."
               echo "Fix the config — do not relax this grep."
@@ -812,7 +817,11 @@
               echo "hyprland-config-parses: --verify-config exited $rc"
               exit 1
             fi
-            echo "hyprland-config-parses: pinned Hyprland 0.56 accepts the open variant config"
+            # And the summary must say so: a run that printed nothing at all is not a pass.
+            printf '%s' "$verify" | grep -qx 'config ok' || {
+              echo "hyprland-config-parses: no 'config ok' summary for $conf"; exit 1; }
+            done
+            echo "hyprland-config-parses: pinned Hyprland 0.56 accepts both open-variant configs (noctalia, waybar)"
             touch $out
           '';
 
@@ -1620,6 +1629,7 @@
             dflt = dfltSys.config; alt = altSys.config;
             none = (mkOpenSystem [ { agentos.desktop = "none"; } ]).config;
             noct = (mkOpenSystem [ { agentos.desktopShell = "noctalia"; } ]).config;
+            wb = (mkOpenSystem [ { agentos.desktopShell = "waybar"; } ]).config;
             sway = (mkOpenSystem [ { agentos.desktop = "sway"; agentos.terminal = "foot"; } ]).config;
             des = lib.genAttrs [ "plasma" "gnome" "cosmic" ] (de: (mkOpenSystem [ { agentos.desktop = de; } ]).config);
             deStart = { plasma = "/bin/startplasma-wayland"; gnome = "/bin/gnome-session"; cosmic = "/bin/start-cosmic"; };
@@ -1650,25 +1660,42 @@
           assert lib.assertMsg (builtins.tryEval (builtins.deepSeq none.system.build.toplevel.drvPath true)).success
             "surface-options: a desktop = none system must evaluate end to end";
           # agentos.desktopShell = "noctalia": the Noctalia unit replaces waybar's (same shape), no waybar
-          # config is seeded, noctalia is installed; the default keeps waybar.
+          # config is seeded, noctalia is installed (it is also the default now, below).
           assert lib.assertMsg (noct.systemd.user.services ? noctalia && !(noct.systemd.user.services ? waybar)
                                 && lib.hasInfix "/bin/noctalia" noct.systemd.user.services.noctalia.serviceConfig.ExecStart
                                 && noct.systemd.user.services.noctalia.serviceConfig.Restart == "always"
                                 && !(lib.any (r: lib.hasInfix "waybar" r) noct.systemd.tmpfiles.rules)
                                 && lib.any (p: lib.hasPrefix "noctalia-" (p.name or "")) noct.environment.systemPackages)
             "surface-options: desktopShell = noctalia must run Noctalia in place of waybar";
-          assert lib.assertMsg (dflt.systemd.user.services ? waybar && !(dflt.systemd.user.services ? noctalia))
-            "surface-options: the default shell layer stays waybar";
+          assert lib.assertMsg (dflt.systemd.user.services ? noctalia && !(dflt.systemd.user.services ? waybar)
+                                && wb.systemd.user.services ? waybar && !(wb.systemd.user.services ? noctalia)
+                                && lib.any (r: lib.hasInfix "waybar/config.jsonc" r) wb.systemd.tmpfiles.rules)
+            "surface-options: the default shell layer is Noctalia (owner 2026-10-10); desktopShell = waybar must still give waybar";
+          # Noctalia's settings (CachyOS's, modules/noctalia/config.toml) are COPIED once, never force-linked:
+          # the settings UI writes that file. Its ownership is fixed to the agent; the tools the CachyOS
+          # binds call are installed.
+          assert lib.assertMsg (lib.any (r: lib.hasPrefix "C /home/agent/.config/noctalia/config.toml " r) dflt.systemd.tmpfiles.rules
+                                && lib.any (r: lib.hasPrefix "z /home/agent/.config/noctalia/config.toml 0644 agent " r) dflt.systemd.tmpfiles.rules
+                                && !(lib.any (r: lib.hasPrefix "L+ /home/agent/.config/noctalia" r) dflt.systemd.tmpfiles.rules)
+                                && lib.all (t: lib.any (n: lib.hasPrefix "${t}-" n) (names dflt)) [ "btop" "hyprpicker" "noctalia" ])
+            "surface-options: the Noctalia desktop must seed its settings copy-once and install btop/hyprpicker";
+          assert lib.assertMsg (let t = builtins.fromTOML (builtins.readFile ./modules/noctalia/config.toml); in
+                                t.shell.polkit_agent == false
+                                && !(lib.elem "kitty" t.theme.templates.builtin_ids)
+                                && !(lib.any (a: lib.hasPrefix "lock" a.action) t.shell.session.actions)
+                                && !(lib.any (l: !(lib.hasPrefix "#" l) && lib.hasInfix "swash" l)
+                                       (lib.splitString "\n" (builtins.readFile ./modules/noctalia/config.toml))))
+            "surface-options: the seeded Noctalia settings must keep polkit off, no lock action (passwordless agent), no swash";
           assert lib.assertMsg (dflt.programs.hyprland.enable && !(dflt.environment.variables ? AGENTOS_DESKTOP))
             "surface-options: the default desktop stays hyprland and sets no AGENTOS_DESKTOP";
           assert lib.assertMsg (lib.all (c: c.security.rtkit.enable && lib.elem "video" c.users.users.agent.extraGroups
                                              && lib.elem dfltSys.pkgs.brightnessctl c.services.udev.packages) [ dflt none ])
             "surface-options: audio (rtkit) and brightness (video group, brightnessctl udev) must hold for every desktop";
-          assert lib.assertMsg (dflt.xdg.portal.enable && dflt.systemd.user.services ? brain-home && dflt.systemd.user.services ? waybar
+          assert lib.assertMsg (dflt.xdg.portal.enable && dflt.systemd.user.services ? brain-home && dflt.systemd.user.services ? noctalia
                                 && lib.any (r: lib.hasInfix "hyprland.lua" r) dflt.systemd.tmpfiles.rules
                                 && lib.hasInfix "exec Hyprland" dflt.environment.loginShellInit
                                 && !(lib.hasInfix "AGENTOS_BRAIN_LOOP" dflt.environment.loginShellInit))
-            "surface-options: the default (hyprland) desktop lost a piece (portal, brain-home, waybar, seeded config, exec Hyprland)";
+            "surface-options: the default (hyprland) desktop lost a piece (portal, brain-home, noctalia, seeded config, exec Hyprland)";
           assert lib.assertMsg (sway.programs.sway.enable && !sway.programs.hyprland.enable
                                 && sway.systemd.user.services ? brain-home && !(sway.systemd.user.services ? waybar)
                                 && lib.hasInfix "exec sway" sway.environment.loginShellInit
@@ -1739,8 +1766,28 @@
               echo "surface-options: the sway config does not bind the chosen terminal" >&2; exit 1; }
             grep -qF 'systemctl --user restart noctalia.service' ${noct.system.build.hyprlandConf} || {
               echo "surface-options: with Noctalia, hyprland.lua must poke noctalia.service" >&2; exit 1; }
-            grep -qF 'systemctl --user restart waybar.service' ${dflt.system.build.hyprlandConf} || {
-              echo "surface-options: the default hyprland.lua must still poke waybar.service" >&2; exit 1; }
+            grep -qF 'systemctl --user restart waybar.service' ${wb.system.build.hyprlandConf} || {
+              echo "surface-options: with waybar, hyprland.lua must poke waybar.service" >&2; exit 1; }
+            # The default hyprland.lua is CachyOS's config with the Agent OS layer (modules/hyprland-noctalia.nix).
+            d=${dflt.system.build.hyprlandConf}
+            for want in 'CACHYLGREEN = "rgba(82dcccff)"' 'panel-toggle launcher' 'hl.layer_rule(' 'Bibata-Modern-Ice' \
+                        'hl.on("hyprland.start"' 'systemctl --user restart brain-home.service' \
+                        'match = { class = "^(brain-home)$" },   workspace = "1"' 'hl.bind("SUPER+" .. i,       hl.dsp.focus({ workspace = i }))'; do
+              grep -qF "$want" "$d" || { echo "surface-options: the default hyprland.lua lacks: $want" >&2; exit 1; }
+            done
+            # The pokes must run INSIDE the start callback, chained after the env import: at top level they
+            # run at config load, before there is a compositor (the 2026-08-30 no-brain-window boot), and
+            # --verify-config never runs callbacks, so only this placement check can see it.
+            if grep -qE '^hl\.exec_cmd\(' "$d"; then
+              echo "surface-options: the default hyprland.lua runs a command at top level (must be in hl.on(\"hyprland.start\"))" >&2; exit 1; fi
+            awk '/^hl\.on\("hyprland\.start"/{f=1} f&&/^end\)/{f=0} f' "$d" \
+              | grep -qE '^ +hl\.exec_cmd\("dbus-update-activation-environment --systemd [^"]*&& systemctl --user restart noctalia\.service && systemctl --user restart brain-home\.service"\)' || {
+              echo "surface-options: env import && noctalia && brain-home must be one chained command inside hl.on(\"hyprland.start\")" >&2; exit 1; }
+            grep -qF 'hl.bind("ALT+SHIFT+TAB", hl.dsp.window.bring_to_top())' "$d" || {
+              echo "surface-options: Alt+Tab must raise and Alt+Shift+Tab must go back (Dillon msg 9268)" >&2; exit 1; }
+            for never in 'xhost' 'session lock' 'uwsm'; do
+              if grep -qF "$never" "$d"; then echo "surface-options: the default hyprland.lua must not contain: $never" >&2; exit 1; fi
+            done
             wallOnce='${noct.systemd.user.services.noctalia.serviceConfig.ExecStartPost}'
             case "$wallOnce" in -/*) ;; *)
               echo "surface-options: the one-time wallpaper step must be '-'-prefixed (a failure must not fail the shell)" >&2; exit 1;; esac
@@ -1750,10 +1797,10 @@
               echo "surface-options: the pinned Hyprland no longer ships share/hypr/wall2.png" >&2; exit 1; }
             if grep -qE '^[[:space:]]*(sleep|mkdir|touch|seq)[[:space:]]' "''${wallOnce#-}"; then
               echo "surface-options: the one-time wallpaper script uses a bare tool name (user-unit PATH is narrow)" >&2; exit 1; fi
-            grep -qF 'environment --systemd WAYLAND_DISPLAY XDG_CURRENT_DESKTOP HYPRLAND_INSTANCE_SIGNATURE DISPLAY XCURSOR_THEME XCURSOR_SIZE")' ${noct.system.build.hyprlandConf} || {
+            grep -qF 'environment --systemd WAYLAND_DISPLAY XDG_CURRENT_DESKTOP HYPRLAND_INSTANCE_SIGNATURE DISPLAY XCURSOR_THEME XCURSOR_SIZE HYPRCURSOR_THEME HYPRCURSOR_SIZE QT_QPA_PLATFORM ELECTRON_OZONE_PLATFORM_HINT && systemctl' ${noct.system.build.hyprlandConf} || {
               echo "surface-options: with Noctalia (it launches apps), the env import must carry DISPLAY and the cursor theme" >&2; exit 1; }
-            grep -qF 'environment --systemd WAYLAND_DISPLAY XDG_CURRENT_DESKTOP HYPRLAND_INSTANCE_SIGNATURE")' ${dflt.system.build.hyprlandConf} || {
-              echo "surface-options: the default env import line must be unchanged" >&2; exit 1; }
+            grep -qF 'environment --systemd WAYLAND_DISPLAY XDG_CURRENT_DESKTOP HYPRLAND_INSTANCE_SIGNATURE")' ${wb.system.build.hyprlandConf} || {
+              echo "surface-options: the waybar env import line must be unchanged" >&2; exit 1; }
             grep -qF 'DESKTOP_DEFAULT = "none"' ${noneBrain}/modules/agos_desktop.py || {
               echo "surface-options: the none system's installed adapter does not have the desktop compiled in" >&2; exit 1; }
             ${lib.concatMapStrings (de: ''

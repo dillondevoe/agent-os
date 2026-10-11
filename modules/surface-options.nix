@@ -37,12 +37,14 @@ in
     };
     desktopShell = lib.mkOption {
       type = lib.types.enum [ "waybar" "noctalia" ];
-      default = "waybar";
+      default = "noctalia";
       description = ''
-        The shell layer on the Hyprland desktop: "waybar" (today's bar) or "noctalia" (Noctalia: bar,
-        launcher, notifications, control center, wallpaper, OSD in one; it also gives the brain's
-        notify() a notification daemon). Noctalia starts on Hyprland's own anime wallpaper once;
-        after that the user's pick sticks.
+        The shell layer on the Hyprland desktop: "noctalia" (the default since 2026-10-10, owner ruling
+        "as cachy ships": CachyOS's Hyprland + Noctalia config with the Agent OS layer on top, see
+        modules/hyprland-noctalia.nix; Noctalia is bar, launcher, notifications, control center,
+        wallpaper and OSD in one, and gives the brain's notify() a notification daemon) or "waybar"
+        (the earlier Agent OS desktop and its own keys). Noctalia starts on Hyprland's own anime
+        wallpaper once; after that the user's pick sticks.
       '';
     };
     terminal = lib.mkOption {
