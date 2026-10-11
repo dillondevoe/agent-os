@@ -26,6 +26,19 @@
 # so a reboot loop cannot hold it open. A wall-clock deadline is kept as a second, closing-only limit
 # and is honoured only when the clock is believable (later than the image's build date), then and now.
 #
+# ONE AT A TIME. recompute, tick and seal each read the state, decide, and then act on the set. Two of
+# them interleaved could decide "open" from a state the other was about to seal, and open the set
+# after it was closed. Every one of them therefore holds an exclusive lock on the state directory from
+# its first read to its last effect, and re-reads nothing it decided on outside it. Whoever cannot get
+# the lock may still CLOSE the set (closing is always safe) but never opens it. The wait for the lock
+# is LOCK_WAIT (150 s): longer than the one slow thing a holder does, restarting the fetcher (120 s).
+# The window unit's stop timeout is set above both (setup-window.nix), or systemd would kill the
+# shutdown stamp while it waits.
+#
+# THE MARKER NEVER LIES. `sealed` is written only after nft has confirmed the flush. If the flush
+# fails, nothing else in the seal happens and there is no marker: the budget is still spent, so the
+# next tick tries again, a minute later, for as long as it takes.
+#
 # FAIL DIRECTION. Anything this cannot read, parse or decide ends with the set empty. A state
 # directory that cannot be written means the window does not open, and a tick that cannot write
 # closes it. A `sealed` marker that is present but malformed is "the wall is DOWN" (seal-check acts on
@@ -33,11 +46,12 @@
 #
 # Paths, the fetch uid, the window length and the tools are compiled in by setup-window.nix. The
 # literal placeholder means "repo copy", and only the repo copy reads AGOS_WINDOW_CONFIG (tests).
-import hashlib, json, os, subprocess, sys, time
+import fcntl, hashlib, json, os, subprocess, sys, time
 
 CONFIG_JSON = "@AGOS_WINDOW_CONFIG@"
 
 FLOOR = 60                 # seconds every boot that opens the window is charged, at least
+LOCK_WAIT = 150            # seconds to wait for the state lock (a seal holds it while it restarts the fetcher)
 STATE_MAX = 4096           # bytes of a state file
 SCHEMA = 1
 
@@ -153,6 +167,42 @@ def load_sealed(c):
     return "valid", m
 
 
+class _Lock:
+    """An exclusive flock on <state_dir>/.lock. `held` is False if it could not be taken in time, or
+    the directory cannot hold a lock file at all."""
+    def __init__(self, c):
+        self.fd, self.held = None, False
+        try:
+            self.fd = os.open(os.path.join(c["state_dir"], ".lock"), os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+        except OSError:
+            return
+        end = time.monotonic() + LOCK_WAIT
+        while True:
+            try:
+                fcntl.flock(self.fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                self.held = True
+                return
+            except OSError:
+                if time.monotonic() >= end:
+                    return
+                _nap(0.2)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        if self.fd is not None:
+            try:
+                os.close(self.fd)                    # closing the descriptor releases the lock
+            except OSError:
+                pass
+
+
+def _nap(seconds):
+    import select
+    select.select([], [], [], seconds)
+
+
 # ── the decision (pure: no clocks, files or tools inside) ───────────────────────────────────────
 def remaining_now(state, now_mono):
     """What is left of the budget for a window opened in THIS boot. Idempotent."""
@@ -221,10 +271,20 @@ def _boot_id(c):
 
 
 def seal(c, reason):
-    """The fixed sequence: (1) flush the set, (2) restart the fetcher so it comes up with the set
-    already empty and any download in flight is gone (flushing does not end an established
-    connection), (3) stop the pull and its retry timer, (4) write the marker. Returns 0 if the marker
-    is on disk and the set was flushed."""
+    """Seal, holding the state lock. Without the lock: flush only (always safe), and report failure."""
+    with _Lock(c) as lock:
+        if not lock.held:
+            close_set(c)
+            log("seal: the state lock could not be taken; the set was flushed, nothing else was done")
+            return 1
+        return _seal(c, reason)
+
+
+def _seal(c, reason):
+    """The fixed sequence, under the lock: (1) flush the set, (2) restart the fetcher so it comes up
+    with the set already empty and any download in flight is gone (flushing does not end an
+    established connection), (3) stop the pull and its retry timer, (4) write the marker. If the flush
+    is not confirmed NOTHING else happens and no marker is written. Returns 0 if the marker is on disk."""
     flushed = close_set(c)
     if c.get("sealed_by_build"):
         return 0 if flushed else 1
@@ -233,6 +293,9 @@ def seal(c, reason):
         return 0 if flushed else 1
     if status == "malformed":
         log("seal refused: the sealed marker is malformed (wall DOWN)")
+        return 1
+    if not flushed:
+        log("seal: nft did not confirm the flush; NOT sealed (no marker); the next tick tries again")
         return 1
     for unit in c.get("restart_units", []):
         _tool([c["systemctl"], "restart", unit], timeout=120)
@@ -245,14 +308,23 @@ def seal(c, reason):
                   "ruleset_sha256": digest, "sealed_at": time.time(), "reason": reason}
         _write(os.path.join(c["state_dir"], "sealed"), marker)
     except OSError as e:
-        log("seal: the set is %s but the marker could not be written (%s)" % ("empty" if flushed else "NOT flushed", e.__class__.__name__))
+        log("seal: the set is empty but the marker could not be written (%s)" % e.__class__.__name__)
         return 1
-    log("sealed reason=%s set_flushed=%d" % (reason, 1 if flushed else 0))
-    return 0 if flushed else 1
+    log("sealed reason=%s set_flushed=1" % reason)
+    return 0
 
 
 def recompute(c):
     """Read the state; end with the set empty or holding the fetch uid. 0 unless the wall is down."""
+    with _Lock(c) as lock:
+        if not lock.held:
+            close_set(c)
+            log("recompute: the state lock could not be taken; the window stays closed")
+            return 1
+        return _recompute(c)
+
+
+def _recompute(c):
     sealed, window = load_sealed(c), load_window(c)
     boot_id = _boot_id(c)
     if not boot_id:
@@ -267,7 +339,7 @@ def recompute(c):
         log("recompute: " + act[1])
         return 1
     if act[0] == "seal":
-        return seal(c, act[1])
+        return _seal(c, act[1])
     state, kind = act[1], act[2]
     try:
         _write(os.path.join(c["state_dir"], "window.json"), state)      # the books first: no state, no window
@@ -284,14 +356,25 @@ def recompute(c):
 
 
 def tick(c, final=False):
-    """Write the remaining budget. If it is gone, or the books cannot be kept, close the window HERE."""
+    """Write the remaining budget. If it is gone, the wall deadline has passed, or the books cannot be
+    kept, close the window HERE."""
+    with _Lock(c) as lock:
+        if not lock.held:
+            close_set(c)                             # cannot coordinate: closing is the one safe act
+            log("tick: the state lock could not be taken; window closed")
+            return 1
+        return _tick(c, final)
+
+
+def _tick(c, final):
     sealed, window = load_sealed(c), load_window(c)
     if c.get("sealed_by_build") or sealed[0] != "absent" or window[0] != "valid":
         close_set(c)                                 # sealed, down, or no window: nothing to count
         return 0 if (c.get("sealed_by_build") or sealed[0] == "valid") else (1 if sealed[0] == "malformed" else 0)
     s = window[1]
     if s["boot_id"] != _boot_id(c):
-        return 0                                     # not opened in this boot: recompute owns that
+        close_set(c)                                 # not opened in this boot (or no boot id): recompute
+        return 0                                     # owns opening; closing is always safe
     left = remaining_now(s, time.monotonic())
     try:
         _write(os.path.join(c["state_dir"], "window.json"), dict(s, remaining=left))
@@ -299,10 +382,16 @@ def tick(c, final=False):
         close_set(c)                                 # an enforcer that cannot keep its books closes the window
         log("tick: the state cannot be written (%s); window closed" % e.__class__.__name__)
         return 1
-    if left <= 0 and not final:
+    if final:
+        return 0
+    # The wall deadline too, by the same rule as `decide`: monotonic time stands still while a box is
+    # suspended, so a box that slept through its deadline must not wake with its window still open.
+    now_wall = time.time()
+    late = now_wall > c["build_epoch"] and s["wall_deadline"] is not None and now_wall > s["wall_deadline"]
+    if left <= 0 or late:
         close_set(c)                                 # first, and by itself
-        log("tick: the budget is spent; window closed")
-        return seal(c, "budget")
+        log("tick: the %s; window closed" % ("budget is spent" if left <= 0 else "deadline has passed"))
+        return _seal(c, "budget" if left <= 0 else "deadline")
     return 0
 
 

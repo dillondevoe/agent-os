@@ -2217,6 +2217,14 @@
             rulesScript = lib.last on.systemd.services.nftables.serviceConfig.ExecStart;
           in
           assert lib.assertMsg (on.networking.nftables.checkRuleset) "setup-window would false-PASS: checkRuleset is false";
+          # THE SLICE BOUNDARY, ENFORCED. Slice 3b (the agent's session waiting on the seal, seal-check)
+          # has not landed: with the window on, the agent can run while the fetcher has egress. So no
+          # configuration this flake ships may enable it. REMOVE THIS ASSERTION IN 3b, not before.
+          assert lib.assertMsg (lib.all (n: !(self.nixosConfigurations.${n}.config.agentos.cleanRoom.setupWindow.enable or false))
+                                  (lib.attrNames self.nixosConfigurations))
+            "setup-window: slice 3b has not landed; no shipped configuration may enable the setup window";
+          assert lib.assertMsg (win.serviceConfig.TimeoutStopSec == "180s")
+            "setup-window: the window unit's stop timeout must exceed the lock wait (150 s), or the shutdown stamp is killed";
           assert lib.assertMsg (lib.count (l: l == "set setup_uid {") cOn == 1 && lib.count (l: l == r1) cOn == 1 && lib.count (l: l == r2) cOn == 1
                                 && lib.count (l: lib.hasInfix "setup_uid" l) cOn == 3 && lib.elem "typeof meta skuid" cOn
                                 && !(lib.any (l: lib.hasInfix "elements" l) cOn))

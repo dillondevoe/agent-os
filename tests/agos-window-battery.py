@@ -22,7 +22,11 @@
 #      cannot write the state flushes the set; `stop` writes the budget and never seals.
 #   J. seal: flush, restart the fetcher, stop the pull and its retry timer, write the marker, in that
 #      order; the marker names the toplevel and the sha256 of the ruleset; a second seal only flushes;
-#      a failed flush is reported even though the marker is written.
+#      WITHOUT a confirmed flush there is no marker and nothing else happens, and every later tick
+#      tries again until nft answers.
+#   L. The tick enforces the wall deadline too (a box that slept through it must not wake open).
+#   M. One at a time: while another holder has the state lock, recompute does not open (it flushes
+#      and fails), the tick flushes, and seal only flushes; with the lock free they work.
 #   K. config: the fetch uid must be a positive number (never root, never a name); the window is at
 #      most 4 hours; the installed copy ignores AGOS_WINDOW_CONFIG; the placeholder appears once.
 #
@@ -105,6 +109,8 @@ class Clock:
 
 
 A.time = Clock                      # the module's clocks are the battery's
+A.LOCK_WAIT = 0.3                   # the lock arm waits this long; nothing else contends
+A._nap = lambda seconds: setattr(Clock, "mono", Clock.mono + seconds)       # waiting moves the fake clock
 
 
 def boot(n):
@@ -122,6 +128,10 @@ def reset():
 
 def window():
     return json.load(open(os.path.join(STATE, "window.json")))
+
+
+def state_files():
+    return sorted(f for f in os.listdir(STATE) if f != ".lock")      # the lock file is not state
 
 
 def put(name, obj):
@@ -228,7 +238,7 @@ reset(); put("window.json", "garbage"); calls()
 check(A.recompute(cfg()) == 0 and json.load(open(os.path.join(STATE, "sealed")))["reason"] == "invalid state" and OPEN not in calls(),
       "E: a malformed window.json must seal")
 reset(); calls()
-check(A.recompute(cfg(sealed_by_build=True)) == 0 and calls() == [CLOSE] and os.listdir(STATE) == [], "E: sealed-by-build never opens and writes nothing")
+check(A.recompute(cfg(sealed_by_build=True)) == 0 and calls() == [CLOSE] and state_files() == [], "E: sealed-by-build never opens and writes nothing")
 check(A.tick(cfg(sealed_by_build=True)) == 0 and calls() == [CLOSE], "E: sealed-by-build tick")
 ok("E a valid marker empties the set; a malformed one is DOWN; bad window state seals; sealed-by-build never opens")
 
@@ -275,7 +285,7 @@ check(A.recompute(cfg()) == 1 and calls() == [CLOSE], "H: an unwritable state di
 reset(); tool(NFT, rc=1); calls()
 check(A.recompute(cfg()) == 1 and calls() == [OPEN, CLOSE], "H: an nft that refuses the open must end in a flush")
 reset(); os.unlink(BOOTID); calls()
-check(A.recompute(cfg()) == 1 and calls() == [CLOSE] and os.listdir(STATE) == [], "H: no boot id must not open the window")
+check(A.recompute(cfg()) == 1 and calls() == [CLOSE] and state_files() == [], "H: no boot id must not open the window")
 ok("H recompute writes the state first; every failure ends with the set flushed and nothing opened")
 
 # I — tick
@@ -291,8 +301,10 @@ check(A.tick(cfg(), final=True) == 0 and calls() == [] and window()["remaining"]
       "I: the stop stamp writes the budget and never seals")
 reset(); A.recompute(cfg()); put("sealed", GOOD_SEALED); calls()
 check(A.tick(cfg()) == 0 and calls() == [CLOSE], "I: sealed: a tick only flushes")
-reset(); A.recompute(cfg()); boot(2); calls()
-check(A.tick(cfg()) == 0 and calls() == [], "I: a window from another boot is recompute's, not the tick's")
+reset(); A.recompute(cfg()); boot(2); calls(); before = window()
+check(A.tick(cfg()) == 0 and calls() == [CLOSE] and window() == before, "I: a window from another boot: the tick flushes and writes nothing")
+os.unlink(BOOTID); calls()
+check(A.tick(cfg()) == 0 and calls() == [CLOSE] and window() == before, "I: no boot id: the tick flushes and writes nothing")
 ok("I tick flushes before sealing, flushes when it cannot write, and its stop form never seals")
 
 # J — the seal sequence and marker
@@ -305,7 +317,12 @@ check(m["toplevel"] == os.path.realpath(TOP) and m["ruleset_sha256"] == hashlib.
       and m["reason"] == "complete" and m["schema"] == 1 and m["sealed_at"] == Clock.wall, "J: marker: %r" % m)
 check(A.seal(cfg(), "budget") == 0 and calls() == [CLOSE] and json.load(open(os.path.join(STATE, "sealed"))) == m, "J: a second seal only flushes")
 reset(); A.recompute(cfg()); tool(NFT, rc=1); calls()
-check(A.seal(cfg(), "complete") == 1 and os.path.exists(os.path.join(STATE, "sealed")), "J: a failed flush must be reported (the marker is still written)")
+check(A.seal(cfg(), "complete") == 1 and not os.path.exists(os.path.join(STATE, "sealed")) and calls() == [CLOSE],
+      "J: no confirmed flush -> NO marker and nothing else done (the marker never lies)")
+Clock.mono = 100.0 + LENGTH + 1                                # ...and the budget being spent, every tick tries again
+check(A.tick(cfg()) == 1 and not os.path.exists(os.path.join(STATE, "sealed")) and calls() == [CLOSE, CLOSE], "J: the retry while nft still fails")
+tool(NFT); calls()
+check(A.tick(cfg()) == 0 and json.load(open(os.path.join(STATE, "sealed")))["reason"] == "budget", "J: the retry seals as soon as nft answers")
 reset(); put("sealed", "x"); calls()
 check(A.seal(cfg(), "complete") == 1 and calls() == [CLOSE] and open(os.path.join(STATE, "sealed")).read() == "x", "J: a malformed marker is not overwritten")
 ok("J seal: flush, restart the fetcher, stop the retry, write the marker; idempotent; a failed flush is reported")
@@ -332,5 +349,62 @@ except SystemExit:
     raised = True
 check(raised, "K: an unconfigured copy did not refuse")
 ok("K the fetch uid is a positive number, the window at most 4 hours, and the installed copy ignores the environment")
+
+# L — the tick enforces the wall deadline (suspend: monotonic time stands still, the wall clock does not)
+reset(); A.recompute(cfg()); Clock.mono = 100.0 + 120; Clock.wall = BUILD + 86400.0 + LENGTH + 5; calls()
+check(A.tick(cfg()) == 0 and calls()[0] == CLOSE and json.load(open(os.path.join(STATE, "sealed")))["reason"] == "deadline",
+      "L: a tick past the wall deadline must close and seal(deadline)")
+reset(); Clock.wall = 12.0; A.recompute(cfg()); Clock.mono = 100.0 + 120; Clock.wall = BUILD + 10 ** 9; calls()
+check(A.tick(cfg()) == 0 and calls() == [] and not os.path.exists(os.path.join(STATE, "sealed")), "L: opened under 1970 there is no deadline for the tick to enforce")
+reset(); A.recompute(cfg()); Clock.mono = 100.0 + 120; Clock.wall = 12.0; calls()
+check(A.tick(cfg()) == 0 and calls() == [] and not os.path.exists(os.path.join(STATE, "sealed")), "L: a 1970 clock must not trip the deadline in the tick")
+ok("L the tick enforces the wall deadline by the same rule as the per-boot decision")
+
+# M — one at a time
+import fcntl
+reset(); calls()
+held = os.open(os.path.join(STATE, ".lock"), os.O_RDWR | os.O_CREAT, 0o600); fcntl.flock(held, fcntl.LOCK_EX)
+try:
+    check(A.recompute(cfg()) == 1 and calls() == [CLOSE] and not os.path.exists(os.path.join(STATE, "window.json")),
+          "M: recompute opened the window without the state lock")
+    check(A.tick(cfg()) == 1 and calls() == [CLOSE], "M: a tick without the lock must flush")
+    check(A.seal(cfg(), "complete") == 1 and calls() == [CLOSE] and not os.path.exists(os.path.join(STATE, "sealed")),
+          "M: a seal without the lock must only flush")
+finally:
+    os.close(held)
+check(A.recompute(cfg()) == 0 and calls() == [OPEN], "M: with the lock free recompute opens")
+check((os.stat(os.path.join(STATE, ".lock")).st_mode & 0o777) == 0o600, "M: lock file mode")
+ok("M without the state lock nothing opens; everything still flushes")
+
+# N — the command line: exactly these roles, nothing else
+import io
+reset()
+os.environ["AGOS_WINDOW_CONFIG"] = json.dumps(cfg())
+try:
+    check(A.main(["x", "recompute"]) == 0 and calls() == [OPEN], "N: recompute")
+    check(A.main(["x", "tick"]) == 0 and A.main(["x", "stop"]) == 0, "N: tick / stop")
+    so, sys.stdout = sys.stdout, io.StringIO()
+    try:
+        rc = A.main(["x", "status"]); out = sys.stdout.getvalue()
+    finally:
+        sys.stdout = so
+    st = json.loads(out)
+    check(rc == 0 and st == {"sealed": "absent", "window": "valid", "remaining": LENGTH - A.FLOOR, "boots": 1}, "N: status: %r" % st)
+    calls(); se, sys.stderr = sys.stderr, io.StringIO()
+    try:
+        for bad in (["x"], ["x", "open"], ["x", "recompute", "extra"], ["x", "seal"], ["x", "seal", "because"], ["x", "seal", "complete", "x"]):
+            check(A.main(bad) == 2 and calls() == [], "N: %r must be refused and do nothing" % bad)
+    finally:
+        sys.stderr = se
+    check(A.main(["x", "seal", "complete"]) == 0 and json.load(open(os.path.join(STATE, "sealed")))["reason"] == "complete", "N: seal complete")
+    so, sys.stdout = sys.stdout, io.StringIO()
+    try:
+        A.main(["x", "status"]); st = json.loads(sys.stdout.getvalue())
+    finally:
+        sys.stdout = so
+    check(st["sealed"] == "valid" and st["reason"] == "complete", "N: status after the seal: %r" % st)
+finally:
+    os.environ.pop("AGOS_WINDOW_CONFIG")
+ok("N the command line accepts exactly its roles; status reports the state")
 
 print("agos-window-battery: PASS (%d criteria)" % len(passed))

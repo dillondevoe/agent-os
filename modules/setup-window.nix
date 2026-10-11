@@ -157,6 +157,10 @@ in
         ExecStart = "${run} recompute";
         ExecReload = "${run} recompute";
         ExecStop = "${run} stop";          # the shutdown stamp of the budget
+        # The stamp may wait for the state lock (150 s) behind a tick that is restarting the fetcher
+        # (120 s). The default 90 s would let systemd kill it, and the next boot would inherit a
+        # budget up to a minute too generous.
+        TimeoutStopSec = "180s";
       };
     };
 
