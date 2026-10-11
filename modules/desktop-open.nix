@@ -47,8 +47,44 @@ let
   '';
   # Noctalia's launcher starts apps, so it also needs the cursor theme and Xwayland's DISPLAY;
   # waybar never launches anything, so the default import line stays as it was.
+  # The CachyOS environment (Qt/Electron on Wayland, the Bibata-Modern-Ice cursor) reaches apps the same way.
   envImport = "WAYLAND_DISPLAY XDG_CURRENT_DESKTOP HYPRLAND_INSTANCE_SIGNATURE"
-    + lib.optionalString (config.agentos.desktopShell == "noctalia") " DISPLAY XCURSOR_THEME XCURSOR_SIZE";
+    + lib.optionalString (config.agentos.desktopShell == "noctalia")
+        " DISPLAY XCURSOR_THEME XCURSOR_SIZE HYPRCURSOR_THEME HYPRCURSOR_SIZE QT_QPA_PLATFORM ELECTRON_OZONE_PLATFORM_HINT";
+  # agentos.desktopShell = "noctalia": CachyOS's config + the Agent OS layer (modules/hyprland-noctalia.nix).
+  hyprConfNoctalia = pkgs.writeText "hyprland.lua" (import ./hyprland-noctalia.nix {
+    inherit envImport barUnit;
+    terminalCmd = config.agentos.surfaceInternal.terminalCmd;
+    cheatsheetTxt = cheatsheetNoctalia;
+  });
+  # Noctalia's own settings, seeded once (modules/noctalia/config.toml says what differs from CachyOS's).
+  noctaliaToml = ./noctalia/config.toml;
+  cheatsheetNoctalia = pkgs.writeText "cheatsheet.txt" ''
+    Agent OS — keys (CachyOS Hyprland + Noctalia). Super+/ reopens this.
+
+      Super + 1          brain home (workspace 1, the brain always lives here)
+      Super + 2..5       switch workspace (Shift = move the window there)
+      Super + Space      app launcher          Super + .   emoji
+      Super + Return     terminal (${config.agentos.surfaceInternal.terminalCmd})
+      Super + W / B      Firefox (opens on workspace 2)
+      Super + E / T / C  files / notes editor / calculator
+      Super + Tab        window switcher       Alt + Tab   next window
+      Super + X          control center        Super + A   notifications
+      Super + Z          Noctalia settings     Super + V   clipboard history
+      Super + Shift + W  wallpaper picker      Super + P   colour picker
+      Super + Alt + C    session menu (log out, suspend, reboot, shut down)
+      Super + Q          close window          Super + F   fullscreen
+      Super + D          maximize              Super + Alt + Space  float
+      Super + J          flip split            Super + arrows  move focus
+      Super + S          scratch workspace (Shift = send window there)
+      Super + - / +      zoom                  Print       screenshot a region
+      Ctrl + Shift + Esc btop                  Super + Shift + M  exit Hyprland
+
+    Gestures: 4 fingers sideways = workspace; 3 down = close, up = fullscreen,
+    left = float.  Gaming: a Steam game takes workspace 5 fullscreen.
+
+    q to close this.
+  '';
 
   # Reproducible Hyprland config = the Dell live baseline (dwindle tiling, tokyonight gradient
   # borders, blur/rounding/shadows/animations). `$mod`/`$(...)` are literal in Nix '' strings.
@@ -67,7 +103,8 @@ let
   #
   # 0.56 resolves ~/.config/hypr/hyprland.lua ahead of hyprland.conf when both exist
   # (verified), so the old .conf the L+ symlink used to point at is a live rollback.
-  hyprConf = pkgs.writeText "hyprland.lua" ''
+  hyprConf = if config.agentos.desktopShell == "noctalia" then hyprConfNoctalia else hyprConfWaybar;
+  hyprConfWaybar = pkgs.writeText "hyprland.lua" ''
     hl.monitor({ output = "", mode = "preferred", position = "auto", scale = 1 })
 
     -- Desktop doctrine (rabbot-to-page-P1-desktop-doctrine-spec 2026-08-02, Dillon msgs
@@ -539,8 +576,10 @@ lib.mkMerge [
     xdg-utils                   # xdg-open etc. for portal handoff
     brightnessctl               # backlight control for the XF86MonBrightness* Fn keys
     playerctl                   # MPRIS transport for the XF86AudioPlay/Next/Prev keys
-    bibata-cursors              # Bibata-Modern-Amber — the OS's default cursor identity (orange + shadow)
-  ]) ++ (if config.agentos.desktopShell == "noctalia" then [ pkgs.noctalia ] else [ pkgs.waybar ]);   # the shell layer
+    bibata-cursors              # Bibata cursors: Modern-Ice (Noctalia desktop, as CachyOS), Modern-Amber (waybar desktop)
+  ]) ++ (if config.agentos.desktopShell == "noctalia"
+         then with pkgs; [ noctalia btop hyprpicker ]   # the shell layer + the CachyOS binds' tools
+         else [ pkgs.waybar ]);
 
   # Seed the reproducible baseline into the agent's config. Force-symlink to the store so the
   # RUNNING config always == the verified Nix source (reproducibility guarantee). Live per-user
@@ -549,6 +588,11 @@ lib.mkMerge [
     "d /home/${user}/.config 0755 ${user} users - -"
     "d /home/${user}/.config/hypr 0755 ${user} users - -"
     "L+ /home/${user}/.config/hypr/hyprland.lua - - - - ${hyprConf}"
+  ] ++ lib.optionals (config.agentos.desktopShell == "noctalia") [
+    # Copied once (C: only if absent), then the user's: Noctalia's settings UI writes this file.
+    "d /home/${user}/.config/noctalia 0755 ${user} users - -"
+    "C /home/${user}/.config/noctalia/config.toml - - - - ${noctaliaToml}"
+    "z /home/${user}/.config/noctalia/config.toml 0644 ${user} users - -"
   ] ++ lib.optionals (config.agentos.desktopShell == "waybar") [
     "d /home/${user}/.config/waybar 0755 ${user} users - -"
     "L+ /home/${user}/.config/waybar/config.jsonc - - - - ${waybarConf}"
