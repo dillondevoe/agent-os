@@ -1,8 +1,9 @@
-# First login and the setup window (spec, v2)
+# First login and the setup window (spec, v3)
 
 Status: SPEC. Fable spec review 2026-10-10: approve with required changes (twelve, folded into v1);
 re-review 2026-10-11: all twelve confirmed, seven further required changes from the rewrite itself,
-folded into this v2. Rulings in section 8. Awaiting the final pass. No code in this PR. It
+folded into v2; final pass 2026-10-11: all seven confirmed, three more required (R1-R3) plus
+implementation notes, folded into this v3. Rulings in section 8. No code in this PR. It
 turns `docs/design/surfaces-and-first-login.md` §4 into buildable pieces now that the owner has
 answered open question 1 there (2026-10-10: "setup window i think"): one system that opens a short,
 logged window to fetch the local model and then locks itself, not two systems and a switch.
@@ -85,8 +86,14 @@ Two things have to become true, and they are separable:
   (2.2), returns in well under a second, and ends in exactly one of: set empty, or set = { fetch
   uid }, applied as one `nft -f` ("flush set; add element" is one transaction). A run that cannot
   decide leaves it empty.
-- It does no timekeeping. A separate `agentos-setup-window-tick.timer` (`OnUnitActiveSec=1min`)
-  runs the budget write (2.2), and an `ExecStop` on the tick service stamps it at shutdown.
+- It does no timekeeping while it runs. A separate `agentos-setup-window-tick.timer`
+  (`OnUnitActiveSec=1min`) runs the budget write (2.2). The stamp at shutdown is the *window
+  oneshot's* `ExecStop`: with `RemainAfterExit=yes` it stays active, so its `ExecStop` runs at
+  shutdown (and on a `PartOf` restart, which is the same boot and charges nothing). The tick
+  service is inactive between runs, so an `ExecStop` there would never fire at shutdown.
+- The tick is also the enforcer of the budget: when it computes `remaining ≤ 0` it applies the
+  empty set itself, in the same run, and then starts the seal. Closing the window never depends
+  on the seal unit succeeding.
 - What re-runs it on `switch-to-configuration`: `nftables.service` embeds the path of the rules
   file, so a changed ruleset changes the unit text, `reloadIfChanged` reloads it, and the reload
   propagates. If the window unit's own text changed in the same switch it is restarted instead.
@@ -97,16 +104,19 @@ Two things have to become true, and they are separable:
   `config.users.users.ollama.uid`.
 - The `agent-os-pull-model` probe stops running as root: it runs as the ollama uid (or is dropped),
   so the window's subject is the only uid that ever needs the registry.
-- Sealing is `agentos-seal.service`: flush the set, write the sealed state. It is started by
-  whichever comes first: the model is present and first login has finished, or the budget runs
-  out. Flushing an empty set is a no-op, so sealing is idempotent.
+- Sealing is `agentos-seal.service` (2.4). Its sequence is fixed: (1) flush the set, (2) restart
+  the ollama daemon so it comes up with the set already empty, (3) stop and mask the
+  `agent-os-pull-model` retry timer, (4) write `sealed`. Flushing an empty set is a no-op, so
+  sealing is idempotent. It also carries `ExecStopPost=` flush-and-write-`sealed` (reason:
+  timeout), so a seal that fails or times out still leaves the set empty and the box marked.
 - `nixos-rebuild` is not involved. `agentos.cleanRoom.sealed` stays for one release with a changed
   meaning (`true` = never open the window on this box: the window unit is masked, not merely
   skipped) so `agentos-sealed` keeps evaluating until the product path moves over (slice 4).
 
 ### 2.2 State
 
-One root-owned directory, `/var/lib/agent-os/seal/` (0700 root). Both units carry
+One root-owned directory, `/var/lib/agent-os/seal/` (0700 root). The window oneshot, its tick
+service and the seal unit all carry
 `RequiresMountsFor=/var/lib/agent-os` and `ConditionPathIsReadWrite=/var/lib/agent-os/seal`: if
 the state cannot be written (read-only filesystem, no space), the window does not open. Writes
 are temp file, `fsync`, `rename`, then `fsync` of the directory.
@@ -125,7 +135,7 @@ that clock would be wrong for the life of the box.
   `budget_at_boot`, the budget as it stood when that boot opened it.
 - Remaining is always *recomputed*, never successively subtracted:
   `remaining = budget_at_boot − max(60, open_seconds_this_boot)`, where `open_seconds_this_boot`
-  comes from `CLOCK_MONOTONIC`. The tick writes that value once a minute and at shutdown; writing
+  is `CLOCK_MONOTONIC` time since the window opened in this boot (not since the boot started). The tick writes that value once a minute and at shutdown; writing
   it twice gives the same number.
 - A run under the same boot id is a re-derivation (an nftables reload, a rebuild) and charges
   nothing. A run under a new boot id first settles the previous boot at its last written value,
@@ -185,13 +195,16 @@ overlap:
   and first login has finished, or the budget is gone. Its `TimeoutStartSec` is the window length
   plus a margin. "Model present" is decided by one detector: the daemon's own `GET /api/tags` on
   loopback lists the configured model.
-- Before it writes `sealed` it stops the fetch: `systemctl restart ollama.service`. Flushing the
-  set does not end a download already in flight, because the `ct state established` rule above the
-  set rules keeps an open connection alive. The restart ends it, so "sealed" means no egress and
-  not "no new egress".
+- It waits on first login by ordering: `After=agentos-surface-apply.service`.
+- After the flush and before it writes `sealed` it ends the fetch: `systemctl restart
+  ollama.service` (step 2 of the sequence in 2.1). Flushing the set does not end a download
+  already in flight, because the `ct state established` rule above the set rules keeps an open
+  connection alive. The restart ends it, so "sealed" means no egress and not "no new egress". A
+  half-pulled model is absent from `/api/tags`, so the detector cannot mistake it for a model.
 - tty1 between the first-login questions and the agent's getty is owned by one small unit,
-  `agentos-setup-progress.service` (`TTYPath=/dev/tty1`, `After=agentos-firstlogin.service`,
-  `Before=getty@tty1.service`, unprivileged, output only). It prints the download progress, and if
+  `agentos-setup-progress.service` (`Type=oneshot`, `TTYPath=/dev/tty1`,
+  `After=agentos-firstlogin.service`, `Before=getty@tty1.service`, unprivileged, output only). It
+  exits when `sealed` appears, so tty1 never has two owners. It prints the download progress, and if
   the budget ends without a model it prints that the box has no model and how a human re-provisions
   it (2.3). It reads no input.
 - There is no cycle: the first-login unit is before the getty and not after the seal; the seal
@@ -210,11 +223,13 @@ on every boot asserts:
 - (c) `sealed` valid ⇒ the set is empty; otherwise the sealed response (links down, agent withheld);
 - (d) `sealed` absent ⇒ `window.json` valid with budget left; otherwise seal and re-check;
 - (e) `sealed` absent and the window unit failed or inactive ⇒ the set must be empty and the box is
-  treated as sealed-or-down, never as "open".
+  treated as sealed-or-down, never as "open" — unless the box is sealed-by-build (below), where an
+  inactive, masked window unit is the expected state and (c) applies.
 
 A box built with `agentos.cleanRoom.sealed = true` has the window unit masked and never writes a
 `sealed` file. seal-check treats that as sealed-by-build: (c) applies with the build flag standing
-in for the marker, so the set must be empty and the token is written.
+in for the marker, so the set must be empty and the token is written. An eval assertion ties the
+two together: `cleanRoom.sealed = true` implies the window unit is masked.
 
 `/run/agentos-sealed-ok` is written only when (c) holds. When the sealed marker's ruleset hash
 differs from the running generation's, seal-check logs `sealed-generation-changed` (not a failure:
@@ -263,9 +278,11 @@ list, and validation happens before any value reaches an `exec`.
 - Instead a root unit, `agentos-boot-default.service`, selects the boot entry that already exists
   for the booted generation's specialisation: `bootctl set-default
   nixos-generation-<N>-specialisation-<name>.conf` (or clears it for the default). `<name>` comes
-  from a table compiled in at build time. `<N>` is the *booted* generation — `/run/current-system`
-  matched against the profile links, or the `LoaderEntrySelected` variable — not the profile's
-  newest link, which is wrong after a rollback boot.
+  from a table compiled in at build time. `<N>` is never the profile's newest link (wrong after a
+  rollback boot). At boot it is the booted generation: `/run/current-system` matched against the
+  profile links. In the activation snippet it is the generation being activated. `nixos-rebuild
+  boot` runs no activation, so after it the variable is stale until the next boot's re-assert, and
+  that one boot lands on the `loader.conf` default; acceptable, and stated.
 - `bootctl set-default` writes the EFI variable `LoaderEntryDefault`, which takes precedence over
   the `default` line in `loader.conf`. nixpkgs rewrites `loader.conf` on every
   `switch-to-configuration` and does not touch the variable, so after a rebuild the variable names
@@ -316,7 +333,9 @@ Split in two (ruling 4), so that no root process reads keyboard bytes:
   0600 file and exits. It has no `exec`. On the idle timeout it writes the default tokens, so the
   helper always has a file to read.
 - The file lives in the unit's `RuntimeDirectory=` (root creates it, owned by `agentos-setup`,
-  0700, not preserved after the helper has run).
+  0700) with `RuntimeDirectoryPreserve=yes`: systemd removes a runtime directory when its unit
+  stops, and a oneshot front end stops the moment it exits, which is before the helper reads.
+  The helper unlinks the file after its one read.
 - The `agentos-setup` account: a system user with no shell (`nologin`), no home, no groups (not
   `tty`, `video` or `input`), no sudo or polkit rule. The unit is sandboxed: `PrivateNetwork=yes`,
   `ProtectSystem=strict`, `NoNewPrivileges=yes`, an empty `CapabilityBoundingSet=`. It needs no
@@ -379,6 +398,8 @@ failure mode (curl exit 28, as `egress-uid-scope.nix` does), so a dead network c
 | `setup-window-seal-ends-flow` (VM) | A download in flight when the seal fires does not survive it: the fetch uid's open connection is gone after `agentos-seal.service` |
 | `setup-window-no-model` (VM) | Budget ends with no model: the box seals, the agent's getty starts, tty1 says there is no model |
 | `seal-check-sealed-by-build` (VM) | `cleanRoom.sealed = true`: window unit masked, set empty, token written, no `sealed` file needed |
+| `setup-window-seal-fails` (VM) | The seal unit made to fail or time out: the set is still empty afterwards and `sealed` is written; with the seal unit broken outright, the tick alone empties the set at `remaining ≤ 0` |
+| `first-login-choice-survives` (VM) | A non-default choice made in the front end reaches the store (the runtime directory is still there when the helper reads) |
 | budget battery | Recompute is idempotent (ticking twice gives one charge); a same-boot run charges nothing; a new boot id settles the previous boot; the floor applies once per boot |
 | `setup-window-unit-dead` (VM) | Window unit killed with `sealed` absent: seal-check treats the box as sealed-or-down |
 | `setup-window-budget` (VM) | Budget exhausted: set empty, `sealed` written; a reboot does not reopen |
@@ -419,6 +440,13 @@ validity is schema validity, with the generation mismatch logged; sealed-by-buil
 the boot-default mechanics (variable precedence, the real stale fallback, the booted generation,
 UEFI only, ordering after the bootloader install); the front end's runtime directory, account and
 sandbox; the token helper split from the boot-default unit.
+
+Final pass (2026-10-11), folded in: the shutdown stamp belongs to the window oneshot, not the tick
+(R1); the tick enforces the budget and the seal has a fixed sequence plus a flush on its failure
+path (R2); the front end's runtime directory is preserved until the helper has read it (R3); and
+the notes on the progress unit, the seal's ordering, sealed-by-build in (e), which units carry the
+mount and read-write conditions, the meaning of open seconds, the two meanings of `<N>`, and the
+pull timer.
 
 Adopted from the review's optional list: one state file with a schema; the window length as an
 option with a cap; the element count in the audit line; a named set instead of a chain the unit
