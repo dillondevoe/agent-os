@@ -1681,6 +1681,7 @@
             "surface-options: the Noctalia desktop must seed its settings copy-once and install btop/hyprpicker";
           assert lib.assertMsg (let t = builtins.fromTOML (builtins.readFile ./modules/noctalia/config.toml); in
                                 t.shell.polkit_agent == false
+                                && !(lib.elem "kitty" t.theme.templates.builtin_ids)
                                 && !(lib.any (a: lib.hasPrefix "lock" a.action) t.shell.session.actions)
                                 && !(lib.any (l: !(lib.hasPrefix "#" l) && lib.hasInfix "swash" l)
                                        (lib.splitString "\n" (builtins.readFile ./modules/noctalia/config.toml))))
@@ -1774,6 +1775,16 @@
                         'match = { class = "^(brain-home)$" },   workspace = "1"' 'hl.bind("SUPER+" .. i,       hl.dsp.focus({ workspace = i }))'; do
               grep -qF "$want" "$d" || { echo "surface-options: the default hyprland.lua lacks: $want" >&2; exit 1; }
             done
+            # The pokes must run INSIDE the start callback, chained after the env import: at top level they
+            # run at config load, before there is a compositor (the 2026-08-30 no-brain-window boot), and
+            # --verify-config never runs callbacks, so only this placement check can see it.
+            if grep -qE '^hl\.exec_cmd\(' "$d"; then
+              echo "surface-options: the default hyprland.lua runs a command at top level (must be in hl.on(\"hyprland.start\"))" >&2; exit 1; fi
+            awk '/^hl\.on\("hyprland\.start"/{f=1} f&&/^end\)/{f=0} f' "$d" \
+              | grep -qE '^ +hl\.exec_cmd\("dbus-update-activation-environment --systemd [^"]*&& systemctl --user restart noctalia\.service && systemctl --user restart brain-home\.service"\)' || {
+              echo "surface-options: env import && noctalia && brain-home must be one chained command inside hl.on(\"hyprland.start\")" >&2; exit 1; }
+            grep -qF 'hl.bind("ALT+SHIFT+TAB", hl.dsp.window.bring_to_top())' "$d" || {
+              echo "surface-options: Alt+Tab must raise and Alt+Shift+Tab must go back (Dillon msg 9268)" >&2; exit 1; }
             for never in 'xhost' 'session lock' 'uwsm'; do
               if grep -qF "$never" "$d"; then echo "surface-options: the default hyprland.lua must not contain: $never" >&2; exit 1; fi
             done
@@ -1786,7 +1797,7 @@
               echo "surface-options: the pinned Hyprland no longer ships share/hypr/wall2.png" >&2; exit 1; }
             if grep -qE '^[[:space:]]*(sleep|mkdir|touch|seq)[[:space:]]' "''${wallOnce#-}"; then
               echo "surface-options: the one-time wallpaper script uses a bare tool name (user-unit PATH is narrow)" >&2; exit 1; fi
-            grep -qF 'environment --systemd WAYLAND_DISPLAY XDG_CURRENT_DESKTOP HYPRLAND_INSTANCE_SIGNATURE DISPLAY XCURSOR_THEME XCURSOR_SIZE HYPRCURSOR_THEME HYPRCURSOR_SIZE QT_QPA_PLATFORM ELECTRON_OZONE_PLATFORM_HINT")' ${noct.system.build.hyprlandConf} || {
+            grep -qF 'environment --systemd WAYLAND_DISPLAY XDG_CURRENT_DESKTOP HYPRLAND_INSTANCE_SIGNATURE DISPLAY XCURSOR_THEME XCURSOR_SIZE HYPRCURSOR_THEME HYPRCURSOR_SIZE QT_QPA_PLATFORM ELECTRON_OZONE_PLATFORM_HINT && systemctl' ${noct.system.build.hyprlandConf} || {
               echo "surface-options: with Noctalia (it launches apps), the env import must carry DISPLAY and the cursor theme" >&2; exit 1; }
             grep -qF 'environment --systemd WAYLAND_DISPLAY XDG_CURRENT_DESKTOP HYPRLAND_INSTANCE_SIGNATURE")' ${wb.system.build.hyprlandConf} || {
               echo "surface-options: the waybar env import line must be unchanged" >&2; exit 1; }

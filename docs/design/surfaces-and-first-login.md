@@ -166,6 +166,14 @@ See section 3. In short: no wheel for the agent, bash and the tty1 loop for the 
 the wall, a minimal greetd-class display manager, XWayland on with no network listener, confirm
 outside the session.
 
+Accepted risk, recorded 2026-10-10 with the Noctalia default (modules/hyprland-noctalia.nix):
+Noctalia's IPC (`noctalia msg`) is a socket any agent-uid process can reach, so screenshots and the
+clipboard-history panel are reachable that way. Screenshot tools (grim) and wl-clipboard were already
+installed, so the reach is not new; what is new is that clipboard history persists and screenshots are
+saved to the agent's home. `launch_apps_as_systemd_services` runs launcher apps as user units (the uid
+wall is unaffected). Noctalia's polkit agent and lock screen are off. Revisit both before the sealed
+product image ships a screenshot or clipboard capability (section 6: not enabled by default).
+
 ## 6. The adapter interface
 
 Each desktop implements one small interface, run as a systemd user unit of the agent user. The

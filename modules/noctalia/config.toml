@@ -4,6 +4,7 @@
 #   - polkit_agent = false: an authentication prompt drawn inside the agent's own session is a prompt the
 #     agent's processes could imitate (surfaces-and-first-login.md 2.1); admin auth stays off this session;
 #   - no greeter_sync block (there is no greeter);
+#   - no "kitty" theme template: ~/.config/kitty/kitty.conf is a store symlink the brain window depends on;
 #   - no lock / lock-and-suspend: the agent account autologins with no password, so a lock screen could
 #     never be unlocked; suspend takes the lock-and-suspend slot.
 # Seeded once (tmpfiles C): after first boot this file is the user's, and Noctalia's settings UI owns it.
@@ -84,7 +85,7 @@ source = "wallpaper"
 wallpaper_scheme = "m3-tonal-spot"
 
     [theme.templates]
-    builtin_ids = [ "btop", "gtk3", "gtk4", "kcolorscheme", "kitty", "qt", "alacritty" ]
+    builtin_ids = [ "btop", "gtk3", "gtk4", "kcolorscheme", "qt", "alacritty" ]
 
 [widget.clock]
 color = "secondary"

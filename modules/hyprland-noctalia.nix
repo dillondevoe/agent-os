@@ -15,6 +15,7 @@
 #     bare `exec noctalia`), so a crash restarts them.
 #   - no `xhost +SI:localuser:root` (root X clients on the agent's display) and no lock binding (the agent
 #     account has no password: a lock screen could not be unlocked).
+#   - Alt+Tab raises as well as cycles, and Alt+Shift+Tab goes back (the Agent OS desktop's binding).
 #   - apps are the ones this image ships: Thunar, Apostrophe, Qalculate!; Super+/ cheatsheet; Super+B
 #     Firefox and Super+Shift+M exit kept from the Agent OS desktop.
 { terminalCmd, envImport, barUnit, cheatsheetTxt }:
@@ -52,12 +53,12 @@
   hl.env("XCURSOR_SIZE", "24")
 
   ---------------------------------------------------------------- autostart (Agent OS units, not CachyOS execs)
-  -- Once, when the compositor is up: hand the user manager the session env, then start the shell and
-  -- the brain window. Both are Restart=always user units (desktop-open.nix); this only pokes them.
+  -- Once, when the compositor is up: hand the user manager the session env, THEN start the shell and
+  -- the brain window (one chained command: separate exec_cmd calls run in parallel, unordered). Both are
+  -- Restart=always user units (desktop-open.nix); this only pokes them. Not on config reload, so a
+  -- reload no longer restarts the brain window.
   hl.on("hyprland.start", function ()
-    hl.exec_cmd("dbus-update-activation-environment --systemd ${envImport}")
-    hl.exec_cmd("systemctl --user restart ${barUnit}.service")
-    hl.exec_cmd("systemctl --user restart brain-home.service")
+    hl.exec_cmd("dbus-update-activation-environment --systemd ${envImport} && systemctl --user restart ${barUnit}.service && systemctl --user restart brain-home.service")
   end)
 
   ---------------------------------------------------------------- decorations (CachyOS config/decorations.lua)
@@ -244,7 +245,12 @@
   hl.bind(mainMod .. " + Right", hl.dsp.focus({ direction = "right" }))
   hl.bind(mainMod .. " + Up",    hl.dsp.focus({ direction = "up" }))
   hl.bind(mainMod .. " + Down",  hl.dsp.focus({ direction = "down" }))
-  hl.bind("ALT + Tab",           hl.dsp.window.cycle_next())
+  -- Alt+Tab as the Agent OS desktop had it (Dillon msg 9268: "clicked off Firefox, no way back"):
+  -- cycle AND raise, with Shift for the reverse. CachyOS binds only cycle_next.
+  hl.bind("ALT+TAB",       hl.dsp.window.cycle_next())
+  hl.bind("ALT+TAB",       hl.dsp.window.bring_to_top())
+  hl.bind("ALT+SHIFT+TAB", hl.dsp.window.cycle_next({ prev = true }))
+  hl.bind("ALT+SHIFT+TAB", hl.dsp.window.bring_to_top())
   hl.bind(mainMod .. " + Tab",   hl.dsp.exec_cmd(noctCall .. "window-switcher"))
 
   hl.bind(mainMod .. " + SHIFT + Up",    hl.dsp.window.move({ direction = "u" }))
