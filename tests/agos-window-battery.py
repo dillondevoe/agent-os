@@ -27,6 +27,24 @@
 #   L. The tick enforces the wall deadline too (a box that slept through it must not wake open).
 #   M. One at a time: while another holder has the state lock, recompute does not open (it flushes
 #      and fails), the tick flushes, and seal only flushes; with the lock free they work.
+#   O. The login token (<run_dir>/login-ok) exists only after a VALID marker AND a confirmed flush,
+#      whoever got there (seal, recompute, tick); never while open, never with a malformed marker,
+#      never when nft did not answer. The status line follows the state and decides nothing.
+#   P. Once the token exists the window cannot open again in that boot (the state removed under a
+#      running agent is a re-provisioning for the NEXT boot).
+#   Q. wait (agentos-seal.service): 0 only when sealed, flushed and the token written. Already sealed
+#      -> at once. Not opened in this boot -> sealed at once ("not open"), the detector never asked.
+#      Open + model listed -> seal(complete), in the fixed order. Open + no model -> it keeps looking
+#      until the budget is gone and then seals by itself, tick or no tick. A seal that fails ends the
+#      wait with 1 (no loop restarting the fetcher). No lock -> 1.
+#   R. ended (ExecStopPost): after a TIMEOUT it seals. After anything else (a clean wait, a stop at
+#      shutdown, a kill) it does nothing at all: a reboot inside the window must not seal the box.
+#   S. The detector: the exact model name in /api/tags (`name` or `model`), `:latest` for a bare name,
+#      never a prefix, a substring or a half-pulled model; a real loopback server: 200 with the model
+#      is yes; 404, a redirect, a closed port and a server that never answers (bounded) are no.
+#   T. The console's progress program: only printable ASCII from the download line reaches the
+#      terminal; it exits on sealed / failed / its limit; it reads no input; the installed copy
+#      ignores the environment.
 #   K. config: the fetch uid must be a positive number (never root, never a name); the window is at
 #      most 4 hours; the installed copy ignores AGOS_WINDOW_CONFIG; the placeholder appears once.
 #
@@ -422,5 +440,348 @@ try:
 finally:
     os.environ.pop("AGOS_WINDOW_CONFIG")
 ok("N the command line accepts exactly its roles; status reports the state")
+
+# ── slice 3b, part 1 ────────────────────────────────────────────────────────────────────────────
+RUN = os.path.join(TMP, "run"); os.makedirs(RUN)
+TOKEN, STATUS = os.path.join(RUN, "login-ok"), os.path.join(RUN, "status")
+SEAL_SEQ = [CLOSE, ["systemctl", "restart", "ollama.service"], ["systemctl", "stop", "agent-os-pull-model.timer"],
+            ["systemctl", "stop", "agent-os-pull-model.service"]]
+
+
+def rcfg(**over):
+    return cfg(**dict({"run_dir": RUN, "model": "qwen3.5:9b"}, **over))
+
+
+def rreset():
+    reset()
+    for f in os.listdir(RUN):
+        os.unlink(os.path.join(RUN, f))
+
+
+def status_line():
+    return json.load(open(STATUS)) if os.path.exists(STATUS) else None
+
+
+def marker():
+    return json.load(open(os.path.join(STATE, "sealed")))
+
+
+# O — the token
+rreset()
+check(A.recompute(rcfg()) == 0 and not os.path.exists(TOKEN), "O: a token while the window is open")
+check(status_line() == {"state": "open", "remaining": LENGTH - A.FLOOR}, "O: status while open: %r" % status_line())
+Clock.mono = 100.0 + 600
+check(A.tick(rcfg()) == 0 and status_line() == {"state": "open", "remaining": LENGTH - 600} and not os.path.exists(TOKEN), "O: the tick's status")
+check(A.seal(rcfg(), "complete") == 0 and os.path.isfile(TOKEN) and (os.stat(TOKEN).st_mode & 0o777) == 0o644
+      and status_line() == {"state": "sealed", "reason": "complete"}, "O: after a seal: token + status")
+for who, call in (("recompute", A.recompute), ("tick", A.tick), ("seal", lambda c: A.seal(c, "budget"))):
+    rreset(); put("sealed", GOOD_SEALED); tool(NFT, rc=1); calls()
+    check(call(rcfg()) == 1 and not os.path.exists(TOKEN), "O: %s wrote the token although nft did not confirm the flush" % who)
+    tool(NFT); calls()
+    check(call(rcfg()) == 0 and os.path.isfile(TOKEN), "O: %s on a sealed box with nft answering must enable logins" % who)
+for who, call in (("recompute", A.recompute), ("tick", A.tick), ("seal", lambda c: A.seal(c, "budget")), ("wait", A.wait)):
+    rreset(); put("sealed", "{}"); calls()
+    check(call(rcfg()) == 1 and not os.path.exists(TOKEN) and status_line() == {"state": "failed" if who == "wait" else "down"},
+          "O: %s with a malformed marker must not enable logins: %r" % (who, status_line()))
+rreset(); A.recompute(rcfg()); tool(NFT, rc=1); calls()
+check(A.seal(rcfg(), "complete") == 1 and not os.path.exists(TOKEN), "O: a seal whose flush failed wrote the token")
+rreset(); A.recompute(rcfg())
+check(A.seal(rcfg(run_dir=os.path.join(TMP, "no-such-dir")), "complete") == 1 and os.path.exists(os.path.join(STATE, "sealed")),
+      "O: sealed but the token cannot be written must be a failure (the agent stays withheld)")
+rreset(); os.mkdir(TOKEN); put("sealed", GOOD_SEALED)
+check(A.recompute(rcfg()) == 1 and os.path.isdir(TOKEN), "O: a token path that is not a plain file must not count as enabling logins")
+os.rmdir(TOKEN); os.mkfifo(TOKEN)
+check(A.recompute(rcfg()) == 1, "O: a FIFO at the token's path must fail at once (not block, not pass)")
+reader = os.open(TOKEN, os.O_RDONLY | os.O_NONBLOCK)           # with a reader the open succeeds: still not a token
+try:
+    check(A.recompute(rcfg()) == 1, "O: a FIFO somebody is reading is not a plain file and must not enable logins")
+finally:
+    os.close(reader)
+os.unlink(TOKEN)
+victim = os.path.join(TMP, "victim")
+rreset(); os.symlink(victim, TOKEN); put("sealed", GOOD_SEALED)
+check(A.recompute(rcfg()) == 1 and os.path.islink(TOKEN) and not os.path.exists(victim), "O: the token must never be written through a symlink")
+os.unlink(TOKEN)
+rreset(); check(A.recompute(cfg()) == 0 and A.seal(cfg(), "complete") == 0 and os.listdir(RUN) == [], "O: without run_dir nothing is written to /run")
+ok("O the login token needs a valid marker AND a confirmed flush; the status line follows")
+
+# P — once logins are enabled the window cannot open again in that boot
+rreset(); A.recompute(rcfg()); A.seal(rcfg(), "complete"); calls()
+os.unlink(os.path.join(STATE, "sealed")); os.unlink(os.path.join(STATE, "window.json"))
+check(A.recompute(rcfg()) == 1 and calls() == [CLOSE] and not os.path.exists(os.path.join(STATE, "window.json")),
+      "P: with the state removed in a sealed boot, recompute opened the window under a running agent")
+os.unlink(TOKEN); boot(2)                                      # the reboot: /run is new, and so is the boot id
+check(A.recompute(rcfg()) == 0 and calls() == [OPEN] and window()["boots"] == 1, "P: after the reboot the same state is a first boot")
+rreset(); A.recompute(rcfg()); A.seal(rcfg(), "complete"); os.unlink(os.path.join(STATE, "sealed")); calls()
+check(A.recompute(rcfg()) == 1 and calls() == [CLOSE], "P: only the marker removed (same boot, budget left): it must not re-derive to open")
+rreset(); os.symlink("/nonexistent", TOKEN)
+check(A.recompute(rcfg()) == 1 and calls() == [CLOSE], "P: anything at the token's path refuses an open")
+os.unlink(TOKEN)
+# ...and the wait (a respawned getty runs it) must not answer a re-provisioning with a fresh marker.
+for leave_window in (False, True):
+    rreset(); A.recompute(rcfg()); A.seal(rcfg(), "complete"); os.unlink(os.path.join(STATE, "sealed"))
+    if not leave_window:
+        os.unlink(os.path.join(STATE, "window.json"))
+    looks = []
+    A.model_present = lambda c: looks.append(1) or False
+    before = state_files(); calls()
+    check(A.wait(rcfg()) == 1 and calls() == [CLOSE] and state_files() == before and not os.path.exists(os.path.join(STATE, "sealed")),
+          "P: the state removed in a sealed boot (window.json left: %s): the wait wrote a new marker and undid the re-provisioning" % leave_window)
+    check(not looks, "P: there is nothing to wait for in that state; the wait asked the detector %d times" % len(looks))
+check(src.count("open_set(c)") == 2 and src.count("c[\"open_file\"]") == 1,
+      "P: exactly one place may open the set (recompute, after the refusal above)")
+# ...nor may anyone else: the tick on a spent budget, a seal by hand, the wait's timeout.
+for who, call in (("tick, budget spent", lambda c: A.tick(c)), ("seal", lambda c: A.seal(c, "budget")), ("ended after a timeout", A.ended)):
+    rreset(); A.recompute(rcfg()); A.seal(rcfg(), "complete"); os.unlink(os.path.join(STATE, "sealed"))
+    Clock.mono = 100.0 + LENGTH + 1; os.environ["SERVICE_RESULT"] = "timeout"; calls()
+    rc = call(rcfg()); os.environ.pop("SERVICE_RESULT")
+    seen = calls()
+    check(rc == 1 and not os.path.exists(os.path.join(STATE, "sealed")) and seen and all(x == CLOSE for x in seen),
+          "P: %s wrote a new marker (or restarted the fetcher) in a sealed boot whose state was removed: rc=%r %r" % (who, rc, seen))
+rreset(); A.recompute(rcfg()); A.seal(rcfg(), "complete"); os.unlink(os.path.join(STATE, "sealed")); put("window.json", "garbage"); calls()
+check(A.recompute(rcfg()) == 1 and not os.path.exists(os.path.join(STATE, "sealed")), "P: a garbage window.json in a sealed boot must wait for the reboot too")
+calls()
+check(A.tick(rcfg()) == 1 and not os.path.exists(os.path.join(STATE, "sealed")) and all(x == CLOSE for x in calls()),
+      "P: the tick on a garbage window.json in a sealed boot must not seal either")
+ok("P once the token exists the window cannot open again in that boot")
+
+# Q — wait
+asked = []
+
+
+def detector(answers):
+    """answers: a list of bools, the last one repeating; or a callable(n) -> bool."""
+    def f(c):
+        asked.append(1)
+        return answers(len(asked)) if callable(answers) else answers[min(len(asked), len(answers)) - 1]
+    A.model_present = f
+    del asked[:]
+
+
+rreset(); put("sealed", GOOD_SEALED); detector([True]); calls()
+check(A.wait(rcfg()) == 0 and calls() == [CLOSE] and os.path.isfile(TOKEN) and not asked, "Q: sealed already: flush, token, 0, no question asked")
+rreset(); put("sealed", GOOD_SEALED); tool(NFT, rc=1); calls()
+check(A.wait(rcfg()) == 1 and not os.path.exists(TOKEN), "Q: sealed but the flush is not confirmed must be 1")
+rreset(); detector([True]); calls()
+check(A.wait(rcfg()) == 0 and marker()["reason"] == "not open" and calls() == SEAL_SEQ and os.path.isfile(TOKEN) and not asked
+      and not os.path.exists(os.path.join(STATE, "window.json")),
+      "Q: no window opened in this boot: seal(not open) at once, without asking the detector and WITHOUT opening")
+rreset(); A.recompute(rcfg()); boot(2); detector([True]); calls()            # a new boot whose recompute never ran
+check(A.wait(rcfg()) == 0 and marker()["reason"] == "not open" and not asked and calls()[0] == CLOSE, "Q: a window from the previous boot is not open in this one")
+rreset(); A.recompute(rcfg()); detector([True]); calls()
+check(A.wait(rcfg()) == 0 and calls() == SEAL_SEQ and marker()["reason"] == "complete" and os.path.isfile(TOKEN) and len(asked) == 1,
+      "Q: open + model listed: seal(complete) in the fixed order")
+rreset(); A.recompute(rcfg()); detector([False, False, True]); calls(); t0 = Clock.mono
+check(A.wait(rcfg()) == 0 and len(asked) == 3 and Clock.mono == t0 + 2 * A.POLL and marker()["reason"] == "complete",
+      "Q: it must look again every POLL seconds until the model is listed")
+rreset(); A.recompute(rcfg()); detector([False]); calls()
+check(A.wait(rcfg()) == 0 and marker()["reason"] == "budget" and os.path.isfile(TOKEN), "Q: no model, no tick: the wait must seal on the budget by itself")
+check(abs(len(asked) - LENGTH // A.POLL) <= 2, "Q: it asked %d times, expected about %d" % (len(asked), LENGTH // A.POLL))
+rreset(); A.recompute(rcfg())
+
+
+def third_look_ticks(n):
+    if n == 3:
+        Clock.mono = 100.0 + LENGTH + 1
+        check(A.tick(rcfg()) == 0, "Q: the tick's seal")
+    return False
+
+
+detector(third_look_ticks); calls()
+check(A.wait(rcfg()) == 0 and marker()["reason"] == "budget" and len(asked) == 3, "Q: the tick sealing ends the wait at its next look")
+rreset(); A.recompute(rcfg()); detector([True]); tool(NFT, rc=1); calls()
+check(A.wait(rcfg()) == 1 and not os.path.exists(os.path.join(STATE, "sealed")) and not os.path.exists(TOKEN) and len(asked) == 1 and calls() == [CLOSE],
+      "Q: a seal that fails ends the wait with 1, once (no loop)")
+check(status_line() == {"state": "failed"}, "Q: a failed wait must tell the console: %r" % status_line())
+rreset(); A.recompute(rcfg()); detector([True]); calls()
+held = os.open(os.path.join(STATE, ".lock"), os.O_RDWR | os.O_CREAT, 0o600); fcntl.flock(held, fcntl.LOCK_EX)
+try:
+    check(A.wait(rcfg()) == 1 and calls() == [CLOSE] and not asked and not os.path.exists(TOKEN), "Q: without the lock the wait flushes and fails")
+finally:
+    os.close(held)
+rreset(); detector([True]); calls()
+check(A.wait(rcfg(sealed_by_build=True)) == 0 and calls() == [CLOSE] and state_files() == [] and not asked, "Q: sealed by build: flush, nothing else")
+ok("Q the wait returns 0 only when the box is sealed, flushed and logins are enabled")
+
+# R — ended
+rreset(); A.recompute(rcfg()); os.environ["SERVICE_RESULT"] = "timeout"; calls()
+check(A.ended(rcfg()) == 0 and calls() == SEAL_SEQ and marker()["reason"] == "timeout" and os.path.isfile(TOKEN), "R: after a timeout `ended` is the seal")
+for result in ("success", "signal", "exit-code", "core-dump", "", None):     # a shutdown stops the wait: "success"
+    rreset(); A.recompute(rcfg()); calls()
+    if result is None:
+        os.environ.pop("SERVICE_RESULT", None)
+    else:
+        os.environ["SERVICE_RESULT"] = result
+    check(A.ended(rcfg()) == 0 and calls() == [] and state_files() == ["window.json"] and not os.path.exists(TOKEN)
+          and status_line()["state"] == "open",
+          "R: SERVICE_RESULT=%r: `ended` touched the window (a reboot inside the window would find the box sealed)" % (result,))
+rreset(); A.recompute(rcfg()); os.environ["SERVICE_RESULT"] = "timeout"; tool(NFT, rc=1); calls()
+check(A.ended(rcfg()) == 1 and not os.path.exists(os.path.join(STATE, "sealed")) and status_line() == {"state": "failed"} and not os.path.exists(TOKEN),
+      "R: a timeout whose seal cannot flush must fail, say so, and leave logins closed")
+os.environ.pop("SERVICE_RESULT")
+os.environ["AGOS_WINDOW_CONFIG"] = json.dumps(rcfg())
+try:
+    rreset(); put("sealed", GOOD_SEALED); calls(); se, sys.stderr = sys.stderr, io.StringIO()
+    try:
+        check(A.main(["x", "wait"]) == 0 and A.main(["x", "ended"]) == 0, "R: the roles on the command line")
+        os.environ["SERVICE_RESULT"] = "timeout"; rreset(); A.recompute(rcfg()); calls()
+        check(A.main(["x", "ended"]) == 0 and marker()["reason"] == "timeout", "R: `ended` from the command line after a timeout")
+        os.environ.pop("SERVICE_RESULT"); rreset(); put("sealed", GOOD_SEALED)
+        calls()
+        check(A.main(["x", "wait", "now"]) == 2 and A.main(["x", "ended", "x"]) == 2 and calls() == [], "R: extra arguments must be refused")
+    finally:
+        sys.stderr = se
+finally:
+    os.environ.pop("AGOS_WINDOW_CONFIG")
+ok("R ended: the seal after a timeout, nothing after anything else")
+
+# S — the detector
+T = A.tags_list_model
+doc = lambda *models: json.dumps({"models": list(models)}).encode()
+check(T(doc({"name": "qwen3.5:9b", "model": "qwen3.5:9b"}), "qwen3.5:9b"), "S: the exact name")
+check(T(doc({"model": "qwen3.5:9b"}), "qwen3.5:9b") and T(doc({"name": "a:b"}, {"name": "qwen3.5:9b"}), "qwen3.5:9b"), "S: either key, any position")
+check(T(doc({"name": "llama3:latest"}), "llama3") and not T(doc({"name": "llama3:8b"}), "llama3"), "S: a bare name means :latest")
+for other in ("qwen3.5:9b-q4", "xqwen3.5:9b", "qwen3.5:9", "qwen3.5", "QWEN3.5:9B", "evil/qwen3.5:9b", " qwen3.5:9b"):
+    check(not T(doc({"name": other}), "qwen3.5:9b"), "S: %r must not count as the model" % other)
+for bad in (b"", b"not json", b"[]", b'{"models": null}', b'{"models": {"name": "qwen3.5:9b"}}', b'{"models": ["qwen3.5:9b"]}',
+            b'{"models": [{"name": ["qwen3.5:9b"]}]}', b'{"models": [{"name": 5}]}', b"\xff\xfe", doc()):
+    check(not T(bad, "qwen3.5:9b"), "S: %r must be no" % bad[:30])
+check(not T(doc({"name": "qwen3.5:9b"}) + b" " * (A.TAGS_MAX + 1), "qwen3.5:9b"), "S: an oversize body must be no")
+check(not T(doc({"name": ""}), "") and not T(doc({"name": "x"}), None), "S: no configured model is never present")
+
+import http.server, socket, threading
+# The real detector again: the Q arms replaced it on A.
+spec2 = importlib.util.spec_from_file_location("agos_window_real", MOD)
+R = importlib.util.module_from_spec(spec2); spec2.loader.exec_module(R)
+R.PROBE_LIMIT = 1.0
+
+
+class H(http.server.BaseHTTPRequestHandler):
+    mode = "ok"
+
+    def do_GET(self):
+        H.seen.append(self.path)
+        if H.mode == "hang":
+            H.release.wait(10); return
+        if H.mode == "404":
+            self.send_response(404); self.end_headers(); return
+        if H.mode == "redirect":
+            self.send_response(302); self.send_header("Location", "http://127.0.0.1:%d/elsewhere" % PORT); self.end_headers(); return
+        body = doc({"name": "qwen3.5:9b"}) if self.path == "/api/tags" else doc({"name": "other:1"})
+        self.send_response(200); self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body)
+
+    def log_message(self, *a):
+        pass
+
+
+H.seen, H.release = [], threading.Event()
+srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H); PORT = srv.server_address[1]
+threading.Thread(target=srv.serve_forever, daemon=True).start()
+try:
+    pc = rcfg(tags_port=PORT)
+    check(R.model_present(pc) is True and H.seen == ["/api/tags"], "S: a real server listing the model: %r" % H.seen)
+    check(R.model_present(rcfg(tags_port=PORT, model="absent:1")) is False, "S: a model that is not listed")
+    H.mode = "404"; check(R.model_present(pc) is False, "S: a 404 is no")
+    H.mode = "redirect"; del H.seen[:]
+    check(R.model_present(pc) is False and H.seen == ["/api/tags"], "S: a redirect must not be followed: %r" % H.seen)
+    H.mode = "hang"; import time as real_time; t = real_time.monotonic()
+    check(R.model_present(pc) is False and real_time.monotonic() - t < 4, "S: a server that never answers must be no, within the limit")
+    H.release.set(); H.mode = "ok"
+    check(R.model_present(pc) is True, "S: and the next look works again (the alarm was cleared)")
+    real_ask = R._ask                               # the deadline landing in a cleanup: still "no", never an exception
+
+
+    def ask_then_alarm_in_cleanup(c):
+        try:
+            return real_ask(c)
+        finally:
+            raise R._Deadline()
+    R._ask = ask_then_alarm_in_cleanup
+    check(R.model_present(pc) is False, "S: an alarm that lands in a cleanup must be a no")
+    R._ask = real_ask
+    import signal as real_signal
+    check(real_signal.getitimer(real_signal.ITIMER_REAL)[0] == 0 and real_signal.getsignal(real_signal.SIGALRM) == real_signal.SIG_DFL,
+          "S: the alarm and its handler must be put back")
+finally:
+    srv.shutdown(); srv.server_close()
+dead = socket.socket(); dead.bind(("127.0.0.1", 0)); closed_port = dead.getsockname()[1]; dead.close()
+check(R.model_present(rcfg(tags_port=closed_port)) is False, "S: a closed port is no")
+check(src.count('HTTPConnection("127.0.0.1"') == 1 and "HTTPSConnection" not in src and "urllib" not in src,
+      "S: the detector must speak to the loopback literal only, with no client that follows redirects or reads proxies")
+ok("S the detector: the exact model in the fetcher's own list, on loopback, bounded")
+
+# T — the console's progress program
+PMOD = os.path.abspath(os.path.join(HERE, "..", "modules", "agos_setup_progress.py"))
+sp = importlib.util.spec_from_file_location("agos_setup_progress", PMOD)
+P = importlib.util.module_from_spec(sp); sp.loader.exec_module(P)
+psrc = open(PMOD).read()
+dirty = "pulling \x1b[31m\x1b]0;owned\x07abc\r\n\u2595\u2588\u258f 45%\t3.0 GB/6.6 GB\x00\x9b2J" + "x" * 500
+c = P.clean(dirty)
+check(all(" " <= ch <= "~" for ch in c) and len(c) <= 70 and "45%" in c and "\x1b" not in c, "T: clean: %r" % c)
+check(P.clean("a   b\n\nc") == "a b c" and P.clean("") == "", "T: clean collapses blanks")
+PS, PP = os.path.join(TMP, "p-status"), os.path.join(TMP, "p-pull")
+os.environ["AGOS_PROGRESS_STATUS"], os.environ["AGOS_PROGRESS_PULL"] = PS, PP
+
+
+def pstatus(obj):
+    open(PS, "w").write(obj if isinstance(obj, str) else json.dumps(obj))
+
+
+for bad in ("", "x", "[]", '{"state": "weird"}', '{"state": ["open"]}', '{"remaining": 5}'):
+    pstatus(bad); check(P.read_status(PS) == ("", None, ""), "T: status %r must read as nothing" % bad)
+for rem in (True, -1, 99999, "60", 1.5):
+    pstatus({"state": "open", "remaining": rem}); check(P.read_status(PS) == ("open", None, ""), "T: remaining=%r must be dropped" % (rem,))
+pstatus({"state": "sealed", "reason": "com\x1b[2Jplete"}); check("\x1b" not in P.read_status(PS)[2], "T: the reason is cleaned too")
+
+
+class Out:
+    def __init__(self):
+        self.text = ""
+
+    def write(self, t):
+        self.text += t
+
+    def flush(self):
+        pass
+
+
+def run_progress(script, limit="100"):
+    """script: a list of (status, pull) per second; the last repeats."""
+    out, tick_no, naps = Out(), [0], []
+
+    def sleep(sec):
+        naps.append(sec); tick_no[0] += 1
+        st, pull = script[min(tick_no[0], len(script) - 1)]
+        pstatus(st); open(PP, "w").write(pull)
+    st, pull = script[0]; pstatus(st); open(PP, "w").write(pull)
+    rc = P.main(["x", limit], out=out, sleep=sleep, now=lambda: float(tick_no[0]))
+    return rc, out.text, naps
+
+
+rc, text, naps = run_progress([({"state": "open", "remaining": 3541}, "pulling 10%"), ({"state": "open", "remaining": 3541}, "pulling 10%"),
+                               ({"state": "open", "remaining": 3481}, "pulling \x1b[2J40%"), ({"state": "sealed", "reason": "complete"}, "done")])
+check(rc == 0 and text.count("pulling 10%") == 1 and "pulling [2J40%" in text and "about 60 min" in text and "about 59 min" in text
+      and text.rstrip().endswith("Starting Agent OS.") and "\x1b[2J" not in text, "T: the open run: %r" % text)
+check(set(text) <= set(chr(i) for i in range(32, 127)) | {"\r", "\n", "\x1b"} and text.count("\x1b") == text.count("\x1b[K"),
+      "T: the only escape it ever writes is its own erase-line")
+rc, text, naps = run_progress([({"state": "sealed", "reason": "budget"}, "")])
+check(rc == 0 and "ran out" in text and "closed to the network" in text and "/var/lib/agent-os/seal/sealed" in text and naps == [8],
+      "T: sealed without a model: say so, say how to set up again, leave it on screen: %r %r" % (text, naps))
+rc, text, naps = run_progress([({"state": "failed"}, "")])
+check(rc == 0 and "could not finish" in text and "Ctrl+Alt+F3" in text, "T: failed: %r" % text)
+rc, text, naps = run_progress([("", "")], limit="5")
+check(rc == 0 and "could not finish" in text and len(naps) == 5 and "getting its model" in text, "T: no status at all ends at the limit: %r" % naps)
+se, sys.stderr = sys.stderr, io.StringIO()
+try:
+    check(P.main(["x"]) == 2 and P.main(["x", "soon"]) == 2, "T: the limit is required and a number")
+finally:
+    sys.stderr = se
+check("stdin" not in psrc and "input(" not in psrc and "subprocess" not in psrc and "socket" not in psrc, "T: it must read no input and run nothing")
+check(psrc.count('"@AGOS_PROGRESS_INSTALLED@"') == 1, "T: the substitution target must appear exactly once")
+inst = psrc.replace('"@AGOS_PROGRESS_INSTALLED@"', '"yes"')
+PI = types.ModuleType("agos_setup_progress_installed"); exec(compile(inst, "agos_setup_progress_installed.py", "exec"), PI.__dict__)
+check(PI._paths() == ("/run/agentos-setup/status", "/run/agent-os/pull-status") and P._paths() == (PS, PP), "T: the installed copy read the environment")
+os.environ.pop("AGOS_PROGRESS_STATUS"); os.environ.pop("AGOS_PROGRESS_PULL")
+ok("T the progress program prints clean text, ends when the box is sealed, and reads no input")
 
 print("agos-window-battery: PASS (%d criteria)" % len(passed))

@@ -292,6 +292,17 @@
           inherit baseModules;
         };
 
+        # THE AGENT DOES NOT EXIST WHILE THE WINDOW IS OPEN (first-login spec 2.4, slice 3b part 1), on a
+        # booted box: tty1's getty waits for the seal, every other console's login and the agent's user
+        # manager are refused until the token exists, the box seals itself when the model is listed, a
+        # sealed boot never reopens. A sampler on the box watches "agent process + non-empty set" throughout.
+        # Out of `checks` (boots a VM five times); in the vm-tests.yml matrix in the same commit.
+        #   nix build .#test-seal-wait
+        test-seal-wait = import ./tests/seal-wait.nix {
+          pkgs = nixpkgs.legacyPackages.${system};
+          inherit baseModules;
+        };
+
         # First login on a booted machine (first-login-and-setup-window.md slice 1): the questions on
         # tty1 before the agent's getty, typed answers reaching the root-owned store through the
         # unprivileged front end and the three-token root helper, the wrappers following the store.
@@ -2211,7 +2222,10 @@
         # any uid-0 accept, nothing else refers to it, there is no uid-blind accept and no port 80;
         # (3) a PARSE gate for the OPEN state: the rendered table followed by the exact file the unit
         # feeds nft, through the same lkl check nixpkgs uses, with a control that must fail; (4) the
-        # units, the fetcher's fixed uid, sealed-by-build; (5) the window OFF changes nothing.
+        # units, the fetcher's fixed uid, sealed-by-build; (5) the window OFF changes nothing;
+        # (6) slice 3b part 1, as unit text: the wait has no condition and seals however it ends, tty1's
+        # getty requires it, EVERY agetty's login program is the gate (and break-glass's is not), the
+        # user manager has the start condition, the progress unit is output-only and unprivileged.
         setup-window =
           let
             lib = nixpkgs.lib;
@@ -2229,14 +2243,90 @@
             tick = on.systemd.services.agentos-setup-window-tick;
             wc = on.system.build.agosWindowConfig;
             rulesScript = lib.last on.systemd.services.nftables.serviceConfig.ExecStart;
+            seal = on.systemd.services.agentos-seal;
+            prog = on.systemd.services.agentos-setup-progress;
+            gate = "${on.system.build.agosLoginGate}";
+            realLogin = "${p.shadow}/bin/login";
+            nc = builtins.unsafeDiscardStringContext;      # hasInfix is a regex match: no store-path context in it
+            execOf = c: n: nc (lib.concatStringsSep " " (lib.toList c.systemd.services.${n}.serviceConfig.ExecStart));
+            gettyScript = c: lib.last (lib.toList c.systemd.services."getty@".serviceConfig.ExecStart);
           in
           assert lib.assertMsg (on.networking.nftables.checkRuleset) "setup-window would false-PASS: checkRuleset is false";
-          # THE SLICE BOUNDARY, ENFORCED. Slice 3b (the agent's session waiting on the seal, seal-check)
-          # has not landed: with the window on, the agent can run while the fetcher has egress. So no
-          # configuration this flake ships may enable it. REMOVE THIS ASSERTION IN 3b, not before.
+          # THE SLICE BOUNDARY, ENFORCED. Slice 3b part 2 (the seal-check assertions of spec 2.5, the
+          # audit-chain lines, the registry probe off uid 0) has not landed. So no configuration this
+          # flake ships may enable the window. REMOVE THIS ASSERTION IN 3b PART 2, not before.
           assert lib.assertMsg (lib.all (n: !(self.nixosConfigurations.${n}.config.agentos.cleanRoom.setupWindow.enable or false))
                                   (lib.attrNames self.nixosConfigurations))
-            "setup-window: slice 3b has not landed; no shipped configuration may enable the setup window";
+            "setup-window: slice 3b part 2 has not landed; no shipped configuration may enable the setup window";
+          # (6) THE WAIT. No condition of any kind (a skipped unit counts as started for what Requires=
+          # it); not RemainAfterExit; it seals however it ends; a rebuild does not end it; loopback only.
+          assert lib.assertMsg (seal.serviceConfig.Type == "oneshot" && !(seal.serviceConfig.RemainAfterExit or false)
+                                && lib.hasSuffix " wait" seal.serviceConfig.ExecStart && lib.hasSuffix " ended" seal.serviceConfig.ExecStopPost
+                                && lib.all (k: !(lib.hasPrefix "Condition" k) && !(lib.hasPrefix "Assert" k)) (lib.attrNames seal.unitConfig)
+                                && seal.serviceConfig.TimeoutStartSec == "7800" && seal.serviceConfig.TimeoutStopSec == "300s"
+                                && lib.elem "multi-user.target" seal.wantedBy && !seal.restartIfChanged && !seal.stopIfChanged
+                                && lib.all (u: lib.elem u seal.after) [ "agentos-setup-window.service" "agentos-surface-apply.service" "agentos-boot-default.service" ]
+                                && seal.serviceConfig.IPAddressDeny == "any" && seal.serviceConfig.IPAddressAllow == "localhost"
+                                && seal.serviceConfig.RestrictAddressFamilies == [ "AF_UNIX" "AF_NETLINK" "AF_INET" ]
+                                && seal.serviceConfig.CapabilityBoundingSet == [ "CAP_NET_ADMIN" ] && seal.serviceConfig.ProtectSystem == "strict")
+            "setup-window: agentos-seal must be an unconditioned oneshot that waits, seals however it ends, and talks to loopback only";
+          assert lib.assertMsg (wc.run_dir == "/run/agentos-setup" && wc.model == on.environment.variables.OLLAMA_MODEL && wc.model == "qwen3.5:9b"
+                                && wc.tags_port == 11434 && lib.hasInfix "11434" on.environment.variables.OLLAMA_HOST
+                                && lib.all (u: u.serviceConfig.RuntimeDirectory == "agentos-setup" && u.serviceConfig.RuntimeDirectoryMode == "0755"
+                                               && u.serviceConfig.RuntimeDirectoryPreserve == "yes") [ win tick seal ])
+            "setup-window: the detector must look for the configured model on the model server's port, and the token's directory must be systemd's, root-owned, never removed";
+          # DOOR 1: tty1.
+          # Declared from the seal unit's side. There must be NO `getty@tty1` unit of our own: nixpkgs
+          # writes every drop-in as overrides.conf, and an instance drop-in of that name masks the
+          # template's, where the getty's command line (autologin and the gate) lives.
+          assert lib.assertMsg (seal.requiredBy == [ "getty@tty1.service" ] && lib.elem "getty@tty1.service" seal.before
+                                && !(on.systemd.services ? "getty@tty1")
+                                && lib.elem "autovt@.service" on.systemd.services."getty@".aliases)
+            "setup-window: getty@tty1 (and its alias autovt@tty1, what getty.target wants) must require and follow agentos-seal, with no instance drop-in";
+          # DOOR 2: every console agetty serves. nixpkgs bakes the login program into each template; all
+          # of them must carry the gate, and none may carry the real login beside it.
+          assert lib.assertMsg (on.services.getty.loginProgram == gate && on.services.getty.autologinUser == "agent"
+                                && lib.all (n: lib.hasInfix (nc "--login-program ${gate} ") (execOf on n) && !(lib.hasInfix (nc realLogin) (execOf on n)))
+                                           [ "serial-getty@" "container-getty@" "console-getty" ]
+                                && lib.hasInfix (nc realLogin) (execOf on "getty@tty3") && !(lib.hasInfix "login-gate" (execOf on "getty@tty3")))
+            "setup-window: every agetty's login program must be the gate; the break-glass console keeps the real login";
+          # DOOR 3: the user manager.
+          assert lib.assertMsg (on.systemd.services."user@".serviceConfig.ExecCondition == "+${on.system.build.agosUserGate} %i")
+            "setup-window: user@.service must carry the start condition, run with full privileges, with the uid as its argument";
+          # THE CONSOLE'S PROGRESS LINE: output only, a throwaway account, no network, before tty1's getty.
+          assert lib.assertMsg (prog.serviceConfig.DynamicUser && !(prog.serviceConfig ? User) && prog.serviceConfig.StandardInput == "null"
+                                && prog.serviceConfig.StandardOutput == "tty" && prog.serviceConfig.TTYPath == "/dev/tty1"
+                                && prog.serviceConfig.PrivateNetwork && prog.serviceConfig.CapabilityBoundingSet == "" && prog.serviceConfig.NoNewPrivileges
+                                && prog.before == [ "getty@tty1.service" ] && prog.unitConfig.ConditionPathExists == "!/var/lib/agent-os/seal/sealed"
+                                && prog.serviceConfig.Type == "oneshot" && lib.hasSuffix " 7860" prog.serviceConfig.ExecStart)
+            "setup-window: the progress unit must be output-only, unprivileged, offline, and finish before tty1's getty";
+          # THE DOORS ARE ALL THE DOORS: a system unit running as the agent's account, or an sshd, next
+          # to the window must fail evaluation (the product path has neither).
+          assert lib.assertMsg (let
+                                  mine = c: c.system.build.agosWindowDoorAssertions;      # the same list the module asserts
+                                  holds = c: lib.all (a: a.assertion) (mine c);
+                                  withUnit = (mkSystem [ { agentos.cleanRoom.setupWindow.enable = true;
+                                                           systemd.services.stray = { serviceConfig = { User = "agent"; ExecStart = "/bin/true"; }; }; } ]).config;
+                                  withSshd = (mkSystem [ { agentos.cleanRoom.setupWindow.enable = true; services.openssh.enable = true; } ]).config;
+                                  # An instance drop-in masks the template's (same file name): the gate would be gone on tty5,
+                                  # the start condition on uid 1000. A second break-glass-style console is fine.
+                                  withGetty = (mkSystem [ { agentos.cleanRoom.setupWindow.enable = true;
+                                                            systemd.services."getty@tty5".serviceConfig.Environment = "X=1"; } ]).config;
+                                  withUser = (mkSystem [ { agentos.cleanRoom.setupWindow.enable = true;
+                                                           systemd.services."user@1000".serviceConfig.Environment = "X=1"; } ]).config;
+                                  withAuto = (mkSystem [ { agentos.cleanRoom.setupWindow.enable = true;
+                                                           systemd.services."serial-getty@ttyS0".serviceConfig.ExecStart = [ "" "/bin/agetty --autologin agent %I" ]; } ]).config;
+                                  withOwn = (mkSystem [ { agentos.cleanRoom.setupWindow.enable = true;
+                                                          systemd.services."getty@tty5".serviceConfig.ExecStart = [ "" "/bin/agetty --noclear %I" ]; } ]).config;
+                                in lib.length (mine on) == 4 && holds on && !(holds withUnit) && !(holds withSshd)
+                                   && !(holds withGetty) && !(holds withUser) && !(holds withAuto) && holds withOwn)
+            "setup-window: with the window on, a unit running as the agent's account, an sshd, or an instance unit that masks a gate must be refused at evaluation";
+          # OFF and SEALED-BY-BUILD: none of it.
+          assert lib.assertMsg (lib.all (c: !(c.systemd.services ? agentos-seal) && !(c.systemd.services ? agentos-setup-progress)
+                                            && !(c.systemd.services ? "getty@tty1") && c.services.getty.loginProgram == realLogin
+                                            && !(c.systemd.services."user@".serviceConfig ? ExecCondition))
+                                        [ off onSealed ])
+            "setup-window: with the window off, or on a box sealed by build, no console is gated and none of the units exist";
           assert lib.assertMsg (win.serviceConfig.TimeoutStopSec == "180s")
             "setup-window: the window unit's stop timeout must exceed the lock wait (150 s), or the shutdown stamp is killed";
           assert lib.assertMsg (lib.count (l: l == "set setup_uid {") cOn == 1 && lib.count (l: l == r1) cOn == 1 && lib.count (l: l == r2) cOn == 1
@@ -2294,8 +2384,30 @@
           p.runCommand "setup-window-check" { nativeBuildInputs = [ p.python3 ]; } ''
             work="$(mktemp -d)"; mkdir -p "$work/modules" "$work/tests"
             cp ${./modules/agos_window.py} "$work/modules/agos_window.py"
+            cp ${./modules/agos_setup_progress.py} "$work/modules/agos_setup_progress.py"
             cp ${./tests/agos-window-battery.py} "$work/tests/agos-window-battery.py"
-            ( cd "$work"; python3 tests/agos-window-battery.py )
+            ( cd "$work"; python3 tests/agos-window-battery.py </dev/null )
+            # Slice 3b part 1: the gates as files. (The sandbox has no /run/agentos-setup: the token is absent.)
+            grep -qF -- '--login-program ${gate} ' ${gettyScript on} || { echo "setup-window: getty@ (every virtual terminal) does not go through the gate" >&2; exit 1; }
+            ! grep -qF -- '${realLogin}' ${gettyScript on} || { echo "setup-window: getty@ still names the real login" >&2; exit 1; }
+            grep -qF -- '--login-program ${realLogin} ' ${gettyScript off} || { echo "setup-window would false-PASS: the window-off getty has no login program to compare with" >&2; exit 1; }
+            grep -qxF '  exec ${realLogin} "$@"' ${gate} && [ "$(grep -c 'exec ' ${gate})" = 1 ] || { echo "setup-window: the gate must exec the real login, once, with its arguments" >&2; exit 1; }
+            [ "$(grep -o '/run/agentos-setup/login-ok' ${gate} | wc -l)" = 2 ] && [ "$(grep -o '/run/agentos-setup/login-ok' ${on.system.build.agosUserGate} | wc -l)" = 2 ] \
+              && grep -qF '[ -f /run/agentos-setup/login-ok ] && [ ! -L /run/agentos-setup/login-ok ]' ${gate} \
+              && grep -qF '[ -f /run/agentos-setup/login-ok ] && [ ! -L /run/agentos-setup/login-ok ]' ${on.system.build.agosUserGate} || {
+              echo "setup-window: both gates must test the token twice (a plain file, and not a symlink)" >&2; exit 1; }
+            ${on.system.build.agosUserGate} 0 || { echo "setup-window: uid 0 must pass the user-manager gate" >&2; exit 1; }
+            for u in 1000 1 65534 ""; do
+              if ${on.system.build.agosUserGate} "$u"; then echo "setup-window: uid '$u' passed the user-manager gate with no token" >&2; exit 1; fi
+            done
+            # `set +e` inside: the subshell inherits errexit, and the gate's exit 1 would end it before the echo.
+            refusal="$( ( set +e; ${gate} -f agent; echo "rc=$?" ) 2>&1 )"       # (not `out`: that is the build's output path)
+            echo "$refusal" | grep -q 'This console opens when setup has finished' && echo "$refusal" | grep -qx 'rc=1' || {
+              echo "setup-window: with no token the login gate must refuse and exit 1: $refusal" >&2; exit 1; }
+            if grep -q '@AGOS_PROGRESS_INSTALLED@' ${on.system.build.agosSetupProgress}/libexec/agos_setup_progress.py; then
+              echo "setup-window: the placeholder survived in the installed progress program" >&2; exit 1; fi
+            grep -aqF -- "--add-flags '-I ${on.system.build.agosSetupProgress}/libexec/agos_setup_progress.py'" ${on.system.build.agosSetupProgress}/libexec/agentos-setup-progress || {
+              echo "setup-window: the progress wrapper must run python3 -I" >&2; exit 1; }
             if grep -q '@AGOS_WINDOW_CONFIG@' ${on.system.build.agosWindow}/libexec/agos_window.py; then
               echo "setup-window: the placeholder survived in the installed copy" >&2; exit 1; fi
             grep -aqF -- "--add-flags '-I ${on.system.build.agosWindow}/libexec/agos_window.py'" ${on.system.build.agosWindow}/libexec/agentos-setup-window || {

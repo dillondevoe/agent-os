@@ -15,6 +15,17 @@
 #   agentos-setup-window seal WHY    flush the set, end the fetcher's open connections (restart it),
 #                                    stop the pull and its retry timer (which refuse to start again once
 #                                    the marker exists), write the `sealed` marker. Idempotent.
+#   agentos-setup-window wait        agentos-seal.service, which every agent console and the agent's
+#                                    user manager start after: return once the box is SEALED. While
+#                                    the window is open in this boot it waits for the one detector
+#                                    (the fetcher's own GET /api/tags on loopback lists the configured
+#                                    model) and then seals; the tick ends the wait by sealing on the
+#                                    budget. A window that is not open in this boot is sealed at once.
+#   agentos-setup-window ended       that unit's ExecStopPost. If the wait TIMED OUT (the tick should
+#                                    have sealed long before: it is the backstop behind the tick), seal.
+#                                    Any other end does nothing: a shutdown stops the wait too, and a
+#                                    reboot inside the window must reopen it with what is left. The
+#                                    agent stays absent either way, because nothing wrote the token.
 #   agentos-setup-window status      print the state (read-only).
 #
 # THE WINDOW IS A BUDGET OF OPEN SECONDS, not a wall-clock deadline: a box with no RTC battery boots
@@ -44,6 +55,19 @@
 # fails, nothing else in the seal happens and there is no marker: the budget is still spent, so the
 # next tick tries again, a minute later, for as long as it takes.
 #
+# THE AGENT DOES NOT EXIST WHILE THE WINDOW IS OPEN (spec 2.4). The fetcher is the model server: with
+# the window open it can reach DNS and 443, and anything that can talk to it on loopback can make it
+# send chosen bytes to a chosen host (`/api/pull`). So the agent's account gets no process until the
+# box is sealed. This program holds its half of that with one file, <run_dir>/login-ok:
+#   - it is written ONLY under the state lock, ONLY when a valid marker is on disk AND nft has just
+#     confirmed the set is empty. /run is a tmpfs, so every boot starts without it;
+#   - every agent console's login program and the user manager's start condition require it
+#     (setup-window.nix). Absent means closed, whatever else did or did not run;
+#   - once it exists the window cannot open again in this boot: `recompute` refuses. Removing the
+#     state files re-provisions the box at the NEXT boot, never under a running agent.
+# <run_dir>/status is one line for the console (open and how long is left, or sealed and why). It is
+# display only: nothing decides anything from it.
+#
 # FAIL DIRECTION. Anything this cannot read, parse or decide ends with the set empty. A state
 # directory that cannot be written means the window does not open, and a tick that cannot write
 # closes it. A `sealed` marker that is present but malformed is "the wall is DOWN" (seal-check acts on
@@ -51,13 +75,16 @@
 #
 # Paths, the fetch uid, the window length and the tools are compiled in by setup-window.nix. The
 # literal placeholder means "repo copy", and only the repo copy reads AGOS_WINDOW_CONFIG (tests).
-import fcntl, hashlib, json, os, subprocess, sys, time
+import fcntl, hashlib, json, os, signal, subprocess, sys, time
 
 CONFIG_JSON = "@AGOS_WINDOW_CONFIG@"
 
 FLOOR = 60                 # seconds every boot that opens the window is charged, at least
 LOCK_WAIT = 150            # seconds to wait for the state lock (a seal holds it while it restarts the fetcher)
 STATE_MAX = 4096           # bytes of a state file
+POLL = 5                   # seconds between looks while the seal waits for the model
+PROBE_LIMIT = 15           # seconds, in all, one look at the fetcher's model list may take
+TAGS_MAX = 4 << 20         # bytes of that list we are willing to read
 SCHEMA = 1
 
 
@@ -208,6 +235,127 @@ def _nap(seconds):
     select.select([], [], [], seconds)
 
 
+# ── what the rest of the box reads (/run: gone at every boot) ─────────────────────────────────────
+def _run_path(c, name):
+    d = c.get("run_dir")
+    return os.path.join(d, name) if d else None
+
+
+def logins_enabled(c):
+    """Has this boot been sealed with the set confirmed empty? Anything at all at that path counts:
+    the answer only ever REFUSES an open."""
+    p = _run_path(c, "login-ok")
+    return bool(p) and os.path.lexists(p)
+
+
+def _allow_logins(c):
+    """Write the token. Callers hold the state lock and have a valid marker and a confirmed flush."""
+    p = _run_path(c, "login-ok")
+    if not p:
+        return True                                  # no consoles are gated on this box (tests of the core)
+    try:
+        import stat
+        fd = os.open(p, os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, 0o644)
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):       # the gates test for a plain file
+                raise OSError("not a plain file")
+            os.fchmod(fd, 0o644)
+        finally:
+            os.close(fd)
+        return True
+    except OSError as e:
+        log("sealed, but the login token could not be written (%s); the agent stays withheld" % e.__class__.__name__)
+        return False
+
+
+def _status(c, **fields):
+    """One line for the console. Best effort, never decides anything."""
+    p = _run_path(c, "status")
+    if not p:
+        return
+    try:
+        tmp = "%s.tmp.%d" % (p, os.getpid())
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW | os.O_CLOEXEC, 0o644)
+        try:
+            os.fchmod(fd, 0o644)
+            os.write(fd, (json.dumps(fields, sort_keys=True) + "\n").encode("ascii"))
+        finally:
+            os.close(fd)
+        os.rename(tmp, p)
+    except OSError:
+        pass
+
+
+def _sealed_ok(c, flushed, reason):
+    """A valid marker is on disk. 0 only if nft also confirmed the set is empty; only then may the
+    agent's account log in."""
+    if not flushed:
+        return 1
+    _status(c, state="sealed", reason=str(reason)[:40])
+    return 0 if _allow_logins(c) else 1
+
+
+# ── the one detector ────────────────────────────────────────────────────────────────────────────
+class _Deadline(Exception):
+    pass
+
+
+def _alarm(*_):
+    raise _Deadline()
+
+
+def tags_list_model(body, want):
+    """Does this /api/tags body list the model, by its exact name? A name with no tag is `:latest`.
+    A half-pulled model is not in the list at all, so it cannot be mistaken for one."""
+    if not isinstance(want, str) or not want or len(body) > TAGS_MAX:
+        return False
+    names = (want,) if ":" in want else (want, want + ":latest")
+    try:
+        doc = json.loads(body.decode("utf-8"))
+    except ValueError:
+        return False
+    models = doc.get("models") if isinstance(doc, dict) else None
+    if not isinstance(models, list):
+        return False
+    for m in models:
+        if isinstance(m, dict) and any(isinstance(m.get(k), str) and m[k] in names for k in ("name", "model")):
+            return True
+    return False
+
+
+def _ask(c):
+    import http.client
+    conn = http.client.HTTPConnection("127.0.0.1", int(c.get("tags_port", 11434)), timeout=5)
+    try:
+        conn.request("GET", "/api/tags", headers={"Connection": "close"})
+        r = conn.getresponse()
+        if r.status != 200:
+            return False
+        return tags_list_model(r.read(TAGS_MAX + 1), c.get("model"))
+    finally:
+        conn.close()
+
+
+def model_present(c):
+    """Ask the fetcher itself, on loopback, with a hard limit on the whole exchange. It has been on
+    the network, so its answer is read as data from a stranger: bounded, parsed, and any doubt is
+    "no". Lying "yes" seals the box early; lying "no" changes nothing, the budget closes the window.
+
+    The limit is an alarm that raises. Wherever it lands, including in a cleanup, the answer is "no":
+    the outer handler below is the only way out of here with an exception in flight."""
+    old = signal.signal(signal.SIGALRM, _alarm)
+    try:
+        try:
+            signal.setitimer(signal.ITIMER_REAL, PROBE_LIMIT)
+            return _ask(c)
+        finally:
+            signal.setitimer(signal.ITIMER_REAL, 0)
+    except Exception:                                # a refusal, a bad answer, the deadline: all "no"
+        return False
+    finally:
+        signal.signal(signal.SIGALRM, old)
+
+
 # ── the decision (pure: no clocks, files or tools inside) ───────────────────────────────────────
 def remaining_now(state, now_mono):
     """What is left of the budget for a window opened in THIS boot. Idempotent."""
@@ -293,11 +441,19 @@ def _seal(c, reason):
     flushed = close_set(c)
     if c.get("sealed_by_build"):
         return 0 if flushed else 1
-    status, _ = load_sealed(c)
+    status, marker = load_sealed(c)
     if status == "valid":
-        return 0 if flushed else 1
+        return _sealed_ok(c, flushed, marker["reason"])
     if status == "malformed":
         log("seal refused: the sealed marker is malformed (wall DOWN)")
+        _status(c, state="down")
+        return 1
+    if logins_enabled(c):
+        # No marker, yet this boot WAS sealed (the token says so): someone with root removed the state
+        # to re-provision the box and has not restarted it. Whoever asks (the tick on a spent budget,
+        # the wait, a timeout), a fresh marker here would undo that for good. The set is empty and
+        # stays empty (recompute refuses to open); the next boot decides.
+        log("seal refused: no marker, but this boot was already sealed; a re-provisioning takes effect at the next boot")
         return 1
     if not flushed:
         log("seal: nft did not confirm the flush; NOT sealed (no marker); the next tick tries again")
@@ -316,7 +472,7 @@ def _seal(c, reason):
         log("seal: the set is empty but the marker could not be written (%s)" % e.__class__.__name__)
         return 1
     log("sealed reason=%s set_flushed=1" % reason)
-    return 0
+    return _sealed_ok(c, True, reason)
 
 
 def recompute(c):
@@ -338,14 +494,25 @@ def _recompute(c):
         return 1
     act = decide(c, sealed, window, boot_id, time.monotonic(), time.time())
     if act[0] == "empty":
-        return 0 if close_set(c) else 1
+        flushed = close_set(c)
+        if sealed[0] == "valid":
+            return _sealed_ok(c, flushed, sealed[1]["reason"])
+        return 0 if flushed else 1                   # sealed by build: no marker, no consoles gated here
     if act[0] == "down":
         close_set(c)
         log("recompute: " + act[1])
+        _status(c, state="down")
         return 1
     if act[0] == "seal":
         return _seal(c, act[1])
     state, kind = act[1], act[2]
+    if logins_enabled(c):
+        # This boot was sealed and the agent's account may be logged in. The state on disk says "open"
+        # (someone removed the marker): that is a re-provisioning, and it takes effect at the next boot.
+        close_set(c)
+        log("recompute: the state says open, but this boot was already sealed and logins are enabled; "
+            "the window stays closed until a reboot")
+        return 1
     try:
         _write(os.path.join(c["state_dir"], "window.json"), state)      # the books first: no state, no window
     except OSError as e:
@@ -357,6 +524,7 @@ def _recompute(c):
         log("recompute: nft refused the open; the window stays closed")
         return 1
     log("window %s remaining=%d boots=%d" % (kind, int(state["remaining"]), state["boots"]))
+    _status(c, state="open", remaining=int(state["remaining"]))
     return 0
 
 
@@ -373,10 +541,13 @@ def tick(c, final=False):
 
 def _tick(c, final):
     sealed, window = load_sealed(c), load_window(c)
-    if c.get("sealed_by_build") or sealed[0] == "valid":
+    if c.get("sealed_by_build"):
         return 0 if close_set(c) else 1              # sealed: nothing to count, keep the set empty
+    if sealed[0] == "valid":
+        return _sealed_ok(c, close_set(c), sealed[1]["reason"])
     if sealed[0] == "malformed":
         close_set(c)
+        _status(c, state="down")
         return 1                                     # the wall is DOWN (seal-check acts on it)
     if final:
         if window[0] == "valid" and window[1]["boot_id"] == _boot_id(c):
@@ -407,11 +578,94 @@ def _tick(c, final):
     # suspended, so a box that slept through its deadline must not wake with its window still open.
     now_wall = time.time()
     late = now_wall > c["build_epoch"] and s["wall_deadline"] is not None and now_wall > s["wall_deadline"]
+    if left > 0 and not late:
+        _status(c, state="open", remaining=int(left))
     if left <= 0 or late:
         close_set(c)                                 # first, and by itself
         log("tick: the %s; window closed" % ("budget is spent" if left <= 0 else "deadline has passed"))
         return _seal(c, "budget" if left <= 0 else "deadline")
     return 0
+
+
+def wait(c):
+    """agentos-seal.service. Return 0 only when the box is sealed: a valid marker on disk, the set
+    confirmed empty, the login token written. Everything that starts a process for the agent's
+    account is ordered after this, so 0 is the one way the agent comes to exist.
+
+    The wait ends at the FIRST seal it attempts, successful or not: a seal that fails leaves this
+    unit failed and the agent withheld until something starts the unit again (the tick goes on
+    closing the window on its budget). It never loops on a failing seal, which would restart the
+    fetcher every few seconds."""
+    if c.get("sealed_by_build"):
+        return 0 if close_set(c) else 1
+    r = _wait(c)
+    if r != 0:
+        _status(c, state="failed")                   # tty1 is told; its getty does not follow a failed wait
+    return r
+
+
+def _wait(c):
+    while True:
+        with _Lock(c) as lock:
+            if not lock.held:
+                close_set(c)
+                log("wait: the state lock could not be taken; the agent stays withheld")
+                return 1
+            r = _look(c)
+        if r is not None:
+            return r
+        if model_present(c):                         # outside the lock: it talks to the fetcher
+            return seal(c, "complete")               # idempotent if the tick sealed in between
+        _nap(POLL)
+
+
+def _look(c):
+    """Under the lock. 0 / 1 = the wait is over; None = the window is open in this boot, keep waiting."""
+    sealed, window = load_sealed(c), load_window(c)
+    if sealed[0] == "valid":
+        return _sealed_ok(c, close_set(c), sealed[1]["reason"])
+    if sealed[0] == "malformed":
+        close_set(c)
+        _status(c, state="down")
+        return 1
+    if logins_enabled(c):
+        # No marker, but this boot WAS sealed: a re-provisioning in progress (see _seal, which refuses
+        # the same state for every caller). Here it also keeps the wait from sitting on a window.json
+        # that still says "open": there is nothing to wait for until the reboot.
+        close_set(c)
+        log("wait: no marker, but this boot was already sealed; a re-provisioning takes effect at the next boot")
+        return 1
+    boot_id = _boot_id(c)
+    if boot_id:
+        act = decide(c, sealed, window, boot_id, time.monotonic(), time.time())
+        if act[0] == "seal":
+            return _seal(c, act[1])
+        if act[0] == "open" and act[2] == "re-derived":
+            return None
+    # The books do not say a window was opened in THIS boot (recompute did not run, failed, or
+    # refused). Nothing can fetch a model, so there is nothing to wait for: seal.
+    return _seal(c, "not open")
+
+
+def ended(c):
+    """ExecStopPost of agentos-seal.service. It runs however the wait ended, and acts in ONE case: the
+    wait timed out. The unit's timeout is the budget plus a margin, so by then the tick should have
+    sealed; this is the backstop behind a tick that did not.
+
+    Every other end is left alone, on purpose. systemd stops the wait at every shutdown, and a reboot
+    inside the window must reopen it with the budget that is left, not find the box sealed. A wait
+    that was killed or crashed leaves the window to the tick. In all of those the agent is still
+    absent: only a seal writes the login token, and none happened.
+
+    (systemd also says "timeout" when a STOP times out. The wait dies on SIGTERM and holds nothing
+    that outlives it, so its stop cannot take TimeoutStopSec; if it ever did, at a shutdown, the cost
+    is the one this function exists to avoid: a sealed box. Safe direction, wrong outcome.)"""
+    if os.environ.get("SERVICE_RESULT") != "timeout":
+        return 0
+    r = seal(c, "timeout")
+    if r != 0:
+        _status(c, state="failed")
+    return r
 
 
 def status(c):
@@ -427,12 +681,13 @@ def status(c):
 
 def main(argv):
     role = argv[1] if len(argv) > 1 else ""
-    if role in ("recompute", "tick", "stop", "status") and len(argv) == 2:
+    if role in ("recompute", "tick", "stop", "status", "wait", "ended") and len(argv) == 2:
         c = config()
-        return {"recompute": recompute, "tick": tick, "stop": lambda c: tick(c, final=True), "status": status}[role](c)
+        return {"recompute": recompute, "tick": tick, "stop": lambda c: tick(c, final=True), "status": status,
+                "wait": wait, "ended": ended}[role](c)
     if role == "seal" and len(argv) == 3 and argv[2] in ("complete", "budget", "deadline", "invalid state", "timeout"):
         return seal(config(), argv[2])
-    sys.stderr.write("usage: agos_window.py recompute | tick | stop | seal <complete|budget|deadline|timeout> | status\n")
+    sys.stderr.write("usage: agos_window.py recompute | tick | stop | wait | ended | seal <complete|budget|deadline|timeout> | status\n")
     return 2
 
 

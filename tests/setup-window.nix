@@ -15,7 +15,7 @@
 #   W4  with the window unit stopped, a reloaded ruleset is the sealed one: the set is empty and the
 #       fetcher's uid cannot reach 443. Starting the unit reopens without a new charge.
 #   W5  a reboot inside the window reopens it with what was left, less one floor: not a fresh budget.
-#   W6  the budget runs out: the box seals itself (the tick flushes the set and writes the marker), the
+#   W6  the budget (or the wall deadline, whichever a look catches first) runs out: the box seals itself, the
 #       fetcher is restarted, the pull and its retry timer are stopped and cannot start again, and the
 #       fetcher's uid cannot reach 443 any more. A CONNECTION OPENED INSIDE THE WINDOW AND HELD ACROSS
 #       THE SEAL IS DEAD (the spec's setup-window-seal-ends-flow): sealed means no egress, not "no new
@@ -108,7 +108,9 @@ pkgs.testers.runNixOSTest {
 
     box.start()
     peer.start()
-    box.wait_for_unit("multi-user.target")
+    # Not multi-user.target: with the window open the agent's getty, and so that target, wait for the
+    # seal (slice 3b; tests/seal-wait.nix). The window unit is what this test is about.
+    box.wait_for_unit("agentos-setup-window.service")
     peer.wait_for_unit("multi-user.target")
     peer.wait_for_open_port(443)
     peer.wait_for_open_port(80)
@@ -199,7 +201,6 @@ pkgs.testers.runNixOSTest {
     before = window()
     box.shutdown()
     box.start()
-    box.wait_for_unit("multi-user.target")
     box.wait_for_unit("agentos-setup-window.service")
     wait_open()
     w5 = window()
@@ -216,7 +217,12 @@ pkgs.testers.runNixOSTest {
     ollama_before = box.succeed("systemctl show -p ActiveEnterTimestampMonotonic --value ollama.service").strip()
     box.wait_until_succeeds(f"test -e {STATE}/sealed", timeout=int(w5["remaining"]) + 150)
     marker = json.loads(box.succeed(f"cat {STATE}/sealed"))
-    assert marker["reason"] == "budget" and marker["toplevel"].startswith("/nix/store/") and len(marker["ruleset_sha256"]) == 64, f"W6: {marker}"
+    # "budget" or "deadline": the open-seconds budget and the wall-clock deadline both end about now
+    # (the deadline is the first opening plus the window length; a reboot's downtime counts against it
+    # and not against the budget, the per-boot floor the other way round). Which one a look catches
+    # first depends on how long the boots took; since slice 3b the wait looks every few seconds, not
+    # only the tick once a minute. Either is the box sealing itself on time. (CI sealed on the deadline.)
+    assert marker["reason"] in ("budget", "deadline") and marker["toplevel"].startswith("/nix/store/") and len(marker["ruleset_sha256"]) == 64, f"W6: {marker}"
     assert marker["toplevel"] == box.succeed("readlink -f /run/current-system").strip(), "W6: the marker names another system"
     assert elements() == [], f"W6: sealed with a non-empty set: {elements()}"
     assert curl("ollama", 443) == 28, "W6: the fetcher's uid still reaches 443 after the seal"
@@ -228,8 +234,7 @@ pkgs.testers.runNixOSTest {
     box.fail("systemctl is-active --quiet agent-os-pull-model.timer")
     box.fail("systemctl start agent-os-pull-model.timer && systemctl is-active --quiet agent-os-pull-model.timer")   # the marker's condition
     assert box.succeed("systemctl show -p ConditionResult --value agent-os-pull-model.timer").strip() == "no", "W6: the retry timer can start on a sealed box"
-    box.succeed("journalctl -t agos-window --no-pager | grep -q 'tick: the budget is spent; window closed'")
-    box.succeed("journalctl -t agos-window --no-pager | grep -q 'sealed reason=budget set_flushed=1'")
+    box.succeed(f"journalctl -t agos-window --no-pager | grep -q 'sealed reason={marker['reason']} set_flushed=1'")
 
     # W7 — sealed stays sealed
     for verb in ("reload", "restart"):
@@ -245,8 +250,10 @@ pkgs.testers.runNixOSTest {
     assert box.succeed("systemctl show -p ConditionResult --value agent-os-pull-model.timer").strip() == "no", "W7: the retry timer is back after a reboot"
     assert json.loads(box.succeed(f"cat {STATE}/sealed")) == marker, "W7: the marker changed"
 
-    # W8 — root removes the state (the re-provisioning path); a garbage window.json seals
-    box.succeed(f"rm {STATE}/sealed && echo garbage > {STATE}/window.json && systemctl restart agentos-setup-window.service")
+    # W8 — root removes the state (the re-provisioning path); a garbage window.json seals. In a boot
+    # that was already sealed nothing is sealed again (slice 3b: a re-provisioning waits for the
+    # reboot), so the test stands in for the new boot by removing the login token, as W10 does.
+    box.succeed(f"rm {STATE}/sealed /run/agentos-setup/login-ok && echo garbage > {STATE}/window.json && systemctl restart agentos-setup-window.service")
     assert json.loads(box.succeed(f"cat {STATE}/sealed"))["reason"] == "invalid state" and elements() == [], "W8"
 
     # W9 — an empty `sealed` is neither a seal nor a first boot
@@ -256,8 +263,10 @@ pkgs.testers.runNixOSTest {
     box.fail(f"test -e {STATE}/window.json")
     box.succeed("journalctl -t agos-window --no-pager | grep -q 'the sealed marker is malformed'")
 
-    # W10 — a first boot with no clock battery
-    box.succeed(f"rm -f {STATE}/sealed {STATE}/window.json; systemctl stop systemd-timesyncd.service 2>/dev/null || true")
+    # W10 — a first boot with no clock battery. This boot was sealed, and a sealed boot refuses to open
+    # again (slice 3b: the agent may be running). A first boot has no login token: /run is new. The
+    # test stands in for that by removing it, which only root can do.
+    box.succeed(f"rm -f {STATE}/sealed {STATE}/window.json /run/agentos-setup/login-ok; systemctl stop systemd-timesyncd.service 2>/dev/null || true")
     box.succeed("date -s '1970-01-02 00:00:00' && test $(date +%Y) = 1970")
     box.succeed("systemctl reset-failed agentos-setup-window.service; systemctl restart agentos-setup-window.service")
     wait_open()
