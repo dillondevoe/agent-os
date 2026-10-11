@@ -288,6 +288,16 @@
           pkgs = nixpkgs.legacyPackages.${system};
         };
 
+        # Choosing a DESKTOP at first login on a UEFI machine with a real boot loader (slice 2; the
+        # proof spec section 3.2 asked for): the answer becomes the boot default by selecting the
+        # specialisation's existing boot entry, the machine reboots into it once, no generation is
+        # created, a stale default falls back to the image's own desktop and is re-asserted, and the
+        # agent cannot change any of it. Out of `checks` (boots a VM, five times).
+        #   nix build .#test-surface-boot-default
+        test-surface-boot-default = import ./tests/surface-boot-default.nix {
+          pkgs = nixpkgs.legacyPackages.${system};
+        };
+
         test-app-approve-confirm = import ./tests/app-approve-confirm.nix {
           pkgs = nixpkgs.legacyPackages.${system};
           inherit baseModules;
@@ -1680,6 +1690,33 @@
             ap = on.systemd.services.agentos-surface-apply;
             su = on.users.users.agentos-setup;
           in
+          # Slice 2: one specialisation per offered desktop other than the image's own; each child runs
+          # that desktop, still names the parent's as the default, carries its own copy of the program
+          # with `this_desktop` compiled in, and has no specialisations of its own.
+          assert lib.assertMsg (lib.attrNames on.specialisation == [ "none" "sway" ]
+                                && lib.all (n: let ch = on.specialisation.${n}.configuration; in
+                                     ch.agentos.desktop == n && ch.agentos.firstLogin.defaultDesktop == "hyprland"
+                                     && ch.isSpecialisation && ch.specialisation == { }
+                                     && ch.agentos.firstLogin.desktops == on.agentos.firstLogin.desktops
+                                     && ch.system.build.agosChoice.drvPath != pkg.drvPath) [ "none" "sway" ]
+                                && dflt.specialisation == { })
+            "surface-choice: with first login on, the offered desktops other than the image's own must be specialisations (and none exist with it off)";
+          assert lib.assertMsg (builtins.tryEval (builtins.deepSeq on.system.build.toplevel.drvPath true)).success
+            "surface-choice: the image with its desktop specialisations must evaluate end to end";
+          assert lib.assertMsg (!(builtins.tryEval (builtins.deepSeq
+                                  (mkOpenSystem [ { agentos.firstLogin.enable = true; agentos.firstLogin.desktops = [ "sway" ]; } ]).config.system.build.toplevel.drvPath true)).success)
+            "surface-choice: offering desktops without the image's own must fail evaluation";
+          assert lib.assertMsg (let bd = on.systemd.services.agentos-boot-default; in
+                                bd.serviceConfig.ExecStart == "${pkg}/libexec/agentos-boot-default" && !(bd.serviceConfig ? User)
+                                && bd.unitConfig.ConditionPathExists == "/sys/firmware/efi/efivars"
+                                && lib.elem "agentos-surface-apply.service" bd.after && lib.elem "getty@tty1.service" bd.before
+                                && bd.serviceConfig.ProtectSystem == "strict" && bd.serviceConfig.PrivateNetwork
+                                && bd.serviceConfig.ReadWritePaths == [ "-/run/agentos-surface" ]
+                                && !(bd.serviceConfig ? StandardInput)
+                                && ap.serviceConfig.RuntimeDirectory == "agentos-surface" && ap.serviceConfig.RuntimeDirectoryPreserve == "yes"
+                                && lib.hasInfix "libexec/agentos-boot-default --system \"$systemConfig\"" on.system.activationScripts.agentosBootDefault.text
+                                && !(dflt.systemd.services ? agentos-boot-default) && !(dflt.system.activationScripts ? agentosBootDefault))
+            "surface-choice: the boot-default unit (after the helper, before the agent's getty, EFI only, no terminal) or its activation re-assert is wrong";
           assert lib.assertMsg (!dflt.agentos.firstLogin.enable && !(dflt.systemd.services ? agentos-firstlogin)
                                 && !(dflt.systemd.services ? agentos-surface-apply) && !(dflt.users.users ? agentos-setup))
             "surface-choice: with first login off (the default) none of it may exist";
@@ -1726,7 +1763,12 @@
             c = m.config()
             assert c["offered"]["terminal"] == ["alacritty", "foot", "ghostty", "kitty"], c["offered"]
             assert c["offered"]["shell"] == ["bash", "fish", "zsh"], c["offered"]
-            assert c["offered"]["desktop"] == [c["defaults"]["desktop"]] == ["hyprland"], c["offered"]
+            assert c["offered"]["desktop"] == ["hyprland", "sway", "none"], c["offered"]
+            assert c["default_desktop"] == c["this_desktop"] == "hyprland", c
+            assert c["entries"] == "/boot/loader/entries" and c["profiles"] == "/nix/var/nix/profiles", c
+            assert c["bootctl"].startswith("/nix/store/") and c["bootctl"].endswith("/bin/bootctl"), c["bootctl"]
+            assert c["systemctl"].startswith("/nix/store/") and c["applied_marker"] == "/run/agentos-surface/applied", c
+            assert "efivars" not in c and "store_prefix" not in c and "current_system" not in c, c
             assert c["defaults"] == {"desktop": "hyprland", "terminal": "kitty", "shell": "bash"}, c["defaults"]
             assert c["store"] == "/var/lib/agent-os/surface.toml" and c["tokens"] == "/run/agentos-firstlogin/choice", c
             assert c["tokens_user"] == "agentos-setup" and "tokens_uid" not in c and "store_uid" not in c and "store_dev" not in c, c
@@ -1736,13 +1778,13 @@
                 assert sorted(c["exec"][kind]) == c["offered"][kind], kind
             print("surface-choice: installed configuration ok")
             PY
-            for w in libexec/agentos-firstlogin:firstlogin libexec/agentos-surface-apply:apply bin/agentos-terminal:terminal bin/agentos-shell:shell bin/agentos-surface:read; do
+            for w in libexec/agentos-firstlogin:firstlogin libexec/agentos-surface-apply:apply libexec/agentos-boot-default:boot-default bin/agentos-terminal:terminal bin/agentos-shell:shell bin/agentos-surface:read; do
               # A binary wrapper carries the command that built it as text.
               grep -aqF -- "--add-flags '-I ${pkg}/libexec/agos_choice.py ''${w##*:}'" ${pkg}/''${w%%:*} || {
                 echo "surface-choice: ''${w%%:*} must run python3 -I with the role ''${w##*:} fixed" >&2; exit 1; }
             done
             # The two roles only the units run are not on anyone's PATH.
-            for priv in agentos-firstlogin agentos-surface-apply; do
+            for priv in agentos-firstlogin agentos-surface-apply agentos-boot-default; do
               if [ -e ${pkg}/bin/$priv ]; then echo "surface-choice: $priv must not be in bin (it is on the agent's PATH there)" >&2; exit 1; fi
             done
             grep -qF 'hl.bind("SUPER+RETURN",  hl.dsp.exec_cmd("${pkg}/bin/agentos-terminal"))' ${on.system.build.hyprlandConf} || {

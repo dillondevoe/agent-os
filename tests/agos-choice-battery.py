@@ -25,6 +25,12 @@
 #   J. The installed copy (placeholder substituted) ignores AGOS_CHOICE_CONFIG.
 #   K. A compiled-in default that is not offered is refused at start; the placeholder appears once.
 #   L. Writes are atomic: no temp file is left, the file and its directory are fsynced.
+#   M. The boot default: the entry chosen is the one whose `options` boots the wanted specialisation OF
+#      THE RUNNING GENERATION (from the parent, from inside another specialisation, and after a
+#      rollback to an older generation); the image's default desktop clears the default; a look-alike
+#      entry is not matched; no entry, no generation, or no EFI variables means bootctl is not run; a
+#      bad store means the image default; `--system` must be a system in the store; a reboot happens
+#      only for a choice made on this boot that differs from the running desktop, and only once.
 #
 # stdlib only.
 
@@ -48,6 +54,15 @@ STORE = os.path.join(TMP, "state", "surface.toml"); os.makedirs(os.path.dirname(
 RUN = os.path.join(TMP, "run"); os.makedirs(RUN)
 TOKENS = os.path.join(RUN, "choice")
 ME = os.getuid()
+EFIVARS = os.path.join(TMP, "efivars"); os.makedirs(EFIVARS)
+NIXSTORE = os.path.join(TMP, "nix-store"); os.makedirs(NIXSTORE)
+PROFILES = os.path.join(TMP, "profiles"); os.makedirs(PROFILES)
+ENTRIES = os.path.join(TMP, "esp", "loader", "entries"); os.makedirs(ENTRIES)
+CURRENT = os.path.join(TMP, "current-system")
+TOOLBIN = os.path.join(TMP, "toolbin"); os.makedirs(TOOLBIN)
+TOOLLOG = os.path.join(TMP, "tools.log")
+BOOTCTL, SYSTEMCTL = os.path.join(TOOLBIN, "bootctl"), os.path.join(TOOLBIN, "systemctl")
+MARKER = os.path.join(TMP, "run", "applied")
 passed = []
 
 
@@ -68,7 +83,11 @@ def cfg(**over):
                                "ghostty": "/store/ghostty/bin/ghostty", "alacritty": "/store/alacritty/bin/alacritty"},
                   "shell": {"bash": "/store/bash/bin/bash", "fish": "/store/fish/bin/fish", "zsh": "/store/zsh/bin/zsh"}},
          "store": STORE, "store_uid": ME, "store_dev": TMP,
-         "tokens": TOKENS, "tokens_uid": ME, "tokens_dev": TMP}
+         "tokens": TOKENS, "tokens_uid": ME, "tokens_dev": TMP,
+         # the boot default (arm M): a fake store, profile, ESP and tools, all under TMP
+         "default_desktop": "hyprland", "this_desktop": "hyprland", "efivars": EFIVARS,
+         "profiles": PROFILES, "entries": ENTRIES, "current_system": CURRENT, "store_prefix": NIXSTORE + "/",
+         "bootctl": BOOTCTL, "systemctl": SYSTEMCTL, "applied_marker": MARKER}
     c.update(over)
     return c
 
@@ -448,8 +467,124 @@ try:
 finally:
     os.fsync = real_fsync
 import stat as _stat
-check(len(synced) == 2 and _stat.S_ISREG(synced[0]) and _stat.S_ISDIR(synced[1]), "L: fsync of the file then its directory: %r" % synced)
+# Two atomic writes now: the store, then the made-on-this-boot marker. Each is file then directory.
+check(len(synced) == 4 and all(_stat.S_ISREG(synced[i]) and _stat.S_ISDIR(synced[i + 1]) for i in (0, 2)),
+      "L: fsync of each file then its directory: %r" % synced)
 check(os.listdir(os.path.dirname(STORE)) == ["surface.toml"], "L: a temp file was left: %r" % os.listdir(os.path.dirname(STORE)))
 ok("L writes are atomic: file and directory fsynced, no temp file left")
+
+# M — the boot default
+def tool(path, rc=0):
+    with open(path, "w") as f:
+        f.write("#!%s\nimport json,sys\nopen(%r,'a').write(json.dumps([%r, sys.argv[1:]])+'\\n')\nsys.exit(%d)\n"
+                % (sys.executable, TOOLLOG, os.path.basename(path), rc))
+    os.chmod(path, 0o755)
+
+
+def tool_calls():
+    if not os.path.exists(TOOLLOG):
+        return []
+    out = [json.loads(l) for l in open(TOOLLOG)]
+    os.unlink(TOOLLOG)
+    return out
+
+
+def system(name, specs=()):
+    """A fake toplevel in the fake store, with specialisations (each its own toplevel)."""
+    top = os.path.join(NIXSTORE, name); os.makedirs(os.path.join(top, "specialisation"), exist_ok=True)
+    for sname in specs:
+        st = os.path.join(NIXSTORE, "%s-spec-%s" % (name, sname)); os.makedirs(st, exist_ok=True)
+        link = os.path.join(top, "specialisation", sname)
+        if not os.path.lexists(link):
+            os.symlink(st, link)
+    return top
+
+
+def entry(fname, toplevel, title="NixOS"):
+    put(os.path.join(ENTRIES, fname), "title %s\nversion Generation 1\nlinux /EFI/nixos/k.efi\ninitrd /EFI/nixos/i.efi\n"
+        "options init=%s/init console=tty0 root=fstab\nsort-key nixos\n" % (title, toplevel))
+
+
+def boot_into(toplevel):
+    if os.path.lexists(CURRENT):
+        os.unlink(CURRENT)
+    os.symlink(toplevel, CURRENT)
+
+
+def store_desktop(d):
+    put(STORE, 'schema = 1\ndesktop = "%s"\nterminal = "kitty"\nshell = "bash"\n' % d)
+
+
+tool(BOOTCTL); tool(SYSTEMCTL); tool_calls()
+g1 = system("g1-system", ("sway", "none")); g2 = system("g2-system", ("sway", "none"))
+os.symlink(g1, os.path.join(PROFILES, "system-1-link")); os.symlink(g2, os.path.join(PROFILES, "system-2-link"))
+os.symlink("system-2-link", os.path.join(PROFILES, "system"))
+entry("nixos-aaa1.conf", g1); entry("nixos-bbb1.conf", g1 + "-spec-sway", "NixOS (sway)"); entry("nixos-ccc1.conf", g1 + "-spec-none", "NixOS (none)")
+entry("nixos-aaa2.conf", g2); entry("nixos-bbb2.conf", g2 + "-spec-sway", "NixOS (sway)"); entry("nixos-ccc2.conf", g2 + "-spec-none", "NixOS (none)")
+# Look-alikes that must never be chosen: the path as a prefix of another, and the path in the title.
+put(os.path.join(ENTRIES, "nixos-0000.conf"), "title init=%s/init\noptions init=%s/init-evil root=fstab\n" % (g2 + "-spec-sway", g2 + "-spec-sway"))
+put(os.path.join(ENTRIES, "nixos-0001.conf"), "title x\noptions root=fstab xinit=%s/init\n" % (g2 + "-spec-sway"))
+gone(MARKER); SYS.lines.clear()
+
+boot_into(g2); store_desktop("sway")
+check(A.boot_default(cfg()) == 0 and tool_calls() == [["bootctl", ["set-default", "nixos-bbb2.conf"]]], "M: from the parent")
+boot_into(g2 + "-spec-none"); store_desktop("sway")
+check(A.boot_default(cfg(this_desktop="none")) == 0 and tool_calls() == [["bootctl", ["set-default", "nixos-bbb2.conf"]]],
+      "M: from inside another specialisation the parent must be found through the profile")
+boot_into(g1 + "-spec-sway"); store_desktop("none")           # a rollback boot of generation 1
+check(A.boot_default(cfg(this_desktop="sway")) == 0 and tool_calls() == [["bootctl", ["set-default", "nixos-ccc1.conf"]]],
+      "M: after a rollback the entry must belong to the BOOTED generation, not the newest")
+boot_into(g2 + "-spec-sway"); store_desktop("hyprland")
+check(A.boot_default(cfg(this_desktop="sway")) == 0 and tool_calls() == [["bootctl", ["set-default", ""]]], "M: the image default clears the boot default")
+boot_into(g2); put(STORE, "garbage")
+check(A.boot_default(cfg()) == 0 and tool_calls() == [["bootctl", ["set-default", ""]]], "M: a bad store means the image default")
+ok("M1 the entry is the wanted specialisation of the running generation; the default desktop clears it")
+
+boot_into(g2); store_desktop("sway")
+os.rename(os.path.join(ENTRIES, "nixos-bbb2.conf"), os.path.join(TMP, "bbb2.aside"))
+check(A.boot_default(cfg()) == 1 and tool_calls() == [], "M: with only look-alike entries nothing may be selected")
+os.rename(os.path.join(TMP, "bbb2.aside"), os.path.join(ENTRIES, "nixos-bbb2.conf"))
+stray = system("stray-system"); boot_into(stray + "/specialisation")           # not a generation, no specialisations of its own
+os.rmdir(os.path.join(stray, "specialisation")); boot_into(stray)
+check(A.boot_default(cfg()) == 1 and tool_calls() == [], "M: an unknown running system must change nothing")
+boot_into(g2); os.rename(EFIVARS, EFIVARS + ".off")
+try:
+    check(A.boot_default(cfg()) == 0 and tool_calls() == [], "M: no EFI variables: bootctl must not run")
+    got, text = front([b"2\n", b"\n"])
+    check("Desktop:" not in text and got == {"desktop": "hyprland", "terminal": "foot", "shell": "bash"}, "M: no EFI variables: the desktop is not asked: %r" % got)
+finally:
+    os.rename(EFIVARS + ".off", EFIVARS)
+tool(BOOTCTL, rc=1)
+check(A.boot_default(cfg()) == 1 and len(tool_calls()) == 1, "M: a failing bootctl must be reported")
+tool(BOOTCTL)
+ok("M2 no entry, an unknown system, no EFI variables or a failing bootctl: nothing is claimed")
+
+boot_into(g1); store_desktop("sway")                          # --system names the generation being activated
+check(A.boot_default(cfg(), system=g2) == 0 and tool_calls() == [["bootctl", ["set-default", "nixos-bbb2.conf"]]], "M: --system must be used")
+for bad in ("/etc", os.path.join(TMP, "nope"), TMP, "relative"):
+    check(A.boot_default(cfg(), system=bad) == 1 and tool_calls() == [], "M: --system %r must be refused" % bad)
+# A complete, bootable-looking system OUTSIDE the store, with its own profile link and boot entry:
+# everything else would accept it, so only the store check refuses it.
+outside = os.path.join(TMP, "outside-system"); os.makedirs(os.path.join(outside, "specialisation"))
+os.makedirs(outside + "-sway"); os.symlink(outside + "-sway", os.path.join(outside, "specialisation", "sway"))
+os.symlink(outside, os.path.join(PROFILES, "system-3-link")); entry("nixos-out.conf", outside + "-sway", "NixOS (sway)")
+check(A.boot_default(cfg(), system=outside) == 1 and tool_calls() == [], "M: a --system outside the store was accepted")
+os.unlink(os.path.join(PROFILES, "system-3-link")); os.unlink(os.path.join(ENTRIES, "nixos-out.conf"))
+ok("M3 --system selects the generation being activated and must be a system in the store")
+
+boot_into(g2); store_desktop("sway"); put(MARKER, "1\n", 0o600)
+check(A.boot_default(cfg()) == 0 and tool_calls() == [["bootctl", ["set-default", "nixos-bbb2.conf"]], ["systemctl", ["--no-block", "reboot"]]]
+      and not os.path.exists(MARKER), "M: a choice made on this boot for another desktop reboots, once")
+check(A.boot_default(cfg()) == 0 and tool_calls() == [["bootctl", ["set-default", "nixos-bbb2.conf"]]], "M: no marker, no reboot")
+put(MARKER, "1\n", 0o600); boot_into(g2 + "-spec-sway")
+check(A.boot_default(cfg(this_desktop="sway")) == 0 and [c[0] for c in tool_calls()] == ["bootctl"] and not os.path.exists(MARKER),
+      "M: the chosen desktop is already running: no reboot")
+put(MARKER, "1\n", 0o600); boot_into(g2); os.rename(os.path.join(ENTRIES, "nixos-bbb2.conf"), os.path.join(TMP, "bbb2.aside"))
+check(A.boot_default(cfg()) == 1 and tool_calls() == [], "M: the default could not be set: no reboot")
+os.rename(os.path.join(TMP, "bbb2.aside"), os.path.join(ENTRIES, "nixos-bbb2.conf")); gone(MARKER)
+gone(STORE); gone(TOKENS); put(TOKENS, "sway foot zsh\n", 0o600)
+check(A.apply(cfg()) == 0 and os.path.exists(MARKER) and (os.stat(MARKER).st_mode & 0o777) == 0o600, "M: apply must leave the made-on-this-boot marker")
+gone(MARKER)
+ok("M4 a reboot only for a choice made on this boot that differs from the running desktop, and only once")
 
 print("agos-choice-battery: PASS (%d criteria)" % len(passed))

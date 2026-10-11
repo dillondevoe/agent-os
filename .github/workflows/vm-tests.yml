@@ -266,6 +266,11 @@ jobs:
           # the unprivileged front end to the root helper (a runtime directory removed too early turns
           # every choice into the default, silently), and that the agent cannot write the store.
           - test-surface-choice
+          # THE DESKTOP AS A BOOT ENTRY. Same rule: added with tests/surface-boot-default.nix. The only
+          # witness, on a UEFI machine with a real systemd-boot, that a first-login desktop choice
+          # selects a specialisation's existing entry (no new generation), survives reboots, falls back
+          # to the image's own desktop when the default is stale, and cannot be changed by the agent.
+          - test-surface-boot-default
           # SURVIVABILITY. Same rule a fourth time: added in the same commit as
           # tests/watchdog-armed.nix. Different subject from every entry above — those watch a
           # wall that keeps something OUT, this watches the mechanism that gets the box BACK.

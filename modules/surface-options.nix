@@ -78,6 +78,22 @@ in
         internal = true;
         description = "The agos-choice package (set by modules/surface-choice.nix).";
       };
+      desktops = lib.mkOption {
+        type = lib.types.listOf (lib.types.enum [ "none" "hyprland" "sway" "plasma" "gnome" "cosmic" ]);
+        default = lib.unique ([ cfg.firstLogin.defaultDesktop ] ++ [ "hyprland" "sway" "none" ]);
+        defaultText = lib.literalExpression ''the image's own desktop, then "hyprland" "sway" "none"'';
+        description = ''
+          The desktops offered at first login. The image's own (`agentos.desktop`) is the default and
+          is what the machine boots when nothing is chosen; every other one is built into the image as
+          a NixOS specialisation and selected by boot entry (modules/surface-choice.nix), so each adds
+          its closure to the image. Plasma, GNOME and COSMIC are left out by default for that reason.
+        '';
+      };
+      defaultDesktop = lib.mkOption {
+        type = lib.types.str;
+        internal = true;
+        description = "The image's own desktop. Inside a specialisation this is still the parent's.";
+      };
     };
     surfaceInternal = lib.mkOption {
       type = lib.types.attrs;

@@ -281,13 +281,24 @@ list, and validation happens before any value reaches an `exec`.
   desktops), and leaves the default desktop reachable only through a parent that garbage
   collection may delete.
 - Instead a root unit, `agentos-boot-default.service`, selects the boot entry that already exists
-  for the booted generation's specialisation: `bootctl set-default
-  nixos-generation-<N>-specialisation-<name>.conf` (or clears it for the default). `<name>` comes
-  from a table compiled in at build time. `<N>` is never the profile's newest link (wrong after a
-  rollback boot). At boot it is the booted generation: `/run/current-system` matched against the
-  profile links. In the activation snippet it is the generation being activated. `nixos-rebuild
-  boot` runs no activation, so after it the variable is stale until the next boot's re-assert, and
-  that one boot lands on the `loader.conf` default; acceptable, and stated.
+  for the booted generation's specialisation: `bootctl set-default <entry>` (or clears it for the
+  image's own desktop).
+- **Correction from the slice 2 proof (2026-10-11).** v0-v3 of this spec assumed entries named
+  `nixos-generation-<N>-specialisation-<name>.conf`. On this pin they are named by content hash
+  (`nixos-<sha256>.conf`, title `NixOS (<name>)`), so the entry is found by what it boots: the one
+  whose `options` line has the exact word `init=<specialisation toplevel>/init`. The desktop name
+  comes from the validated store and a closed list; the path comes from the running generation.
+- The generation is never the profile's newest link (wrong after a rollback boot). At boot it is
+  the one the booted system belongs to. Inside a specialisation `/run/current-system` has no
+  specialisations of its own, so the parent is found by scanning the system profile's links for
+  the generation whose toplevel, or one of whose specialisations, is the booted system. In the
+  activation snippet it is the generation being activated (`--system "$systemConfig"`, which must
+  be a system in the store). `nixos-rebuild boot` runs no activation, so after it the variable is
+  stale until the next boot's re-assert, and that one boot lands on the `loader.conf` default;
+  acceptable, and stated.
+- A desktop chosen on this boot that differs from the one running is entered by rebooting, once,
+  before the agent's getty: the root helper leaves a marker in `/run`, the boot-default unit
+  removes it and reboots. Gone after the reboot, so it cannot loop.
 - `bootctl set-default` writes the EFI variable `LoaderEntryDefault`, which takes precedence over
   the `default` line in `loader.conf`. nixpkgs rewrites `loader.conf` on every
   `switch-to-configuration` and does not touch the variable, so after a rebuild the variable names
@@ -311,10 +322,15 @@ list, and validation happens before any value reaches an `exec`.
   image's default since #339). sway, Plasma, GNOME and COSMIC stay developer-image choices until
   the closure budget is set (owner question B).
 - The seal step refuses if the chosen desktop's specialisation is not in the running closure.
-- This selection mechanism is the part of the spec least proven on paper. Slice 2 must demonstrate
-  it in a UEFI VM (including a rebuild in the middle) before anything depends on it; if it does
-  not hold, the fallback is the generation switch with a GC root for the parent, recorded here so
-  the choice is not relitigated from scratch.
+- This selection mechanism was the part of the spec least proven on paper. Slice 2 demonstrates it
+  in a UEFI VM with a real systemd-boot (`tests/surface-boot-default.nix`): a first-login choice
+  boots the chosen variant with no new generation, a later change takes effect at the next boot,
+  the image's own desktop clears the default, a stale default falls back to the image's own
+  desktop and is re-asserted on that boot, and the agent cannot change any of it. NOT yet
+  demonstrated in a VM: a rebuild in the middle and a rollback boot (the entry-selection logic for
+  both is covered by the contract battery against a fake profile and ESP; the activation snippet
+  is asserted at evaluation only). The fallback if it ever fails to hold is the generation switch
+  with a GC root for the parent, recorded here so the choice is not relitigated from scratch.
 
 ### 3.3 Terminal and shell: no switch at all
 
