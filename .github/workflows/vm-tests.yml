@@ -265,6 +265,11 @@ jobs:
           # the questions hold tty1 before the agent's getty, that a typed choice survives the hop from
           # the unprivileged front end to the root helper (a runtime directory removed too early turns
           # every choice into the default, silently), and that the agent cannot write the store.
+          # THE SETUP WINDOW. Same rule: added with tests/setup-window.nix. The fast lane proves the
+          # ruleset TEXT and that the open file parses; only a booted box can show the packet's fate:
+          # that the fetcher's uid gets out while the set holds it and nobody else does, that an
+          # nftables reload really empties it, and that the box closes and seals itself on its budget.
+          - test-setup-window
           - test-surface-choice
           # THE DESKTOP AS A BOOT ENTRY. Same rule: added with tests/surface-boot-default.nix. The only
           # witness, on a UEFI machine with a real systemd-boot, that a first-login desktop choice
