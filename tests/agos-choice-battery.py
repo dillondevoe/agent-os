@@ -284,11 +284,13 @@ def _boom(fd, deadline):
 
 
 A._read_line = _boom
-gone(TOKENS)
+gone(TOKENS); SYS.lines.clear()
 try:
     got = A.firstlogin(cfg(), fd_in=0, out=io.StringIO())
 finally:
     A._read_line = _lr
+check(SYS.lines == ["questions ended early (RuntimeError); the answers so far and the defaults were written"],
+      "D2: a failure while asking must leave a journal line (not look like accepted defaults): %r" % SYS.lines)
 check(got == {"desktop": "sway", "terminal": "kitty", "shell": "bash"} and open(TOKENS).read() == "sway kitty bash\n",
       "D2: a failure while asking must still write the answers so far: %r" % got)
 ok("D2 Ctrl-C/Z/\\ are rejected lines, not signals; a failure mid-question still writes the tokens")

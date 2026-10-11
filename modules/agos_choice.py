@@ -231,8 +231,8 @@ def firstlogin(c=None, fd_in=0, out=None):
     state = _quiet_keyboard(fd_in)
     try:
         _ask(c, choice, fd_in, out)
-    except Exception:
-        pass                                         # the answers so far, the defaults for the rest
+    except Exception as e:                           # the answers so far, the defaults for the rest
+        log("questions ended early (%s); the answers so far and the defaults were written" % e.__class__.__name__)
     finally:
         _restore_keyboard(fd_in, state)
     tokens = " ".join(choice[k] for k in KINDS) + "\n"
