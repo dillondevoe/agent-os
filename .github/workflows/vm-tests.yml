@@ -261,6 +261,11 @@ jobs:
           # binding, clean environment, single-flight refusal, one request per instance, peer_uid in
           # the audit record (broker-service.md §4).
           - test-wall-service
+          # FIRST LOGIN. Same rule: added with tests/surface-choice.nix. The only runtime witness that
+          # the questions hold tty1 before the agent's getty, that a typed choice survives the hop from
+          # the unprivileged front end to the root helper (a runtime directory removed too early turns
+          # every choice into the default, silently), and that the agent cannot write the store.
+          - test-surface-choice
           # SURVIVABILITY. Same rule a fourth time: added in the same commit as
           # tests/watchdog-armed.nix. Different subject from every entry above — those watch a
           # wall that keeps something OUT, this watches the mechanism that gets the box BACK.

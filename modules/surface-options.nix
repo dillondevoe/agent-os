@@ -61,6 +61,24 @@ in
         the agent account always keeps bash.
       '';
     };
+    firstLogin = {
+      enable = lib.mkOption {
+        type = lib.types.bool;
+        default = false;
+        description = ''
+          Ask for the terminal and shell at first login and make both a run-time choice
+          (modules/surface-choice.nix; docs/design/first-login-and-setup-window.md slice 1). When on,
+          "open a terminal" and the operator's login shell go through wrappers that read the root-owned
+          choice store, every offered terminal and shell is installed, and `agentos.terminal` /
+          `agentos.shell` become the defaults the questions start from.
+        '';
+      };
+      package = lib.mkOption {
+        type = lib.types.package;
+        internal = true;
+        description = "The agos-choice package (set by modules/surface-choice.nix).";
+      };
+    };
     surfaceInternal = lib.mkOption {
       type = lib.types.attrs;
       internal = true;
@@ -71,9 +89,13 @@ in
 
   config = {
     agentos.surfaceInternal = {
-      terminalCmd = terminals.${cfg.terminal}.cmd;
+      # With first login on, both go through the choice wrappers by absolute store path (never a name
+      # on PATH); without it they are the build-time picks, exactly as before.
+      terminalCmd = if cfg.firstLogin.enable then "${cfg.firstLogin.package}/bin/agentos-terminal" else terminals.${cfg.terminal}.cmd;
+      terminalLabel = if cfg.firstLogin.enable then "your chosen one; default ${cfg.terminal}" else terminals.${cfg.terminal}.cmd;
       terminalPkg = terminals.${cfg.terminal}.pkg;
-      shellPkg = shells.${cfg.shell};
+      shellPkg = if cfg.firstLogin.enable then "${cfg.firstLogin.package}/bin/agentos-shell" else shells.${cfg.shell};
+      inherit terminals shells;
     };
     # With the Hyprland desktop, kitty is already installed by desktop-open.nix (the brain's window
     # and the cheatsheet use it), so only a non-default terminal adds a package there; the default

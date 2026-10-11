@@ -65,7 +65,7 @@ let
       Super + 1          brain home (workspace 1, the brain always lives here)
       Super + 2..5       switch workspace (Shift = move the window there)
       Super + Space      app launcher          Super + .   emoji
-      Super + Return     terminal (${config.agentos.surfaceInternal.terminalCmd})
+      Super + Return     terminal (${config.agentos.surfaceInternal.terminalLabel})
       Super + W / B      Firefox (opens on workspace 2)
       Super + E / T / C  files / notes editor / calculator
       Super + Tab        window switcher       Alt + Tab   next window
@@ -256,7 +256,7 @@ let
 
       Super + 1         brain home (workspace 1 — the brain always lives here)
       Super + `         brain overlay from anywhere (tap again to hide)
-      Super + Return    open terminal (${config.agentos.surfaceInternal.terminalCmd})
+      Super + Return    open terminal (${config.agentos.surfaceInternal.terminalLabel})
       Super + B         open Firefox (opens on workspace 2)
       Super + D         app launcher (wofi, fuzzy search)
       Super + R         app launcher (wofi — same as Super+D)
