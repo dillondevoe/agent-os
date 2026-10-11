@@ -24,10 +24,12 @@
 # THE DESKTOP IS A BOOT ENTRY (spec §3.2, proven in tests/surface-boot-default.nix). Each offered
 # desktop other than the image's default is a NixOS specialisation, already in the closure and
 # already in the boot menu. Choosing one is `bootctl set-default <its entry>`: no new generation, no
-# build, no network. On this nixpkgs the entries are named by content hash, not by desktop, so the
-# entry is found by what it boots: the one whose `options` line has init=<that specialisation>/init.
-# A default that names an entry which no longer exists falls back to loader.conf's, which is the
-# image's default desktop.
+# build, no network. On this nixpkgs the entries are named by a hash of their content, not by
+# desktop, so the entry is found by what it boots: the one whose `options` line has
+# init=<that specialisation>/init. An old generation's entry keeps its name and stays in the menu
+# (up to configurationLimit), so a default left pointing at one keeps booting that old generation:
+# nothing here may ever leave it there. Only a default that names no existing entry falls back to
+# loader.conf's, which is the newest generation's own desktop.
 #
 # WHICH GENERATION: the one the system profile points to, never "the one that is running". That is
 # what loader.conf's own default tracks, so the chosen desktop follows the box's updates exactly as
@@ -376,6 +378,25 @@ def _entry_for(toplevel, c):
     return None
 
 
+LOADER_GUID = "4a67b082-0a4c-41cf-b6c7-440b29bb8c4f"
+
+
+def _current_default(c):
+    """The entry LoaderEntryDefault names now ("" if unset), or None if it cannot be read."""
+    path = os.path.join(c.get("efivars", "/sys/firmware/efi/efivars"), "LoaderEntryDefault-" + LOADER_GUID)
+    try:
+        with open(path, "rb") as f:
+            raw = f.read(4096)
+    except FileNotFoundError:
+        return ""
+    except OSError:
+        return None
+    try:
+        return raw[4:].decode("utf-16-le").rstrip("\x00")     # 4 bytes of attributes, then UTF-16
+    except UnicodeDecodeError:
+        return None
+
+
 def _tool(argv):
     try:
         return subprocess.run(argv, stdin=subprocess.DEVNULL, capture_output=True, timeout=60, env={}).returncode
@@ -407,7 +428,9 @@ def boot_default(c=None, at_boot=False):
         else:                                        # never leave an older generation's entry selected
             log("boot-default: desktop=%s has no boot entry in the current generation; default cleared" % want)
             rc = 1
-    if _tool([c["bootctl"], "set-default", entry]) != 0:
+    # Write only when it would change something: no NVRAM write on every boot, and an install into a
+    # fresh machine does not delete a default this box never set.
+    if _current_default(c) != entry and _tool([c["bootctl"], "set-default", entry]) != 0:
         log("boot-default: bootctl set-default failed")
         return 1
     if rc == 0:

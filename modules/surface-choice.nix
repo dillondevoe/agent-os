@@ -81,6 +81,21 @@ in
       agentos.firstLogin.defaultDesktop = lib.mkDefault cfg.desktop;
     }
 
+    # FIRST LOGIN OFF, but an earlier generation of this box may have had it on and left the boot
+    # default on one of ITS desktop entries. That entry still exists (an old generation keeps its entry,
+    # under the same name, until it is pruned), so the box would go on booting the old generation and
+    # this one would never run. Nothing in this generation will ever re-select a desktop, so the boot
+    # loader install clears a default that names a NixOS entry. A default the box never set, or one
+    # naming something else, is left alone.
+    (lib.mkIf (config.boot.loader.systemd-boot.enable && !cfg.firstLogin.enable) {
+      boot.loader.systemd-boot.extraInstallCommands = ''
+        agentos_default=/sys/firmware/efi/efivars/LoaderEntryDefault-4a67b082-0a4c-41cf-b6c7-440b29bb8c4f
+        if [ -e "$agentos_default" ] && ${pkgs.coreutils}/bin/tr -d '\0' < "$agentos_default" | ${pkgs.gnugrep}/bin/grep -aq 'nixos-.*\.conf'; then
+          ${config.systemd.package}/bin/bootctl set-default "" || true
+        fi
+      '';
+    })
+
     # One specialisation per offered desktop other than the image's own. Not inside a specialisation
     # (they do not nest). Each child is told the parent's desktop, so its default stays the parent's.
     (lib.mkIf (cfg.firstLogin.enable && !config.isSpecialisation) {
@@ -185,7 +200,7 @@ in
       # one parses a user-fed file, the other writes EFI variables, neither does both. It reads only the
       # validated store. Every boot (a rebuild or a pruned generation can leave the default stale), and
       # before the agent's getty, because a desktop chosen on this boot is entered by rebooting.
-      systemd.services.agentos-boot-default = {
+      systemd.services.agentos-boot-default = lib.mkIf config.boot.loader.systemd-boot.enable {
         description = "Agent OS: make the chosen desktop the boot default";
         wantedBy = [ "multi-user.target" ];
         after = [ "agentos-surface-apply.service" ];
@@ -216,9 +231,9 @@ in
       };
 
       # After a rebuild the EFI variable still names the OLD generation's entry, and that entry still
-      # exists (nixpkgs rewrites loader.conf, not the variable). Left alone the box would boot the old
-      # generation and the unit above would re-select it: no update would ever land. So the default is
-      # re-selected every time the boot loader is installed, which `switch` and `boot` both do, after
+      # exists (nixpkgs rewrites loader.conf, not the variable; an old generation keeps its entry).
+      # Left alone the box would boot the old generation again. So the default is re-selected, in the
+      # generation the profile now points to, every time the boot loader is installed, which `switch` and `boot` both do, after
       # the profile points at the new generation and its entries exist. `|| true`: installing the boot
       # loader must not fail because of this; the per-boot unit is the backstop.
       boot.loader.systemd-boot.extraInstallCommands = lib.mkIf config.boot.loader.systemd-boot.enable ''

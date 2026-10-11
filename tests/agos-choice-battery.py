@@ -515,6 +515,26 @@ def store_desktop(d):
     put(STORE, 'schema = 1\ndesktop = "%s"\nterminal = "kitty"\nshell = "bash"\n' % d)
 
 
+VAR = os.path.join(EFIVARS, "LoaderEntryDefault-" + A.LOADER_GUID)
+
+
+def set_var(value):
+    """The fake LoaderEntryDefault: 4 bytes of attributes, then UTF-16 with a terminator. None removes it."""
+    if os.path.exists(VAR):
+        os.unlink(VAR)
+    if value is not None:
+        with open(VAR, "wb") as f:
+            f.write(b"\x07\x00\x00\x00" + (value + "\x00").encode("utf-16-le"))
+
+
+def BD(*a, **k):
+    # The default currently names some OTHER entry, so every arm below needs a write; the arms that are
+    # about NOT writing set the variable themselves and call the program directly.
+    if os.path.isdir(EFIVARS):                    # (one arm takes the directory away)
+        set_var("nixos-something-else.conf")
+    return A.boot_default(*a, **k)
+
+
 tool(BOOTCTL); tool(SYSTEMCTL); tool_calls()
 g1 = system("g1-system", ("sway", "none")); g2 = system("g2-system", ("sway", "none"))
 os.symlink(g1, os.path.join(PROFILES, "system-1-link")); os.symlink(g2, os.path.join(PROFILES, "system-2-link"))
@@ -529,7 +549,7 @@ gone(MARKER); SYS.lines.clear()
 # The profile points at generation 2 throughout; what is RUNNING must not matter.
 def want_entry(running, desktop, this="hyprland"):
     boot_into(running); store_desktop(desktop)
-    rc = A.boot_default(cfg(this_desktop=this))
+    rc = BD(cfg(this_desktop=this))
     return rc, tool_calls()
 
 
@@ -542,7 +562,7 @@ check(want_entry(g1 + "-spec-sway", "sway", "sway") == (0, [["bootctl", ["set-de
 check(want_entry(g1, "none") == (0, [["bootctl", ["set-default", "nixos-ccc2.conf"]]]), "M: old generation running, other desktop")
 check(want_entry(g2 + "-spec-sway", "hyprland", "sway") == (0, [["bootctl", ["set-default", ""]]]), "M: the image default clears the boot default")
 boot_into(g2); put(STORE, "garbage")
-check(A.boot_default(cfg()) == 0 and tool_calls() == [["bootctl", ["set-default", ""]]], "M: a bad store means the image default")
+check(BD(cfg()) == 0 and tool_calls() == [["bootctl", ["set-default", ""]]], "M: a bad store means the image default")
 ok("M1 the entry is the chosen desktop in the generation the profile points to, whatever is running")
 
 # The chosen desktop is missing from the current generation: CLEAR the default (boot the new
@@ -560,7 +580,7 @@ check(want_entry(g2, "sway") == (1, [["bootctl", ["set-default", ""]]]), "M: a d
 os.unlink(os.path.join(PROFILES, "system")); os.symlink("system-2-link", os.path.join(PROFILES, "system"))
 boot_into(g2); os.rename(EFIVARS, EFIVARS + ".off")
 try:
-    check(A.boot_default(cfg()) == 0 and tool_calls() == [], "M: no EFI variables: bootctl must not run")
+    check(BD(cfg()) == 0 and tool_calls() == [], "M: no EFI variables: bootctl must not run")
     got, text = front([b"2\n", b"\n"])
     check("Desktop:" not in text and got == {"desktop": "hyprland", "terminal": "foot", "shell": "bash"}, "M: no EFI variables: the desktop is not asked: %r" % got)
 finally:
@@ -568,21 +588,34 @@ finally:
 tool(BOOTCTL, rc=1)
 check(want_entry(g2, "sway")[0] == 1, "M: a failing bootctl must be reported")
 tool(BOOTCTL); tool_calls()
+# Written only when it would change something.
+boot_into(g2); store_desktop("sway"); set_var("nixos-bbb2.conf")
+check(A.boot_default(cfg()) == 0 and tool_calls() == [], "M: the default already names the chosen entry: no write")
+store_desktop("hyprland"); set_var(None)
+check(A.boot_default(cfg()) == 0 and tool_calls() == [], "M: nothing set and nothing wanted: no write (a fresh install must not touch the variable)")
+set_var("nixos-bbb1.conf")                                    # an OLD generation's entry, which still exists
+check(A.boot_default(cfg()) == 0 and tool_calls() == [["bootctl", ["set-default", ""]]], "M: a default on an old generation's entry must be cleared")
+store_desktop("sway")
+check(A.boot_default(cfg()) == 0 and tool_calls() == [["bootctl", ["set-default", "nixos-bbb2.conf"]]], "M: a default on an old generation's entry must be moved to the current one")
+with open(VAR, "wb") as f:
+    f.write(b"\x07\x00\x00\x00\xff")                           # unreadable as UTF-16: write rather than trust it
+check(A.boot_default(cfg()) == 0 and tool_calls() == [["bootctl", ["set-default", "nixos-bbb2.conf"]]], "M: an unreadable variable must be rewritten")
+set_var(None)
 ok("M2 a chosen desktop missing from the current generation clears the default; no EFI or a failing bootctl claims nothing")
 
 boot_into(g2); store_desktop("sway"); put(MARKER, "1\n", 0o600)
 # Not the per-boot unit (the boot loader is being installed by a rebuild): never a reboot, and the
 # marker is left for the unit.
-check(A.boot_default(cfg()) == 0 and tool_calls() == [["bootctl", ["set-default", "nixos-bbb2.conf"]]] and os.path.exists(MARKER),
+check(BD(cfg()) == 0 and tool_calls() == [["bootctl", ["set-default", "nixos-bbb2.conf"]]] and os.path.exists(MARKER),
       "M: outside the per-boot unit the marker must be ignored: a rebuild must never reboot the box")
-check(A.boot_default(cfg(), at_boot=True) == 0 and tool_calls() == [["bootctl", ["set-default", "nixos-bbb2.conf"]], ["systemctl", ["--no-block", "reboot"]]]
+check(BD(cfg(), at_boot=True) == 0 and tool_calls() == [["bootctl", ["set-default", "nixos-bbb2.conf"]], ["systemctl", ["--no-block", "reboot"]]]
       and not os.path.exists(MARKER), "M: a choice made on this boot for another desktop reboots, once")
-check(A.boot_default(cfg(), at_boot=True) == 0 and tool_calls() == [["bootctl", ["set-default", "nixos-bbb2.conf"]]], "M: no marker, no reboot")
+check(BD(cfg(), at_boot=True) == 0 and tool_calls() == [["bootctl", ["set-default", "nixos-bbb2.conf"]]], "M: no marker, no reboot")
 put(MARKER, "1\n", 0o600); boot_into(g2 + "-spec-sway")
-check(A.boot_default(cfg(this_desktop="sway"), at_boot=True) == 0 and [c[0] for c in tool_calls()] == ["bootctl"] and not os.path.exists(MARKER),
+check(BD(cfg(this_desktop="sway"), at_boot=True) == 0 and [c[0] for c in tool_calls()] == ["bootctl"] and not os.path.exists(MARKER),
       "M: the chosen desktop is already running: no reboot")
 put(MARKER, "1\n", 0o600); boot_into(g2); os.rename(os.path.join(ENTRIES, "nixos-bbb2.conf"), os.path.join(TMP, "bbb2.aside"))
-check(A.boot_default(cfg(), at_boot=True) == 1 and [c[0] for c in tool_calls()] == ["bootctl"] and not os.path.exists(MARKER),
+check(BD(cfg(), at_boot=True) == 1 and [c[0] for c in tool_calls()] == ["bootctl"] and not os.path.exists(MARKER),
       "M: the chosen desktop could not be selected: no reboot")
 # An entry file that reaches the read limit is skipped: a word cut at the limit could read as ours.
 big = os.path.join(ENTRIES, "nixos-0002.conf")
@@ -593,7 +626,7 @@ word = "init=%s/init" % (g2 + "-spec-sway")
 put(big, "options " + "x" * (READ - len("options ") - 1 - len(word)) + " " + word + "-evil root=fstab\n")
 check(open(big).read()[:READ].split()[-1] == word and open(big).read().split()[2] == word + "-evil",
       "M: the oversize fixture must end its first ENTRY_MAX + 1 bytes on the wanted word")
-check(A.boot_default(cfg()) == 1 and tool_calls() == [["bootctl", ["set-default", ""]]], "M: a cut-off look-alike in an oversize entry was matched")
+check(BD(cfg()) == 1 and tool_calls() == [["bootctl", ["set-default", ""]]], "M: a cut-off look-alike in an oversize entry was matched")
 os.unlink(big)
 os.rename(os.path.join(TMP, "bbb2.aside"), os.path.join(ENTRIES, "nixos-bbb2.conf")); gone(MARKER)
 gone(STORE); gone(TOKENS); put(TOKENS, "sway foot zsh\n", 0o600)

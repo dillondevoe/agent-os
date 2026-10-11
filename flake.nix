@@ -1710,6 +1710,7 @@
                                 bd.serviceConfig.ExecStart == "${pkg}/libexec/agentos-boot-default --at-boot" && !(bd.serviceConfig ? User)
                                 && bd.serviceConfig.CapabilityBoundingSet == [ "CAP_SYS_ADMIN" "CAP_LINUX_IMMUTABLE" ]
                                 && bd.serviceConfig.RestrictAddressFamilies == "AF_UNIX" && bd.serviceConfig.NoNewPrivileges
+                                && bd.serviceConfig.ProtectKernelModules && bd.serviceConfig.ProtectControlGroups
                                 && !(lib.hasInfix "--at-boot" (builtins.unsafeDiscardStringContext on.boot.loader.systemd-boot.extraInstallCommands))
                                 && bd.unitConfig.ConditionPathExists == "/sys/firmware/efi/efivars"
                                 && lib.elem "agentos-surface-apply.service" bd.after && lib.elem "getty@tty1.service" bd.before
@@ -1720,13 +1721,19 @@
                                 && lib.hasInfix (builtins.unsafeDiscardStringContext "${pkg}/libexec/agentos-boot-default || true")
                                      (builtins.unsafeDiscardStringContext on.boot.loader.systemd-boot.extraInstallCommands)
                                 && !(dflt.systemd.services ? agentos-boot-default)
-                                && !(lib.hasInfix "agentos-boot-default" (builtins.unsafeDiscardStringContext dflt.boot.loader.systemd-boot.extraInstallCommands)))
+                                # With first login OFF the install must still clear a default an earlier
+                                # generation left on one of its entries, or the box stays on that generation.
+                                && (let off = builtins.unsafeDiscardStringContext dflt.boot.loader.systemd-boot.extraInstallCommands; in
+                                    dflt.boot.loader.systemd-boot.enable && !(lib.hasInfix "agentos-boot-default" off)
+                                    && lib.hasInfix "LoaderEntryDefault-4a67b082-0a4c-41cf-b6c7-440b29bb8c4f" off
+                                    && lib.hasInfix "bootctl set-default \"\" || true" off)
+                                && !(lib.hasInfix "LoaderEntryDefault" (builtins.unsafeDiscardStringContext on.boot.loader.systemd-boot.extraInstallCommands)))
             "surface-choice: the boot-default unit (after the helper, before the agent's getty, EFI only, no terminal) or its re-select on boot-loader install is wrong";
           # Not systemd-boot (GRUB on UEFI has EFI variables but no entries to select): only the image's
           # own desktop is offered, and no specialisation is built for a choice that could not take effect.
           assert lib.assertMsg (let g = (mkOpenSystem [ { agentos.firstLogin.enable = true; boot.loader.systemd-boot.enable = lib.mkForce false;
                                                            boot.loader.grub.enable = true; boot.loader.grub.device = "nodev"; boot.loader.grub.efiSupport = true; } ]).config; in
-                                g.specialisation == { } && g.agentos.firstLogin.enable
+                                g.specialisation == { } && g.agentos.firstLogin.enable && !(g.systemd.services ? agentos-boot-default)
                                 && g.system.build.agosChoiceConfig.offered.desktop == [ "hyprland" ]
                                 && on.system.build.agosChoiceConfig.offered.desktop == [ "hyprland" "sway" "none" ])
             "surface-choice: without systemd-boot only the image's own desktop may be offered and no specialisation built (the choice could never take effect)";

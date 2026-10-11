@@ -22,6 +22,8 @@
 #       chosen desktop at install time, and the next boot runs the new generation: the choice follows
 #       updates instead of pinning the box to the generation it was made on.
 #   D7  running an OLD generation (its entry picked by hand) does not pin the box to it either.
+#   D8  a later generation with first login turned OFF clears the default when its boot loader is
+#       installed (the old generation's entry still exists; left selected it would boot for ever).
 { pkgs }:
 
 pkgs.testers.runNixOSTest {
@@ -29,13 +31,15 @@ pkgs.testers.runNixOSTest {
 
   nodes.box = { config, lib, extendModules, ... }:
     let
-      # A second, different system for D6: this same node plus a marker file. The flag stops the
-      # second from depending on a third.
-      gen2 = (extendModules { modules = [ { test.isGen2 = true; environment.etc."gen2".text = "2\n"; } ]; }).config.system.build.toplevel;
+      # Two more systems in the store. gen2 (D6): this same node plus a marker file. gen3 (D8): the
+      # same with FIRST LOGIN TURNED OFF. The flag stops either from depending on further ones.
+      gen2 = (extendModules { modules = [ { test.later = true; environment.etc."gen2".text = "2\n"; } ]; }).config.system.build.toplevel;
+      gen3 = (extendModules { modules = [ { test.later = true; environment.etc."gen3".text = "3\n";
+                                          agentos.firstLogin.enable = lib.mkForce false; } ]; }).config.system.build.toplevel;
     in
     {
       imports = [ ../modules/surface-options.nix ../modules/surface-choice.nix ];
-      options.test.isGen2 = lib.mkOption { type = lib.types.bool; default = false; };
+      options.test.later = lib.mkOption { type = lib.types.bool; default = false; };
       config = {
         virtualisation.useBootLoader = true;
         virtualisation.useEFIBoot = true;
@@ -43,15 +47,16 @@ pkgs.testers.runNixOSTest {
         boot.loader.efi.canTouchEfiVariables = true;
         boot.loader.timeout = 1;
         agentos.desktop = "none";
-        agentos.firstLogin.enable = true;
+        agentos.firstLogin.enable = lib.mkDefault true;
         agentos.firstLogin.desktops = [ "none" "sway" "hyprland" ];
         users.users.agent = { isNormalUser = true; };
         users.users.operator = { isNormalUser = true; shell = config.agentos.surfaceInternal.shellPkg; };
         services.getty.autologinUser = "agent";
         environment.systemPackages = with pkgs; [ coreutils util-linux procps ];
         virtualisation.memorySize = 2048;
-        system.extraDependencies = lib.mkIf (!config.test.isGen2) [ gen2 ];
-        environment.etc."gen2-path" = lib.mkIf (!config.test.isGen2) { text = "${gen2}\n"; };
+        system.extraDependencies = lib.mkIf (!config.test.later) [ gen2 gen3 ];
+        environment.etc."gen2-path" = lib.mkIf (!config.test.later) { text = "${gen2}\n"; };
+        environment.etc."gen3-path" = lib.mkIf (!config.test.later) { text = "${gen3}\n"; };
       };
     };
 
@@ -64,12 +69,15 @@ pkgs.testers.runNixOSTest {
         return out.replace('AGENTOS_DESKTOP=', "").strip('"')
 
     def boot_default():
-        return box.succeed("bootctl status --no-pager 2>/dev/null | sed -n 's/^ *Default Entry: *//p' | head -1; "
-                           "cat /sys/firmware/efi/efivars/LoaderEntryDefault-* 2>/dev/null | tr -d '\\000' | tail -c +5").strip()
+        # What LoaderEntryDefault names ("" when the variable is not set). The variable only: bootctl's
+        # "Default Entry" is the EFFECTIVE default, which is loader.conf's when the variable is unset.
+        return box.succeed("f=$(ls /sys/firmware/efi/efivars/ | grep '^LoaderEntryDefault-' || true); "
+                           "[ -z \"$f\" ] || tail -c +5 /sys/firmware/efi/efivars/$f | tr -d '\\000'").strip()
 
     def entry_of(name, generation="/nix/var/nix/profiles/system"):
-        # Looked up by what the entry boots, every time: the file names are content hashes and change
-        # whenever the boot loader is installed.
+        # Looked up by what the entry boots. The file name is a hash of the entry's content (which
+        # includes the generation's build date, so generation 1's differs between the image build and
+        # the first install inside the VM; after that an old generation's entry keeps its name).
         spec = box.succeed("readlink -f " + generation + "/specialisation/" + name).strip()
         return box.succeed("grep -l -- 'init=" + spec + "/init' /boot/loader/entries/*.conf | xargs basename").strip()
 
@@ -144,6 +152,7 @@ pkgs.testers.runNixOSTest {
     box.fail("runuser -u agent -- bootctl set-default " + entry_of("hyprland"))
     box.fail("runuser -u agent -- sh -c 'echo x > /boot/loader/loader.conf'")
     box.fail("runuser -u agent -- sh -c 'echo x > /boot/loader/entries/x.conf'")
+    assert before != "", "D5: precondition: a default is set"
     var = box.succeed("ls /sys/firmware/efi/efivars/ | grep '^LoaderEntryDefault-'").strip()
     box.fail("runuser -u agent -- sh -c 'echo x > /sys/firmware/efi/efivars/" + var + "'")
     box.fail("runuser -u agent -- rm -f /sys/firmware/efi/efivars/" + var)
@@ -180,5 +189,21 @@ pkgs.testers.runNixOSTest {
     assert new_entry in boot_default(), "D7: running the old generation re-selected its own entry (pinning)"
     reboot()
     box.succeed("test -e /etc/gen2")
+
+    # D8 — A LATER GENERATION WITH FIRST LOGIN TURNED OFF. Nothing in it will ever re-select a desktop,
+    # and the default still names generation 2's sway entry, which still exists. Left there, the box
+    # would boot generation 2 for ever and generation 3 would never run. Installing its boot loader
+    # must clear the default; the next boot is generation 3, on its own desktop.
+    gen3 = box.succeed("cat /nix/var/nix/profiles/system-1-link/etc/gen3-path").strip()
+    gen2_sway = entry_of("sway")
+    assert gen2_sway in boot_default(), "D8: precondition: the default names generation 2's sway entry"
+    box.succeed(f"ln -sfn {gen3} /nix/var/nix/profiles/system-3-link && ln -sfn system-3-link /nix/var/nix/profiles/system")
+    box.succeed(f"{gen3}/bin/switch-to-configuration boot")
+    box.succeed("test -e /boot/loader/entries/" + gen2_sway)       # the trap: the old entry is still there
+    assert boot_default() == "", "D8: a generation with first login off left the default on an older generation: " + boot_default()
+    reboot()
+    box.succeed("test -e /etc/gen3")                                # generation 3 is what booted
+    assert running() == "none", "D8: " + running()
+    box.fail("systemctl cat agentos-boot-default.service")          # and it has none of the machinery
   '';
 }
