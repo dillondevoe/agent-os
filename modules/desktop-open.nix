@@ -73,6 +73,7 @@ let
       Super + Z          Noctalia settings     Super + V   clipboard history
       Super + Shift + W  wallpaper picker      Super + P   colour picker
       Super + Alt + C    session menu (log out, suspend, reboot, shut down)
+      Super + I          quick-ask the local model (select text first to send it along)
       Super + Q          close window          Super + F   fullscreen
       Super + D          maximize              Super + Alt + Space  float
       Super + J          flip split            Super + arrows  move focus
@@ -192,6 +193,8 @@ let
     hl.bind("SUPER+F",       hl.dsp.window.fullscreen())
     hl.bind("SUPER+V",       hl.dsp.window.float())
     hl.bind("SUPER+SHIFT+M", hl.dsp.exit())
+    -- Quick-ask: one read-only question to the local model; answer as a notification + clipboard.
+    hl.bind("SUPER+I",       hl.dsp.exec_cmd("agos-ask"))
 
     -- Workspace switching — the ws1/ws2+/ws5 rules above are only reachable with these.
     -- Super+1 = brain home.
@@ -266,6 +269,7 @@ let
       Ctrl + V          paste into terminal
       Ctrl + Shift + C  copy from terminal
       Super + Shift + M exit Hyprland session
+      Super + I         quick-ask the local model (select text first to send it along)
 
     Lost a window? Alt+Tab cycles through everything open, including a
     minimized/click-away Firefox. The taskbar in the top bar also shows it —

@@ -100,6 +100,7 @@ in {
     ./modules/docs-open.nix
     ./modules/media-open.nix
     ./modules/web-open.nix
+    ./modules/quick-ask-open.nix   # agos-ask: one read-only question to the local model (Super+I)
     ./modules/gaming-open.nix
     # Shared with the sovereign path deliberately (the ONE cross-lane import):
     # boot-branding is pure cosmetics (quiet+splash kernel params, Plymouth wordmark,

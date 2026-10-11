@@ -40,6 +40,7 @@ let
     bindsym $mod+f fullscreen toggle
     bindsym $mod+v floating toggle
     bindsym $mod+Shift+m exit
+    bindsym $mod+i exec agos-ask
     bindsym $mod+1 workspace number 1
     bindsym $mod+2 workspace number 2
     bindsym $mod+3 workspace number 3

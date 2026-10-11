@@ -294,6 +294,8 @@
   hl.bind(mainMod .. " + Space",   hl.dsp.exec_cmd(noctCall .. "panel-toggle launcher"))
   hl.bind(mainMod .. " + period",  hl.dsp.exec_cmd(noctCall .. "panel-toggle launcher /emo"))
   hl.bind(mainMod .. " + ALT + C", hl.dsp.exec_cmd(noctCall .. "panel-toggle session"))
+  -- Quick-ask (Agent OS): one read-only question to the local model; answer as a notification + clipboard.
+  hl.bind("SUPER+I",               hl.dsp.exec_cmd("agos-ask"))
   hl.bind("SUPER+SHIFT+M",         hl.dsp.exit())
 
   hl.bind("XF86AudioRaiseVolume",  hl.dsp.exec_cmd(noctCall .. "volume-up"),       { locked = true, repeating = true })
