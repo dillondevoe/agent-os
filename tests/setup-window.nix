@@ -108,7 +108,9 @@ pkgs.testers.runNixOSTest {
 
     box.start()
     peer.start()
-    box.wait_for_unit("multi-user.target")
+    # Not multi-user.target: with the window open the agent's getty, and so that target, wait for the
+    # seal (slice 3b; tests/seal-wait.nix). The window unit is what this test is about.
+    box.wait_for_unit("agentos-setup-window.service")
     peer.wait_for_unit("multi-user.target")
     peer.wait_for_open_port(443)
     peer.wait_for_open_port(80)
@@ -199,7 +201,6 @@ pkgs.testers.runNixOSTest {
     before = window()
     box.shutdown()
     box.start()
-    box.wait_for_unit("multi-user.target")
     box.wait_for_unit("agentos-setup-window.service")
     wait_open()
     w5 = window()
@@ -245,8 +246,10 @@ pkgs.testers.runNixOSTest {
     assert box.succeed("systemctl show -p ConditionResult --value agent-os-pull-model.timer").strip() == "no", "W7: the retry timer is back after a reboot"
     assert json.loads(box.succeed(f"cat {STATE}/sealed")) == marker, "W7: the marker changed"
 
-    # W8 — root removes the state (the re-provisioning path); a garbage window.json seals
-    box.succeed(f"rm {STATE}/sealed && echo garbage > {STATE}/window.json && systemctl restart agentos-setup-window.service")
+    # W8 — root removes the state (the re-provisioning path); a garbage window.json seals. In a boot
+    # that was already sealed nothing is sealed again (slice 3b: a re-provisioning waits for the
+    # reboot), so the test stands in for the new boot by removing the login token, as W10 does.
+    box.succeed(f"rm {STATE}/sealed /run/agentos-setup/login-ok && echo garbage > {STATE}/window.json && systemctl restart agentos-setup-window.service")
     assert json.loads(box.succeed(f"cat {STATE}/sealed"))["reason"] == "invalid state" and elements() == [], "W8"
 
     # W9 — an empty `sealed` is neither a seal nor a first boot
@@ -256,8 +259,10 @@ pkgs.testers.runNixOSTest {
     box.fail(f"test -e {STATE}/window.json")
     box.succeed("journalctl -t agos-window --no-pager | grep -q 'the sealed marker is malformed'")
 
-    # W10 — a first boot with no clock battery
-    box.succeed(f"rm -f {STATE}/sealed {STATE}/window.json; systemctl stop systemd-timesyncd.service 2>/dev/null || true")
+    # W10 — a first boot with no clock battery. This boot was sealed, and a sealed boot refuses to open
+    # again (slice 3b: the agent may be running). A first boot has no login token: /run is new. The
+    # test stands in for that by removing it, which only root can do.
+    box.succeed(f"rm -f {STATE}/sealed {STATE}/window.json /run/agentos-setup/login-ok; systemctl stop systemd-timesyncd.service 2>/dev/null || true")
     box.succeed("date -s '1970-01-02 00:00:00' && test $(date +%Y) = 1970")
     box.succeed("systemctl reset-failed agentos-setup-window.service; systemctl restart agentos-setup-window.service")
     wait_open()

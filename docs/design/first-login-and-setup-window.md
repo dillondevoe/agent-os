@@ -134,10 +134,9 @@ Two things have to become true, and they are separable:
 
 ### 2.2 State
 
-One root-owned directory, `/var/lib/agent-os/seal/` (0700 root). The window oneshot and the seal
-unit carry
+One root-owned directory, `/var/lib/agent-os/seal/` (0700 root). The window oneshot carries
 `RequiresMountsFor=/var/lib/agent-os` and `ConditionPathIsReadWrite=/var/lib/agent-os/seal` (the
-tick carries only the mount requirement, see 2.1): if
+tick and the seal unit carry only the mount requirement, see 2.1 and 2.4): if
 the state cannot be written (read-only filesystem, no space), the window does not open. Writes
 are temp file, `fsync`, `rename`, then `fsync` of the directory.
 
@@ -216,11 +215,52 @@ overlap:
 - `agentos-seal.service` is in every boot (`WantedBy=multi-user.target`), and the agent's session
   (`getty@tty1` autologin, and any desktop session) carries `Requires=` and `After=` on it. Unit
   ordering is static, so the seal unit is always scheduled: on a sealed box it exits at once.
+- **tty1 is not the only door (found while building slice 3b; v3 named only tty1).** nixpkgs bakes
+  `--autologin agent` into every getty template, so a second virtual terminal (logind spawns its
+  getty on a switch), a serial console (the normal console of a VM) and a container console all log
+  the agent in. And logind starts the agent's user manager at boot, with no login at all, if
+  lingering was ever enabled for the account, which an account may do for itself; the agent's
+  scheduled apps are systemd user timers in that manager. Every one of these runs code the agent
+  may have written in an earlier life (a shell profile, a timer), and the window can be open again
+  after a re-provisioning. So:
+  - one positive token, `/run/agentos-setup/login-ok`. Only the window program writes it, under
+    the state lock, after a valid `sealed` marker and a flush nft confirmed. `/run` is a tmpfs:
+    every boot starts without it. Absent means closed;
+  - every agetty's login program (`services.getty.loginProgram`, read by all the templates) is a
+    gate that execs `login` only if the token is there. The break-glass console (tty3) spells out
+    its own login program and is not gated: it is root's, and it must work while a window is stuck;
+  - `user@.service` carries `ExecCondition=+<gate> %i`: uid 0 passes, every other uid needs the
+    token. A skipped user manager is not a failure; logind starts it again at the login;
+  - **once the token exists the window cannot open again in that boot.** `recompute` refuses to
+    open, and the seal itself refuses to write a new marker, whoever asks (the tick on a spent
+    budget, the wait a respawning getty runs again, a timeout). A human who removes the state
+    re-provisions the box at the next boot, never under a running agent, and nothing undoes it
+    in between.
+- tty1's dependency is declared from the seal unit's side (`RequiredBy=` and `Before=`), not as a
+  drop-in on `getty@tty1`: nixpkgs writes every drop-in as `overrides.conf`, and an instance
+  drop-in of that name masks the template's, which holds the getty's whole command line. The VM
+  test caught the first version doing that.
+- The seal unit carries **no** `Condition*=` (2.2 said it would carry `ConditionPathIsReadWrite`;
+  that was wrong): a unit skipped by a condition counts as started for everything that `Requires=`
+  it, and the agent's getty would follow a wait that never ran. A state directory that cannot be
+  written makes the wait fail, because it cannot write the marker.
+- A window that is not open in this boot (the window unit failed, was skipped, or refused) is
+  sealed by the wait at once, reason `not open`: nothing can fetch a model, so there is nothing to
+  wait for.
+- The wait ends at the first seal it attempts. A seal that fails leaves the unit failed and the
+  agent withheld; it does not loop, which would restart the fetcher every few seconds.
+- `ExecStopPost` seals in one case only: the wait timed out (2.1 said "fails or times out"). systemd
+  stops the wait at every shutdown, and a seal there would turn every reboot inside the window into
+  a sealed box with no model; the slice 3b VM test caught exactly that. A wait that is killed or
+  crashes leaves the window to the tick. The agent is absent in every one of those cases, because
+  only a seal writes the token.
 - On a boot where the window is open it *blocks* until one of two things: the model is present
   and first login has finished, or the budget is gone. Its `TimeoutStartSec` is the window length
   plus a margin. "Model present" is decided by one detector: the daemon's own `GET /api/tags` on
   loopback lists the configured model.
-- It waits on first login by ordering: `After=agentos-surface-apply.service`.
+- It waits on first login by ordering: `After=agentos-surface-apply.service`. (On the product
+  path that unit does not exist until slice 4 brings first login there; until then the ordering
+  is inert.)
 - "Sealed" means no egress and not "no new egress": the guard rule (2.1) drops the fetcher's
   off-box packets the moment the set is flushed, including on a connection opened inside the
   window. After the flush the seal also restarts the fetcher (`systemctl restart ollama.service`,
@@ -230,7 +270,12 @@ overlap:
 - tty1 between the first-login questions and the agent's getty is owned by one small unit,
   `agentos-setup-progress.service` (`Type=oneshot`, `TTYPath=/dev/tty1`,
   `After=agentos-firstlogin.service`, `Before=getty@tty1.service`, unprivileged, output only). It
-  exits when `sealed` appears, so tty1 never has two owners. It prints the download progress, and if
+  cannot read the state directory, so the window program writes one display-only line for it,
+  `/run/agentos-setup/status`; nothing decides anything from that file. The download's progress
+  text comes from the fetcher, so only printable ASCII of it reaches the terminal. It
+  exits when the status says sealed, so tty1 never has two owners. (Known limit: the status write
+  is best effort. If that one write failed while the seal succeeded, tty1's getty would wait for
+  the progress unit's own limit, the window length plus eleven minutes.) It prints the download progress, and if
   the budget ends without a model it prints that the box has no model and how a human re-provisions
   it (2.3). It reads no input.
 - There is no cycle: the first-login unit is before the getty and not after the seal; the seal
@@ -439,7 +484,8 @@ Split in two (ruling 4), so that no root process reads keyboard bytes:
 | 1 | Choice store, validator, front end, root helper, `agentos-terminal`, `agentos-shell` | developer image; Fable code review (root helper, console input) | Wired into the developer image's desktops; validator, input and helper batteries; the `agentos-setup` account; `surface-choice-store` VM test |
 | 2 | Desktop specialisations and `agentos-boot-default` | developer image | hyprland / sway / none specialisations (the heavy desktops stay build-time choices); the UEFI VM proof of 3.2; `surface-offline-switch` |
 | 3a | The setup window: the mechanism | wall; Fable code review | `agentos.cleanRoom.setupWindow.enable` (default OFF, the existing rulesets byte-identical): the set and its rules, the fetcher's fixed uid, the state machine (`modules/agos_window.py`), the window oneshot following nftables' restarts and reloads, the tick that closes and seals on the budget, the pull units conditioned on the marker. VM test `tests/setup-window.nix` (W1-W10) |
-| 3b | The setup window: around it | wall; Fable code review | The agent's session waiting on the seal (2.4), the "model is in" seal and its detector, the tty1 progress unit, the seal-check assertions (2.5), the audit-chain lines (window and surface choice), and the `agent-os-pull-model` registry probe no longer running as root (2.1). A flake assertion refuses any shipped configuration that enables the window until this slice lands. **Until 3b lands the option must stay off on a real box**: the agent's uid gets no accept, but the agent can run while the fetcher has egress |
+| 3b part 1 | The setup window: the agent does not exist while it is open | wall; Fable code review | `agentos-seal.service` (the wait, the detector, `ExecStopPost`), tty1's getty behind it, the login token and the gates on every other console and on the user manager, no reopening in a sealed boot, the tty1 progress unit (2.4). VM test `test-seal-wait`. The option stays off on shipped images. |
+| 3b part 2 | The setup window: seal-check and the rest | wall; Fable code review | The seal-check assertions (2.5), the audit-chain lines, the registry probe off uid 0, timeout tidying; removes the flake assertion that keeps the option off. |
 | 4 | Product path | wall; Fable code review | Surfaces and first login in `agentos`; a human account; `agentos-sealed` retired once the window has acceptance evidence |
 
 Slices 1 and 2 touch no wall code and can land while 3 is in review.
@@ -466,8 +512,10 @@ failure mode (curl exit 28, as `egress-uid-scope.nix` does), so a dead network c
 | `setup-window-reload` (VM) | `systemctl reload nftables` and `restart nftables` mid-window: the set is re-populated, the same boot is charged nothing extra (remaining equals the recomputed value), one audit line each; after the seal the set stays empty across both |
 | `setup-window-seal-ends-flow` (VM) | A download in flight when the seal fires does not survive it: the fetch uid's open connection is gone after `agentos-seal.service` |
 | `setup-window-no-model` (VM) | Budget ends with no model: the box seals, the agent's getty starts, tty1 says there is no model |
-| `seal-check-sealed-by-build` (VM) | `cleanRoom.sealed = true`: window unit masked, set empty, token written, no `sealed` file needed |
+| `seal-check-sealed-by-build` (VM, slice 3b part 2; the token here is seal-check's `/run/agentos-sealed-ok`) | `cleanRoom.sealed = true`: window unit masked, set empty, token written, no `sealed` file needed |
 | `setup-window-seal-fails` (VM) | The seal unit made to fail or time out: the set is still empty afterwards and `sealed` is written; with the seal unit broken outright, the tick alone empties the set at `remaining ≤ 0` |
+| `setup-window-agent-absent` (VM, `test-seal-wait`) | Window open: tty1's getty has not started; a second virtual terminal, a getty started by hand and a serial console refuse and produce no process of the agent's account; with lingering enabled the user manager is refused at boot. A sampler on the box watches "agent process, then non-empty set" for the whole test. Controls: each door logs the agent in once the box is sealed |
+| `setup-window-seal-on-model` (VM, `test-seal-wait`) | A look-alike model name does not seal; the configured name in `/api/tags` does (reason `complete`), and only then does the agent exist. A killed wait does NOT seal (only a timeout does) and the agent stays absent. State removed in a sealed boot does not reopen the window and is not re-sealed; after a reboot it is a first boot |
 | `first-login-choice-survives` (VM) | A non-default choice made in the front end reaches the store (the runtime directory is still there when the helper reads) |
 | budget battery | Recompute is idempotent (ticking twice gives one charge); a same-boot run charges nothing; a new boot id settles the previous boot; the floor applies once per boot |
 | `setup-window-unit-dead` (VM) | Window unit killed with `sealed` absent: seal-check treats the box as sealed-or-down |

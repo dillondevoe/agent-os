@@ -270,6 +270,11 @@ jobs:
           # that the fetcher's uid gets out while the set holds it and nobody else does, that an
           # nftables reload really empties it, and that the box closes and seals itself on its budget.
           - test-setup-window
+          # THE AGENT DOES NOT EXIST WHILE THE WINDOW IS OPEN. Same rule: added with tests/seal-wait.nix.
+          # Unit text can say tty1's getty requires the seal; only a booted box shows that no console,
+          # no serial line and no lingering user manager produces a process of the agent's account
+          # while the fetcher has egress, and that the box seals itself the moment the model is listed.
+          - test-seal-wait
           - test-surface-choice
           # THE DESKTOP AS A BOOT ENTRY. Same rule: added with tests/surface-boot-default.nix. The only
           # witness, on a UEFI machine with a real systemd-boot, that a first-login desktop choice
