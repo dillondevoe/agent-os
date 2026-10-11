@@ -1691,6 +1691,9 @@
                                 && fl.unitConfig.ConditionPathExists == "!/var/lib/agent-os/surface.toml"
                                 && lib.elem "getty@tty1.service" fl.before && lib.elem "plymouth-quit-wait.service" fl.after)
             "surface-choice: the front end unit lost a property (unprivileged, tty1 before the getty, preserved runtime dir, sandbox, timeout, condition)";
+          assert lib.assertMsg (fl.serviceConfig.ExecStart == "${pkg}/libexec/agentos-firstlogin"
+                                && ap.serviceConfig.ExecStart == "${pkg}/libexec/agentos-surface-apply")
+            "surface-choice: the units must run the libexec wrappers";
           assert lib.assertMsg (!(ap.serviceConfig ? User) && lib.elem "agentos-firstlogin.service" ap.requires
                                 && lib.elem "agentos-firstlogin.service" ap.after && lib.elem "getty@tty1.service" ap.before
                                 && ap.serviceConfig.ProtectSystem == "strict" && ap.serviceConfig.PrivateNetwork
@@ -1733,10 +1736,14 @@
                 assert sorted(c["exec"][kind]) == c["offered"][kind], kind
             print("surface-choice: installed configuration ok")
             PY
-            for w in agentos-firstlogin:firstlogin agentos-surface-apply:apply agentos-terminal:terminal agentos-shell:shell agentos-surface:read; do
+            for w in libexec/agentos-firstlogin:firstlogin libexec/agentos-surface-apply:apply bin/agentos-terminal:terminal bin/agentos-shell:shell bin/agentos-surface:read; do
               # A binary wrapper carries the command that built it as text.
-              grep -aqF -- "--add-flags '-I ${pkg}/libexec/agos_choice.py ''${w##*:}'" ${pkg}/bin/''${w%%:*} || {
+              grep -aqF -- "--add-flags '-I ${pkg}/libexec/agos_choice.py ''${w##*:}'" ${pkg}/''${w%%:*} || {
                 echo "surface-choice: ''${w%%:*} must run python3 -I with the role ''${w##*:} fixed" >&2; exit 1; }
+            done
+            # The two roles only the units run are not on anyone's PATH.
+            for priv in agentos-firstlogin agentos-surface-apply; do
+              if [ -e ${pkg}/bin/$priv ]; then echo "surface-choice: $priv must not be in bin (it is on the agent's PATH there)" >&2; exit 1; fi
             done
             grep -qF 'hl.bind("SUPER+RETURN",  hl.dsp.exec_cmd("${pkg}/bin/agentos-terminal"))' ${on.system.build.hyprlandConf} || {
               echo "surface-choice: Super+Return must run the terminal wrapper by store path" >&2; exit 1; }

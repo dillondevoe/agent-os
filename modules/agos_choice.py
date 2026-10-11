@@ -21,7 +21,7 @@
 # The lists, the defaults, the exec tables and the paths are compiled in by surface-choice-open.nix.
 # The literal placeholder means "repo copy", and ONLY the repo copy reads AGOS_CHOICE_CONFIG (tests);
 # the installed copy ignores the environment for every decision.
-import json, os, pwd, select, stat, sys, time
+import glob, json, os, pwd, select, signal, stat, sys, time
 
 CONFIG_JSON = "@AGOS_CHOICE_CONFIG@"
 
@@ -90,6 +90,8 @@ def read_store(c=None):
     list. `reason` is None when the store was valid, else why the defaults were used."""
     c = c or config()
     defaults = {k: c["defaults"][k] for k in KINDS}
+    # "On the root filesystem": if an image ever puts /var on its own filesystem this fails closed to
+    # the defaults (with a journal line per use); compile store_dev to the state directory then.
     data, why = _read_checked(c["store"], STORE_MAX, c.get("store_uid", 0), c.get("store_dev", "/"))
     if data is None:
         return defaults, why
@@ -100,7 +102,7 @@ def read_store(c=None):
         return defaults, "not valid TOML"
     if set(doc) != {"schema"} | set(KINDS):
         return defaults, "unexpected keys"
-    if doc["schema"] != 1 or isinstance(doc["schema"], bool):
+    if type(doc["schema"]) is not int or doc["schema"] != 1:      # not 1.0, not true
         return defaults, "unknown schema"
     choice = {}
     for k in KINDS:
@@ -113,6 +115,11 @@ def read_store(c=None):
 
 def _write_atomic(path, data, mode):
     d = os.path.dirname(path)
+    for stale in glob.glob(os.path.join(glob.escape(d), ".%s.tmp.*" % os.path.basename(path))):
+        try:
+            os.unlink(stale)                         # a temp left by a run that died mid-write
+        except OSError:
+            pass
     tmp = os.path.join(d, ".%s.tmp.%d" % (os.path.basename(path), os.getpid()))
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, mode)
     try:
@@ -173,12 +180,72 @@ def _read_line(fd, deadline):
     return raw or None
 
 
+_KEYBOARD_SIGNALS = ("SIGINT", "SIGQUIT", "SIGTSTP", "SIGTTIN", "SIGTTOU", "SIGHUP")
+
+
+def _quiet_keyboard(fd):
+    """Ctrl-C, Ctrl-\\ and Ctrl-Z must not kill or stop the questions: a dead front end writes no
+    tokens, the helper then fails, and the box asks again on every boot. Ignore the signals, and on a
+    real terminal turn off the keys that send them (ISIG) and the literal-next key (IEXTEN), so they
+    arrive as ordinary control bytes, which the line rule rejects. Returns what to restore."""
+    saved = {}
+    for name in _KEYBOARD_SIGNALS:
+        try:
+            saved[name] = signal.signal(getattr(signal, name), signal.SIG_IGN)
+        except (OSError, ValueError, AttributeError):
+            pass
+    attrs = None
+    try:
+        import termios
+        if os.isatty(fd):
+            attrs = termios.tcgetattr(fd)
+            new = list(attrs)
+            new[3] &= ~(termios.ISIG | termios.IEXTEN)
+            termios.tcsetattr(fd, termios.TCSANOW, new)
+    except Exception:
+        attrs = None
+    return saved, attrs
+
+
+def _restore_keyboard(fd, state):
+    saved, attrs = state
+    if attrs is not None:
+        try:
+            import termios
+            termios.tcsetattr(fd, termios.TCSANOW, attrs)
+        except Exception:
+            pass
+    for name, old in saved.items():
+        try:
+            signal.signal(getattr(signal, name), old)
+        except (OSError, ValueError, TypeError):
+            pass
+
+
 def firstlogin(c=None, fd_in=0, out=None):
-    """Ask up to three questions; write the tokens file. Returns the choice it wrote."""
+    """Ask up to three questions; write the tokens file. Returns the choice it wrote. Whatever
+    happens while asking, the tokens file is written: the helper always has something to read."""
     c = c or config()
     out = out or sys.stdout
-    deadline = time.monotonic() + TIMEOUT
     choice = {k: c["defaults"][k] for k in KINDS}
+    state = _quiet_keyboard(fd_in)
+    try:
+        _ask(c, choice, fd_in, out)
+    except Exception:
+        pass                                         # the answers so far, the defaults for the rest
+    finally:
+        _restore_keyboard(fd_in, state)
+    tokens = " ".join(choice[k] for k in KINDS) + "\n"
+    _write_atomic(c["tokens"], tokens.encode("ascii"), 0o600)
+    try:
+        out.write("\nDesktop %s, terminal %s, shell %s.\n" % tuple(choice[k] for k in KINDS)); out.flush()
+    except Exception:
+        pass
+    return choice
+
+
+def _ask(c, choice, fd_in, out):
+    deadline = time.monotonic() + TIMEOUT
     out.write("\nAgent OS — first login. Three questions; Enter takes the default, s skips the rest.\n")
     skip = False
     for kind in KINDS:
@@ -204,10 +271,6 @@ def firstlogin(c=None, fd_in=0, out=None):
             elif got[0] == "pick":
                 choice[kind] = offered[got[1]]
             break
-    tokens = " ".join(choice[k] for k in KINDS) + "\n"
-    _write_atomic(c["tokens"], tokens.encode("ascii"), 0o600)
-    out.write("\nDesktop %s, terminal %s, shell %s.\n" % tuple(choice[k] for k in KINDS)); out.flush()
-    return choice
 
 
 # ── the root helper (privileged; reads one small file; no keyboard) ──────────────────────────────
@@ -250,8 +313,11 @@ def run(kind, argv, c=None):
         log("%s: store %s; using the default" % (kind, why))
     table = c["exec"][kind]
     path = table.get(choice[kind]) or table[c["defaults"][kind]]
-    # A shell is started as a login shell, the way login(1) would: argv[0] with a leading dash.
-    argv0 = "-" + os.path.basename(path) if kind == "shell" else path
+    # The dash login(1), sshd and `su -l` put on argv[0] is lost before this code runs (the wrapper and
+    # python both replace argv[0]), so the rule is by arguments: a shell started with NONE is the
+    # login / interactive case and gets the dash; one started with any (`-c cmd`, a script: ssh host
+    # cmd, scp, rsync, `su -c`) is not a login shell and must not read the profile.
+    argv0 = "-" + os.path.basename(path) if (kind == "shell" and not argv) else path
     os.execv(path, [argv0] + argv)
 
 

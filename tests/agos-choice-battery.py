@@ -11,6 +11,8 @@
 #      control byte, non-ASCII digits, an over-length line, a line with no newline, 0, n+1 are not.
 #   D. The front end: picks, skip, a bad line then a good one, too many bad lines (default), EOF
 #      (defaults), timeout (defaults); a kind with one option is not asked; the tokens file is 0600.
+#   D2. Ctrl-C, Ctrl-Z and Ctrl-\ cannot kill or stop it (signals ignored, ISIG off on a terminal, both
+#      restored after); an exception while asking still writes the tokens for the answers so far.
 #   E. The front end never execs or spawns, and nothing typed reaches the tokens file or the log.
 #   F. The helper: valid tokens become the store (0644, exact text), and the tokens file is removed.
 #   G. The helper refuses and writes NOTHING for: no file, a symlink, the wrong owner, an oversize
@@ -135,6 +137,7 @@ for tag, text in (("not TOML", "schema = \n"), ("binary", "\x00\x01\x02"),
                   ("extra key", GOOD + 'exec = "/bin/sh"\n'), ("missing key", 'schema = 1\ndesktop = "sway"\nterminal = "foot"\n'),
                   ("schema 2", GOOD.replace("schema = 1", "schema = 2")), ("schema true", GOOD.replace("schema = 1", "schema = true")),
                   ("schema string", GOOD.replace("schema = 1", 'schema = "1"')),
+                  ("schema float", GOOD.replace("schema = 1", "schema = 1.0")),
                   ("not offered", GOOD.replace('"foot"', '"xterm"')), ("wrong type", GOOD.replace('"foot"', "7")),
                   ("list", GOOD.replace('"foot"', '["foot"]')), ("trailing text", GOOD.replace('"foot"', '"foot; reboot"')),
                   ("path", GOOD.replace('"fish"', '"/bin/sh"')), ("case", GOOD.replace('"fish"', '"Fish"')),
@@ -220,6 +223,76 @@ got, text = front([b"2\n", b"2\n"], c=one)
 check(got == {"desktop": "hyprland", "terminal": "foot", "shell": "fish"} and "Desktop:" not in text, "D one option is not asked: %r" % got)
 ok("D picks, skip, bad lines, EOF and timeout all end in a 0600 tokens file of offered words")
 
+# D2 — the keyboard cannot kill it, and a failure while asking still writes the tokens
+import pty, signal, termios
+seen = {}
+_lr = A._read_line
+
+
+def _spy(fd, deadline):
+    seen["sigint"] = signal.getsignal(signal.SIGINT); seen["sigtstp"] = signal.getsignal(signal.SIGTSTP)
+    seen["sigquit"] = signal.getsignal(signal.SIGQUIT)
+    if os.isatty(fd):
+        seen["lflag"] = termios.tcgetattr(fd)[3]
+    return _lr(fd, deadline)
+
+
+A._read_line = _spy
+before = signal.getsignal(signal.SIGINT)
+master, slave = pty.openpty()
+lflag0 = termios.tcgetattr(slave)[3]
+# Typed AFTER each prompt, as a person would: the program flushes pending input before every prompt
+# (so type-ahead is discarded), and the control keys only become ordinary bytes once it has turned
+# ISIG off. Ctrl-C then 2 is one invalid line; Ctrl-Z and Ctrl-\ likewise; then real answers.
+import threading
+gone(TOKENS); out = io.StringIO()
+keys = [b"\x032\n", b"\x1a\x1c2\n", b"2\n", b"\n", b"\n"]
+
+
+def _typist():
+    sent = 0
+    t_end = time.monotonic() + 30
+    while sent < len(keys) and time.monotonic() < t_end:
+        if out.getvalue().count("> ") > sent:
+            time.sleep(0.05)                 # after the flush that follows the prompt
+            os.write(master, keys[sent]); sent += 1
+        else:
+            time.sleep(0.01)
+
+
+old_timeout = A.TIMEOUT; A.TIMEOUT = 30
+th = threading.Thread(target=_typist, daemon=True); th.start()
+try:
+    got = A.firstlogin(cfg(), fd_in=slave, out=out)
+finally:
+    A._read_line = _lr; A.TIMEOUT = old_timeout
+th.join(5)
+check(got == {"desktop": "sway", "terminal": "kitty", "shell": "bash"} and out.getvalue().count("Please type") == 2,
+      "D2: control keys must be rejected lines, not signals: %r %r" % (got, out.getvalue().count("Please type")))
+check(seen["sigint"] == signal.SIG_IGN and seen["sigtstp"] == signal.SIG_IGN and seen["sigquit"] == signal.SIG_IGN, "D2: keyboard signals not ignored while asking: %r" % seen)
+check(not seen["lflag"] & termios.ISIG and not seen["lflag"] & termios.IEXTEN, "D2: ISIG/IEXTEN still on while asking")
+check(termios.tcgetattr(slave)[3] == lflag0 and signal.getsignal(signal.SIGINT) == before, "D2: terminal flags or handlers not restored")
+os.close(master); os.close(slave)
+calls_n = {"n": 0}
+
+
+def _boom(fd, deadline):
+    calls_n["n"] += 1
+    if calls_n["n"] == 2:
+        raise RuntimeError("the terminal went away")
+    return b"2\n"
+
+
+A._read_line = _boom
+gone(TOKENS)
+try:
+    got = A.firstlogin(cfg(), fd_in=0, out=io.StringIO())
+finally:
+    A._read_line = _lr
+check(got == {"desktop": "sway", "terminal": "kitty", "shell": "bash"} and open(TOKENS).read() == "sway kitty bash\n",
+      "D2: a failure while asking must still write the answers so far: %r" % got)
+ok("D2 Ctrl-C/Z/\\ are rejected lines, not signals; a failure mid-question still writes the tokens")
+
 # E — the front end never execs or spawns; nothing typed is kept
 import subprocess
 trip = []
@@ -303,7 +376,10 @@ try:
     put(STORE, GOOD)
     A.run("terminal", ["-e", "top"], cfg()); A.run("shell", ["-c", "true"], cfg())
     check(execs == [("/store/foot/bin/foot", ["/store/foot/bin/foot", "-e", "top"]),
-                    ("/store/fish/bin/fish", ["-fish", "-c", "true"])], "I: %r" % execs)
+                    ("/store/fish/bin/fish", ["/store/fish/bin/fish", "-c", "true"])],
+          "I: a shell given arguments is NOT a login shell (ssh host cmd, scp, su -c): %r" % execs)
+    execs.clear(); A.run("shell", [], cfg())
+    check(execs == [("/store/fish/bin/fish", ["-fish"])], "I: a shell with no arguments is the login shell: %r" % execs)
     os.environ.update(POISON); execs.clear()
     A.run("terminal", [], cfg()); A.run("shell", [], cfg())
     check([e[0] for e in execs] == ["/store/foot/bin/foot", "/store/fish/bin/fish"], "I: the environment steered the exec: %r" % execs)
@@ -365,6 +441,7 @@ real_fsync = os.fsync
 os.fsync = lambda fd: (synced.append(os.fstat(fd).st_mode), real_fsync(fd))[1]
 try:
     gone(STORE); put(TOKENS, "none foot bash\n", 0o600)
+    put(os.path.join(os.path.dirname(STORE), ".surface.toml.tmp.4242"), "left by a run that died")
     A.apply(cfg())
 finally:
     os.fsync = real_fsync

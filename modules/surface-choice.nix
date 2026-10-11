@@ -44,9 +44,11 @@ let
     install -Dm755 ${./agos_choice.py} $out/libexec/agos_choice.py
     substituteInPlace $out/libexec/agos_choice.py \
       --replace-fail '"@AGOS_CHOICE_CONFIG@"' ${lib.escapeShellArg (builtins.toJSON (builtins.toJSON choiceConfig))}
-    for pair in agentos-firstlogin:firstlogin agentos-surface-apply:apply agentos-terminal:terminal \
-                agentos-shell:shell agentos-surface:read; do
-      makeBinaryWrapper ${pkgs.python3}/bin/python3 $out/bin/''${pair%%:*} \
+    # The two roles only the units run live in libexec, off everyone's PATH; the three a person or a
+    # desktop binding runs live in bin.
+    for pair in libexec/agentos-firstlogin:firstlogin libexec/agentos-surface-apply:apply \
+                bin/agentos-terminal:terminal bin/agentos-shell:shell bin/agentos-surface:read; do
+      makeBinaryWrapper ${pkgs.python3}/bin/python3 $out/''${pair%%:*} \
         --add-flags "-I $out/libexec/agos_choice.py ''${pair##*:}"
     done
   '';
@@ -82,7 +84,7 @@ in
         unitConfig.ConditionPathExists = "!/var/lib/agent-os/surface.toml";
         serviceConfig = {
           Type = "oneshot";
-          ExecStart = "${agos-choice}/bin/agentos-firstlogin";
+          ExecStart = "${agos-choice}/libexec/agentos-firstlogin";
           User = "agentos-setup";
           Group = "agentos-setup";
           # systemd opens the terminal as root before it drops privileges, so the account needs no
@@ -122,7 +124,7 @@ in
         unitConfig.ConditionPathExists = "!/var/lib/agent-os/surface.toml";
         serviceConfig = {
           Type = "oneshot";
-          ExecStart = "${agos-choice}/bin/agentos-surface-apply";
+          ExecStart = "${agos-choice}/libexec/agentos-surface-apply";
           PrivateNetwork = true;
           ProtectSystem = "strict";
           ProtectHome = true;
