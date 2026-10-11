@@ -18,9 +18,13 @@
 # rest of C0/C1, which drive terminals), format characters (bidirectional overrides, zero-width
 # characters, the Unicode tag block — the usual carriers of hidden text that survives a copy and
 # paste into another prompt), line/paragraph separators, private-use, surrogate and unassigned code
-# points. The notification's text is also markup-escaped (notification daemons render links and
+# points, variation selectors (a second hidden-data channel: any number can ride on one visible
+# character), and the letters and symbols that render as nothing (Hangul fillers, the Braille blank,
+# the combining grapheme joiner). Every space other than the plain one becomes a plain space, so
+# spacing cannot encode anything either. The notification's text is also markup-escaped (notification daemons render links and
 # images from it). Newlines and tabs stay. What this does not do: judge the words. A pasted answer
-# is still text a person should read before running.
+# is still text a person should read before running. And the notification shows only the first 500
+# characters while the clipboard holds all of it: read the paste, not the popup.
 #
 # THE TRACE (owner ruling 2026-10-10, option 1): one journal line per use with byte counts and the
 # outcome, never the text. The journal stamps the time. It is a usage record, not a control: this
@@ -74,11 +78,23 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 
 
 _DROP = {"Cc", "Cf", "Cs", "Co", "Cn", "Zl", "Zp"}   # control, format, surrogate, private, unassigned, separators
+# Invisible but not in those categories: variation selectors (Mn) and characters that render blank.
+_BLANK = (set(range(0xFE00, 0xFE10)) | set(range(0xE0100, 0xE01F0)) | set(range(0x180B, 0x1810))
+          | {0x034F, 0x115F, 0x1160, 0x17B4, 0x17B5, 0x2800, 0x3164, 0xFFA0})
 
 
 def clean(text):
-    """The answer with every invisible or terminal-driving character removed (newline and tab stay)."""
-    return "".join(c for c in text if c in "\n\t" or unicodedata.category(c) not in _DROP)
+    """The answer with every invisible or terminal-driving character removed (newline and tab stay);
+    every other kind of space becomes a plain space."""
+    out = []
+    for c in text:
+        if c in "\n\t":
+            out.append(c)
+        elif unicodedata.category(c) == "Zs":
+            out.append(" ")
+        elif unicodedata.category(c) not in _DROP and ord(c) not in _BLANK:
+            out.append(c)
+    return "".join(out)
 
 
 def ask(question, context=""):

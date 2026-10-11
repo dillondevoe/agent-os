@@ -21,8 +21,8 @@
 #   L. The repo copy (placeholders unsubstituted) says "not configured" and makes no request; each
 #      placeholder appears exactly once.
 #   M. A proxy in the environment is ignored.
-#   N. The answer is untrusted: control, format (bidi, zero-width, tag block), separator, private-use
-#      and unassigned characters never reach stdout, the
+#   N. The answer is untrusted: control, format (bidi, zero-width, tag block), separator, private-use,
+#      unassigned, variation-selector and blank-rendering characters never reach stdout, the
 #      clipboard or the notification; the notification's title and body are markup-escaped; an answer
 #      that is only control characters is "no answer".
 #   O. Child tools never inherit this process's stdin.
@@ -334,15 +334,20 @@ ok("M a proxy in the environment is ignored")
 
 # N — the answer is untrusted text
 evil = ("ok\x1b]52;c;ZXZpbA==\x07 \x1b[2J<a href=\"http://127.0.0.1:1/\">x</a> & \u202egpj.exe\u202c \x9b31m line2\nnext\ttab"
-        " z\u200bw\u200d\ufeff\u00ad tag\U000e0041\U000e0042 sep\u2028\u2029 pua\ue000 del\x7f una\u0378 end")
+        " z\u200bw\u200d\ufeff\u00ad tag\U000e0041\U000e0042 sep\u2028\u2029 pua\ue000 del\x7f una\u0378"
+        " vs\ufe0f\ufe00\U000e0100\U000e01ef fill\u3164\u115f\u1160\uffa0\u2800\u034f\u17b4\u180b"
+        " sp\u00a0a\u2003b\u3000c\u205fd\u1680e end")
 want = ("ok]52;c;ZXZpbA== [2J<a href=\"http://127.0.0.1:1/\">x</a> & gpj.exe 31m line2\nnext\ttab"
-        " zw tag sep pua del una end")
+        " zw tag sep pua del una vs fill sp a b c d e end")
 configure(); tools(); S.answer(evil)
 rc, out, err, lines = run_main(["q"])
 check(rc == 0 and out == want + "\n", "N: stdout: %r" % out)
 import unicodedata
 check(not any(ch not in "\n\t" and unicodedata.category(ch) in ("Cc", "Cf", "Cs", "Co", "Cn", "Zl", "Zp") for ch in out),
       "N: an invisible or control character reached stdout")
+check(all(ch == " " or unicodedata.category(ch) != "Zs" for ch in out), "N: a non-plain space reached stdout")
+check("caf\u00e9 \u65e5\u672c \U0001f600 e\u0301" == A.clean("caf\u00e9 \u65e5\u672c \U0001f600 e\u0301"),
+      "N: ordinary accented, CJK, emoji and combining text must pass through unchanged")
 configure(launcher="fake-launcher"); S.answer(evil)
 tools(fake_launcher="<b>bold</b> & \x1b[31mred\n", wl_copy="", notify_send="")
 rc, out, err, lines = run_main([])
