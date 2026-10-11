@@ -79,6 +79,7 @@ in {
     ./modules/calendar-open.nix
     ./modules/desktop-open.nix
     ./modules/desktop-sway-open.nix # agentos.desktop = "sway" (inert unless chosen)
+    ./modules/surface-choice.nix    # agentos.firstLogin.enable: terminal/shell asked at first login (inert unless on)
     ./modules/desktop-de-open.nix   # agentos.desktop = "plasma" | "gnome" | "cosmic" (inert unless chosen)
     ./modules/surface-options.nix # agentos.terminal / agentos.shell (defaults: today's kitty / bash)
     ./modules/settings-open.nix

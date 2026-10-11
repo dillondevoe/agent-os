@@ -279,6 +279,15 @@
           inherit baseModules;
         };
 
+        # First login on a booted machine (first-login-and-setup-window.md slice 1): the questions on
+        # tty1 before the agent's getty, typed answers reaching the root-owned store through the
+        # unprivileged front end and the three-token root helper, the wrappers following the store.
+        # Out of `checks` (boots a VM); in the vm-tests.yml matrix in the same commit.
+        #   nix build .#test-surface-choice
+        test-surface-choice = import ./tests/surface-choice.nix {
+          pkgs = nixpkgs.legacyPackages.${system};
+        };
+
         test-app-approve-confirm = import ./tests/app-approve-confirm.nix {
           pkgs = nixpkgs.legacyPackages.${system};
           inherit baseModules;
@@ -1653,6 +1662,91 @@
             done
             grep -qF 'bindsym $mod+i exec agos-ask' ${sway.system.build.swayConf} || {
               echo "quick-ask: the sway config does not bind Mod+i to agos-ask" >&2; exit 1; }
+            touch $out
+          '';
+        # First login, slice 1 (first-login-and-setup-window.md §3-§4): the contract battery (store
+        # reader, typed-line rule, front end, root helper, wrappers), then the INSTALLED pieces with
+        # agentos.firstLogin.enable = true: the configuration compiled in, the units and the account
+        # as the spec states them, the terminal binding and the operator's shell going through the
+        # wrappers by store path. And the default: none of it exists.
+        surface-choice =
+          let
+            lib = nixpkgs.lib;
+            p = nixpkgs.legacyPackages.${system};
+            dflt = self.nixosConfigurations.agentos-open.config;
+            on = (mkOpenSystem [ { agentos.firstLogin.enable = true; } ]).config;
+            pkg = on.system.build.agosChoice;
+            fl = on.systemd.services.agentos-firstlogin;
+            ap = on.systemd.services.agentos-surface-apply;
+            su = on.users.users.agentos-setup;
+          in
+          assert lib.assertMsg (!dflt.agentos.firstLogin.enable && !(dflt.systemd.services ? agentos-firstlogin)
+                                && !(dflt.systemd.services ? agentos-surface-apply) && !(dflt.users.users ? agentos-setup))
+            "surface-choice: with first login off (the default) none of it may exist";
+          assert lib.assertMsg (fl.serviceConfig.User == "agentos-setup" && fl.serviceConfig.TTYPath == "/dev/tty1"
+                                && fl.serviceConfig.StandardInput == "tty" && fl.serviceConfig.RuntimeDirectoryPreserve == "yes"
+                                && fl.serviceConfig.RuntimeDirectoryMode == "0700" && fl.serviceConfig.PrivateNetwork
+                                && fl.serviceConfig.NoNewPrivileges && fl.serviceConfig.CapabilityBoundingSet == ""
+                                && fl.serviceConfig.ProtectSystem == "strict" && fl.serviceConfig.TimeoutStartSec == 360
+                                && fl.unitConfig.ConditionPathExists == "!/var/lib/agent-os/surface.toml"
+                                && lib.elem "getty@tty1.service" fl.before && lib.elem "plymouth-quit-wait.service" fl.after)
+            "surface-choice: the front end unit lost a property (unprivileged, tty1 before the getty, preserved runtime dir, sandbox, timeout, condition)";
+          assert lib.assertMsg (fl.serviceConfig.ExecStart == "${pkg}/libexec/agentos-firstlogin"
+                                && ap.serviceConfig.ExecStart == "${pkg}/libexec/agentos-surface-apply")
+            "surface-choice: the units must run the libexec wrappers";
+          assert lib.assertMsg (!(ap.serviceConfig ? User) && lib.elem "agentos-firstlogin.service" ap.requires
+                                && lib.elem "agentos-firstlogin.service" ap.after && lib.elem "getty@tty1.service" ap.before
+                                && ap.serviceConfig.ProtectSystem == "strict" && ap.serviceConfig.PrivateNetwork
+                                && ap.serviceConfig.ReadWritePaths == [ "/var/lib/agent-os" "/run/agentos-firstlogin" ]
+                                && !(ap.serviceConfig ? StandardInput))
+            "surface-choice: the root helper must follow the front end, write only its two directories, and have no terminal";
+          assert lib.assertMsg (su.isSystemUser && su.extraGroups == [ ] && su.group == "agentos-setup"
+                                && lib.hasSuffix "nologin" (su.shell.shellPath or (toString su.shell)) && su.home == "/var/empty"
+                                && !(lib.elem "agentos-setup" (on.users.groups.wheel.members or [ ])))
+            "surface-choice: agentos-setup must have no shell, no home, no groups";
+          assert lib.assertMsg (on.agentos.surfaceInternal.terminalCmd == "${pkg}/bin/agentos-terminal"
+                                && on.users.users.operator.shell == "${pkg}/bin/agentos-shell"
+                                && lib.elem "${pkg}/bin/agentos-shell" on.environment.shells
+                                && on.users.users.agent.shell.drvPath == p.bash.drvPath)
+            "surface-choice: the terminal binding and the operator's shell must be the wrappers by store path; the agent keeps bash";
+          assert lib.assertMsg (lib.all (t: lib.any (n: lib.hasPrefix "${t}-" n) (map (x: x.name or "") on.environment.systemPackages))
+                                  [ "kitty" "foot" "ghostty" "alacritty" ] && on.programs.fish.enable && on.programs.zsh.enable)
+            "surface-choice: every offered terminal and shell must be installed";
+          p.runCommand "surface-choice-check" { nativeBuildInputs = [ p.python3 ]; } ''
+            work="$(mktemp -d)"; mkdir -p "$work/modules" "$work/tests"
+            cp ${./modules/agos_choice.py} "$work/modules/agos_choice.py"
+            cp ${./tests/agos-choice-battery.py} "$work/tests/agos-choice-battery.py"
+            ( cd "$work"; python3 tests/agos-choice-battery.py )
+            src=${pkg}/libexec/agos_choice.py
+            if grep -q '@AGOS_CHOICE_CONFIG@' "$src"; then echo "surface-choice: the placeholder survived in the installed copy" >&2; exit 1; fi
+            # The compiled-in configuration, read back the way the program reads it.
+            python3 - "$src" <<'PY'
+            import importlib.util, sys
+            spec = importlib.util.spec_from_file_location("c", sys.argv[1]); m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+            c = m.config()
+            assert c["offered"]["terminal"] == ["alacritty", "foot", "ghostty", "kitty"], c["offered"]
+            assert c["offered"]["shell"] == ["bash", "fish", "zsh"], c["offered"]
+            assert c["offered"]["desktop"] == [c["defaults"]["desktop"]] == ["hyprland"], c["offered"]
+            assert c["defaults"] == {"desktop": "hyprland", "terminal": "kitty", "shell": "bash"}, c["defaults"]
+            assert c["store"] == "/var/lib/agent-os/surface.toml" and c["tokens"] == "/run/agentos-firstlogin/choice", c
+            assert c["tokens_user"] == "agentos-setup" and "tokens_uid" not in c and "store_uid" not in c and "store_dev" not in c, c
+            for kind in ("terminal", "shell"):
+                for name, path in c["exec"][kind].items():
+                    assert path.startswith("/nix/store/") and path.endswith("/bin/" + name), (kind, name, path)
+                assert sorted(c["exec"][kind]) == c["offered"][kind], kind
+            print("surface-choice: installed configuration ok")
+            PY
+            for w in libexec/agentos-firstlogin:firstlogin libexec/agentos-surface-apply:apply bin/agentos-terminal:terminal bin/agentos-shell:shell bin/agentos-surface:read; do
+              # A binary wrapper carries the command that built it as text.
+              grep -aqF -- "--add-flags '-I ${pkg}/libexec/agos_choice.py ''${w##*:}'" ${pkg}/''${w%%:*} || {
+                echo "surface-choice: ''${w%%:*} must run python3 -I with the role ''${w##*:} fixed" >&2; exit 1; }
+            done
+            # The two roles only the units run are not on anyone's PATH.
+            for priv in agentos-firstlogin agentos-surface-apply; do
+              if [ -e ${pkg}/bin/$priv ]; then echo "surface-choice: $priv must not be in bin (it is on the agent's PATH there)" >&2; exit 1; fi
+            done
+            grep -qF 'hl.bind("SUPER+RETURN",  hl.dsp.exec_cmd("${pkg}/bin/agentos-terminal"))' ${on.system.build.hyprlandConf} || {
+              echo "surface-choice: Super+Return must run the terminal wrapper by store path" >&2; exit 1; }
             touch $out
           '';
         # agentos.terminal / agentos.shell (surfaces-and-first-login.md §4.3/§4.4, order of work item 2).

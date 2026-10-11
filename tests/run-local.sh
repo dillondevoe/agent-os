@@ -265,6 +265,9 @@ fi
 if need "$ROOT/modules/agos_ask.py" agos-ask; then
   run agos-ask "$PY" "$T/agos-ask-battery.py"
 fi
+if need "$ROOT/modules/agos_choice.py" agos-choice; then
+  run agos-choice "$PY" "$T/agos-choice-battery.py"
+fi
 if need "$ROOT/modules/agent-brain.py" brain-dispatch; then
   run brain-dispatch env PYTHONPATH="$ROOT/modules" \
     sh -c 'cd "$1" && "$2" tests/brain-dispatch-battery.py' _ "$ROOT" "$PY"
