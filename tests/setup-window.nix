@@ -15,7 +15,7 @@
 #   W4  with the window unit stopped, a reloaded ruleset is the sealed one: the set is empty and the
 #       fetcher's uid cannot reach 443. Starting the unit reopens without a new charge.
 #   W5  a reboot inside the window reopens it with what was left, less one floor: not a fresh budget.
-#   W6  the budget runs out: the box seals itself (the tick flushes the set and writes the marker), the
+#   W6  the budget (or the wall deadline, whichever a look catches first) runs out: the box seals itself, the
 #       fetcher is restarted, the pull and its retry timer are stopped and cannot start again, and the
 #       fetcher's uid cannot reach 443 any more. A CONNECTION OPENED INSIDE THE WINDOW AND HELD ACROSS
 #       THE SEAL IS DEAD (the spec's setup-window-seal-ends-flow): sealed means no egress, not "no new
@@ -217,7 +217,12 @@ pkgs.testers.runNixOSTest {
     ollama_before = box.succeed("systemctl show -p ActiveEnterTimestampMonotonic --value ollama.service").strip()
     box.wait_until_succeeds(f"test -e {STATE}/sealed", timeout=int(w5["remaining"]) + 150)
     marker = json.loads(box.succeed(f"cat {STATE}/sealed"))
-    assert marker["reason"] == "budget" and marker["toplevel"].startswith("/nix/store/") and len(marker["ruleset_sha256"]) == 64, f"W6: {marker}"
+    # "budget" or "deadline": the open-seconds budget and the wall-clock deadline both end about now
+    # (the deadline is the first opening plus the window length; a reboot's downtime counts against it
+    # and not against the budget, the per-boot floor the other way round). Which one a look catches
+    # first depends on how long the boots took; since slice 3b the wait looks every few seconds, not
+    # only the tick once a minute. Either is the box sealing itself on time. (CI sealed on the deadline.)
+    assert marker["reason"] in ("budget", "deadline") and marker["toplevel"].startswith("/nix/store/") and len(marker["ruleset_sha256"]) == 64, f"W6: {marker}"
     assert marker["toplevel"] == box.succeed("readlink -f /run/current-system").strip(), "W6: the marker names another system"
     assert elements() == [], f"W6: sealed with a non-empty set: {elements()}"
     assert curl("ollama", 443) == 28, "W6: the fetcher's uid still reaches 443 after the seal"
@@ -229,8 +234,7 @@ pkgs.testers.runNixOSTest {
     box.fail("systemctl is-active --quiet agent-os-pull-model.timer")
     box.fail("systemctl start agent-os-pull-model.timer && systemctl is-active --quiet agent-os-pull-model.timer")   # the marker's condition
     assert box.succeed("systemctl show -p ConditionResult --value agent-os-pull-model.timer").strip() == "no", "W6: the retry timer can start on a sealed box"
-    box.succeed("journalctl -t agos-window --no-pager | grep -q 'tick: the budget is spent; window closed'")
-    box.succeed("journalctl -t agos-window --no-pager | grep -q 'sealed reason=budget set_flushed=1'")
+    box.succeed(f"journalctl -t agos-window --no-pager | grep -q 'sealed reason={marker['reason']} set_flushed=1'")
 
     # W7 — sealed stays sealed
     for verb in ("reload", "restart"):
