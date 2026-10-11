@@ -194,7 +194,7 @@ for good, in_url in (("127.0.0.1:11434", "127.0.0.1:11434"), ("127.0.0.9:80", "1
     check(A.endpoint() == url, "B: %s -> %r, want %r" % (good, A.endpoint(), url))
 # Bad hosts ON THE FAKE'S PORT, so a wrongly accepted one would reach it (0.0.0.0 and localhost do).
 P = S.port
-for bad in ("0.0.0.0:%d" % P, "localhost:%d" % P, "localhost.:%d" % P, ":%d" % P, "%d" % P, "10.0.0.5:%d" % P,
+for bad in ("0.0.0.0:%d" % P, "localhost:%d" % P, "localhost.:%d" % P, ":%d" % P, "%d" % P, "192.0.2.5:%d" % P,
             "example.org:%d" % P, "127.0.0.1", "127.0.0.1:http", "127.0.0.1:0", "127.0.0.1:99999", "127.0.0.1:\u00b2"):
     configure(host=bad)
     check(A.endpoint() is None, "B: %s must be refused" % bad)
