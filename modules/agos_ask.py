@@ -14,9 +14,11 @@
 #
 # THE ANSWER IS UNTRUSTED TEXT. The model can be steered by what it is shown (a selection taken from a
 # web page, say), and its answer goes to a terminal, the clipboard and a notification. So before it
-# goes anywhere: control characters (ESC and the rest of C0/C1, which drive terminals) and the
-# bidirectional overrides (which make text display as something other than what will be pasted) are
-# removed, and the notification's text is markup-escaped (notification daemons render links and
+# goes anywhere, every character a person cannot see is removed: control characters (ESC and the
+# rest of C0/C1, which drive terminals), format characters (bidirectional overrides, zero-width
+# characters, the Unicode tag block — the usual carriers of hidden text that survives a copy and
+# paste into another prompt), line/paragraph separators, private-use, surrogate and unassigned code
+# points. The notification's text is also markup-escaped (notification daemons render links and
 # images from it). Newlines and tabs stay. What this does not do: judge the words. A pasted answer
 # is still text a person should read before running.
 #
@@ -26,7 +28,9 @@
 #
 # The model, host and launcher are compiled in by quick-ask-open.nix (a hotkey's process does not
 # reliably see environment.variables — the OLLAMA_THINK scar). The literal placeholders mean "repo
-# copy"; AGOS_ASK_* override them for tests only.
+# copy", and ONLY the repo copy reads AGOS_ASK_* (tests). The installed copy ignores the environment:
+# otherwise anything running as the agent could aim this at any loopback port, or name its own
+# launcher, and "narrow" would be a comment.
 import html, ipaddress, json, os, shutil, subprocess, sys, unicodedata, urllib.error, urllib.request
 
 MODEL_DEFAULT = "@AGOS_ASK_MODEL@"
@@ -43,10 +47,9 @@ SYSTEM = "Answer concisely. Plain text, no markdown headings."
 
 
 def _cfg(name, default):
-    v = os.environ.get("AGOS_ASK_" + name)
-    if v:
-        return v
-    return "" if default.startswith("@") else default
+    if default.startswith("@"):                  # the repo copy: tests configure it
+        return os.environ.get("AGOS_ASK_" + name, "")
+    return default                               # the installed copy: compiled in, environment ignored
 
 
 def endpoint():
@@ -54,14 +57,15 @@ def endpoint():
     outright (no lookup): 'localhost' is whatever the resolver says it is."""
     host = _cfg("HOST", HOST_DEFAULT)
     name, sep, port = host.rpartition(":")
-    if not sep or not port.isdigit():
+    if not sep or not (port.isascii() and port.isdigit()) or not 0 < int(port) < 65536:
         return None
     try:
-        if not ipaddress.ip_address(name.strip("[]")).is_loopback:
-            return None
+        ip = ipaddress.ip_address(name.strip("[]"))
     except ValueError:
         return None
-    return "http://%s:%s/api/chat" % (name, port)
+    if not ip.is_loopback:
+        return None
+    return "http://%s:%s/api/chat" % ("[%s]" % ip if ip.version == 6 else ip, port)
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -69,13 +73,12 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
         return None     # a redirect becomes an HTTPError instead of a second, unvetted request
 
 
-_BIDI = set(range(0x202A, 0x202F)) | set(range(0x2066, 0x206A)) | {0x200E, 0x200F, 0x061C}
+_DROP = {"Cc", "Cf", "Cs", "Co", "Cn", "Zl", "Zp"}   # control, format, surrogate, private, unassigned, separators
 
 
 def clean(text):
-    """The answer with terminal-control and display-spoofing characters removed."""
-    return "".join(c for c in text
-                   if c in "\n\t" or (unicodedata.category(c) != "Cc" and ord(c) not in _BIDI))
+    """The answer with every invisible or terminal-driving character removed (newline and tab stay)."""
+    return "".join(c for c in text if c in "\n\t" or unicodedata.category(c) not in _DROP)
 
 
 def ask(question, context=""):
@@ -102,7 +105,7 @@ def ask(question, context=""):
         if not text:
             return False, "the model gave no answer"
         return True, text
-    except (urllib.error.URLError, OSError, ValueError, KeyError, TypeError):
+    except Exception:       # a boundary: http.client raises non-OSError types on a half-sent reply
         return False, "the local model did not answer"
 
 

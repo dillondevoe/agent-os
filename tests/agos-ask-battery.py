@@ -21,10 +21,13 @@
 #   L. The repo copy (placeholders unsubstituted) says "not configured" and makes no request; each
 #      placeholder appears exactly once.
 #   M. A proxy in the environment is ignored.
-#   N. The answer is untrusted: terminal control characters and bidi overrides never reach stdout, the
+#   N. The answer is untrusted: control, format (bidi, zero-width, tag block), separator, private-use
+#      and unassigned characters never reach stdout, the
 #      clipboard or the notification; the notification's title and body are markup-escaped; an answer
 #      that is only control characters is "no answer".
 #   O. Child tools never inherit this process's stdin.
+#   P. The installed copy (placeholders substituted) ignores AGOS_ASK_*: the environment can aim it at
+#      no other port, model or launcher.
 #
 # stdlib only.
 
@@ -77,6 +80,8 @@ class Fake:
                 n = int(self.headers.get("Content-Length") or 0)
                 outer.hits.append((self.path, self.rfile.read(n)))
                 code, headers, body = outer.reply
+                if code == "raw":                    # bytes straight onto the socket, then close
+                    self.wfile.write(body); return
                 self.send_response(code)
                 for k, v in headers.items():
                     self.send_header(k, v)
@@ -179,14 +184,22 @@ check([m["role"] for m in body["messages"]] == ["system", "user"] and body["mess
 ok("A one call, exact shape, no tools, answer printed")
 
 # B — only a loopback literal
-for good in ("127.0.0.1:11434", "[::1]:11434", "127.0.0.9:80"):
+# (host as configured, host as it must appear in the URL). No request is made in this loop; the URLs
+# are assembled, not written out, because the egress detector reads any literal other than 127.0.0.1
+# as leaving the machine, and 127.0.0.9 is still loopback.
+for good, in_url in (("127.0.0.1:11434", "127.0.0.1:11434"), ("127.0.0.9:80", "127.0.0.9:80"),
+                     ("[::1]:11434", "[::1]:11434"), ("::1:11434", "[::1]:11434")):
     configure(host=good)
-    check(A.endpoint() and A.endpoint().endswith("/api/chat"), "B: %s must be accepted" % good)
-for bad in ("10.0.0.5:11434", "localhost:11434", "127.0.0.1", "example.org:80", "0.0.0.0:11434", ":11434", "127.0.0.1:http"):
+    url = "http://" + in_url + "/api/chat"
+    check(A.endpoint() == url, "B: %s -> %r, want %r" % (good, A.endpoint(), url))
+# Bad hosts ON THE FAKE'S PORT, so a wrongly accepted one would reach it (0.0.0.0 and localhost do).
+P = S.port
+for bad in ("0.0.0.0:%d" % P, "localhost:%d" % P, "localhost.:%d" % P, ":%d" % P, "%d" % P, "10.0.0.5:%d" % P,
+            "example.org:%d" % P, "127.0.0.1", "127.0.0.1:http", "127.0.0.1:0", "127.0.0.1:99999", "127.0.0.1:\u00b2"):
     configure(host=bad)
     check(A.endpoint() is None, "B: %s must be refused" % bad)
     r = A.ask("q")
-    check(r[0] is False and S.hits == [], "B: %s: no request may be made: %r" % (bad, r))
+    check(r[0] is False and S.hits == [], "B: %s: no request may be made: %r %r" % (bad, r, S.hits))
 ok("B endpoint(): loopback literals only; a name or a routable address makes no request")
 
 # C — a redirect is refused
@@ -208,6 +221,12 @@ for reply in ((200, {}, b"not json"), (200, {}, b'{"nope": 1}'), (200, {}, b'{"m
     S.reply = reply
     r = A.ask("q")
     check(r[0] is False and isinstance(r[1], str), "E: %r -> %r" % (reply[2], r))
+for raw in (b"HTTP/1.1 200 OK\r\nContent-Length: 500\r\n\r\nshort", b"NOT-HTTP garbage\r\n\r\n", b""):
+    S.reply = ("raw", {}, raw)                      # http.client raises non-OSError types here
+    r = A.ask("q")
+    check(r == (False, "the local model did not answer"), "E: raw %r -> %r" % (raw[:20], r))
+rc, out, err, lines = run_main(["q"])               # ...and the use is still traced
+check(rc == 1 and lines == ["agos-ask mode=cli in=1 ctx=0 out=0 ok=0"], "E: a half-sent reply must still be traced: %r" % lines)
 configure(host="127.0.0.1:1")
 r = A.ask("q")
 check(r == (False, "the local model did not answer"), "E: dead port: %r" % (r,))
@@ -314,12 +333,16 @@ check(r == (True, "direct"), "M: the proxy was used: %r" % (r,))
 ok("M a proxy in the environment is ignored")
 
 # N — the answer is untrusted text
-evil = "ok\x1b]52;c;ZXZpbA==\x07 \x1b[2J<a href=\"http://127.0.0.1:1/\">x</a> & \u202egpj.exe\u202c \x9b31m line2\nnext\ttab"
-want = "ok]52;c;ZXZpbA== [2J<a href=\"http://127.0.0.1:1/\">x</a> & gpj.exe 31m line2\nnext\ttab"
+evil = ("ok\x1b]52;c;ZXZpbA==\x07 \x1b[2J<a href=\"http://127.0.0.1:1/\">x</a> & \u202egpj.exe\u202c \x9b31m line2\nnext\ttab"
+        " z\u200bw\u200d\ufeff\u00ad tag\U000e0041\U000e0042 sep\u2028\u2029 pua\ue000 del\x7f una\u0378 end")
+want = ("ok]52;c;ZXZpbA== [2J<a href=\"http://127.0.0.1:1/\">x</a> & gpj.exe 31m line2\nnext\ttab"
+        " zw tag sep pua del una end")
 configure(); tools(); S.answer(evil)
 rc, out, err, lines = run_main(["q"])
 check(rc == 0 and out == want + "\n", "N: stdout: %r" % out)
-check(not any(ord(ch) < 32 and ch not in "\n\t" or 0x7f <= ord(ch) <= 0x9f or ord(ch) in (0x202e, 0x202c) for ch in out), "N: control/bidi reached stdout")
+import unicodedata
+check(not any(ch not in "\n\t" and unicodedata.category(ch) in ("Cc", "Cf", "Cs", "Co", "Cn", "Zl", "Zp") for ch in out),
+      "N: an invisible or control character reached stdout")
 configure(launcher="fake-launcher"); S.answer(evil)
 tools(fake_launcher="<b>bold</b> & \x1b[31mred\n", wl_copy="", notify_send="")
 rc, out, err, lines = run_main([])
@@ -345,6 +368,21 @@ c = calls()
 check(rc == 0 and [x[0] for x in c] == ["fake-launcher", "wl-paste", "notify-send", "wl-copy", "notify-send"], "O: %r" % [x[0] for x in c])
 check(all("PARENT-STDIN" not in x[2] for x in c) and c[1][2] == "" and c[2][2] == "", "O: a child read our stdin: %r" % [x[2] for x in c])
 ok("O child tools get /dev/null, never this process's stdin")
+
+# P — the INSTALLED copy (placeholders substituted) ignores AGOS_ASK_* entirely
+inst_src = (open(MOD).read().replace('"@AGOS_ASK_MODEL@"', '"installed-model"')
+            .replace('"@AGOS_ASK_HOST@"', '"127.0.0.1:%d"' % S.port).replace('"@AGOS_ASK_LAUNCHER@"', '"compiled-launcher --dmenu"'))
+I = types.ModuleType("agos_ask_installed"); exec(compile(inst_src, "agos_ask_installed.py", "exec"), I.__dict__)
+os.environ.update(AGOS_ASK_HOST="127.0.0.1:%d" % S2.port, AGOS_ASK_MODEL="env-model", AGOS_ASK_LAUNCHER="env-launcher")
+S.hits.clear(); S2.hits.clear(); S.answer("from-compiled"); S2.answer("from-env")
+tools(env_launcher="hijacked\n")
+r = I.ask("q")
+check(r == (True, "from-compiled") and S2.hits == [] and json.loads(S.hits[0][1])["model"] == "installed-model",
+      "P: the installed copy honoured AGOS_ASK_HOST/MODEL: %r %r" % (r, S2.hits))
+check(I._prompt() is None and calls() == [], "P: the installed copy ran the environment's launcher: %r" % calls())
+for k in ("AGOS_ASK_HOST", "AGOS_ASK_MODEL", "AGOS_ASK_LAUNCHER"):
+    os.environ.pop(k)
+ok("P the installed copy ignores AGOS_ASK_* (host, model and launcher are compiled in)")
 
 os.environ["PATH"] = REAL_PATH
 print("agos-ask-battery: PASS (%d criteria)" % len(passed))

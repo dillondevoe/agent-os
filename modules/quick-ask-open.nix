@@ -14,7 +14,8 @@
 let
   model = config.environment.variables.OLLAMA_MODEL or (throw
     "quick-ask-open: environment.variables.OLLAMA_MODEL is unset, so agos-ask would have no model");
-  host = "${config.services.ollama.host}:${toString config.services.ollama.port}";
+  h = config.services.ollama.host;
+  host = "${if lib.hasInfix ":" h then "[${h}]" else h}:${toString config.services.ollama.port}";
   # A dmenu-style prompt with no list: type the question, Enter. A store path, so it is there on every
   # desktop, not only the ones that install wofi for their own launcher.
   launcher = "${pkgs.wofi}/bin/wofi --dmenu --prompt ask --lines 1";
