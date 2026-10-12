@@ -2259,14 +2259,50 @@
             nc = builtins.unsafeDiscardStringContext;      # hasInfix is a regex match: no store-path context in it
             execOf = c: n: nc (lib.concatStringsSep " " (lib.toList c.systemd.services.${n}.serviceConfig.ExecStart));
             gettyScript = c: lib.last (lib.toList c.systemd.services."getty@".serviceConfig.ExecStart);
+            sc = on.systemd.services.agentos-seal-check;
+            scf = on.systemd.services.agentos-seal-check-final;
+            sealed0 = self.nixosConfigurations.agentos-sealed.config;      # sealed by build, WITHOUT the window's ruleset
           in
           assert lib.assertMsg (on.networking.nftables.checkRuleset) "setup-window would false-PASS: checkRuleset is false";
-          # THE SLICE BOUNDARY, ENFORCED. Slice 3b part 2 (the seal-check assertions of spec 2.5, the
-          # audit-chain lines, the registry probe off uid 0) has not landed. So no configuration this
-          # flake ships may enable the window. REMOVE THIS ASSERTION IN 3b PART 2, not before.
+          # THE SLICE BOUNDARY, ENFORCED. The wall side of the window is complete with slice 3b part 2
+          # (seal-check's assertions, spec 2.5). What is still owed before a shipped image turns it on is
+          # the RECORD: the audit-chain lines for every transition (spec 2.2), which need a ruling on a
+          # second root writer and signer of the chain (slice 3c). Until then the transitions are only
+          # in the journal. REMOVE THIS ASSERTION IN SLICE 3c, not before.
           assert lib.assertMsg (lib.all (n: !(self.nixosConfigurations.${n}.config.agentos.cleanRoom.setupWindow.enable or false))
                                   (lib.attrNames self.nixosConfigurations))
-            "setup-window: slice 3b part 2 has not landed; no shipped configuration may enable the setup window";
+            "setup-window: slice 3c (the audit-chain record of the window's transitions) has not landed; no shipped configuration may enable the setup window";
+          # (7) SEAL-CHECK, the second key (spec 2.5, slice 3b part 2). Sealed-class response; the early
+          # run follows the window unit and precedes the network; the second run follows the wait, is
+          # required by tty1's getty from ITS side, has no condition and is not RemainAfterExit.
+          assert lib.assertMsg (lib.elem "agentos-setup-window.service" sc.after && lib.elem "nftables.service" sc.after
+                                && lib.all (u: lib.elem u sc.before) [ "getty@tty1.service" "NetworkManager.service" "network-online.target" ]
+                                && sc.onFailure == [ "agentos-seal-failclose.service" ] && on.systemd.services ? agentos-seal-failclose
+                                && scf.serviceConfig.ExecStart == sc.serviceConfig.ExecStart
+                                && scf.requiredBy == [ "getty@tty1.service" ] && lib.elem "getty@tty1.service" scf.before
+                                && lib.all (u: lib.elem u scf.after) [ "agentos-seal.service" "agentos-setup-window.service" "agentos-seal-check.service" ]
+                                && scf.serviceConfig.Type == "oneshot" && !(scf.serviceConfig.RemainAfterExit or false)
+                                && scf.serviceConfig.TimeoutStartSec == 15 && !scf.restartIfChanged && !scf.stopIfChanged
+                                && scf.onFailure == [ "agentos-seal-failclose.service" ]
+                                && lib.all (k: !(lib.hasPrefix "Condition" k) && !(lib.hasPrefix "Assert" k)) (lib.attrNames scf.unitConfig))
+            "setup-window: seal-check must run early (after the window unit, before the network) and again after the wait, required by tty1's getty, with the sealed response";
+          # The backstop takes the token away after a run that was killed or could not start, and this
+          # variant's check runs many times a boot: the backstop must be able to fire every time. On the
+          # build-sealed image it stays RemainAfterExit, as it always was.
+          assert lib.assertMsg (!on.systemd.services.agentos-seal-failclose.serviceConfig.RemainAfterExit
+                                && sealed0.systemd.services.agentos-seal-failclose.serviceConfig.RemainAfterExit
+                                && onSealed.systemd.services.agentos-seal-failclose.serviceConfig.RemainAfterExit)
+            "setup-window: with the window the seal-check backstop must not be RemainAfterExit (it would fire once per boot)";
+          assert lib.assertMsg (lib.hasInfix "! -e /run/agentos-sealed-ok" on.environment.loginShellInit
+                                && !(lib.hasInfix "agent still starting" on.environment.loginShellInit)
+                                && lib.hasInfix "agent still starting" off.environment.loginShellInit)
+            "setup-window: with the window the tty1 guard must be the sealed one (no agent without seal-check's token)";
+          # The registry probe runs as the fetcher's uid with the window, and is untouched without it.
+          assert lib.assertMsg (lib.hasInfix "setpriv --reuid=351 --regid=351 --clear-groups" (nc on.systemd.services.agent-os-pull-model.script)
+                                && lib.all (c: !(lib.hasInfix "setpriv" (nc c.systemd.services.agent-os-pull-model.script))) [ off onSealed sealed0 ])
+            "setup-window: with the window the pull's registry probe must run as the fetcher's uid, and only then";
+          assert lib.assertMsg (lib.all (c: !(c.systemd.services ? agentos-seal-check-final)) [ off onSealed sealed0 ])
+            "setup-window: only the runtime-sealing variant has the second seal-check run";
           # (6) THE WAIT. No condition of any kind (a skipped unit counts as started for what Requires=
           # it); not RemainAfterExit; it seals however it ends; a rebuild does not end it; loopback only.
           assert lib.assertMsg (seal.serviceConfig.Type == "oneshot" && !(seal.serviceConfig.RemainAfterExit or false)
@@ -2326,9 +2362,12 @@
                                   withAuto = (mkSystem [ { agentos.cleanRoom.setupWindow.enable = true;
                                                            systemd.services."serial-getty@ttyS0".serviceConfig.ExecStart = [ "" "/bin/agetty --autologin agent %I" ]; } ]).config;
                                   withOwn = (mkSystem [ { agentos.cleanRoom.setupWindow.enable = true;
-                                                          systemd.services."getty@tty5".serviceConfig.ExecStart = [ "" "/bin/agetty --noclear %I" ]; } ]).config;
+                                                          systemd.services."getty@tty5" = { overrideStrategy = "asDropin"; serviceConfig.ExecStart = [ "" "/bin/agetty --noclear %I" ]; }; } ]).config;
+                                  # the same console as a whole unit of its own: logind's autovt@tty5 would run the template
+                                  withOwnNotDropin = (mkSystem [ { agentos.cleanRoom.setupWindow.enable = true;
+                                                                   systemd.services."getty@tty5".serviceConfig.ExecStart = [ "" "/bin/agetty --noclear %I" ]; } ]).config;
                                 in lib.length (mine on) == 4 && holds on && !(holds withUnit) && !(holds withSshd)
-                                   && !(holds withGetty) && !(holds withUser) && !(holds withAuto) && holds withOwn)
+                                   && !(holds withGetty) && !(holds withUser) && !(holds withAuto) && holds withOwn && !(holds withOwnNotDropin))
             "setup-window: with the window on, a unit running as the agent's account, an sshd, or an instance unit that masks a gate must be refused at evaluation";
           # OFF and SEALED-BY-BUILD: none of it.
           assert lib.assertMsg (lib.all (c: !(c.systemd.services ? agentos-seal) && !(c.systemd.services ? agentos-setup-progress)
@@ -2390,7 +2429,7 @@
           assert lib.assertMsg (!(builtins.tryEval (builtins.deepSeq
                                   (mkSystem [ { agentos.cleanRoom.setupWindow.enable = true; agentos.cleanRoom.setupWindow.seconds = 14401; } ]).config.system.build.agosWindowConfig true)).success)
             "setup-window: a window longer than 4 hours must fail evaluation";
-          p.runCommand "setup-window-check" { nativeBuildInputs = [ p.python3 ]; } ''
+          p.runCommand "setup-window-check" { nativeBuildInputs = [ p.python3 p.util-linux ]; } ''
             work="$(mktemp -d)"; mkdir -p "$work/modules" "$work/tests"
             cp ${./modules/agos_window.py} "$work/modules/agos_window.py"
             cp ${./modules/agos_setup_progress.py} "$work/modules/agos_setup_progress.py"
@@ -2401,6 +2440,22 @@
             ! grep -qF -- '${realLogin}' ${gettyScript on} || { echo "setup-window: getty@ still names the real login" >&2; exit 1; }
             grep -qF -- '--login-program ${realLogin} ' ${gettyScript off} || { echo "setup-window would false-PASS: the window-off getty has no login program to compare with" >&2; exit 1; }
             grep -qxF '  exec ${realLogin} "$@"' ${gate} && [ "$(grep -c 'exec ' ${gate})" = 1 ] || { echo "setup-window: the gate must exec the real login, once, with its arguments" >&2; exit 1; }
+            # TWO KEYS at every door: the window program's token AND seal-check's.
+            for g in ${gate} ${on.system.build.agosUserGate}; do
+              grep -qF '[ -f /run/agentos-setup/login-ok ] && [ ! -L /run/agentos-setup/login-ok ] && [ -f /run/agentos-sealed-ok ] && [ ! -L /run/agentos-sealed-ok ]' "$g" || {
+                echo "setup-window: $g must require both keys, each a plain file" >&2; exit 1; }
+            done
+            # SEAL-CHECK's window variant: its decision table on the rendered script (fakes for the tools).
+            cp ${./tests/seal-check-window-battery.sh} "$work/tests/seal-check-window-battery.sh"
+            bash -n ${sc.serviceConfig.ExecStart}
+            bash "$work/tests/seal-check-window-battery.sh" ${sc.serviceConfig.ExecStart} ${onSealed.systemd.services.agentos-seal-check.serviceConfig.ExecStart} \
+              ${p.nftables}/bin/nft ${on.systemd.package}/bin/systemctl ${on.system.build.agosWindow}/libexec/agentos-setup-window ${p.iproute2}/bin/ip
+            # The variants without the window must not have changed: no mention of the set at all.
+            for other in ${off.systemd.services.agentos-seal-check.serviceConfig.ExecStart} ${sealed0.systemd.services.agentos-seal-check.serviceConfig.ExecStart}; do
+              if grep -q 'setup_uid\|agentos-setup-window' "$other"; then echo "setup-window: $other (a variant without the window) mentions the window" >&2; exit 1; fi
+            done
+            grep -q 'window_set_empty' ${onSealed.systemd.services.agentos-seal-check.serviceConfig.ExecStart} || {
+              echo "setup-window: sealed by build with the window's ruleset must check that the set is empty" >&2; exit 1; }
             [ "$(grep -o '/run/agentos-setup/login-ok' ${gate} | wc -l)" = 2 ] && [ "$(grep -o '/run/agentos-setup/login-ok' ${on.system.build.agosUserGate} | wc -l)" = 2 ] \
               && grep -qF '[ -f /run/agentos-setup/login-ok ] && [ ! -L /run/agentos-setup/login-ok ]' ${gate} \
               && grep -qF '[ -f /run/agentos-setup/login-ok ] && [ ! -L /run/agentos-setup/login-ok ]' ${on.system.build.agosUserGate} || {

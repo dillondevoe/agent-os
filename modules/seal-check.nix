@@ -77,10 +77,46 @@
 #  (3) banner-only (agent keeps running) <== SHIPPED for non-sealed. Weakest, but right
 #      for a dev box with the operator present.
 # -------------------------------------------------------------------------------------
+#
+# ---- THE SETUP WINDOW (docs/design/first-login-and-setup-window.md §2.5; slice 3b part 2) -------
+# With `agentos.cleanRoom.setupWindow.enable` the box is not sealed by a rebuild: it seals itself at
+# runtime (modules/setup-window.nix, modules/agos_window.py). That makes a THIRD variant of this
+# check, and it is of the sealed class: a wall that is DOWN gets the sealed response (links down,
+# NetworkManager masked, the agent withheld), not the banner-only one.
+#
+# What it asserts, reading the KERNEL's ruleset itself and not the window program's word for it:
+#   (a) nftables did not fail and the table is loaded;
+#   (b) the loaded ruleset is the reviewed one: the set `setup_uid` is declared once and exactly
+#       three rules refer to it, two accepts and the guard that names the fetcher's uid;
+#   (c) a valid `sealed` marker  =>  the set is EMPTY. Only then is /run/agentos-sealed-ok written;
+#   (d) no marker and the set holds the fetcher's uid  =>  the window unit is running and there are
+#       valid books for it (the program writes the books before it opens);
+#   (e) no marker and the window unit failed or never ran  =>  the set must be empty. No token: the
+#       box is sealed-or-down, never "open";
+#   and in every case the set holds nothing but the fetcher's uid, and a malformed marker is DOWN.
+# The state is read BEFORE the set: the marker is written after the flush, so "marker valid" read
+# first can never be followed by a legitimately non-empty set.
+#
+# TWO KEYS. The window program writes /run/agentos-setup/login-ok when IT has sealed; this check
+# writes /run/agentos-sealed-ok when the kernel agrees. Every door to the agent's account needs
+# both (the gates in setup-window.nix). A bug in the program's own bookkeeping cannot certify itself.
+#
+# It runs TWICE per boot: early, as before (after nftables and the window unit, before the network),
+# so a wall that is down is answered before anything is online; and again in
+# `agentos-seal-check-final`, after the wait (agentos-seal.service) and before tty1's getty, which is
+# when (c) can first be true on a boot that started with the window open. The final unit is required
+# by tty1's getty and is not RemainAfterExit, so it runs again whenever that getty starts.
+#
+# The repair shell: on the build-sealed variant a DOWN wall leaves a bare shell on tty1 as the
+# agent's account. With the window that account does not log in without both keys, so the repair
+# path is the break-glass console (tty3), and every other console shows the banner.
 { config, pkgs, lib, ... }:
 let
   cfg    = config.agentos.cleanRoom;
   sealed = cfg.sealed;
+  sw     = cfg.setupWindow or { enable = false; };
+  windowOn    = cfg.enable && sw.enable && !sealed;   # seals itself at runtime
+  sealedClass = sealed || windowOn;                   # which response a DOWN wall gets
 
   nft  = "${pkgs.nftables}/bin/nft";
   ip   = "${pkgs.iproute2}/bin/ip";
@@ -141,19 +177,140 @@ let
     }
   '';
 
+  grep = "${pkgs.gnugrep}/bin/grep";
+  tr   = "${pkgs.coreutils}/bin/tr";
+
+  # Window variants only: the set and its rules, as the kernel has them.
+  windowHelper = ''
+    ruleset_reviewed() {
+      # (b) the set is declared once; exactly three rules refer to it: two accepts, and the guard
+      # that drops the fetcher's uid unless it is in the set.
+      t="$(${nft} list table inet agentos_egress 2>/dev/null)" || return 1
+      [ "$(printf '%s\n' "$t" | ${grep} -c 'set setup_uid {')" = 1 ] || return 1
+      r="$(printf '%s\n' "$t" | ${grep} '@setup_uid')" || return 1
+      [ "$(printf '%s\n' "$r" | ${grep} -c .)" = 3 ] || return 1
+      # The two accepts are the reviewed ones to the letter (as nft prints them): v4 only, DNS and 443
+      # only. A count of "lines ending in accept" would pass `tcp dport 0-65535 accept`.
+      [ "$(printf '%s\n' "$r" | ${grep} -c '^[[:space:]]*meta nfproto ipv4 meta skuid @setup_uid udp dport 53 accept$')" = 1 ] || return 1
+      [ "$(printf '%s\n' "$r" | ${grep} -c '^[[:space:]]*meta nfproto ipv4 meta skuid @setup_uid tcp dport { 53, 443 } accept$')" = 1 ] || return 1
+      [ "$(printf '%s\n' "$r" | ${grep} -c '^[[:space:]]*oifname != "lo" meta skuid ${toString sw.fetchUid} meta skuid != @setup_uid drop$')" = 1 ] || return 1
+      return 0
+    }
+    set_state() {
+      # prints: none | uid | other. Fails if the set cannot be listed.
+      flat="$(${nft} list set inet agentos_egress setup_uid 2>/dev/null | ${tr} -d ' \t\n')" || return 1
+      [ -n "$flat" ] || return 1
+      case "$flat" in
+        *elements=*)
+          case "$flat" in
+            *'elements={${toString sw.fetchUid}}'*) printf uid ;;
+            *) printf other ;;
+          esac ;;
+        *) printf none ;;
+      esac
+    }
+  '';
+
+  # Sealed by build AND built with the window's ruleset: the set exists, no unit ever writes it, and
+  # the build flag stands in for the marker. (c) still applies: the set must be empty.
+  sealedByBuildHelper = ''
+
+    window_set_empty() {
+      flat="$(${nft} list set inet agentos_egress setup_uid 2>/dev/null | ${tr} -d ' \t\n')" || return 1
+      [ -n "$flat" ] || return 1
+      case "$flat" in *elements=*) return 1 ;; esac
+      return 0
+    }
+  '';
+
+  # The window variant's line on the live console. The shared one says "See tty1 to repair", and
+  # here tty1 is exactly where nothing comes up: its getty requires this check.
+  windowBanner = ''
+    console_banner() {
+      printf '\033[1;41;97m %s \033[0m\n' \
+        'AGENT OS: EGRESS SEAL DOWN. The agent is not started. Repair console: Ctrl+Alt+F3 (tty3).' \
+        > /dev/console 2>/dev/null || true
+    }
+  '';
+
+  # The window variant's verdict. `down` never returns.
+  windowCheck = ''
+    set -u
+    ${markerHelpers}
+    ${windowBanner}
+    ${enforceHelper}
+    ${wallHelper}
+    ${windowHelper}
+    down() {
+      write_marker
+      printf '%s\n' \
+        "  seal-check: $1" \
+        '  This box seals itself (setup window). Restarting nftables also re-runs' \
+        '  agentos-setup-window, which derives the set from its state; then' \
+        '           systemctl restart getty@tty1   (it runs this check again)' \
+        '  The agent does not log in while this stands. Repair console: Ctrl+Alt+F3.' >> "$MARK"
+      console_banner
+      enforce_offline
+      exit 1
+    }
+    # Fail closed by polarity: the token exists only if a run proved (c). /run is new at every boot.
+    # It is NOT removed up front: this check runs again at every start of tty1's getty, and a healthy
+    # sealed box must not lose its second key for the length of a run (a user manager started in
+    # that instant would be refused, silently, and nothing retries it). Instead EVERY way out of this
+    # script that did not prove (c) removes it, here, by the exit trap: a DOWN, the "not sealed"
+    # exit, an error, and a kill by systemd's timeout (TERM reaches the trap). What a trap cannot
+    # see (SIGKILL, a script that never starts) leaves the unit failed, and the backstop removes the
+    # token; that unit is not RemainAfterExit in this variant, so it fires every time, not once a boot.
+    proved=0
+    trap '[ "$proved" = 1 ] || rm -f "$OK"' EXIT
+    trap 'exit 143' TERM INT HUP      # bash runs the EXIT trap on these by itself; spelled out so it does not depend on that
+    wall_up || down "nftables failed, or the egress table is not loaded"
+    ruleset_reviewed || down "the loaded ruleset is not the reviewed one (the setup window's set, its two accepts or its guard are missing)"
+    # The state FIRST, the set second (see the header).
+    st="$(${config.system.build.agosWindow}/libexec/agentos-setup-window status 2>/dev/null)" || down "the setup window's state cannot be read"
+    elems="$(set_state)" || down "the setup window's set cannot be read"
+    [ "$elems" != other ] || down "the setup window's set holds something other than the fetcher's uid"
+    case "$st" in
+      *'"sealed": "valid"'*)
+        # (c)
+        [ "$elems" = none ] || down "sealed, but the setup window's set is not empty"
+        case "$st" in
+          *'"ruleset": "changed"'*) echo "agentos-seal-check: sealed-generation-changed (sealed under another ruleset; a rebuild does that; not a failure)" ;;
+        esac
+        rm -f "$MARK"
+        : > "$OK" && proved=1
+        exit 0 ;;
+      *'"sealed": "absent"'*)
+        if [ "$elems" = uid ]; then
+          # (d)
+          ${sctl} is-active --quiet agentos-setup-window.service || down "the set is open but the window unit is not running"
+          case "$st" in
+            *'"window": "valid"'*) ;;
+            *) down "the set is open but there are no valid books for it" ;;
+          esac
+        fi
+        # (e) and the ordinary open window: not sealed. No token (the exit trap removes one left by
+        # an earlier run); the agent's account stays out.
+        rm -f "$MARK"
+        exit 0 ;;
+      *) down "the sealed marker is malformed" ;;
+    esac
+  '';
+
   # The check. Templated per-variant at eval time (the module knows cfg.sealed).
   sealCheck = pkgs.writeShellScript "agentos-seal-check" (
-    if sealed then ''
+    if windowOn then windowCheck
+    else if sealed then ''
       set -u
       ${markerHelpers}
       ${enforceHelper}
-      ${wallHelper}
+      ${wallHelper}${lib.optionalString sw.enable sealedByBuildHelper}
       # INVERTED-POLARITY FAIL-CLOSED (sealed): the agent runs ONLY if we assert the
       # positive token $OK on the proven-up path. /run is tmpfs, so a check that never
       # runs / forks-fails / crashes leaves $OK absent => the tty1 guard withholds the
       # agent. Defensive rm in case of a warm /run.
       rm -f "$OK"
-      if wall_up; then
+      if wall_up${lib.optionalString sw.enable " && window_set_empty"}; then
         rm -f "$MARK"
         : > "$OK"
         exit 0
@@ -186,9 +343,12 @@ let
   # side of a hang. (The agent is already blocked by the absent $OK token.)
   sealFailClose = pkgs.writeShellScript "agentos-seal-failclose" ''
     set -u
-    ${markerHelpers}
+    ${markerHelpers}${lib.optionalString windowOn windowBanner}
     ${enforceHelper}
-    write_marker
+    ${if windowOn then ''
+      # The check's own banner carries the REASON; keep it. Write the generic one only if the check
+      # died before it could say anything (a timeout, a crash).
+      [ -s "$MARK" ] || write_marker'' else "write_marker"}
     console_banner
     enforce_offline
     exit 0
@@ -229,14 +389,15 @@ lib.mkIf cfg.enable {
   systemd.services.agentos-seal-check = {
     description = "Agent OS: verify the clean-room egress seal is up; fail LOUD if it is down";
     wantedBy = [ "multi-user.target" ];
-    # after nftables has attempted to load the wall...
-    after  = [ "nftables.service" ];
-    # ...and BEFORE the agent login sees the token. On the sealed variant, also before
+    # after nftables has attempted to load the wall (and, with the setup window, after the unit
+    # that derives the set from its state: what this run reads is what that unit decided)...
+    after  = [ "nftables.service" ] ++ lib.optionals windowOn [ "agentos-setup-window.service" ];
+    # ...and BEFORE the agent login sees the token. On the sealed class, also before
     # NetworkManager/network-online so the link-drop lands before anything comes online.
     before = [ "getty@tty1.service" "systemd-user-sessions.service" ]
-             ++ lib.optionals sealed [ "NetworkManager.service" "network-online.target" ];
-    # sealed: a timeout/start-failure trips the fail-closed backstop (drops egress).
-    onFailure = lib.optionals sealed [ "agentos-seal-failclose.service" ];
+             ++ lib.optionals sealedClass [ "NetworkManager.service" "network-online.target" ];
+    # sealed class: a timeout/start-failure trips the fail-closed backstop (drops egress).
+    onFailure = lib.optionals sealedClass [ "agentos-seal-failclose.service" ];
     serviceConfig = {
       Type = "oneshot";
       # RemainAfterExit so a DOWN result stays visible as a failed unit post-boot; a
@@ -252,11 +413,36 @@ lib.mkIf cfg.enable {
 
   # SEALED-only fail-closed backstop. Not `wantedBy` anything — only pulled in via the
   # OnFailure= above. mkIf sealed drops it entirely on the non-sealed variant.
-  systemd.services.agentos-seal-failclose = lib.mkIf sealed {
+  # WINDOW ONLY: the second run, when (c) can first hold on a boot that began with the window open.
+  # Declared from this side (requiredBy + before), never as a drop-in on getty@tty1: an instance
+  # drop-in masks the template's (setup-window.nix, door 1). Not RemainAfterExit, so every start of
+  # tty1's getty runs it again: a box sealed later in the boot gets its second key then.
+  systemd.services.agentos-seal-check-final = lib.mkIf windowOn {
+    description = "Agent OS: verify the egress seal after setup (the second key for the agent's logins)";
+    wantedBy = [ "multi-user.target" ];
+    after = [ "nftables.service" "agentos-setup-window.service" "agentos-seal-check.service" "agentos-seal.service" ];
+    requiredBy = [ "getty@tty1.service" ];
+    before = [ "getty@tty1.service" ];
+    onFailure = [ "agentos-seal-failclose.service" ];
+    # A rebuild must not restart it: an explicit restart is passed on to tty1's getty.
+    restartIfChanged = false;
+    stopIfChanged = false;
+    serviceConfig = {
+      Type = "oneshot";
+      ExecStart = "${sealCheck}";
+      TimeoutStartSec = 15;
+    };
+  };
+
+  systemd.services.agentos-seal-failclose = lib.mkIf sealedClass {
     description = "Agent OS: sealed fail-closed backstop — drop egress if seal-check failed or hung";
     serviceConfig = {
       Type = "oneshot";
-      RemainAfterExit = true;
+      # Build-sealed: stays active so a DOWN is visible, as always. With the window it must NOT:
+      # a start job on a unit that is already active runs nothing, so a RemainAfterExit backstop
+      # fires once per boot, and this variant's check runs many times per boot and relies on the
+      # backstop to take the token away after a run that was killed or could not start.
+      RemainAfterExit = !windowOn;
       ExecStart = "${sealFailClose}";
     };
   };
@@ -264,5 +450,5 @@ lib.mkIf cfg.enable {
   # Withhold tty1 from the agent unless the seal was proven up (sealed) / warn only
   # (non-sealed). mkBefore = runs before agent-shell.nix's exec block; see loginGuard*.
   environment.loginShellInit =
-    lib.mkBefore (if sealed then loginGuardSealed else loginGuardUnsealed);
+    lib.mkBefore (if sealedClass then loginGuardSealed else loginGuardUnsealed);
 }

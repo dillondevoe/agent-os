@@ -33,7 +33,14 @@
 #       tty1's getty runs the wait again, and with the model listed the box seals and the agent starts.
 #   D8  no model ever arrives: the budget ends, the box seals (reason: budget), tty1 says so and how to
 #       set the machine up again, and then the agent starts without a model.
-#   Last: a control for the sampler itself (a planted violation is recorded).
+#   D9  seal-check, the second key (slice 3b part 2). While the window is open it passes and writes
+#       no token (D1); once the box is sealed it writes /run/agentos-sealed-ok (D5), and the login
+#       gate needs both keys: with seal-check's token removed, a console refuses again. Then the
+#       fetcher's uid is put back in the set by hand on the sealed box: the sampler records it (its
+#       own control), and seal-check, re-run, answers "sealed, but the set is not empty": no token,
+#       the banner on the consoles, NetworkManager masked, the links down.
+#   Break-glass (D2): root logs in on tty3 with its password WHILE the window is open. The repair
+#       console is not gated, and must not be.
 { pkgs, baseModules }:
 
 let
@@ -90,6 +97,10 @@ pkgs.testers.runNixOSTest {
     # a serial console is the normal console of a VM, so that door needs a real port to knock on.
     virtualisation.qemu.options = [ "-serial null" ];
     environment.systemPackages = [ pkgs.python3 pkgs.jq pkgs.kbd ];
+    # Break-glass needs a password to be tried. The product reads it from a file the installer
+    # writes; the test gives root one directly ("glass").
+    users.users.root.hashedPasswordFile = lib.mkForce null;
+    users.users.root.hashedPassword = "$6$agentostest$ewKMzyEYxD9L/CKzg.LIAt.tkmw2r4LmmpQUQbKOh2ON/RNQ9GKY/LjGcp2m8zAumQpHbcCJ6vGYVGnQmZS5z.";
   };
 
   testScript = ''
@@ -165,6 +176,20 @@ pkgs.testers.runNixOSTest {
     assert box.succeed("systemctl show -p User --value agentos-setup-progress.service").strip() != "root" or \
         box.succeed("systemctl show -p DynamicUser --value agentos-setup-progress.service").strip() == "yes", "D1: the progress unit runs as root"
     box.fail("systemctl is-active --quiet multi-user.target")
+    # seal-check, early run: the open window is a state it accepts, and it gives no key.
+    box.wait_for_unit("agentos-seal-check.service")
+    box.fail("test -e /run/agentos-sealed-ok")
+    box.fail("test -e /run/agentos-unsealed")
+    assert box.succeed("systemctl show -p ActiveState --value agentos-seal-check-final.service").strip() == "inactive", "D1: the second check ran before the wait ended"
+    assert "agentos-seal-check-final.service" in box.succeed("systemctl show -p Requires --value getty@tty1.service"), "D1: tty1's getty does not require the second check"
+    print(box.succeed("nft list set inet agentos_egress setup_uid; nft list table inet agentos_egress | grep -n 'setup_uid'"))
+    # seal-check matches these three lines to the letter. If a new nft prints them differently, say so
+    # HERE, by name, and not as a wall that is "down" three legs later.
+    table = box.succeed("nft list table inet agentos_egress")
+    for line in ('oifname != "lo" meta skuid 351 meta skuid != @setup_uid drop',
+                 "meta nfproto ipv4 meta skuid @setup_uid udp dport 53 accept",
+                 "meta nfproto ipv4 meta skuid @setup_uid tcp dport { 53, 443 } accept"):
+        assert sum(1 for l in table.splitlines() if l.strip() == line) == 1, f"D1: nft does not print the reviewed rule as seal-check expects: {line!r}\n{table}"
 
     # ── D2 ──────────────────────────────────────────────────────────────────────────────────────
     box.succeed("chvt 4")
@@ -181,6 +206,24 @@ pkgs.testers.runNixOSTest {
     # means one whole refusal has happened on that line.
     box.wait_until_succeeds("test \"$(systemctl show -p NRestarts --value serial-getty@ttyS1.service)\" -ge 1", timeout=60)
     no_agent("D2 serial console")
+    # Break-glass: root, with its password, on tty3, while the window is open.
+    box.succeed("chvt 3")
+    box.wait_until_tty_matches("3", "login:")
+    box.succeed("sleep 2")                   # a getty that has just started drops what was typed before it read
+    text3 = box.get_tty_text("3")
+    assert "automatic login" not in text3 and "still setting up" not in text3, f"D2: the repair console is gated or logs someone in:\n{text3}"
+    box.send_chars("root\n")
+    try:
+        box.wait_until_tty_matches("3", "Password:", timeout=15)
+    except Exception:
+        assert box.get_tty_text("3") == text3, "D2: tty3 did not ask for a password:\n" + box.get_tty_text("3")
+        box.send_chars("root\n")                # nothing moved at all: typed before the getty read
+        box.wait_until_tty_matches("3", "Password:", timeout=40)
+    box.send_chars("glass\n")
+    box.wait_until_succeeds("pgrep -t tty3 -u root -x bash >/dev/null", timeout=60)
+    box.succeed("systemctl cat getty@tty3.service | grep ExecStart | grep -v agentos-login-gate | grep -q bin/login")
+    assert elements() == [UID], "D2: the window closed under the break-glass login"
+    box.send_chars("exit\n")
     box.succeed("chvt 1")
     no_violation("D2")
 
@@ -222,6 +265,9 @@ pkgs.testers.runNixOSTest {
     assert elements() == [], f"D5: sealed with a non-empty set: {elements()}"
     assert box.succeed(f"stat -c '%U %a' {RUN}/login-ok").split() == ["root", "644"], "D5: the token"
     assert json.loads(box.succeed(f"cat {RUN}/status")) == {"state": "sealed", "reason": "complete"}, "D5: the status line"
+    box.wait_until_succeeds("test -f /run/agentos-sealed-ok", timeout=30)      # seal-check's key, from its second run
+    box.fail("test -e /run/agentos-unsealed")
+    print(box.succeed("nft list set inet agentos_egress setup_uid"))
     try:
         box.wait_for_unit("getty@tty1.service")
     except Exception:       # what it ran is the first thing to know (a masked template drop-in shows here)
@@ -284,12 +330,55 @@ pkgs.testers.runNixOSTest {
     box.wait_for_unit("getty@tty1.service")
     box.wait_until_succeeds("pgrep -u agent >/dev/null", timeout=60)
     no_violation("D8")
-    assert box.succeed("systemctl is-active agentos-seal-check.service").strip() == "active", "the existing seal check still passes"
+    assert box.succeed("systemctl is-active agentos-seal-check.service").strip() == "active", "D8: seal-check's early run failed on a healthy boot"
+    box.succeed("test -f /run/agentos-sealed-ok")
 
-    # CONTROL for the sampler, last: the agent is running now. Put the uid back in the set by hand for
-    # two seconds. A sampler that cannot see THAT proved nothing above.
-    box.succeed(f"nft add element inet agentos_egress setup_uid '{{ {UID} }}' && sleep 2 && nft flush set inet agentos_egress setup_uid")
+    # ── D9 ──────────────────────────────────────────────────────────────────────────────────────
+    # Both keys are needed. Take seal-check's away: a console refuses again (the window program's key
+    # alone is not enough). Put it back by running the check.
+    box.succeed("test -f /run/agentos-sealed-ok && rm /run/agentos-sealed-ok && chvt 4")
+    box.succeed("systemctl restart getty@tty4.service")
+    box.wait_until_tty_matches("4", "This console opens when setup has finished")
+    assert box.execute("pgrep -u agent -t tty4")[0] != 0, "D9: a console logged the agent in with only one key"
+    # What brings the key back is tty1's getty STARTING: it requires the second check, which is not
+    # RemainAfterExit and so runs again. (Restarting that getty ends the agent's session on tty1.)
+    box.succeed("systemctl restart getty@tty1.service")
+    box.wait_until_succeeds("test -f /run/agentos-sealed-ok", timeout=30)
+    box.wait_until_succeeds("pgrep -u agent -t tty1 >/dev/null", timeout=60)
+    box.succeed("systemctl restart getty@tty4.service")
+    box.wait_until_succeeds("pgrep -u agent -t tty4 >/dev/null", timeout=60)       # CONTROL: both keys, the same console
+
+    # The fetcher's uid back in the set of a SEALED box, by hand. This is also the sampler's control:
+    # the agent is running, so a sampler that cannot see THIS proved nothing above.
+    box.succeed(f"nft add element inet agentos_egress setup_uid '{{ {UID} }}' && sleep 2")
     seen = box.succeed("cat /var/lib/invariant-violations")
-    assert "agent" in seen or seen.strip(), f"CONTROL: the sampler did not record a planted violation: {seen!r}"
+    assert seen.strip(), f"CONTROL: the sampler did not record a planted violation: {seen!r}"
+    box.fail("systemctl start agentos-seal-check-final.service")
+    box.fail("test -e /run/agentos-sealed-ok")
+    banner = box.succeed("cat /run/agentos-unsealed")
+    assert "EGRESS SEAL DOWN" in banner and "sealed, but the setup window's set is not empty" in banner, f"D9: the banner: {banner}"
+    box.wait_until_succeeds("test \"$(readlink /run/systemd/system/NetworkManager.service 2>/dev/null)\" = /dev/null", timeout=30)
+    box.wait_until_succeeds("for i in $(ls /sys/class/net | grep -vx lo); do ip -o link show \"$i\" | grep -qw UP && exit 1; done; true", timeout=30)
+    box.succeed("systemctl restart getty@tty6.service; chvt 6")
+    box.wait_until_tty_matches("6", "EGRESS SEAL DOWN")
+    assert "Repair console" in box.get_tty_text("6"), "D9: the console did not say where to repair"
+    # ...and the same check passes again once the set is empty and the mask is lifted (recoverable).
+    box.succeed("nft flush set inet agentos_egress setup_uid && systemctl unmask --runtime NetworkManager.service")
+    box.succeed("systemctl reset-failed agentos-seal-check-final.service; systemctl start agentos-seal-check-final.service")
+    box.succeed("test -f /run/agentos-sealed-ok && test ! -e /run/agentos-unsealed")
+
+    # The backstop fires EVERY time, not once a boot. It ran for the DOWN above. Now a run of the
+    # check that proves nothing and says nothing: it fails before its script even starts. The key
+    # from the run just above must go, and the only thing left to take it is the backstop.
+    fired = int(box.succeed("journalctl -b -u agentos-seal-failclose.service --no-pager | grep -c 'Finished' || true").strip())
+    assert fired >= 1, "D9: the backstop did not run for the first DOWN"
+    box.succeed("systemctl reset-failed agentos-seal-check-final.service")
+    box.succeed("mkdir -p /run/systemd/system/agentos-seal-check-final.service.d && printf '[Service]\\nExecStartPre=/run/current-system/sw/bin/false\\n' > /run/systemd/system/agentos-seal-check-final.service.d/never-starts.conf && systemctl daemon-reload")
+    box.fail("systemctl start agentos-seal-check-final.service")
+    box.wait_until_succeeds(f"test \"$(journalctl -b -u agentos-seal-failclose.service --no-pager | grep -c 'Finished')\" -gt {fired}", timeout=30)
+    box.fail("test -e /run/agentos-sealed-ok")
+    box.succeed("rm -r /run/systemd/system/agentos-seal-check-final.service.d && systemctl daemon-reload && systemctl unmask --runtime NetworkManager.service")
+    box.succeed("systemctl reset-failed agentos-seal-check-final.service; systemctl start agentos-seal-check-final.service")
+    box.succeed("test -f /run/agentos-sealed-ok && test ! -e /run/agentos-unsealed")
   '';
 }

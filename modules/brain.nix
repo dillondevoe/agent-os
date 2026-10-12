@@ -7,6 +7,17 @@
 # at first boot by bin/setup-brain.sh (`ollama pull`), per the roadmap's division.
 { config, pkgs, lib, ... }:
 
+let
+  # Who the first-boot pull's connectivity probe runs as. With the setup window (modules/setup-window.nix)
+  # the ONLY uid that may reach the registry is the fetcher's, and only while the window is open; a
+  # probe as root would test a path the pull does not use (and that the wall does not open). So there
+  # it runs as the fetcher's uid: a passing probe then means the pull itself can get out. Without the
+  # window this is the empty string and the script is the one it always was.
+  sw = config.agentos.cleanRoom.setupWindow or { enable = false; };
+  windowOn = (config.agentos.cleanRoom.enable or false) && sw.enable && !(config.agentos.cleanRoom.sealed or false);
+  probeAs = lib.optionalString windowOn
+    "${pkgs.util-linux}/bin/setpriv --reuid=${toString sw.fetchUid} --regid=${toString sw.fetchUid} --clear-groups ";
+in
 {
   services.ollama = {
     enable = true;
@@ -80,7 +91,7 @@
       # passing probe means the pull can actually run, not merely that some other site is up.
       say "waiting for network..."
       for _i in $(seq 1 24); do
-        timeout 4 ${pkgs.bash}/bin/bash -c ': >/dev/tcp/registry.ollama.ai/443' >/dev/null 2>&1 && break
+        timeout 4 ${probeAs}${pkgs.bash}/bin/bash -c ': >/dev/tcp/registry.ollama.ai/443' >/dev/null 2>&1 && break
         echo "agent-os: waiting for network... ($_i/24)"; say "waiting for network... ($_i/24)"; sleep 5
       done
       echo "agent-os: pulling qwen3.5:9b (~6.6GB, first boot only)..."

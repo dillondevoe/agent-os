@@ -81,6 +81,14 @@ CONFIG_JSON = "@AGOS_WINDOW_CONFIG@"
 
 FLOOR = 60                 # seconds every boot that opens the window is charged, at least
 LOCK_WAIT = 150            # seconds to wait for the state lock (a seal holds it while it restarts the fetcher)
+# What a holder of the lock may spend on tools, each bounded: one nft, one restart, each stop. A seal
+# is the longest holder (nft + restart + the stops), and it must finish inside LOCK_WAIT, or whoever
+# waits behind it gives up: the shutdown stamp would then be skipped and the next boot would inherit
+# a budget up to a minute too generous. Killing `systemctl` at its limit does not cancel the job it
+# queued; the restart is tidying, never what makes the seal true.
+NFT_LIMIT = 20
+RESTART_LIMIT = 60
+STOP_LIMIT = 20
 STATE_MAX = 4096           # bytes of a state file
 POLL = 5                   # seconds between looks while the seal waits for the model
 PROBE_LIMIT = 15           # seconds, in all, one look at the fetcher's model list may take
@@ -398,7 +406,7 @@ def decide(c, sealed, window, boot_id, now_mono, now_wall):
 
 
 # ── effects ──────────────────────────────────────────────────────────────────────────────────────
-def _tool(argv, timeout=60):
+def _tool(argv, timeout=NFT_LIMIT):
     try:
         return subprocess.run(argv, stdin=subprocess.DEVNULL, capture_output=True, timeout=timeout, env={}).returncode
     except (OSError, subprocess.SubprocessError):
@@ -448,20 +456,20 @@ def _seal(c, reason):
         log("seal refused: the sealed marker is malformed (wall DOWN)")
         _status(c, state="down")
         return 1
-    if logins_enabled(c):
-        # No marker, yet this boot WAS sealed (the token says so): someone with root removed the state
-        # to re-provision the box and has not restarted it. Whoever asks (the tick on a spent budget,
-        # the wait, a timeout), a fresh marker here would undo that for good. The set is empty and
-        # stays empty (recompute refuses to open); the next boot decides.
-        log("seal refused: no marker, but this boot was already sealed; a re-provisioning takes effect at the next boot")
-        return 1
     if not flushed:
         log("seal: nft did not confirm the flush; NOT sealed (no marker); the next tick tries again")
         return 1
+    if logins_enabled(c):
+        # No marker, yet this boot WAS sealed (the token says so): someone with root removed the state
+        # to re-provision the box and has not restarted it. Whoever asks (the wait, a timeout, a seal
+        # by hand), a fresh marker here would undo that for good. The set is empty and stays empty
+        # (recompute refuses to open); the next boot decides.
+        log("seal refused: no marker, but this boot was already sealed; a re-provisioning takes effect at the next boot")
+        return 1
     for unit in c.get("restart_units", []):
-        _tool([c["systemctl"], "restart", unit], timeout=120)
-    for unit in c.get("stop_units", []):             # they also carry a condition on the marker below,
-        _tool([c["systemctl"], "stop", unit])        # so they stay down across reboots (a runtime mask would not)
+        _tool([c["systemctl"], "restart", unit], timeout=RESTART_LIMIT)
+    for unit in c.get("stop_units", []):             # they also carry a condition on the marker below, so
+        _tool([c["systemctl"], "stop", unit], timeout=STOP_LIMIT)    # they stay down across reboots (a runtime mask would not)
     try:
         with open(c["ruleset_file"], "rb") as f:
             digest = hashlib.sha256(f.read()).hexdigest()
@@ -549,6 +557,11 @@ def _tick(c, final):
         close_set(c)
         _status(c, state="down")
         return 1                                     # the wall is DOWN (seal-check acts on it)
+    if logins_enabled(c):
+        # No marker, but this boot was sealed: a re-provisioning waiting for its reboot (see _seal).
+        # There is no window to count in this boot, so there are no books to keep and nothing to seal:
+        # keep the set empty and say nothing, once a minute, until the machine restarts.
+        return 0 if close_set(c) else 1
     if final:
         if window[0] == "valid" and window[1]["boot_id"] == _boot_id(c):
             try:                                     # the shutdown stamp: write the budget, nothing else
@@ -561,11 +574,13 @@ def _tick(c, final):
     # closed-but-unmarked until something happens to run recompute.
     boot_id = _boot_id(c)
     if window[0] != "valid" or not boot_id or window[1]["boot_id"] != boot_id:
-        close_set(c)
+        flushed = close_set(c)                       # reported: a tick that could not close has failed
         if window[0] == "absent" or not boot_id:
-            return 0                                 # no window yet (recompute opens it), or no boot id
+            return 0 if flushed else 1               # no window yet (recompute opens it), or no boot id
         act = decide(c, sealed, window, boot_id, time.monotonic(), time.time())
-        return _seal(c, act[1]) if act[0] == "seal" else 0
+        if act[0] == "seal":
+            return _seal(c, act[1])
+        return 0 if flushed else 1
     s = window[1]
     left = remaining_now(s, time.monotonic())
     try:
@@ -673,6 +688,13 @@ def status(c):
     out = {"sealed": sealed[0], "window": window[0]}
     if sealed[0] == "valid":
         out["reason"] = sealed[1]["reason"]
+        # Was the box sealed under the ruleset this generation loads? A rebuild legitimately changes
+        # it, there is no ledger of past rulesets, and it is NOT a failure: seal-check logs it.
+        try:
+            with open(c["ruleset_file"], "rb") as f:
+                out["ruleset"] = "same" if hashlib.sha256(f.read()).hexdigest() == sealed[1]["ruleset_sha256"] else "changed"
+        except OSError:
+            out["ruleset"] = "unknown"
     if window[0] == "valid":
         out["remaining"] = int(window[1]["remaining"]); out["boots"] = window[1]["boots"]
     sys.stdout.write(json.dumps(out, sort_keys=True) + "\n")

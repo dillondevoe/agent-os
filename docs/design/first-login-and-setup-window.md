@@ -285,27 +285,75 @@ overlap:
 
 ### 2.5 What seal-check asserts
 
-`seal-check.nix` is ordered after `agentos-setup-window.service` and before the agent's getty, and
-on every boot asserts:
+(As built in slice 3b part 2. The first paragraph of each item is v3's; the differences are marked.)
 
-- (a) the table is present;
-- (b) the set `setup_uid` and its two rules are present — their absence means the loaded ruleset is
-  not the reviewed one: wall DOWN;
-- (c) `sealed` valid ⇒ the set is empty; otherwise the sealed response (links down, agent withheld);
-- (d) `sealed` absent ⇒ `window.json` valid with budget left; otherwise seal and re-check;
-- (e) `sealed` absent and the window unit failed or inactive ⇒ the set must be empty and the box is
-  treated as sealed-or-down, never as "open" — unless the box is sealed-by-build (below), where an
-  inactive, masked window unit is the expected state and (c) applies.
+`seal-check.nix` gets a third variant for a box that seals itself, and it is of the **sealed
+class**: a wall that is DOWN gets the sealed response (links down, NetworkManager masked, the
+agent withheld), not the developer image's banner. It reads the **kernel's** ruleset itself and
+asserts:
 
-A box built with `agentos.cleanRoom.sealed = true` has the window unit masked and never writes a
-`sealed` file. seal-check treats that as sealed-by-build: (c) applies with the build flag standing
-in for the marker, so the set must be empty and the token is written. An eval assertion ties the
-two together: `cleanRoom.sealed = true` implies the window unit is masked.
+- (a) nftables did not fail and the table is present;
+- (b) the loaded ruleset is the reviewed one: the set `setup_uid` is declared once and exactly
+  three rules refer to it, the two accepts **to the letter as nft prints them** (v4 only, DNS and
+  443 only) and the guard that names the fetcher's uid. (v3 said "its two rules"; the guard came
+  with slice 3a. It is a check of those four lines, not of the whole table.) Anything else: wall DOWN;
+- (c) `sealed` valid ⇒ the set is empty; otherwise DOWN;
+- (d) `sealed` absent and the set holds the fetcher's uid ⇒ the window unit is running and
+  `window.json` is valid (the program writes its books before it opens); otherwise DOWN. (v3 said
+  "otherwise seal and re-check". seal-check is not a writer of the set or of the marker, and must
+  not become one: the tick and the wait seal.)
+- (e) `sealed` absent and the window unit failed or never ran ⇒ the set must be empty. No token:
+  the box is sealed-or-down, never "open";
+- in every case the set holds nothing but the fetcher's uid, and a malformed marker is DOWN.
 
-`/run/agentos-sealed-ok` is written only when (c) holds. When the sealed marker's ruleset hash
-differs from the running generation's, seal-check logs `sealed-generation-changed` (not a failure:
-a rebuild legitimately changes it) and rewrites nothing. Its repair text stops telling the operator
-to restart nftables without saying that the window unit follows.
+The state is read **before** the set: the marker is written after the flush, so "marker valid",
+read first, can never be followed by a legitimately non-empty set.
+
+**Two keys.** `/run/agentos-sealed-ok` is written only when (c) holds. The window program writes
+`/run/agentos-setup/login-ok` when *it* has sealed (2.4). Every door to the agent's account
+needs both, so a bug in the program's own bookkeeping cannot certify itself. The tty1 guard in
+the login shell is the sealed one as well.
+
+**Two runs per boot.** Early, as today (after nftables and the window unit, before the network),
+so a wall that is down is answered before anything is online; on a boot that begins with the
+window open this run passes and writes no token. And again in `agentos-seal-check-final`, after
+the wait and before tty1's getty, which is when (c) can first hold. That unit is required by
+tty1's getty (declared from its own side, 2.4) and is not `RemainAfterExit`, so it runs again
+whenever that getty starts.
+
+The token is not removed at the start of a run: the check runs again at every start of tty1's
+getty, and a healthy sealed box must not lose its second key for the length of a run. Instead
+every way out of the check that did not prove (c) removes it, in an exit trap: a DOWN, the "not
+sealed" exit, an error, a kill by the start timeout. What a trap cannot see (SIGKILL, a script
+that cannot start) leaves the unit failed, and the backstop removes the token. In this variant
+the backstop is not `RemainAfterExit`: a unit that stays active runs nothing when it is started
+again, and a backstop that fires once per boot is not one here. (The second review pass caught
+exactly that.)
+
+Two consequences worth knowing. After a re-provisioning (root removes the marker under a running
+agent) the next start of tty1's getty finds no marker, so the second key goes and the agent's
+account cannot log in again in that boot; the re-provisioning wants a reboot anyway. And a DOWN
+found while an operator restarts nftables by hand (the stop deletes the table before the start
+loads it) is a false one: the key comes back at the next check, but NetworkManager stays masked
+until root unmasks it. A reload, which is what a rebuild does, is atomic.
+
+**The repair path.** On a DOWN, tty1 itself shows nothing (its getty requires the check, and the
+progress line has stopped); the line on the live console and the banner on every other console
+point at tty3. On the build-sealed variant a DOWN wall leaves a bare shell on tty1 as the
+agent's account. Here that account does not log in without both keys, so the repair path is the
+break-glass console (tty3), and every other console prints the banner, which says so. A box with
+no break-glass password provisioned and a DOWN wall is repaired from installer media. That is a
+real cost of this variant and belongs in the product decision of slice 4.
+
+A box built with `agentos.cleanRoom.sealed = true` has none of the window's units (v3 said
+"masked"; slice 3a made them absent) and never writes a `sealed` file. seal-check treats that as
+sealed-by-build: the build flag stands in for the marker, and if the image was built with the
+window's ruleset the set must be empty for the token to be written.
+
+When the marker's ruleset hash differs from the running generation's, seal-check logs
+`sealed-generation-changed` (not a failure: a rebuild legitimately changes it) and rewrites
+nothing. Its banner says that restarting nftables also re-runs the window unit, and how to run
+the check again.
 
 ### 2.6 What this changes about trust
 
@@ -485,7 +533,8 @@ Split in two (ruling 4), so that no root process reads keyboard bytes:
 | 2 | Desktop specialisations and `agentos-boot-default` | developer image | hyprland / sway / none specialisations (the heavy desktops stay build-time choices); the UEFI VM proof of 3.2; `surface-offline-switch` |
 | 3a | The setup window: the mechanism | wall; Fable code review | `agentos.cleanRoom.setupWindow.enable` (default OFF, the existing rulesets byte-identical): the set and its rules, the fetcher's fixed uid, the state machine (`modules/agos_window.py`), the window oneshot following nftables' restarts and reloads, the tick that closes and seals on the budget, the pull units conditioned on the marker. VM test `tests/setup-window.nix` (W1-W10) |
 | 3b part 1 | The setup window: the agent does not exist while it is open | wall; Fable code review | `agentos-seal.service` (the wait, the detector, `ExecStopPost`), tty1's getty behind it, the login token and the gates on every other console and on the user manager, no reopening in a sealed boot, the tty1 progress unit (2.4). VM test `test-seal-wait`. The option stays off on shipped images. |
-| 3b part 2 | The setup window: seal-check and the rest | wall; Fable code review | The seal-check assertions (2.5), the audit-chain lines, the registry probe off uid 0, timeout tidying; removes the flake assertion that keeps the option off. |
+| 3b part 2 | The setup window: seal-check and the rest | wall; Fable code review | The seal-check assertions (2.5) and the second key at every door, the registry probe as the fetcher's uid, the tool timeouts under the lock wait, the quiet tick while a re-provisioning waits for its reboot. The flake assertion stays, now pointing at 3c. |
+| 3c | The record | wall; Fable spec ruling first | The audit-chain lines for the window's transitions and the surface choice (2.2). They need a ruling on a second root writer and signer of the chain. Until then the transitions are in the journal only, and no shipped image may enable the window. |
 | 4 | Product path | wall; Fable code review | Surfaces and first login in `agentos`; a human account; `agentos-sealed` retired once the window has acceptance evidence |
 
 Slices 1 and 2 touch no wall code and can land while 3 is in review.
