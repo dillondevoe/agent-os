@@ -709,12 +709,15 @@ gh run view <id> --log-failed \
 Unbalanced (a start with no finish) means this cause. Balanced means look elsewhere, and this
 section does not apply.
 
-**Evidence**, on dellon: `~/jarvis-sync/research/plymouth-stall-2026-10-12/` — the loop script, its
-runner, nine result files, a stalled console carrying the full task dump, and a screenshot of a
-stalled display. To reproduce: `nix build .#test-setup-window.driver`, then run four copies in
-parallel, **each with its own `XDG_RUNTIME_DIR`**. The driver keys its vde switch socket and VM
-state directories off `XDG_RUNTIME_DIR`, not `TMPDIR`; without separate ones, parallel runs collide
-and all but the first silently fail to start.
+**To reproduce.** `nix build .#test-setup-window.driver`, then run four copies of the driver in
+parallel against a test script that loops `box.start()` / `box.shutdown()` and, on a boot where
+`Finished Tell Plymouth To Write Out Runtime Data` does not appear, reads `info status` and
+`info registers -a` off the QEMU monitor and sends one `sendkey`. **Give each copy its own
+`XDG_RUNTIME_DIR`**: the driver keys its vde switch socket and VM state directories off
+`XDG_RUNTIME_DIR`, not `TMPDIR`, so without separate ones parallel runs collide and all but the
+first silently fail to start. Mirror holds the loop script, the nine result files, a stalled console
+carrying the full task dump, and a screenshot of a stalled display; ask for them rather than
+re-deriving.
 
 ## What is NOT established
 
