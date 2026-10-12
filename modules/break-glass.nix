@@ -24,10 +24,11 @@
 # provision the hash or there is NO admin path at all (installer-media recovery only) — this
 # is the crux of the pending Dillon-confirm on break-glass provisioning.
 #
-# BOOT/CONSOLE SURFACE — VM-BLIND: `nix build .#vm` swaps the whole console/getty story under
-# mkVMOverride, so the exact getty@tty3 ExecStart below is eval-only here. It MUST be verified
-# against the pinned-nixpkgs getty template on real hardware (Dell) before this is trusted —
-# same class of blind spot as the by-label/VMD boot path in configuration.nix.
+# BOOT/CONSOLE SURFACE. `nix build .#vm` swaps the whole console/getty story under mkVMOverride,
+# so for months the getty@tty3 override below was eval-only, and it was wrong the whole time (see
+# the note at the unit). Since 2026-10-12 a booted machine checks it: tests/break-glass.nix switches
+# to tty3 the way a human does and types the password. Real hardware (Dell) is still worth one look:
+# the VM proves the unit and the login, not a particular keyboard or firmware console.
 #
 # SECURITY SURFACE: routed branch -> PR -> Fable, never direct-push, never self-merge.
 { config, pkgs, lib, ... }:
@@ -43,7 +44,24 @@
   # NOTE: if it turns out autologin was already tty1-only on the pinned nixpkgs, this override
   # is a harmless no-op (tty3 was already a plain login) and only the root password below
   # matters. Verified either way on real HW per the VM-blind note above.
+  #
+  # `overrideStrategy = "asDropin"` IS LOAD-BEARING (found 2026-10-12, tests/break-glass.nix). The
+  # default, "asDropinIfExists", looks for an upstream unit FILE of this exact name; a template
+  # INSTANCE has none, so nixpkgs wrote `getty@tty3.service` as a whole unit of its own. logind does
+  # not start that name on a VT switch: it starts `autovt@tty3.service`, an alias of the TEMPLATE,
+  # and with a separate file in the way the two were different units. So Ctrl+Alt+F3 ran the
+  # template's getty, an autologin as the agent, and the root prompt this module exists for never
+  # appeared (the NOTE above guessed at the opposite failure). As a drop-in there is one unit under
+  # both names, and this ExecStart is what runs. The drop-in is named overrides.conf, like the
+  # template's own, and so replaces it for this instance: nothing of the template's autologin
+  # command line is inherited, which is the point.
+  # `restartIfChanged = false` is the template's own setting, and it went away with the template's
+  # drop-in: without it a `nixos-rebuild switch` that changes this unit's text (a new util-linux or
+  # shadow path is enough) restarts the console, and the session it kills is the root repair
+  # session, the one most likely to be running that very rebuild.
   systemd.services."getty@tty3" = {
+    overrideStrategy = "asDropin";
+    restartIfChanged = false;
     serviceConfig.ExecStart = [
       ""  # clear the inherited (autologin) ExecStart before setting our own
       "@${pkgs.util-linux}/sbin/agetty agetty --login-program ${pkgs.shadow}/bin/login --noclear %I $TERM"

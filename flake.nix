@@ -292,6 +292,15 @@
           inherit baseModules;
         };
 
+        # THE REPAIR CONSOLE IS REACHABLE (modules/break-glass.nix), on a booted box: a VT switch to tty3
+        # shows a root login prompt (not an autologin as the agent), the password works, a wrong one and
+        # an unprovisioned one do not. Out of `checks` (boots two VMs); in the vm-tests.yml matrix.
+        #   nix build .#test-break-glass
+        test-break-glass = import ./tests/break-glass.nix {
+          pkgs = nixpkgs.legacyPackages.${system};
+          inherit baseModules;
+        };
+
         # THE AGENT DOES NOT EXIST WHILE THE WINDOW IS OPEN (first-login spec 2.4, slice 3b part 1), on a
         # booted box: tty1's getty waits for the seal, every other console's login and the agent's user
         # manager are refused until the token exists, the box seals itself when the model is listed, a
@@ -2621,6 +2630,16 @@
               "agentos-sealed-imports: seal-check.nix is NOT imported — the agentos-seal-check service is absent, so a broken seal would fail SILENT instead of loud (the whole point of that module).";
             assert lib.assertMsg (cfg.users.users.root.hashedPasswordFile == "/etc/agent-os/break-glass.hash")
               "agentos-sealed-imports: break-glass.nix is NOT imported — root's hashedPasswordFile is not the break-glass hash, so the ONE interactive root door (tty3) is gone.";
+            # The tty3 override must be a DROP-IN. As a whole unit of its own (nixpkgs' default for a
+            # template instance) logind's `autovt@tty3` is a different unit and runs the template: an
+            # autologin as the agent on the repair console. tests/break-glass.nix is the booted witness.
+            assert lib.assertMsg (lib.all (n: let c = self.nixosConfigurations.${n}.config; in
+                                    c.systemd.units."getty@tty3.service".overrideStrategy == "asDropin"
+                                    && !(lib.hasInfix "--autologin" (builtins.unsafeDiscardStringContext c.systemd.units."getty@tty3.service".text))
+                                    && lib.hasInfix (builtins.unsafeDiscardStringContext "--login-program ${nixpkgs.legacyPackages.${system}.shadow}/bin/login")
+                                                    (builtins.unsafeDiscardStringContext c.systemd.units."getty@tty3.service".text))
+                                  [ "agentos" "agentos-sealed" "agentos-sealed-s5" ])
+              "break-glass: getty@tty3 must be a drop-in (overrideStrategy = asDropin) with its own non-autologin command line, on every product image";
             assert lib.assertMsg (builtins.hasAttr "meshWireguard" cfg.agentos)
               "agentos-sealed-imports: mesh-wireguard-sealed.nix is NOT imported — options.agentos.meshWireguard is absent (WP-S1 sealed-lane mesh; options-only here by design).";
             assert lib.assertMsg (builtins.hasAttr "fetchProxy" cfg.agentos)

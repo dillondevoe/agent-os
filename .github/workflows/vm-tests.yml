@@ -275,6 +275,11 @@ jobs:
           # no serial line and no lingering user manager produces a process of the agent's account
           # while the fetcher has egress, and that the box seals itself the moment the model is listed.
           - test-seal-wait
+          # THE REPAIR CONSOLE. Same rule: added with tests/break-glass.nix. Unit text said tty3 had a
+          # root login prompt for months; a booted box showed that a VT switch there logged the AGENT in
+          # (logind starts the console under its other name, which ran the template). Only a booted box,
+          # a real VT switch and a typed password can say the one root door opens, and only for root.
+          - test-break-glass
           - test-surface-choice
           # THE DESKTOP AS A BOOT ENTRY. Same rule: added with tests/surface-boot-default.nix. The only
           # witness, on a UEFI machine with a real systemd-boot, that a first-login desktop choice

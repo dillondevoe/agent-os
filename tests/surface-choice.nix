@@ -66,6 +66,7 @@ pkgs.testers.runNixOSTest {
     box.sleep(1)
     box.send_chars("2\n")
     box.wait_until_tty_matches("1", "Shell:")
+    box.sleep(1)                                           # the front end discards what is typed before its "> "
     box.send_chars("3\n")                                  # bash, fish, zsh
 
     # S2 — the choice reaches the store.
