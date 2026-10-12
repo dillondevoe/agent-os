@@ -42,6 +42,11 @@ let
   runDir = "/run/agentos-setup";
   agentUser = config.services.getty.autologinUser;      # the account whose processes must not exist yet
   loginToken = "${runDir}/login-ok";
+  # The second key (slice 3b part 2): seal-check.nix writes it when the KERNEL's ruleset agrees that
+  # the box is sealed. /run itself is root's (0755), so nothing else can plant it.
+  sealedToken = "/run/agentos-sealed-ok";
+  unsealedBanner = "/run/agentos-unsealed";
+  bothKeys = "[ -f ${loginToken} ] && [ ! -L ${loginToken} ] && [ -f ${sealedToken} ] && [ ! -L ${sealedToken} ]";
 
   # One transaction each: the set is flushed and (for "open") refilled in the same `nft -f`, so it is
   # never anything but empty or exactly { fetch uid }. Rendered here, never built in a shell.
@@ -84,12 +89,19 @@ let
   # plain file in a root-only-writable tmpfs directory; absent, a symlink or anything else: no login.
   realLogin = options.services.getty.loginProgram.default;
   loginGate = pkgs.writeShellScript "agentos-login-gate" ''
-    if [ -f ${loginToken} ] && [ ! -L ${loginToken} ]; then
+    if ${bothKeys}; then
       exec ${realLogin} "$@"
     fi
-    printf '\r\n%s\r\n%s\r\n' \
-      'Agent OS is still setting up this machine.' \
-      'This console opens when setup has finished.'
+    if [ -f ${unsealedBanner} ] && [ ! -L ${unsealedBanner} ]; then
+      # seal-check found the wall down: say that, and how to repair it, on every console.
+      printf '\r\n'
+      while IFS= read -r line; do printf '%s\r\n' "$line"; done < ${unsealedBanner}
+      printf '%s\r\n' '  The agent is not started. Repair console: Ctrl+Alt+F3 (root).'
+    else
+      printf '\r\n%s\r\n%s\r\n' \
+        'Agent OS is still setting up this machine.' \
+        'This console opens when setup has finished.'
+    fi
     ${pkgs.coreutils}/bin/sleep 10
     exit 1
   '';
@@ -98,7 +110,7 @@ let
   # user: exit 0 = start the manager, 1 = skip it (not a failure; logind starts it again at login).
   userGate = pkgs.writeShellScript "agentos-user-gate" ''
     [ "$1" = 0 ] && exit 0
-    [ -f ${loginToken} ] && [ ! -L ${loginToken} ] && exit 0
+    ${bothKeys} && exit 0
     exit 1
   '';
 
@@ -141,9 +153,13 @@ let
           isInstanceOf = t: n: lib.hasPrefix t n && n != t;
           gettys = lib.filter (n: lib.any (t: isInstanceOf t n) [ "getty@" "autovt@" "serial-getty@" "container-getty@" ]) names;
           cmd = u: builtins.unsafeDiscardStringContext (lib.concatStringsSep " " (lib.toList (u.serviceConfig.ExecStart or "")));
-          own = u: !u.enable || ((u.serviceConfig ? ExecStart) && lib.hasInfix "agetty" (cmd u) && !(lib.hasInfix "--autologin" (cmd u)));
+          # ...and it must be a DROP-IN: as a whole unit of its own (nixpkgs' default for an instance)
+          # logind's `autovt@<tty>` stays a different unit and runs the template, gate and autologin
+          # and all. That is how the break-glass console showed an agent login for months.
+          own = u: !u.enable || (u.overrideStrategy == "asDropin" && (u.serviceConfig ? ExecStart)
+                                 && lib.hasInfix "agetty" (cmd u) && !(lib.hasInfix "--autologin" (cmd u)));
         in lib.all (n: own config.systemd.services.${n}) gettys && !(lib.any (isInstanceOf "user@") names));
-      message = "setup-window: an instance unit of a getty template or of user@ masks the template's drop-in (the login gate, the start condition). Only a disabled one, or a console with its own non-autologin agetty command line (break-glass), is allowed next to the setup window.";
+      message = "setup-window: an instance unit of a getty template or of user@ masks the template's drop-in (the login gate, the start condition). Only a disabled one, or a console that is a drop-in (overrideStrategy = \"asDropin\") with its own non-autologin agetty command line (break-glass), is allowed next to the setup window.";
     }
     {
       assertion = cr.sealed || agentUser != null;

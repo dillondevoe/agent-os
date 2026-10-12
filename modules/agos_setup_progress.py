@@ -4,12 +4,14 @@
 # Stdlib only. OUTPUT ONLY: it never reads the terminal, holds no privilege (a throwaway account, no
 # network), and decides nothing. It exits when the box is sealed, so tty1 never has two owners.
 #
-# It reads two world-readable files in /run:
+# It reads two world-readable files in /run, and looks for a third:
 #   /run/agentos-setup/status    one JSON line from agos_window.py: {"state": "open", "remaining": N}
 #                                | {"state": "sealed", "reason": ...} | {"state": "failed" | "down"}
 #   /run/agent-os/pull-status    the model download's latest progress line. That text comes from the
 #                                fetcher, which is on the network: only printable ASCII reaches the
 #                                terminal, and at most one short line of it.
+#   /run/agentos-unsealed        seal-check's banner. If it EXISTS the wall is down: say that setup
+#                                could not finish and stop (the consoles' login gate prints the banner).
 #
 #   agos_setup_progress.py <limit seconds>     the unit's own TimeoutStartSec is the backstop
 import json, os, sys, time
@@ -21,9 +23,10 @@ READ_MAX = 512
 def _paths():
     """The installed copy reads its two fixed paths. Only the repo copy reads AGOS_PROGRESS_* (tests)."""
     if INSTALLED:
-        return "/run/agentos-setup/status", "/run/agent-os/pull-status"
+        return "/run/agentos-setup/status", "/run/agent-os/pull-status", "/run/agentos-unsealed"
     return (os.environ.get("AGOS_PROGRESS_STATUS", "/run/agentos-setup/status"),
-            os.environ.get("AGOS_PROGRESS_PULL", "/run/agent-os/pull-status"))
+            os.environ.get("AGOS_PROGRESS_PULL", "/run/agent-os/pull-status"),
+            os.environ.get("AGOS_PROGRESS_UNSEALED", "/run/agentos-unsealed"))
 
 
 def clean(text, limit=70):
@@ -108,10 +111,12 @@ def main(argv, out=None, sleep=time.sleep, now=time.monotonic):
     except (IndexError, ValueError):
         sys.stderr.write("usage: agos_setup_progress.py <limit seconds>\n")
         return 2
-    status_path, pull_path = _paths()
+    status_path, pull_path, unsealed_path = _paths()
     end, last = now() + limit, None
     while True:
         state, left, reason = read_status(status_path)
+        if os.path.lexists(unsealed_path):           # seal-check: the wall is down, whatever the status says
+            state, reason = "down", ""
         if state in ("sealed", "failed", "down"):
             text, hold = final_for(state, reason)
             out.write("\r\033[K" + text)

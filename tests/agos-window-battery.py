@@ -359,6 +359,26 @@ tool(NFT); calls()
 check(A.tick(cfg()) == 0 and json.load(open(os.path.join(STATE, "sealed")))["reason"] == "budget", "J: the retry seals as soon as nft answers")
 reset(); put("sealed", "x"); calls()
 check(A.seal(cfg(), "complete") == 1 and calls() == [CLOSE] and open(os.path.join(STATE, "sealed")).read() == "x", "J: a malformed marker is not overwritten")
+# The seal is the longest holder of the lock. Everything it may spend on tools must fit inside the
+# time the others wait for the lock, or the shutdown stamp is skipped behind it.
+spent = []
+real_tool = A._tool
+A._tool = lambda argv, timeout=A.NFT_LIMIT: (spent.append((os.path.basename(argv[0]), argv[1], timeout)), real_tool(argv, timeout))[1]
+try:
+    reset(); A.recompute(cfg()); del spent[:]
+    check(A.seal(cfg(), "complete") == 0, "J: seal")
+finally:
+    A._tool = real_tool
+check([t for _, _, t in spent] == [A.NFT_LIMIT, A.RESTART_LIMIT, A.STOP_LIMIT, A.STOP_LIMIT], "J: every tool call under the lock must carry its limit: %r" % spent)
+import re
+REAL_LOCK_WAIT = int(re.search(r"^LOCK_WAIT = (\d+)", open(MOD).read(), re.M).group(1))      # the battery shortens A.LOCK_WAIT
+check(sum(t for _, _, t in spent) < REAL_LOCK_WAIT and A.NFT_LIMIT + REAL_LOCK_WAIT < 180,
+      "J: a seal (%d s of tools at most) must finish inside the lock wait (%d s), and a stamp that waited for the lock must still fit the unit's 180 s stop timeout"
+      % (sum(t for _, _, t in spent), REAL_LOCK_WAIT))
+reset(); tool(NFT, rc=1); calls()
+check(A.tick(cfg()) == 1, "J: a tick that cannot close (no window yet) must report it")
+reset(); A.recompute(cfg()); boot(2); tool(NFT, rc=1); calls()
+check(A.tick(cfg()) == 1 and not os.path.exists(os.path.join(STATE, "sealed")), "J: a tick that cannot close a window from another boot must report it")
 ok("J seal: flush, restart the fetcher, stop the retry, write the marker; idempotent; a failed flush is reported")
 
 # K — configuration
@@ -436,7 +456,16 @@ try:
         A.main(["x", "status"]); st = json.loads(sys.stdout.getvalue())
     finally:
         sys.stdout = so
-    check(st["sealed"] == "valid" and st["reason"] == "complete", "N: status after the seal: %r" % st)
+    check(st["sealed"] == "valid" and st["reason"] == "complete" and st["ruleset"] == "same", "N: status after the seal: %r" % st)
+    open(RULESET, "a").write("# a rebuild changed the ruleset\n")
+    so, sys.stdout = sys.stdout, io.StringIO()
+    try:
+        A.main(["x", "status"]); st2 = json.loads(sys.stdout.getvalue())
+    finally:
+        sys.stdout = so
+    check(st2["sealed"] == "valid" and st2["ruleset"] == "changed" and A.load_sealed(cfg())[0] == "valid",
+          "N: a sealed box whose ruleset was rebuilt is still sealed, and says the generation changed: %r" % st2)
+    open(RULESET, "w").write("table inet agentos_egress { }\n")
 finally:
     os.environ.pop("AGOS_WINDOW_CONFIG")
 ok("N the command line accepts exactly its roles; status reports the state")
@@ -530,19 +559,35 @@ for leave_window in (False, True):
     check(not looks, "P: there is nothing to wait for in that state; the wait asked the detector %d times" % len(looks))
 check(src.count("open_set(c)") == 2 and src.count("c[\"open_file\"]") == 1,
       "P: exactly one place may open the set (recompute, after the refusal above)")
-# ...nor may anyone else: the tick on a spent budget, a seal by hand, the wait's timeout.
-for who, call in (("tick, budget spent", lambda c: A.tick(c)), ("seal", lambda c: A.seal(c, "budget")), ("ended after a timeout", A.ended)):
+# ...nor may anyone else: a seal by hand, the wait's timeout (both refuse, rc 1), and the tick. The
+# tick runs once a minute for the rest of that boot, so it is QUIET there: it keeps the set empty,
+# keeps no books (there is no window to count), seals nothing, says nothing, and does not fail.
+for who, call, want in (("seal", lambda c: A.seal(c, "budget"), 1), ("ended after a timeout", A.ended, 1),
+                        ("tick, budget spent", lambda c: A.tick(c), 0), ("stop", lambda c: A.tick(c, final=True), 0)):
     rreset(); A.recompute(rcfg()); A.seal(rcfg(), "complete"); os.unlink(os.path.join(STATE, "sealed"))
-    Clock.mono = 100.0 + LENGTH + 1; os.environ["SERVICE_RESULT"] = "timeout"; calls()
+    Clock.mono = 100.0 + LENGTH + 1; os.environ["SERVICE_RESULT"] = "timeout"
+    books = open(os.path.join(STATE, "window.json")).read(); line = status_line(); calls()
     rc = call(rcfg()); os.environ.pop("SERVICE_RESULT")
     seen = calls()
-    check(rc == 1 and not os.path.exists(os.path.join(STATE, "sealed")) and seen and all(x == CLOSE for x in seen),
-          "P: %s wrote a new marker (or restarted the fetcher) in a sealed boot whose state was removed: rc=%r %r" % (who, rc, seen))
+    check(rc == want and not os.path.exists(os.path.join(STATE, "sealed")) and seen and all(x == CLOSE for x in seen),
+          "P: %s in a sealed boot whose marker was removed: rc=%r (want %r) %r" % (who, rc, want, seen))
+    check(open(os.path.join(STATE, "window.json")).read() == books and (want == 1 or status_line() == line),
+          "P: %s kept books, or told the console the window is open, in a boot that was sealed" % who)
+rreset(); A.recompute(rcfg()); A.seal(rcfg(), "complete"); os.unlink(os.path.join(STATE, "sealed")); tool(NFT, rc=1); calls()
+check(A.tick(rcfg()) == 1, "P: the quiet tick must still report a flush that failed")
 rreset(); A.recompute(rcfg()); A.seal(rcfg(), "complete"); os.unlink(os.path.join(STATE, "sealed")); put("window.json", "garbage"); calls()
 check(A.recompute(rcfg()) == 1 and not os.path.exists(os.path.join(STATE, "sealed")), "P: a garbage window.json in a sealed boot must wait for the reboot too")
 calls()
-check(A.tick(rcfg()) == 1 and not os.path.exists(os.path.join(STATE, "sealed")) and all(x == CLOSE for x in calls()),
+check(A.tick(rcfg()) == 0 and not os.path.exists(os.path.join(STATE, "sealed")) and calls() == [CLOSE],
       "P: the tick on a garbage window.json in a sealed boot must not seal either")
+# A refused seal whose flush ALSO failed is reported as the failed flush (the thing to repair first).
+rreset(); A.recompute(rcfg()); A.seal(rcfg(), "complete"); os.unlink(os.path.join(STATE, "sealed")); tool(NFT, rc=1); syslog_lines = []
+real_log, A.log = A.log, syslog_lines.append
+try:
+    check(A.seal(rcfg(), "budget") == 1 and any("did not confirm the flush" in l for l in syslog_lines)
+          and not any("re-provisioning" in l for l in syslog_lines), "P: the log must name the failed flush: %r" % syslog_lines)
+finally:
+    A.log = real_log
 ok("P once the token exists the window cannot open again in that boot")
 
 # Q — wait
@@ -719,8 +764,8 @@ dirty = "pulling \x1b[31m\x1b]0;owned\x07abc\r\n\u2595\u2588\u258f 45%\t3.0 GB/6
 c = P.clean(dirty)
 check(all(" " <= ch <= "~" for ch in c) and len(c) <= 70 and "45%" in c and "\x1b" not in c, "T: clean: %r" % c)
 check(P.clean("a   b\n\nc") == "a b c" and P.clean("") == "", "T: clean collapses blanks")
-PS, PP = os.path.join(TMP, "p-status"), os.path.join(TMP, "p-pull")
-os.environ["AGOS_PROGRESS_STATUS"], os.environ["AGOS_PROGRESS_PULL"] = PS, PP
+PS, PP, PU = os.path.join(TMP, "p-status"), os.path.join(TMP, "p-pull"), os.path.join(TMP, "p-unsealed")
+os.environ["AGOS_PROGRESS_STATUS"], os.environ["AGOS_PROGRESS_PULL"], os.environ["AGOS_PROGRESS_UNSEALED"] = PS, PP, PU
 
 
 def pstatus(obj):
@@ -774,14 +819,21 @@ check(rc == 0 and "could not finish" in text and len(naps) == 5 and "getting its
 se, sys.stderr = sys.stderr, io.StringIO()
 try:
     check(P.main(["x"]) == 2 and P.main(["x", "soon"]) == 2, "T: the limit is required and a number")
+    open(PU, "w").write("EGRESS SEAL DOWN\x1b[2J")          # seal-check's banner exists: the wall is down, whatever the status says
+    for st in ({"state": "open", "remaining": 3000}, {"state": "sealed", "reason": "complete"}):
+        rc, text, naps = run_progress([(st, "pulling 10%")])
+        check(rc == 0 and "could not finish" in text and "Starting Agent OS" not in text and "\x1b[2J" not in text and naps == [0],
+              "T: with seal-check's banner present the program must say setup could not finish and stop: %r" % text)
+    os.unlink(PU)
 finally:
     sys.stderr = se
 check("stdin" not in psrc and "input(" not in psrc and "subprocess" not in psrc and "socket" not in psrc, "T: it must read no input and run nothing")
 check(psrc.count('"@AGOS_PROGRESS_INSTALLED@"') == 1, "T: the substitution target must appear exactly once")
 inst = psrc.replace('"@AGOS_PROGRESS_INSTALLED@"', '"yes"')
 PI = types.ModuleType("agos_setup_progress_installed"); exec(compile(inst, "agos_setup_progress_installed.py", "exec"), PI.__dict__)
-check(PI._paths() == ("/run/agentos-setup/status", "/run/agent-os/pull-status") and P._paths() == (PS, PP), "T: the installed copy read the environment")
-os.environ.pop("AGOS_PROGRESS_STATUS"); os.environ.pop("AGOS_PROGRESS_PULL")
+check(PI._paths() == ("/run/agentos-setup/status", "/run/agent-os/pull-status", "/run/agentos-unsealed") and P._paths() == (PS, PP, PU),
+      "T: the installed copy read the environment")
+os.environ.pop("AGOS_PROGRESS_STATUS"); os.environ.pop("AGOS_PROGRESS_PULL"); os.environ.pop("AGOS_PROGRESS_UNSEALED")
 ok("T the progress program prints clean text, ends when the box is sealed, and reads no input")
 
 print("agos-window-battery: PASS (%d criteria)" % len(passed))
