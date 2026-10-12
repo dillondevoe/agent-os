@@ -98,9 +98,16 @@ pkgs.testers.runNixOSTest {
     gens = generations()
     box.fail("pgrep -u agent")
     box.send_chars("2\n")                                   # none, sway, hyprland -> sway
+    # The front end discards whatever was typed before it shows its "> " (a paste must not answer a
+    # question it has not asked yet). A key sent the instant the heading appears can land before
+    # that and be thrown away; the program then waits out its idle limit and takes the DEFAULTS, the
+    # machine never reboots, and this test waits for a power-off that does not come (it cost a CI
+    # job its whole 45 minutes on 2026-10-12). So: let the prompt settle, then type.
     box.wait_until_tty_matches("1", "Terminal:")
+    box.sleep(1)
     box.send_chars("\n")
     box.wait_until_tty_matches("1", "Shell:")
+    box.sleep(1)
     box.send_chars("\n")
     # The machine reboots by itself into the chosen desktop; the agent never had a session before it.
     box.wait_for_shutdown()
