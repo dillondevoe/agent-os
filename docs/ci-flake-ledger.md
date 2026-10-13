@@ -718,31 +718,72 @@ parallel against a test script that loops `box.start()` / `box.shutdown()` and, 
 first silently fail to start. Mirror holds the loop script, the nine result files, a stalled console
 carrying the full task dump, and a screenshot of a stalled display; ask for them rather than
 re-deriving.
-### THE PATCH IS MEASURED: 0 stalls in 480 patched boots against 3 in 240 stock the same hour (2026-10-13, Mirror, dellon)
+
+### THE PATCH IS MEASURED: 0 stalls in 480 patched boots against 3 in 240 stock, interleaved on one host (2026-10-13, Mirror, dellon)
 
 The cause above is now fixed rather than only identified. `modules/boot-branding.nix` builds
 `boot.plymouth.package` with `patches/plymouth-buffer-read-nonblocking.patch`, which sets
 `O_NONBLOCK` for the duration of the one `read()` in `ply_buffer_append_from_fd` and restores the
 flag afterwards. A readable-with-nothing-behind-it console then costs one `EAGAIN` instead of the
-boot.
+boot (measured, not assumed: see the counter arm below).
 
 | image | boots | stalls |
 |---|---|---|
 | patched, 4 streams, run 1 | 240 | 0 |
 | patched, 4 streams, run 2 | 240 | 0 |
 | **patched, total** | **480** | **0** |
-| stock, 4 streams, same host, same hour | 240 | 3 |
+| stock, 4 streams, same host, run between the two patched runs | 240 | 3 |
 
 Fisher exact one-sided on the same-session pair (0/480 vs 3/240) is **p = 0.037**; pooling the
 stock arm with the 9/480 baseline measured the day before gives 0/480 vs 12/720, **p = 0.0024**.
 
 **The control is the half that makes this worth reading.** A zero from a patched loop is also what
 a loop that stopped reproducing looks like — the stall needs host CPU contention, and contention is
-not a knob you set. So the stock arm ran on the same host, in the same hour, through the same
-4-stream harness, and it stalled three times; all three were freed by one `sendkey` to the virtual
+not a knob you set. So the stock arm ran on the same host through the same 4-stream harness, **between** the two
+patched runs (patched 00:39-00:58Z, stock 00:58-01:19Z, patched 01:22-01:41Z, 62 minutes end to
+end), and it stalled three times; all three were freed by one `sendkey` to the virtual
 console, the same signature as every earlier specimen. Two independent 240-boot patched runs rather
 than one 480 for the same reason: a single long run can go quiet for a cause that has nothing to do
 with the patch.
+
+**NOTE 1 ANSWERED, AND IT NEEDED A THIRD IMAGE: the race fires once per boot, not persistently —
+so this patch costs one `EAGAIN`, measured rather than assumed (2026-10-13).** The sentence above
+originally asserted "costs one `EAGAIN`" as a mechanism claim. An independent read of the PR pointed
+out what was wrong with that: the event loop is level-triggered and `ply_fd_has_data` is a 10 ms
+poll, so IF "readable with nothing to read" were a persistent state rather than a one-shot race, the
+patched daemon would spin `epoll_wait -> poll -> read EAGAIN` at a full core until a key arrived or
+plymouth quit. Boot would still complete — entirely consistent with 0 stalls in 480 — and the ledger
+would be quietly wrong about the cost.
+
+**A quiet CPU reading on patched boots could not settle it, because that is an unarmed zero:**
+indistinguishable from the race simply never having fired in the boots measured. So the measurement
+needed an image that makes "the race fired here" observable. A third build carries the fix plus a
+debug counter that records each `EAGAIN` to `/run`, and every boot is read at shell time for both
+that count and plymouthd's cumulative CPU.
+
+| debug-arm boots, 4 streams | value |
+|---|---|
+| boots | 240 |
+| stalls | 0 |
+| boots where the race fired (`EAGAIN` ≥ 1) | 6 (1 in 40) |
+| `EAGAIN` count on each of those boots | 1, 1, 1, 1, 1, 1 |
+| plymouthd CPU on fired boots | 1.00, 0.89, 0.79, 0.96, 0.77, 0.76 s |
+| plymouthd CPU across all boots | p50 0.89 s, p95 1.08 s, max 1.13 s |
+
+The fired boots sit inside the ordinary CPU distribution, so the readable-with-nothing condition is
+a **one-shot race, not a persistent state**, and the patch's cost is one `EAGAIN` per occurrence.
+That is now a measurement; before this run it was an assumption.
+
+**The counter also arms the 480-boot zero.** The race fired on 6 of 240 patched boots, a rate in
+line with the stock stall rate (3 of 240 here, 12 of 720 pooled), and none of the 6 stalled. So the
+patched runs were not clean because the trigger went away; the trigger kept arriving and the patch
+absorbed it. The counter image is a separate build from the one in the table above (the fix plus
+the debug counter) and its 240 boots are not added to the 480.
+
+**What the counter arm does not settle.** It observes the condition at `ply_buffer_append_from_fd`
+only. A different caller, a different terminal state, or a kernel that reports readable repeatedly
+could still produce the spin; nothing here rules that out for all time, and 6 firings is a small
+sample for anything beyond "the count was 1 every time it fired."
 
 **Which plymouth each arm ran was read out of the closure, not inferred from a green build:** stock
 `lvk5f18…-plymouth-26.134.222`, patched `8fbxx2n…-plymouth-26.134.222`.
@@ -765,7 +806,7 @@ blocking fd that this patch works around comes from. An upstream report is owed 
   side: a stall was observed on a VM whose `ttyS0` is a null device, so the serial line is not the
   trigger either way.
 - The guard against regression is an eval check (`plymouth-blocking-read-patched`), which asserts
-  every image's plymouth carries the patch. It does **not** boot anything. The booted arm is the
+  every image that enables plymouth carries the patch (the list is derived from the flake). It does **not** boot anything. The booted arm is the
   4-stream loop described above and is run by hand.
 
 **To reproduce either arm**, follow the recipe above, building `.#test-setup-window.driver` for the
