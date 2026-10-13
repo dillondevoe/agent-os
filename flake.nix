@@ -2770,7 +2770,11 @@
           let
             pkgs = nixpkgs.legacyPackages.${system};
             lib = nixpkgs.lib;
-            variants = [ "agentos" "agentos-sealed" "agentos-sealed-s5" "agentos-open" ];
+            # DERIVED, never a hand list: a fifth image added later is covered without anyone
+            # remembering this check exists. An image with plymouth off is skipped by `patched`
+            # itself, so it needs no exception here.
+            variants = builtins.attrNames self.nixosConfigurations;
+            splashed = lib.filter (n: self.nixosConfigurations.${n}.config.boot.plymouth.enable) variants;
             patched = n:
               let c = self.nixosConfigurations.${n}.config; in
               !c.boot.plymouth.enable
@@ -2778,13 +2782,19 @@
                          (c.boot.plymouth.package.patches or [ ]);
             missing = lib.filter (n: !(patched n)) variants;
           in
+            # A DERIVED list that went empty would make the assert below vacuously true, which is
+            # the one way deriving is worse than a hand list. Pin the floor at the four product
+            # images so "covers nothing" cannot read as "covers everything".
+            assert lib.assertMsg (lib.length splashed >= 4)
+              "plymouth-blocking-read-patched: only ${toString (lib.length splashed)} image(s) enable plymouth (expected at least the four product images) -- this check has gone VACUOUS, which looks identical to passing.";
             assert lib.assertMsg (missing == [ ])
               "plymouth-blocking-read-patched: these images ship a plymouth WITHOUT the blocking-read patch, so their boot can hang until a key is pressed: ${lib.concatStringsSep " " missing}";
             assert lib.assertMsg (!(lib.any (p: lib.hasSuffix "plymouth-buffer-read-nonblocking.patch" (toString p))
                                             (pkgs.plymouth.patches or [ ])))
               "plymouth-blocking-read-patched: stock nixpkgs plymouth already matches the patch name, so this check cannot tell patched from unpatched.";
             pkgs.runCommand "plymouth-blocking-read-patched-check" { } ''
-              echo "plymouth carries the blocking-read patch on: ${lib.concatStringsSep " " variants}"
+              echo "plymouth carries the blocking-read patch on: ${lib.concatStringsSep " " splashed}"
+              echo "images with plymouth off (skipped): ${lib.concatStringsSep " " (lib.subtractLists splashed variants)}"
               touch $out
             '';
 
