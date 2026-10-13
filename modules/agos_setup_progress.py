@@ -53,7 +53,7 @@ def read_status(path):
     """-> (state, remaining, reason). Anything unreadable or malformed is ("", None, "")."""
     try:
         doc = json.loads(_read(path))
-    except ValueError:
+    except Exception:                                # not JSON, or nested past the parser's patience
         return "", None, ""
     if not isinstance(doc, dict) or doc.get("state") not in ("open", "sealed", "failed", "down"):
         return "", None, ""

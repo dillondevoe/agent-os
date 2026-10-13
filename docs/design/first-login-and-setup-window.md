@@ -144,7 +144,7 @@ are temp file, `fsync`, `rename`, then `fsync` of the directory.
 |---|---|
 | `window.json` | `schema`, `remaining_seconds` (the budget), `opened_at` and `wall_deadline` (advisory), `boots` (count). One file, one atomic write. |
 | `sealed` | The store path of the running toplevel, the sha256 of the rendered ruleset file, UTC time, the reason, and the boot id of the boot that sealed. Never removed by any unit. |
-| `recorded.json` | A cache: which marker's seal the tick has seen in the audit chain (2.7). Losing it costs one scan. |
+| `recorded.json` | A pointer: where in the audit chain the tick found this marker's seal (offset and hash of the line; 2.7). Checked against the chain on every use; losing it costs one scan. |
 
 The window is measured as a **budget of open seconds**, not as a wall-clock deadline. A box with
 no RTC battery boots near 1970 and time sync is itself behind the wall, so a deadline written from
@@ -185,6 +185,17 @@ Decision table, evaluated on every run of `agentos-setup-window.service`:
 | present but malformed | — | Wall DOWN (seal-check's response); do not open. |
 | absent | unreadable or malformed | Seal, and say so on the console. |
 | absent | any, but the state directory is not writable | The unit is skipped by its condition; the set stays empty; seal-check (e) treats the box as sealed-or-down until a human fixes the filesystem. Intended. |
+
+**A reader never raises, and a role that raises anyway fails closed** (added in slice 3c, from the
+commit security review). Every role reads its state before it closes or opens anything, so an
+exception in a reader is a role that died with the set as it was: an open window with no
+enforcer. The first version could be made to raise by a number too large to become a float
+(`10**400` is valid JSON) and by a pointer offset too large to seek to; the wait's unit can
+write these files. (Nesting deeper than the parser allows is the third way a parser raises
+something that is not "bad JSON". On the Python this image ships the files' size cap keeps the
+depth far below that limit; the catch is general so that it does not depend on that.) Now every loader returns a verdict
+whatever it is given, every number is bounded before it is used, and each role is wrapped so
+that any exception at all ends with the set flushed and the role failed.
 
 "Valid" for `sealed` means: the schema parses, every field is well formed, and the toplevel is a
 store path. It does not mean the ruleset hash matches: a rebuild legitimately changes it, there is
@@ -382,26 +393,43 @@ is the proposal as changed by the spec ruling of 2026-10-13 (the changes are mar
 | `window-opened` | first boot: the window is about to open with the full budget | `remaining`, `budget_at_boot`, `boots` |
 | `window-reopened` | a later boot is about to open it with what was left | `remaining`, `budget_at_boot`, `boots` |
 | `window-rederived` | same boot: the set is about to be put back after an nftables reload or restart | `remaining`, `budget_at_boot`, `boots` |
-| `window-sealed` | the box sealed itself | `reason`, `sealed_at` |
+| `window-sealed` | the box sealed itself | `marker`: what the marker says (`reason`, `sealed_at`, `boot_id`, `toplevel`, `ruleset_sha256`) |
 
 Common to all four (ruling): `"src": "setup-window"`, `schema`, `boot_id` (what the state is keyed
 on, and what tells reopened from re-derived), `fetch_uid` (the subject that had egress, as a
 number), `toplevel` and `ruleset_sha256` (the generation and the ruleset the record speaks for),
 and `elements`: how many uids the **kernel's** set held when the record was written, read back
-from nft, never assumed. For the three opens that is the state before the open: the record says
+from nft, never assumed. These are always what the **writing role measured itself** at the
+moment it wrote. (`remaining`, `budget_at_boot` and `boots` on the opens are not measurements:
+they are what the program decided from its books, `window.json`, bounded by the window length.
+A forged book can make them wrong about history; it cannot put anything but bounded numbers
+there.) For the seal that role is the tick, possibly in a later boot and from a later
+generation than the seal; what the *marker* says about the seal is quoted under `marker`, as the
+marker's. (Found by the commit security review after the code review: the first version copied
+the marker's fields to the top of a signed record. The marker can be written by the wait, the
+one role that reads bytes from a process that has been on the network, so a file's claims came
+out as the signer's own.) The marker is validated field by field before any of it is quoted: a
+finite, non-negative time (a NaN equals nothing, itself included, and would have been recorded
+again every minute), a boot id of letters, digits and dashes, a toplevel of printable
+characters, each with a length limit. For the three opens that is the state before the open: the record says
 the program authorised the open and is about to attempt it. (So on a run with no reload and no
 reboot no record ever says 1: the opens say 0 and the seal says 0. The chain witnesses that the
 open was authorised and that the box sealed. A re-derive after an nftables reload says 0 too:
 the reload is what emptied the set. A non-zero count appears only when the window unit is run
-again with the set still full, for instance restarted by hand.) `reason` is one of exactly seven: `complete`, `budget`, `deadline`,
+again with the set still full, for instance restarted by hand.) The marker's `reason` is one of exactly seven: `complete`, `budget`, `deadline`,
 `invalid state`, `timeout`, `not open`, `refused`. On a box with no clock battery `sealed_at`
 and the chain's own `ts` may be near 1970; the order of events is `boot_id` and the chain's
-`seq`, not the times. Nothing in a record comes from the model server's answers.
+`seq`, not the times. Nothing in a record comes from the model server's answers, except that a marker's
+`reason: complete` is the wait's conclusion from one, quoted as the marker's.
 
 Refusals and closes that are not a seal (a re-provisioning refused until the reboot, a tick that
 closes because it cannot keep its books, a wall that seal-check finds DOWN) stay in the journal.
 One of them, "the state was removed under a running agent", is security-relevant rather than
-operational and is a candidate for the chain in slice 4.
+operational and is a candidate for the chain in slice 4. So is this one: the login token
+appearing while the window is open (only something already root in the wait's unit could do
+that). It closes the window at the next reload and no marker is ever written, so the chain shows
+an open with no seal and only the journal says why; logins stay shut all the same, because the
+second key is seal-check's.
 
 **Who writes.** The window program, through the same pinned `audit` wrapper the wall uses (one
 derivation, `modules/audit-pkg.nix`: the same ledger, modules and identity root). The chain
@@ -445,17 +473,25 @@ be the first record of the chain.
   tick, the window oneshot, a `seal` typed by root) writes the marker, as before. Ruling: **the tick reconciles**. It runs once a minute on a
   sealed box too, and appends `window-sealed` built from the marker, so the record is at most a
   minute behind the seal. Whether that has been done is read from the **chain** (a read-only
-  scan for a `window-sealed` with this marker's `boot_id` and `sealed_at`); `seal/recorded.json`
-  only saves the scan. So the record can be late (the chain is broken: the tick keeps trying,
-  quietly), never lost (the debt is the default state of "valid marker, no such record") and
-  never written twice (the scan comes before every append, under the state lock). The marker
+  scan for a `window-sealed` whose `marker` has this marker's `boot_id`: a box seals at most
+  once per boot, so that is the honest count, and a marker rewritten with a new time does not
+  get a second record).
+  `seal/recorded.json` is a **pointer**, not a statement: the offset and the hash of that line,
+  checked against the chain every time it is used. (The first version stored only "recorded",
+  which let a side file decide whether a security record is written: a chain that later lost
+  the record would have stayed without it. Found by the commit security review.) The tick that
+  appends writes no pointer; the next tick finds the line and writes it. So the record can be
+  late (the chain is broken: the tick keeps trying, quietly), never lost (the debt is the
+  default state of "valid marker, no such record in the chain") and never written twice (the
+  scan comes before every append, under the state lock). The marker
   gains `boot_id` for this. Nothing about logins waits for the record.
 
 The file-as-queue of the first draft (`audit-owed.json`) is gone: it could be unwritable, it
 could duplicate after a crash, and it could grow.
 
 **Time under the lock.** One append is limited to 10 seconds (`AUDIT_LIMIT`), and so is the
-scan of the log for a seal's record (`SCAN_LIMIT`; a log too long to read in that time is also
+scan of the log for a seal's record (one scan per tick at most: the tick that appends does not
+look for what it wrote) (`SCAN_LIMIT`; a log too long to read in that time is also
 too long for `audit append`, which reads all of it, and the record then stays owed). While the
 window is open nothing else writes the chain, so longer is a failure and not a queue. With every
 tool at its limit the longest holders of the state lock are: a seal, 20 + 45 + 2 x 10 = 85

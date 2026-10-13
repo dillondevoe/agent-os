@@ -13,8 +13,9 @@
 #       set and the record is written before the set is put back. It is a measurement.
 #   R3  a reboot inside the window: `window-reopened`, boots 2.
 #   R4  the model appears: the box seals (the wait does that, and appends nothing). Within a tick the
-#       chain holds exactly one `window-sealed`, built from the marker (same time, same boot id). It
-#       stays exactly one through further ticks and with the cache removed.
+#       chain holds exactly one `window-sealed`: the tick's own measurements, and the marker quoted
+#       under `marker`. `recorded.json` is a pointer to that line (offset and hash); removed or
+#       pointed elsewhere, the next tick puts it right from the chain and the record stays one.
 #   R5  a wall request made by the agent after the seal chains onto the window's records, and the
 #       whole chain verifies under the pin: one signer, two writing programs.
 #   R6  a chain that refuses: a torn tail is planted, the state removed, the box restarted. No record,
@@ -138,14 +139,22 @@ pkgs.testers.runNixOSTest {
     assert m4["reason"] == "complete" and m4["boot_id"] == boot2, f"R4: {m4}"
     box.wait_until_succeeds(f"grep -c window-sealed {LOG} | grep -qx 1", timeout=100)        # the tick, once a minute
     s4 = [r for r in mine(box) if r["event"] == "window-sealed"]
-    assert len(s4) == 1 and (s4[0]["reason"], s4[0]["sealed_at"], s4[0]["boot_id"], s4[0]["toplevel"], s4[0]["ruleset_sha256"], s4[0]["elements"], s4[0]["fetch_uid"]) == \
-        ("complete", m4["sealed_at"], boot2, m4["toplevel"], m4["ruleset_sha256"], 0, UID), f"R4: the seal's record is not the marker's: {s4} vs {m4}"
+    # On top: what the tick measured itself. Under `marker`: what the marker says, quoted.
+    assert len(s4) == 1 and (s4[0]["boot_id"], s4[0]["toplevel"], s4[0]["elements"], s4[0]["fetch_uid"]) == (boot2, top, 0, UID) \
+        and len(s4[0]["ruleset_sha256"]) == 64, f"R4: the tick's own measurements: {s4}"
+    assert s4[0]["marker"] == {k: m4[k] for k in ("reason", "sealed_at", "boot_id", "toplevel", "ruleset_sha256")}, f"R4: the marker is not quoted as it is: {s4[0].get('marker')} vs {m4}"
     assert s4[0].get("signer") == "agent", "R4: the seal's record is not signed"
-    assert json.loads(box.succeed(f"cat {STATE}/recorded.json")) == {"boot_id": boot2, "sealed_at": m4["sealed_at"]}, "R4: the cache"
-    box.succeed(f"rm {STATE}/recorded.json")
-    box.wait_until_succeeds(f"test -e {STATE}/recorded.json", timeout=100)                    # the next tick scanned the chain
+    # The pointer: written by the tick that FINDS the record, and it names the very line.
     box.succeed("systemctl start agentos-setup-window-tick.service")
-    assert [r["event"] for r in mine(box)].count("window-sealed") == 1, f"R4: the seal was recorded more than once: {events(box)}"
+    ptr = json.loads(box.succeed(f"cat {STATE}/recorded.json"))
+    line = box.succeed(f"tail -c +{ptr['offset'] + 1} {LOG} | head -n 1")
+    assert (ptr["boot_id"], ptr["sealed_at"]) == (boot2, m4["sealed_at"]) and json.loads(line)["event"] == "window-sealed" \
+        and box.succeed(f"tail -c +{ptr['offset'] + 1} {LOG} | head -n 1 | sha256sum").split()[0] == ptr["sha256"], f"R4: the pointer does not name the record: {ptr}"
+    for forged in ("", json.dumps(dict(ptr, offset=0))):          # removed; then one that points at another line
+        box.succeed(f"rm {STATE}/recorded.json" if not forged else f"echo '{forged}' > {STATE}/recorded.json && chmod 600 {STATE}/recorded.json")
+        box.succeed("systemctl start agentos-setup-window-tick.service")
+        assert json.loads(box.succeed(f"cat {STATE}/recorded.json")) == ptr, "R4: the pointer was not put right from the chain"
+        assert [r["event"] for r in mine(box)].count("window-sealed") == 1, f"R4: the seal was recorded more than once: {events(box)}"
     box.succeed(VERIFY)
 
     # ── R5 ──────────────────────────────────────────────────────────────────────────────────────
@@ -186,7 +195,7 @@ pkgs.testers.runNixOSTest {
     box.succeed(f"sed -i '$ d' {LOG}")
     box.succeed("audit verify >/dev/null && systemctl start agentos-setup-window-tick.service")
     s6 = [r for r in mine(box) if r["event"] == "window-sealed"]
-    assert len(s6) == 2 and (s6[-1]["reason"], s6[-1]["sealed_at"]) == ("refused", m6["sealed_at"]), f"R6: the owed record: {s6[-1:]}"
+    assert len(s6) == 2 and (s6[-1]["marker"]["reason"], s6[-1]["marker"]["sealed_at"]) == ("refused", m6["sealed_at"]), f"R6: the owed record: {s6[-1:]}"
     box.succeed(VERIFY)
     # ...and with the state removed again, the next boot is a first boot.
     box.succeed(f"rm {STATE}/sealed {STATE}/window.json")

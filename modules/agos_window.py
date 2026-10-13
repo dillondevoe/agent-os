@@ -77,9 +77,10 @@
 #     a budget behind a set that never opened: a refused record, like a refused nft open, seals the
 #     box at once (reason `refused`).
 #   - SEALING never waits for the record. Whoever seals writes the marker; the tick, which runs once
-#     a minute on a sealed box too, appends `window-sealed` built from the marker. Whether that has
-#     been done is read from the CHAIN (a scan for this marker's boot id and time), never from a side
-#     file: `recorded.json` only saves the scan. So a record can be late, never lost and never twice.
+#     a minute on a sealed box too, appends `window-sealed`: what it measured itself, and what the
+#     marker says, quoted as the marker's. Whether that has been done is read from the CHAIN (a scan
+#     for this marker's boot id and time), never from a side file: `recorded.json` is a pointer to
+#     the line, checked against the chain on every use. Late, never lost, never twice.
 #
 # FAIL DIRECTION. Anything this cannot read, parse or decide ends with the set empty. A state
 # directory that cannot be written means the window does not open, and a tick that cannot write
@@ -196,30 +197,95 @@ def _num(v):
     return isinstance(v, (int, float)) and not isinstance(v, bool)
 
 
+# NOTHING THAT READS A FILE MAY RAISE. Every role reads its state before it closes or opens anything,
+# so an exception in a reader is a role that died with the set as it was: an open window with no
+# enforcer. The files are small and root's, but the wait can write them too, and what is in them is
+# hostile until checked. Three things raised in the first version and are closed here by
+# construction, not case by case: a number too large to become a float (10**400 is valid JSON and
+# an int; arithmetic and `math.isfinite` on it raise OverflowError), nesting too deep for the parser
+# (RecursionError, which is not a ValueError; out of reach of a 4 KiB file on today's Python, caught
+# anyway), and an offset too large to seek to.
+_BAD = object()
+NUMBER_LIMIT = 1e12        # no time, budget or count in this program is anywhere near it
+
+
+def _json(data, encoding="ascii"):
+    """The parsed value, or _BAD. Never raises."""
+    try:
+        return json.loads(data.decode(encoding))
+    except Exception:                                # ValueError, RecursionError, MemoryError, anything
+        return _BAD
+
+
+def _sane(v, lo=-NUMBER_LIMIT, hi=NUMBER_LIMIT):
+    """A real number inside [lo, hi]. The comparison is exact for ints of any size, and false for
+    NaN and both infinities, so nothing that passes can overflow later."""
+    return _num(v) and lo <= v <= hi
+
+
+def _total(fallback):
+    """Make a reader total: whatever it raises, it returns `fallback` instead."""
+    def deco(fn):
+        def wrapped(*a, **k):
+            try:
+                return fn(*a, **k)
+            except Exception:
+                return fallback
+        wrapped.__name__, wrapped.__doc__, wrapped.__wrapped__ = fn.__name__, fn.__doc__, fn
+        return wrapped
+    return deco
+
+
+def _closing(role):
+    """Make a role fail CLOSED: whatever it raises, the set is flushed and the role returns 1. The
+    readers above should make this unreachable; it is here because "should" is what the first
+    version had."""
+    def wrapped(c, *a, **k):
+        try:
+            return role(c, *a, **k)
+        except Exception as e:
+            try:
+                close_set(c)
+            except Exception:
+                pass
+            # The class name to syslog (nothing a file said goes to authpriv); the traceback to
+            # stderr, which is the unit's journal: a caught failure must still be findable.
+            log("%s: unexpected %s; the set was flushed and the role failed" % (role.__name__, e.__class__.__name__))
+            try:
+                import traceback
+                sys.stderr.write(traceback.format_exc())
+            except Exception:
+                pass
+            return 1
+    wrapped.__name__, wrapped.__doc__ = role.__name__, role.__doc__
+    return wrapped
+
+
+@_total(("malformed", "unreadable"))
 def load_window(c):
-    """('absent', None) | ('valid', state) | ('malformed', reason)."""
+    """('absent', None) | ('valid', state) | ('malformed', reason). Never raises."""
     data, why = _read(os.path.join(c["state_dir"], "window.json"))
     if why == "absent":
         return "absent", None
     if data is None:
         return "malformed", why
-    try:
-        s = json.loads(data.decode("ascii"))
-    except ValueError:
+    s = _json(data)
+    if s is _BAD:
         return "malformed", "not JSON"
     need = {"schema", "budget_at_boot", "remaining", "boot_id", "opened_mono", "opened_at", "wall_deadline", "boots"}
     if not isinstance(s, dict) or set(s) != need or s["schema"] != SCHEMA:
         return "malformed", "wrong fields"
-    if not (_num(s["budget_at_boot"]) and _num(s["remaining"]) and _num(s["opened_mono"])
+    if not (_sane(s["budget_at_boot"]) and _sane(s["remaining"]) and _sane(s["opened_mono"])
             and isinstance(s["boot_id"], str) and isinstance(s["boots"], int) and not isinstance(s["boots"], bool)
-            and (s["opened_at"] is None or _num(s["opened_at"]))
-            and (s["wall_deadline"] is None or _num(s["wall_deadline"]))):
+            and (s["opened_at"] is None or _sane(s["opened_at"]))
+            and (s["wall_deadline"] is None or _sane(s["wall_deadline"]))):
         return "malformed", "wrong types"
-    if not (0 <= s["remaining"] <= s["budget_at_boot"] <= c["length"]) or s["boots"] < 1:
+    if not (0 <= s["remaining"] <= s["budget_at_boot"] <= c["length"]) or not 1 <= s["boots"] <= 10 ** 6:
         return "malformed", "out of range"
     return "valid", s
 
 
+@_total(("malformed", "unreadable"))
 def load_sealed(c):
     """('absent', None) | ('valid', marker) | ('malformed', reason). Valid = the schema parses, the
     fields are well formed and the toplevel is a store path. It does NOT mean the ruleset hash
@@ -229,13 +295,20 @@ def load_sealed(c):
         return "absent", None
     if data is None:
         return "malformed", why
-    try:
-        m = json.loads(data.decode("ascii"))
-    except ValueError:
+    m = _json(data)
+    if m is _BAD:
         return "malformed", "not JSON"
+    # Strict, field by field: what the marker says is quoted in a signed record (reconcile), the
+    # marker's (boot id, time) is the key that keeps that record from being written twice (a NaN
+    # equals nothing, itself included), and the wait can write this file.
     if (not isinstance(m, dict) or set(m) != {"schema", "toplevel", "ruleset_sha256", "sealed_at", "reason", "boot_id"}
-            or m.get("reason") not in SEAL_REASONS     # it goes into the audit chain verbatim (reconcile)
-            or m["schema"] != SCHEMA or not isinstance(m["toplevel"], str) or not isinstance(m["boot_id"], str)
+            or not isinstance(m.get("reason"), str) or m["reason"] not in SEAL_REASONS
+            or not _sane(m.get("sealed_at"), 0)
+            or not isinstance(m.get("boot_id"), str) or len(m["boot_id"]) > 64
+            or any(not (ch.isascii() and (ch.isalnum() or ch == "-")) for ch in m["boot_id"])
+            or not isinstance(m.get("toplevel"), str) or len(m["toplevel"]) > 512
+            or any(not ("!" <= ch <= "~") for ch in m["toplevel"])
+            or m["schema"] != SCHEMA
             or not m["toplevel"].startswith(c.get("store_prefix", "/nix/store/"))
             or not isinstance(m["ruleset_sha256"], str) or len(m["ruleset_sha256"]) != 64
             or any(ch not in "0123456789abcdef" for ch in m["ruleset_sha256"])
@@ -428,6 +501,10 @@ def decide(c, sealed, window, boot_id, now_mono, now_wall):
     s = window[1]
     if clock_known and s["wall_deadline"] is not None and now_wall > s["wall_deadline"]:
         return ("seal", "deadline")
+    if s["boot_id"] == boot_id and s["opened_mono"] > now_mono:
+        # Books that say this boot opened the window at a moment that has not come yet. The floor
+        # would hold `remaining` still for as long as that lasted: a window that never closes.
+        return ("seal", "invalid state")
     if s["boot_id"] == boot_id:                      # a re-derivation in the same boot: charges nothing
         left = remaining_now(s, now_mono)
         if left <= 0:
@@ -473,7 +550,7 @@ def set_elements(c):
                 elem = item["set"].get("elem", [])
                 return len(elem) if isinstance(elem, list) else None
         return None
-    except (OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError):
+    except Exception:                                # nft missing, slow, or saying something unparseable
         return None
 
 
@@ -508,74 +585,132 @@ def _append_record(c, event, **fields):
     return True
 
 
-def _chain_has_seal(c, marker):
-    """Is this marker's seal in the chain? True / False, or None if the log cannot be read, or not
-    within SCAN_LIMIT (then the record stays owed: a log too long to read in that time is also too
-    long for `audit append`, which reads all of it to find its head). The log is root's own ledger,
-    read-only here; lines are appended whole, so a reader needs no lock."""
-    import time as real_time                         # a deadline on the real clock, whatever a test did to `time`
-    deadline = real_time.monotonic() + SCAN_LIMIT
+def _open_log(c):
+    """The audit log, read-only, as a plain file: an fd, "absent", or None (cannot say). It is root's
+    own ledger; lines are appended whole, so a reader needs no lock. A FIFO or a symlink there is
+    refused at once: the caller holds the state lock."""
     try:
         fd = os.open(c["audit_log"], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
     except FileNotFoundError:
-        return False
+        return "absent"
     except OSError:
         return None
     try:
         import stat
-        try:
-            regular = stat.S_ISREG(os.fstat(fd).st_mode)
-        except OSError:
-            regular = False
-        if not regular:                              # a FIFO there would hold the lock for ever
-            os.close(fd)
-            return None
-        with os.fdopen(fd, "r", encoding="utf-8", errors="replace") as f:
+        if stat.S_ISREG(os.fstat(fd).st_mode):
+            return fd
+    except OSError:
+        pass
+    os.close(fd)
+    return None
+
+
+@_total(False)
+def _is_seal_of(line, marker):
+    """Is this one line of the chain the record of THIS marker's seal?"""
+    if b"window-sealed" not in line:
+        return False
+    r = _json(line, "utf-8")
+    m = r.get("marker") if isinstance(r, dict) else None
+    # The key is the marker's BOOT: a box seals at most once per boot (a sealed boot refuses a second
+    # marker, and re-provisioning takes a reboot), so one record per marker boot is the honest count.
+    # The time is not part of it: a marker rewritten every minute with a new time (the wait's unit
+    # can write that file) would otherwise get a new signed record every minute. Only a marker with
+    # no boot id at all falls back to its time.
+    return (isinstance(m, dict) and r.get("src") == "setup-window" and r.get("event") == "window-sealed"
+            and m.get("boot_id") == marker["boot_id"]
+            and (marker["boot_id"] != "" or m.get("sealed_at") == marker["sealed_at"]))
+
+
+@_total(None)
+def _find_seal(c, marker):
+    """Where is this marker's seal in the chain? (offset, sha256 of the line) if it is there, False
+    if it is not, None if the log cannot be read or not within SCAN_LIMIT (then the record stays
+    owed: a log too long to read in that time is also too long for `audit append`, which reads all
+    of it to find its head). Only whole lines count: a torn tail is not a record."""
+    import time as real_time                         # a deadline on the real clock, whatever a test did to `time`
+    deadline = real_time.monotonic() + SCAN_LIMIT
+    fd = _open_log(c)
+    if fd == "absent":
+        return False
+    if fd is None:
+        return None
+    try:
+        with os.fdopen(fd, "rb") as f:
+            offset = 0
             for n, line in enumerate(f):
                 if n % 1024 == 0 and real_time.monotonic() > deadline:
                     return None
-                if "window-sealed" not in line:
-                    continue
-                try:
-                    r = json.loads(line)
-                except ValueError:
-                    continue
-                if (isinstance(r, dict) and r.get("src") == "setup-window" and r.get("event") == "window-sealed"
-                        and r.get("boot_id") == marker["boot_id"] and r.get("sealed_at") == marker["sealed_at"]):
-                    return True
+                if line.endswith(b"\n") and _is_seal_of(line, marker):
+                    return offset, hashlib.sha256(line).hexdigest()
+                offset += len(line)
         return False
     except OSError:
         return None
 
 
+@_total(False)
+def _pointer_holds(c, marker):
+    """`recorded.json` is a POINTER into the chain, not a statement about it: it names the offset
+    and the hash of the line that records this marker's seal. True only if that line is there now.
+    A file that merely SAID "recorded" would decide whether a security record gets written; a chain
+    that later lost the record (a truncated tail, a replaced log) would stay without it for good."""
+    data, _ = _read(os.path.join(c["state_dir"], "recorded.json"))
+    p = _json(data) if data is not None else None
+    if (not isinstance(p, dict) or set(p) != {"boot_id", "sealed_at", "offset", "sha256"}
+            or p["boot_id"] != marker["boot_id"]
+            or not isinstance(p["offset"], int) or isinstance(p["offset"], bool) or not 0 <= p["offset"] < 1 << 62
+            or not isinstance(p["sha256"], str)):
+        return False
+    fd = _open_log(c)
+    if fd is None or fd == "absent":
+        return False
+    try:
+        with os.fdopen(fd, "rb") as f:
+            f.seek(p["offset"])
+            line = f.readline(1 << 16)
+        return line.endswith(b"\n") and hashlib.sha256(line).hexdigest() == p["sha256"] and _is_seal_of(line, marker)
+    except OSError:
+        return False
+
+
+@_total(False)
 def reconcile(c, marker):
     """Under the state lock, by the tick only: make sure this marker's seal is in the chain. True if
-    it is (now or already). A False is a record still owed; the next tick tries again."""
+    it is known to be. A False is a record still owed; the next tick tries again.
+
+    WHAT IS SIGNED. The top-level fields are what THIS role measured when it wrote the record: the
+    boot it runs in, the generation it runs from, what the kernel's set holds. What the marker says
+    (who sealed, when, why, under which generation) goes under `marker`, as what a file on disk
+    says: the marker can be written by the wait, the one role that reads bytes from a process that
+    has been on the network, and a file's claims must not come out of here as this role's own."""
     if not c.get("audit"):
         return True
-    key = {"boot_id": marker["boot_id"], "sealed_at": marker["sealed_at"]}
-    cache = os.path.join(c["state_dir"], "recorded.json")
-    data, _ = _read(cache)
-    try:
-        if data is not None and json.loads(data.decode("ascii")) == key:
-            return True                              # the cache only saves the scan below
-    except ValueError:
-        pass
-    found = _chain_has_seal(c, marker)
+    if _pointer_holds(c, marker):
+        return True
+    found = _find_seal(c, marker)
     if found is None:
         return False
-    if not found:
+    if found is False:
         elements = set_elements(c)
-        if elements is None:
+        boot_id = _boot_id(c)
+        try:
+            toplevel, digest = _generation(c)
+        except OSError:
             return False
-        if not _append_record(c, "window-sealed", boot_id=marker["boot_id"], toplevel=marker["toplevel"],
-                              ruleset_sha256=marker["ruleset_sha256"], reason=marker["reason"],
-                              sealed_at=marker["sealed_at"], elements=elements):
+        if elements is None or not boot_id:
             return False
+        claims = {k: marker[k] for k in ("reason", "sealed_at", "boot_id", "toplevel", "ruleset_sha256")}
+        # No pointer yet: the next tick's scan finds the line and writes it. (Looking for it here
+        # would be a second scan under the lock.) The scan always comes before an append, so a
+        # record that is in the chain is never written again, pointer or no pointer.
+        return _append_record(c, "window-sealed", boot_id=boot_id, toplevel=toplevel, ruleset_sha256=digest,
+                              elements=elements, marker=claims)
     try:
-        _write(cache, key)
+        _write(os.path.join(c["state_dir"], "recorded.json"),
+               {"boot_id": marker["boot_id"], "sealed_at": marker["sealed_at"], "offset": found[0], "sha256": found[1]})
     except OSError:
-        pass                                         # no cache: the next tick scans, finds it, and stops there
+        pass                                         # no pointer: the next tick scans again, and stops there
     return True
 
 
@@ -587,6 +722,7 @@ def _boot_id(c):
         return ""
 
 
+@_closing
 def seal(c, reason):
     """Seal, holding the state lock. Without the lock: flush only (always safe), and report failure."""
     with _Lock(c) as lock:
@@ -638,6 +774,7 @@ def _seal(c, reason):
     return _sealed_ok(c, True, reason)
 
 
+@_closing
 def recompute(c):
     """Read the state; end with the set empty or holding the fetch uid. 0 unless the wall is down."""
     with _Lock(c) as lock:
@@ -707,6 +844,7 @@ def _recompute(c):
     return 0
 
 
+@_closing
 def tick(c, final=False):
     """Write the remaining budget. If it is gone, the wall deadline has passed, or the books cannot be
     kept, close the window HERE."""
@@ -761,6 +899,12 @@ def _tick(c, final):
             return _seal(c, act[1])
         return 0 if flushed else 1
     s = window[1]
+    if s["opened_mono"] > time.monotonic():
+        # Books that open the window in the future (see `decide`): the floor would hold the budget
+        # still. Not a window this program opened; close it and seal.
+        close_set(c)
+        log("tick: the books open the window in the future; window closed")
+        return _seal(c, "invalid state")
     left = remaining_now(s, time.monotonic())
     try:
         _write(os.path.join(c["state_dir"], "window.json"), dict(s, remaining=left))
@@ -781,6 +925,7 @@ def _tick(c, final):
     return 0
 
 
+@_closing
 def wait(c):
     """agentos-seal.service. Return 0 only when the box is sealed: a valid marker on disk, the set
     confirmed empty, the login token written. Everything that starts a process for the agent's
@@ -841,6 +986,7 @@ def _look(c):
     return _seal(c, "not open")
 
 
+@_closing
 def ended(c):
     """ExecStopPost of agentos-seal.service. It runs however the wait ended, and acts in ONE case: the
     wait timed out. The unit's timeout is the budget plus a margin, so by then the tick should have
@@ -862,6 +1008,7 @@ def ended(c):
     return r
 
 
+@_total(1)
 def status(c):
     sealed, window = load_sealed(c), load_window(c)
     out = {"sealed": sealed[0], "window": window[0]}
