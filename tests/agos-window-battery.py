@@ -45,6 +45,20 @@
 #   T. The console's progress program: only printable ASCII from the download line reaches the
 #      terminal; it exits on sealed / failed / its limit; it reads no input; the installed copy
 #      ignores the environment.
+#   U. THE RECORD (spec 2.7), against the REAL bin/audit and a real identity: books, record, set, in
+#      that order; the open records' fields; `elements` is what the fake kernel holds, not a constant;
+#      re-derived and reopened; a refused record (a torn tail in the chain) or a record that hangs
+#      seals at once, `refused`, and nothing opens; the seal's record is written by the TICK from the
+#      marker, exactly once whatever is done to the cache, and late rather than lost when the chain is
+#      broken; signed as the wall's participant when one is configured (verify passes under the pin)
+#      and unsigned otherwise; the wait and the seal append nothing; every reason a seal can carry is
+#      one of the seven the spec lists.
+#   V. NOTHING THAT READS A FILE MAY RAISE, and a role that raises anyway fails CLOSED. Hostile
+#      contents in every file a role reads (a number too large for a float, nesting too deep for the
+#      parser, an offset too large to seek to, wrong types), under every role: no exception leaves the
+#      role, the set ends EMPTY, there is no login token, and the seal's record is still written when
+#      the hostile file is only the pointer. Then the net itself: an exception planted inside each
+#      role's own logic ends with the set flushed and 1.
 #   K. config: the fetch uid must be a positive number (never root, never a name); the window is at
 #      most 4 hours; the installed copy ignores AGOS_WINDOW_CONFIG; the placeholder appears once.
 #
@@ -99,10 +113,42 @@ def cfg(**over):
     return c
 
 
-def tool(path, rc=0):
+SETSTATE = os.path.join(TMP, "kernel-set.json")      # what the fake kernel's set holds
+MEASURED = os.path.join(TMP, "measured.log")         # one line per `nft -j list set` (not in LOG: the
+                                                     # arms below count the calls that CHANGE something)
+
+
+def tool(path, rc=0, measure_rc=None, measure_says=None, open_rc=None):
+    """A fake nft / systemctl. It logs its argv and exits rc. As nft it also keeps a set: `-f open`
+    puts the uid in, `-f close` empties it, and `-j list set ...` reports it (measure_rc / measure_says
+    override that answer)."""
     with open(path, "w") as f:
-        f.write("#!%s\nimport json,sys\nopen(%r,'a').write(json.dumps([%r]+sys.argv[1:])+'\\n')\nsys.exit(%d)\n"
-                % (sys.executable, LOG, os.path.basename(path), rc))
+        f.write("""#!%s
+import json, os, sys
+a = sys.argv[1:]
+if a[:1] == ["-j"]:
+    open(%r, "a").write("m\\n")
+    mrc = %r
+    if mrc:
+        sys.exit(mrc)
+    says = %r
+    elems = says if says is not None else (json.load(open(%r)) if os.path.exists(%r) else [])
+    s = {"family": "inet", "name": "setup_uid", "table": "agentos_egress", "type": "uid"}
+    if elems:
+        s["elem"] = elems
+    print(json.dumps({"nftables": [{"metainfo": {"json_schema_version": 1}}, {"set": s}]}))
+    sys.exit(0)
+open(%r, "a").write(json.dumps([%r] + a) + "\\n")
+rc = %d
+if a == ["-f", %r] and %r is not None:
+    rc = %r
+if rc == 0 and a == ["-f", %r]:
+    json.dump([61], open(%r, "w"))
+if rc == 0 and a == ["-f", %r]:
+    json.dump([], open(%r, "w"))
+sys.exit(rc)
+""" % (sys.executable, MEASURED, rc if measure_rc is None else measure_rc, measure_says, SETSTATE, SETSTATE,
+       LOG, os.path.basename(path), rc, OPEN_F, open_rc, open_rc, OPEN_F, SETSTATE, CLOSE_F, SETSTATE))
     os.chmod(path, 0o755)
 
 
@@ -140,6 +186,9 @@ def reset():
     for f in os.listdir(STATE):
         os.unlink(os.path.join(STATE, f))
     tool(NFT); tool(SYSTEMCTL); calls()
+    for f in (SETSTATE, MEASURED):
+        if os.path.exists(f):
+            os.unlink(f)
     Clock.mono, Clock.wall = 100.0, BUILD + 86400.0
     boot(1)
 
@@ -160,7 +209,7 @@ def put(name, obj):
 
 OPEN, CLOSE = ["nft", "-f", OPEN_F], ["nft", "-f", CLOSE_F]
 GOOD_SEALED = {"schema": 1, "toplevel": TOP, "ruleset_sha256": "0" * 64,
-               "sealed_at": 1.0, "reason": "complete"}
+               "sealed_at": 1.0, "reason": "complete", "boot_id": "boot-0"}
 
 
 class FakeSyslog(types.ModuleType):
@@ -300,8 +349,22 @@ finally:
 check(order == ["write window.json", "nft -f open.nft"], "H: the state must be on disk before the set is opened: %r" % order)
 reset(); os.chmod(STATE, 0o500); calls()
 check(A.recompute(cfg()) == 1 and calls() == [CLOSE], "H: an unwritable state directory must not open the window")
+# An open that does not happen is not waited out: the box seals at once, reason `refused` (it used
+# to sit "open" on its books with an empty set until the budget ran out, two hours on a real box).
+SEAL_TAIL = [CLOSE, ["systemctl", "restart", "ollama.service"], ["systemctl", "stop", "agent-os-pull-model.timer"],
+             ["systemctl", "stop", "agent-os-pull-model.service"]]
+reset(); tool(NFT, open_rc=1); calls()
+check(A.recompute(cfg()) == 0 and calls() == [OPEN] + SEAL_TAIL
+      and json.load(open(os.path.join(STATE, "sealed")))["reason"] == "refused"
+      and json.load(open(SETSTATE)) == [], "H: an nft that refuses the open must seal at once (refused), set empty")
+w = window()
+check(w["boots"] == 1 and w["remaining"] == LENGTH - A.FLOOR, "H: a refused open charges one floor, no more: %r" % w)
 reset(); tool(NFT, rc=1); calls()
-check(A.recompute(cfg()) == 1 and calls() == [OPEN, CLOSE], "H: an nft that refuses the open must end in a flush")
+check(A.recompute(cfg()) == 1 and calls() == [CLOSE] and not os.path.exists(os.path.join(STATE, "sealed")),
+      "H: an nft that answers nothing at all: no open attempted, no marker without a confirmed flush")
+reset(); tool(NFT, measure_rc=1); calls()
+check(A.recompute(cfg()) == 0 and calls() == SEAL_TAIL and json.load(open(os.path.join(STATE, "sealed")))["reason"] == "refused",
+      "H: a set that cannot be measured is not opened")
 reset(); os.unlink(BOOTID); calls()
 check(A.recompute(cfg()) == 1 and calls() == [CLOSE] and state_files() == [], "H: no boot id must not open the window")
 ok("H recompute writes the state first; every failure ends with the set flushed and nothing opened")
@@ -370,9 +433,15 @@ try:
 finally:
     A._tool = real_tool
 check([t for _, _, t in spent] == [A.NFT_LIMIT, A.RESTART_LIMIT, A.STOP_LIMIT, A.STOP_LIMIT], "J: every tool call under the lock must carry its limit: %r" % spent)
+# The longest holders, every tool at its limit (the table above LOCK_WAIT in the program):
+seal_s = A.NFT_LIMIT + A.RESTART_LIMIT + 2 * A.STOP_LIMIT
+check(seal_s == 85 and A.NFT_LIMIT + A.AUDIT_LIMIT + A.NFT_LIMIT + seal_s == 135
+      and A.NFT_LIMIT + seal_s + A.SCAN_LIMIT + A.NFT_LIMIT + A.AUDIT_LIMIT == 145,
+      "J: the lock-time table in the program no longer matches its constants")
 import re
 REAL_LOCK_WAIT = int(re.search(r"^LOCK_WAIT = (\d+)", open(MOD).read(), re.M).group(1))      # the battery shortens A.LOCK_WAIT
-check(sum(t for _, _, t in spent) < REAL_LOCK_WAIT and A.NFT_LIMIT + REAL_LOCK_WAIT < 180,
+check(A.NFT_LIMIT + seal_s + A.SCAN_LIMIT + A.NFT_LIMIT + A.AUDIT_LIMIT < REAL_LOCK_WAIT          # the longest holder of all
+      and sum(t for _, _, t in spent) < REAL_LOCK_WAIT and A.NFT_LIMIT + REAL_LOCK_WAIT < 180,
       "J: a seal (%d s of tools at most) must finish inside the lock wait (%d s), and a stamp that waited for the lock must still fit the unit's 180 s stop timeout"
       % (sum(t for _, _, t in spent), REAL_LOCK_WAIT))
 reset(); tool(NFT, rc=1); calls()
@@ -835,5 +904,446 @@ check(PI._paths() == ("/run/agentos-setup/status", "/run/agent-os/pull-status", 
       "T: the installed copy read the environment")
 os.environ.pop("AGOS_PROGRESS_STATUS"); os.environ.pop("AGOS_PROGRESS_PULL"); os.environ.pop("AGOS_PROGRESS_UNSEALED")
 ok("T the progress program prints clean text, ends when the box is sealed, and reads no input")
+
+# ── slice 3c: the record ────────────────────────────────────────────────────────────────────────
+import ast, subprocess
+REPO = os.path.abspath(os.path.join(HERE, ".."))
+AUDIT_DIR, IDROOT = os.path.join(TMP, "audit"), os.path.join(TMP, "identity")
+AUDIT_LOG = os.path.join(AUDIT_DIR, "audit.log")
+AUDIT_WRAP = os.path.join(BIN, "audit")
+AUDIT_ENV = {"AGENT_OS_AUDIT_DIR": AUDIT_DIR, "AGENT_OS_MODULES": os.path.join(REPO, "modules"), "AGENT_OS_IDENTITY_ROOT": IDROOT}
+# The production wrapper's shape (modules/audit-pkg.nix): pin the ledger, the modules and the identity
+# root, then the real primitive. Whatever else is in the environment comes from the caller, and for
+# the window program that is the signer and the pin, or nothing.
+with open(AUDIT_WRAP, "w") as f:
+    f.write("#!/bin/sh\n%s\n[ ! -e %s/hang ] || exec %s -c 'import time; time.sleep(30)'\nexec %s -I %s \"$@\"\n" % (
+        "\n".join("export %s=%s" % kv for kv in sorted(AUDIT_ENV.items())), TMP, sys.executable, sys.executable,
+        os.path.join(REPO, "bin", "audit")))
+os.chmod(AUDIT_WRAP, 0o755)
+r = subprocess.run([sys.executable, "-I", "-c",
+                    "import sys; sys.path.insert(0, %r); import identity; identity.ensure_boot_identities()" % AUDIT_ENV["AGENT_OS_MODULES"]],
+                   env=AUDIT_ENV, stdin=subprocess.DEVNULL, capture_output=True, text=True)
+check(r.returncode == 0, "U: fixture: could not mint the identities: " + r.stderr[-300:])
+
+
+def acfg(**over):
+    return rcfg(**dict({"audit": AUDIT_WRAP, "audit_log": AUDIT_LOG}, **over))
+
+
+def areset():
+    rreset()
+    shutil.rmtree(AUDIT_DIR, True)
+    if os.path.exists(os.path.join(TMP, "hang")):
+        os.unlink(os.path.join(TMP, "hang"))
+
+
+def chain():
+    if not os.path.exists(AUDIT_LOG):
+        return []
+    return [json.loads(l) for l in open(AUDIT_LOG) if l.endswith("\n")]
+
+
+def mine():
+    return [r for r in chain() if r.get("src") == "setup-window"]
+
+
+def verify(pin=None):
+    env = dict(AUDIT_ENV)
+    if pin:
+        env["AGENT_OS_AUDIT_REQUIRE_SIGNED"] = pin
+    return subprocess.run([AUDIT_WRAP, "verify"], env=env, stdin=subprocess.DEVNULL, capture_output=True).returncode
+
+
+RULESET_SHA = hashlib.sha256(open(RULESET, "rb").read()).hexdigest()
+# the order: books, record, set
+areset(); order = []
+real_write, real_tool, real_record = A._write, A._tool, A._append_record
+A._write = lambda p, o: (order.append("write " + os.path.basename(p)), real_write(p, o))[1]
+A._tool = lambda argv, timeout=A.NFT_LIMIT: (order.append(" ".join(os.path.basename(a) for a in argv[:3])), real_tool(argv, timeout))[1]
+A._append_record = lambda c, event, **f: (order.append("record " + event), real_record(c, event, **f))[1]
+try:
+    check(A.recompute(acfg()) == 0, "U: recompute with a chain")
+finally:
+    A._write, A._tool, A._append_record = real_write, real_tool, real_record
+check(order == ["write window.json", "record window-opened", "nft -f open.nft"], "U: the order must be books, record, set: %r" % order)
+recs = mine()
+check(len(recs) == 1 and recs[0]["seq"] == 0 and {k: recs[0][k] for k in recs[0] if k not in ("seq", "prev", "ts")} == {
+    "src": "setup-window", "schema": 1, "event": "window-opened", "boot_id": "boot-1", "fetch_uid": 61,
+    "toplevel": os.path.realpath(TOP), "ruleset_sha256": RULESET_SHA, "elements": 0,
+    "remaining": LENGTH - A.FLOOR, "budget_at_boot": LENGTH, "boots": 1}, "U: the first record: %r" % recs)
+check(verify() == 0, "U: the chain must verify")
+# re-derived: the set is put back in the same boot. `elements` is MEASURED: the fake kernel still
+# holds the uid here (a real reload would have emptied it), and the record says 1, not a constant 0.
+check(A.recompute(acfg()) == 0 and [r["event"] for r in mine()] == ["window-opened", "window-rederived"]
+      and mine()[1]["elements"] == 1 and mine()[1]["boots"] == 1, "U: re-derived: %r" % mine())
+tool(NFT, measure_says=[61, 62, 63]); calls()
+check(A.recompute(acfg()) == 0 and mine()[-1]["elements"] == 3, "U: `elements` must be what nft reported: %r" % mine()[-1])
+tool(NFT); boot(2); Clock.mono = 5.0
+check(A.recompute(acfg()) == 0 and mine()[-1]["event"] == "window-reopened" and mine()[-1]["boots"] == 2
+      and mine()[-1]["boot_id"] == "boot-2" and mine()[-1]["budget_at_boot"] < LENGTH, "U: reopened: %r" % mine()[-1])
+
+# the seal: whoever seals, the TICK records it, from the marker, once.
+areset(); A.recompute(acfg()); n0 = len(chain())
+detector([True]); calls()
+check(A.wait(acfg()) == 0 and len(chain()) == n0, "U: the wait appended to the chain (it must never)")
+mk = marker()
+check(mk["boot_id"] == "boot-1" and set(mk) == {"schema", "toplevel", "ruleset_sha256", "sealed_at", "reason", "boot_id"}, "U: the marker: %r" % mk)
+check(A.seal(acfg(), "budget") == 0 and len(chain()) == n0, "U: `seal` appended to the chain (only the tick may)")
+Clock.wall += 500                                              # the tick comes later: the record must carry the SEAL's time
+check(A.tick(acfg()) == 0, "U: the tick on the sealed box")
+sealed_recs = [r for r in mine() if r["event"] == "window-sealed"]
+# What is signed: the tick's OWN measurements on top (the boot it runs in, the generation it runs from,
+# what the kernel's set holds), and what the marker says under `marker`, as the marker's.
+check(len(sealed_recs) == 1 and {k: sealed_recs[0][k] for k in sealed_recs[0] if k not in ("seq", "prev", "ts")} == {
+    "src": "setup-window", "schema": 1, "event": "window-sealed", "boot_id": "boot-1", "fetch_uid": 61,
+    "toplevel": os.path.realpath(TOP), "ruleset_sha256": RULESET_SHA, "elements": 0,
+    "marker": {"reason": "complete", "sealed_at": mk["sealed_at"], "boot_id": mk["boot_id"],
+               "toplevel": mk["toplevel"], "ruleset_sha256": mk["ruleset_sha256"]}},
+      "U: the seal's record: the tick's measurements, and the marker quoted: %r" % sealed_recs)
+CACHE = os.path.join(STATE, "recorded.json")
+
+
+def seals():
+    return [r for r in mine() if r["event"] == "window-sealed"]
+
+
+def pointer():
+    return json.load(open(CACHE))
+
+
+check(not os.path.exists(CACHE), "U: the pointer is written by the tick that FINDS the record, not by the one that appends it")
+check(A.tick(acfg()) == 0 and len(seals()) == 1, "U: the next tick must find it and stop")
+raw = open(AUDIT_LOG, "rb").read()
+line = [l for l in raw.splitlines(True) if b"window-sealed" in l][0]
+check(pointer() == {"boot_id": mk["boot_id"], "sealed_at": mk["sealed_at"], "offset": raw.index(line), "sha256": hashlib.sha256(line).hexdigest()},
+      "U: the pointer must name the line: %r" % pointer())
+good_pointer = pointer()
+for what, plant in (("again", None), ("pointer deleted", "delete"), ("pointer garbage", "x"),
+                    ("pointer of another seal", dict(good_pointer, boot_id="boot-9", sealed_at=5.0)),
+                    ("pointer with the wrong offset", dict(good_pointer, offset=0)),
+                    ("pointer with the wrong hash", dict(good_pointer, sha256="0" * 64)),
+                    ("pointer past the end", dict(good_pointer, offset=10 ** 9)),
+                    ("pointer with a negative offset", dict(good_pointer, offset=-1)),
+                    ("pointer with only the key", {"boot_id": mk["boot_id"], "sealed_at": mk["sealed_at"]})):
+    if plant == "delete":
+        os.unlink(CACHE)
+    elif plant is not None:
+        put("recorded.json", plant)
+    check(A.tick(acfg()) == 0 and len(seals()) == 1, "U: %s: the seal must be in the chain exactly once: %r" % (what, len(seals())))
+    check(pointer() == good_pointer, "U: %s: the pointer must be put right" % what)
+# THE POINTER DECIDES NOTHING. It says "recorded", and the chain does not have the record (its tail was
+# lost after the fact): the record is written again. A file that merely said so would hide it for good.
+keep = raw[:raw.index(line)]
+open(AUDIT_LOG, "wb").write(keep)
+check(pointer() == good_pointer and len(seals()) == 0, "U: fixture: the chain lost the record, the pointer still claims it")
+check(A.tick(acfg()) == 0 and len(seals()) == 1, "U: a pointer to a record the chain no longer has must not stop the record being written")
+check(A.tick(acfg()) == 0 and len(seals()) == 1 and verify() == 0, "U: ...once")
+# a forged pointer for a seal that was never recorded at all
+areset(); A.recompute(acfg()); A.seal(acfg(), "complete"); mk2 = marker()
+put("recorded.json", {"boot_id": mk2["boot_id"], "sealed_at": mk2["sealed_at"], "offset": 0, "sha256": hashlib.sha256(open(AUDIT_LOG, "rb").readline()).hexdigest()})
+check(A.tick(acfg()) == 0 and len(seals()) == 1, "U: a pointer at some OTHER line of the chain must not pass for the seal's record")
+# what the marker says is quoted, never adopted: a marker naming another generation (a rebuild since
+# the seal, or a forgery) leaves the tick's own measurements on top.
+areset(); A.recompute(acfg()); A.seal(acfg(), "complete"); mk3 = marker()
+put("sealed", dict(mk3, toplevel=TMP + "/another-generation", ruleset_sha256="f" * 64)); boot(2)
+check(A.tick(acfg()) == 0, "U: tick with a marker from another generation")
+r3 = seals()[-1]
+check(r3["toplevel"] == os.path.realpath(TOP) and r3["ruleset_sha256"] == RULESET_SHA and r3["boot_id"] == "boot-2"
+      and r3["marker"]["toplevel"] == TMP + "/another-generation" and r3["marker"]["ruleset_sha256"] == "f" * 64 and r3["marker"]["boot_id"] == "boot-1",
+      "U: the record's own fields must be the tick's measurements, the marker's under `marker`: %r" % r3)
+# a marker is validated field by field before any of it is quoted or used as a key.
+for label, bad in (("NaN time", dict(mk3, sealed_at=float("nan"))), ("infinite time", dict(mk3, sealed_at=float("inf"))),
+                   ("negative time", dict(mk3, sealed_at=-1.0)), ("time as text", dict(mk3, sealed_at="1.0")), ("time as a boolean", dict(mk3, sealed_at=True)),
+                   ("boot id with a newline", dict(mk3, boot_id="boot\n1")), ("boot id with a space", dict(mk3, boot_id="boot 1")),
+                   ("boot id too long", dict(mk3, boot_id="a" * 65)), ("boot id not text", dict(mk3, boot_id=5)),
+                   ("toplevel with a space", dict(mk3, toplevel=TMP + "/a b")), ("toplevel with a control byte", dict(mk3, toplevel=TMP + "/a\x1bb")),
+                   ("toplevel too long", dict(mk3, toplevel=TMP + "/" + "a" * 600)), ("toplevel not ASCII", dict(mk3, toplevel=TMP + "/\u00e9"))):
+    rreset(); put("sealed", json.dumps(bad))
+    check(A.load_sealed(cfg())[0] == "malformed", "U: a marker with %s must be malformed" % label)
+areset(); A.recompute(acfg()); A.seal(acfg(), "complete"); put("sealed", json.dumps(dict(marker(), sealed_at=float("nan")))); n_nan = len(chain())
+check(A.tick(acfg()) == 1 and A.tick(acfg()) == 1 and len(chain()) == n_nan,
+      "U: a marker whose time equals nothing must never reach the chain (it would be recorded again every minute)")
+areset(); A.recompute(acfg()); A.seal(acfg(), "complete"); A.tick(acfg()); A.tick(acfg()); mk = marker()
+# a second provisioning cycle on the same chain: the earlier seal's record is not this marker's.
+os.unlink(os.path.join(STATE, "sealed")); os.unlink(os.path.join(STATE, "window.json")); os.unlink(TOKEN)
+boot(3); Clock.mono = 9.0; Clock.wall += 1000
+check(A.recompute(acfg()) == 0 and A.seal(acfg(), "budget") == 0 and A.tick(acfg()) == 0, "U: second cycle")
+both = seals()
+check(len(both) == 2 and both[1]["boot_id"] == "boot-3" and both[1]["marker"]["sealed_at"] == marker()["sealed_at"] != both[0]["marker"]["sealed_at"]
+      and both[1]["marker"]["reason"] == "budget", "U: a new marker's seal must be recorded although an older seal is in the chain: %r" % both)
+A.tick(acfg()); os.unlink(CACHE)
+check(A.tick(acfg()) == 0 and len(seals()) == 2, "U: ...and still once each")
+# the process dies between the append and the cache write: still exactly one.
+areset(); A.recompute(acfg()); A.seal(acfg(), "complete")
+real_write = A._write
+
+
+def no_cache(p, o):
+    if os.path.basename(p) == "recorded.json":
+        raise OSError("the pointer cannot be written")
+    return real_write(p, o)
+
+
+A._write = no_cache
+try:
+    check(A.tick(acfg()) == 0 and A.tick(acfg()) == 0 and A.tick(acfg()) == 0 and not os.path.exists(CACHE) and len(seals()) == 1,
+          "U: with no pointer at all every tick scans, finds the record, and writes nothing")
+finally:
+    A._write = real_write
+check(A.tick(acfg()) == 0 and A.tick(acfg()) == 0 and len(seals()) == 1 and os.path.exists(CACHE),
+      "U: with the pointer's write failing at first there must still be exactly one record")
+# a log that cannot be read through in time: the record stays owed (nothing appended, nothing invented).
+areset(); A.recompute(acfg()); A.seal(acfg(), "complete"); n_scan = len(chain()); A.SCAN_LIMIT, scan0 = -1, A.SCAN_LIMIT
+try:
+    check(A.tick(acfg()) == 0 and len(chain()) == n_scan and not os.path.exists(CACHE), "U: a scan past its limit must leave the record owed")
+finally:
+    A.SCAN_LIMIT = scan0
+check(A.tick(acfg()) == 0 and len(chain()) == n_scan + 1, "U: ...and it is written by the next tick that can read the log")
+bad_reason = dict(GOOD_SEALED, reason="because"); rreset(); put("sealed", bad_reason)
+check(A.load_sealed(cfg())[0] == "malformed", "U: a marker whose reason is not one of the seven is malformed (it would go into the chain verbatim)")
+# `stop` (the shutdown stamp) and a sealed-by-build box record nothing.
+areset(); A.recompute(acfg()); A.seal(acfg(), "complete"); n1 = len(chain())
+check(A.tick(acfg(), final=True) == 0 and len(chain()) == n1, "U: the shutdown stamp must not append")
+check(verify() == 0, "U: the chain must verify")
+
+# a chain that refuses the record: a torn tail (audit append exits 4 until an operator repairs it).
+areset(); os.makedirs(AUDIT_DIR); open(AUDIT_LOG, "w").write('{"torn":'); calls()
+check(A.recompute(acfg()) == 0 and calls() == SEAL_SEQ and marker()["reason"] == "refused" and json.load(open(SETSTATE)) == []
+      and window()["remaining"] == LENGTH - A.FLOOR,
+      "U: no record, no window: a refused record must seal at once (refused) and never open")
+check(A.tick(acfg()) == 0 and mine() == [], "U: the tick must not fail the unit for an owed record, and must not invent one")
+open(AUDIT_LOG, "w").close()                                   # the operator's repair
+check(A.tick(acfg()) == 0 and [(r["event"], r["marker"]["reason"], r["marker"]["sealed_at"]) for r in mine()] == [("window-sealed", "refused", marker()["sealed_at"])],
+      "U: an owed record must land once the chain accepts it, with the time of the seal: %r" % mine())
+# recorded, then nft refuses the open: the chain reads opened, then sealed(refused).
+areset(); tool(NFT, open_rc=1); calls()
+check(A.recompute(acfg()) == 0 and marker()["reason"] == "refused" and A.tick(acfg()) == 0
+      and [(r["event"], r.get("marker", {}).get("reason")) for r in mine()] == [("window-opened", None), ("window-sealed", "refused")],
+      "U: opened then refused: %r" % mine())
+# a record that hangs is a refused record, inside its limit.
+areset(); open(os.path.join(TMP, "hang"), "w").close(); A.AUDIT_LIMIT, limit0 = 1, A.AUDIT_LIMIT
+import time as wall_clock
+t = wall_clock.monotonic()
+try:
+    check(A.recompute(acfg()) == 0 and marker()["reason"] == "refused" and wall_clock.monotonic() - t < 8, "U: a hung append must be a refused one, within the limit")
+finally:
+    A.AUDIT_LIMIT = limit0
+    os.unlink(os.path.join(TMP, "hang"))
+check(limit0 == 10, "U: AUDIT_LIMIT")
+# the bound is computed from the units the program is given: one more to stop would not fit.
+check(A.worst_lock_seconds(cfg()) == 145 and A.LOCK_BUDGET == REAL_LOCK_WAIT == 150, "U: the worst case under the lock: %r" % A.worst_lock_seconds(cfg()))
+for label, over, fits in (("as shipped", {}, True), ("a third unit to stop", {"stop_units": ["a", "b", "c"]}, False),
+                          ("a second unit to restart", {"restart_units": ["a", "b"]}, False), ("nothing to restart or stop", {"restart_units": [], "stop_units": []}, True)):
+    os.environ["AGOS_WINDOW_CONFIG"] = json.dumps(cfg(**over))
+    try:
+        A.config(); accepted = True
+    except SystemExit:
+        accepted = False
+    os.environ.pop("AGOS_WINDOW_CONFIG")
+    check(accepted == fits, "U: %s: config() %s it" % (label, "accepted" if accepted else "refused"))
+# a FIFO where the log should be must not hold the tick (and the state lock) for ever.
+areset(); A.recompute(acfg()); A.seal(acfg(), "complete"); os.makedirs(AUDIT_DIR, exist_ok=True)
+os.rename(AUDIT_LOG, AUDIT_LOG + ".real"); os.mkfifo(AUDIT_LOG)
+check(A._find_seal(acfg(), marker()) is None and A._pointer_holds(acfg(), marker()) is False, "U: a FIFO at the log's path must read as 'cannot say', at once")
+os.unlink(AUDIT_LOG); os.rename(AUDIT_LOG + ".real", AUDIT_LOG)
+
+# signed as the wall's participant, or not at all.
+areset(); signed = acfg(audit_signer="agent", audit_require_signed="agent")
+check(A.recompute(signed) == 0 and A.seal(signed, "complete") == 0 and A.tick(signed) == 0, "U: signed run")
+check(len(mine()) == 2 and all(r.get("signer") == "agent" and len(r.get("sig", "")) == 128 for r in mine()), "U: every record must be signed as the wall's participant: %r" % mine())
+check(verify(pin="agent") == 0 and verify(pin="dillon") != 0, "U: the signed chain must verify under the pin, and only under the right one")
+# CONTROL: a window program that was NOT handed the signer appends unsigned, and the chain breaks.
+areset(); A.recompute(signed); boot(2); Clock.mono = 5.0
+check(A.recompute(acfg()) == 0 and "sig" not in mine()[-1] and verify(pin="agent") != 0 and verify() != 0,
+      "U: CONTROL: an unsigned record after a signed one must break verify (so the signer really came from the configuration)")
+areset(); A.recompute(acfg(audit_signer="", audit_require_signed=None))
+check("sig" not in mine()[0] and verify() == 0, "U: no signer configured: unsigned, and the chain verifies")
+
+# what the child is handed: the signer AND the pin when the wall has them, and nothing at all otherwise.
+ENVDUMP = os.path.join(TMP, "audit-env.json")
+ENVWRAP = os.path.join(BIN, "audit-env")
+with open(ENVWRAP, "w") as f:
+    f.write("#!%s\nimport json, os, sys\njson.dump({k: v for k, v in os.environ.items() if k != 'LC_CTYPE'}, open(%r, 'w'))\nsys.stdin.read()\nprint('0' * 64)\n" % (sys.executable, ENVDUMP))
+os.chmod(ENVWRAP, 0o755)                     # (LC_CTYPE: the child interpreter sets it for itself at startup)
+areset()
+check(A.recompute(acfg(audit=ENVWRAP, audit_signer="agent", audit_require_signed="agent")) == 0
+      and json.load(open(ENVDUMP)) == {"AGENT_OS_AUDIT_SIGNER": "agent", "AGENT_OS_AUDIT_REQUIRE_SIGNED": "agent"},
+      "U: the child's environment with a signing wall: %r" % json.load(open(ENVDUMP)))
+areset()
+check(A.recompute(acfg(audit=ENVWRAP)) == 0 and json.load(open(ENVDUMP)) == {}, "U: the child's environment with no signer must be EMPTY: %r" % json.load(open(ENVDUMP)))
+
+# only recompute and the tick append; every reason a seal can carry is one of the seven.
+tree = ast.parse(src := open(MOD).read())
+callers = {}
+for fn in [n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)]:
+    for call in [n for n in ast.walk(fn) if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)]:
+        callers.setdefault(call.func.id, set()).add(fn.name)
+check(callers.get("_append_record") == {"_recompute", "reconcile"} and callers.get("reconcile") == {"tick"},
+      "U: only recompute (the opens) and the tick (the seal) may append: %r %r" % (callers.get("_append_record"), callers.get("reconcile")))
+reasons = set()
+for call in [n for n in ast.walk(tree) if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id in ("_seal", "seal")]:
+    reasons |= {c.value for a in call.args[1:] for c in ast.walk(a) if isinstance(c, ast.Constant) and isinstance(c.value, str)}
+for tup in [n for n in ast.walk(tree) if isinstance(n, ast.Tuple) and len(n.elts) == 2 and isinstance(n.elts[0], ast.Constant) and n.elts[0].value == "seal"]:
+    reasons |= {tup.elts[1].value} if isinstance(tup.elts[1], ast.Constant) else set()
+check(reasons == set(A.SEAL_REASONS) and len(A.SEAL_REASONS) == 7, "U: the reasons a seal can carry: %r vs %r" % (sorted(reasons), A.SEAL_REASONS))
+check(all(r in P.REASONS or r == "complete" for r in A.SEAL_REASONS), "U: the console must have words for every reason")
+bad = dict(GOOD_SEALED); del bad["boot_id"]; rreset(); put("sealed", bad)
+check(A.load_sealed(cfg())[0] == "malformed", "U: a marker without its boot id is malformed")
+ok("U the record: books, record, set; refused seals at once; the tick records the seal once; signed as the wall")
+
+# ── V: hostile files, and the net under them ─────────────────────────────────────────────────────
+HUGE = "1" + "0" * 400                                   # valid JSON, a Python int, and no float can hold it
+DEEP = "[" * 2000                                        # under the size cap; plain bad JSON on today's Python (see VERY_DEEP)
+good_window = {"schema": 1, "budget_at_boot": LENGTH, "remaining": LENGTH - 60, "boot_id": "boot-1", "opened_mono": 100.0,
+               "opened_at": None, "wall_deadline": None, "boots": 1}
+
+
+def raw(obj, **text_fields):
+    """JSON text of obj, with some fields replaced by raw JSON text (so a huge int stays an int)."""
+    t = json.dumps(dict(obj, **{k: "@@%s@@" % k for k in text_fields}))
+    for k, v in text_fields.items():
+        t = t.replace('"@@%s@@"' % k, v)
+    return t
+
+
+hostile_windows = [("opened_mono too large for a float", raw(good_window, opened_mono=HUGE)),
+                   ("budget_at_boot too large", raw(good_window, budget_at_boot=HUGE)),
+                   ("remaining too large", raw(good_window, remaining=HUGE)),
+                   ("wall_deadline too large", raw(good_window, wall_deadline=HUGE)),
+                   ("opened_at too large", raw(good_window, opened_at=HUGE)),
+                   ("boots too large", raw(good_window, boots=HUGE)),
+                   ("remaining NaN", raw(good_window, remaining="NaN")),
+                   ("opened_mono -Infinity", raw(good_window, opened_mono="-Infinity")),
+                   ("nested past the parser", DEEP), ("a list", "[1]"), ("a string", '"x"')]
+hostile_markers = [("sealed_at too large for a float", raw(GOOD_SEALED, sealed_at=HUGE)),
+                   ("sealed_at NaN", raw(GOOD_SEALED, sealed_at="NaN")), ("sealed_at Infinity", raw(GOOD_SEALED, sealed_at="Infinity")),
+                   ("reason a list", raw(GOOD_SEALED, reason="[1]")), ("reason a dict", raw(GOOD_SEALED, reason="{}")),
+                   ("boot_id a number", raw(GOOD_SEALED, boot_id=HUGE)), ("toplevel a list", raw(GOOD_SEALED, toplevel="[]")),
+                   ("nested past the parser", DEEP), ("a list", "[1]")]
+roles = [("recompute", A.recompute), ("tick", A.tick), ("stop", lambda c: A.tick(c, final=True)), ("wait", A.wait),
+         ("seal", lambda c: A.seal(c, "budget")), ("ended", A.ended), ("status", A.status)]
+os.environ["SERVICE_RESULT"] = "timeout"
+sink = io.StringIO()
+for kind, cases in (("window.json", hostile_windows), ("sealed", hostile_markers)):
+    for label, text in cases:
+        for rname, role in roles:
+            rreset(); A.recompute(rcfg())                      # an OPEN window: the uid is in the kernel's set
+            check(json.load(open(SETSTATE)) == [61], "V: fixture: the window is not open")
+            if kind == "sealed":
+                put("sealed", text)
+            else:
+                put("window.json", text)
+            detector([False]); calls(); so, sys.stdout = sys.stdout, sink
+            try:
+                try:
+                    rc = role(rcfg()); raised = None
+                except Exception as e:                         # the point of the arm: this must not happen
+                    rc, raised = None, e
+            finally:
+                sys.stdout = so
+            check(raised is None, "V: %s raised %r on a %s with %s" % (rname, raised, kind, label))
+            check(isinstance(rc, int), "V: %s returned %r" % (rname, rc))
+            if rname not in ("status", "stop"):          # (those two only read, or only stamp)
+                check(json.load(open(SETSTATE)) == [], "V: %s left the window OPEN on a %s with %s (rc=%r)" % (rname, kind, label, rc))
+            if kind == "sealed":
+                check(not os.path.exists(TOKEN), "V: %s enabled logins on a %s with %s" % (rname, kind, label))
+            check(A.load_window(rcfg())[0] in ("valid", "absent", "malformed") and A.load_sealed(rcfg())[0] in ("valid", "absent", "malformed"),
+                  "V: a loader did not return a verdict")
+os.environ.pop("SERVICE_RESULT")
+# The loaders WITHOUT their safety wrapper: the verdict must come from the checks, not from a caught crash.
+for label, text in hostile_windows:
+    rreset(); put("window.json", text)
+    try:
+        got = A.load_window.__wrapped__(cfg())[0]; raised = None
+    except Exception as e:
+        got, raised = None, e
+    check(raised is None and got == "malformed", "V: window.json with %s: the loader's own checks must say malformed (got %r, raised %r)" % (label, got, raised))
+for label, text in hostile_markers:
+    rreset(); put("sealed", text)
+    try:
+        got = A.load_sealed.__wrapped__(cfg())[0]; raised = None
+    except Exception as e:
+        got, raised = None, e
+    check(raised is None and got == "malformed", "V: a marker with %s: the loader's own checks must say malformed (got %r, raised %r)" % (label, got, raised))
+# books that open the window in the future (the floor would freeze the budget): sealed, invalid state.
+rreset(); A.recompute(rcfg()); w = window(); put("window.json", dict(w, opened_mono=Clock.mono + 10 ** 6)); calls()
+check(A.tick(rcfg()) == 0 and marker()["reason"] == "invalid state" and json.load(open(SETSTATE)) == [],
+      "V: a window opened in the future must be sealed (invalid state), not held open")
+rreset(); A.recompute(rcfg()); w = window(); put("window.json", dict(w, opened_mono=Clock.mono + 10 ** 6)); calls()
+check(A.recompute(rcfg()) == 0 and marker()["reason"] == "invalid state", "V: ...by the window unit too (an nftables reload must not re-open it)")
+# a marker rewritten with a new time, same boot: still ONE record for that boot's seal.
+areset(); A.recompute(acfg()); A.seal(acfg(), "complete"); A.tick(acfg()); A.tick(acfg())
+for k in range(3):
+    put("sealed", dict(marker(), sealed_at=marker()["sealed_at"] + 60.0 * (k + 1)))
+    check(A.tick(acfg()) == 0 and len(seals()) == 1, "V: a marker rewritten with a new time got a second record (%d)" % len(seals()))
+# the pointer: hostile contents must neither break the tick nor keep the seal's record out of the chain.
+for label, text in (("an offset too large to seek to", lambda m: raw({"boot_id": m["boot_id"], "sealed_at": m["sealed_at"], "sha256": "0" * 64}, offset=HUGE)),
+                    ("an offset of 2**63", lambda m: raw({"boot_id": m["boot_id"], "sealed_at": m["sealed_at"], "sha256": "0" * 64}, offset=str(2 ** 63))),
+                    ("a sha256 that is a number", lambda m: raw({"boot_id": m["boot_id"], "sealed_at": m["sealed_at"], "offset": 0}, sha256=HUGE)),
+                    ("nested past the parser", lambda m: DEEP), ("a list", lambda m: "[1]"), ("a sealed_at too large", lambda m: raw({"boot_id": m["boot_id"], "offset": 0, "sha256": "0" * 64}, sealed_at=HUGE))):
+    areset(); A.recompute(acfg()); A.seal(acfg(), "complete"); put("recorded.json", text(marker()))
+    try:
+        rc = A.tick(acfg()); raised = None
+    except Exception as e:
+        rc, raised = None, e
+    check(raised is None and rc == 0 and len(seals()) == 1, "V: a pointer with %s: tick rc=%r raised=%r records=%d (the record must still be written)" % (label, rc, raised, len(seals())))
+# a TORN tail is not a record, even if the torn line is, byte for byte, this seal's record without
+# its newline: `audit append` wrote the newline with the line, so a line without one never landed whole.
+areset(); A.recompute(acfg()); A.seal(acfg(), "complete"); A.tick(acfg())
+whole = open(AUDIT_LOG, "rb").read(); sealed_line = [l for l in whole.splitlines(True) if b"window-sealed" in l][0]
+open(AUDIT_LOG, "wb").write(whole[:whole.index(sealed_line)] + sealed_line.rstrip(b"\n"))
+check(A._find_seal(acfg(), marker()) is False, "V: a torn tail must not count as the seal's record")
+# a chain line nested past the parser, naming the event: skipped, not fatal.
+areset(); A.recompute(acfg()); A.seal(acfg(), "complete")
+open(AUDIT_LOG, "a").write('{"event":"window-sealed","x":' + "[" * 3000 + "\n")
+check(A._find_seal(acfg(), marker()) is False, "V: an unparseable chain line must be skipped by the scan")
+# Each layer by itself (the layers cover for one another above, so each is also tried alone):
+VERY_DEEP = b"[" * 1000000                               # deep enough for RecursionError on every Python this ships with
+try:
+    json.loads(VERY_DEEP.decode()); depth_error = None
+except Exception as e:
+    depth_error = e
+check(isinstance(depth_error, RecursionError), "V: fixture: this depth no longer raises RecursionError here (%r); find one that does" % depth_error)
+check(A._json(VERY_DEEP) is A._BAD and A._json(DEEP.encode()) is A._BAD and A._json(b"\xff") is A._BAD and A._json(b"{") is A._BAD and A._json(b"[1]") == [1],
+      "V: the parser wrapper must turn every failure of the parser into _BAD, a depth error included")
+areset(); A.recompute(acfg()); A.seal(acfg(), "complete"); mkv = marker()
+for off in (HUGE, str(2 ** 63), str(2 ** 62)):
+    put("recorded.json", raw({"boot_id": mkv["boot_id"], "sealed_at": mkv["sealed_at"], "sha256": "0" * 64}, offset=off))
+    try:
+        got = A._pointer_holds.__wrapped__(acfg(), mkv); raised = None
+    except Exception as e:
+        got, raised = None, e
+    check(raised is None and got is False, "V: the pointer's own bound must refuse offset %s... before any seek (raised %r)" % (off[:12], raised))
+real_open = A._open_log
+A._open_log = lambda c: (_ for _ in ()).throw(RuntimeError("planted in the log reader"))
+try:
+    put("recorded.json", {"boot_id": mkv["boot_id"], "sealed_at": mkv["sealed_at"], "offset": 0, "sha256": "0" * 64})
+    check(A._pointer_holds(acfg(), mkv) is False and A._find_seal(acfg(), mkv) is None and A.reconcile(acfg(), mkv) is False,
+          "V: a reader that raises inside the pointer check, the scan or the reconciliation must read as 'cannot say'")
+    check(A.tick(acfg()) == 0 and len(seals()) == 0, "V: ...and the tick must survive it, with the record still owed")
+finally:
+    A._open_log = real_open
+check(A.tick(acfg()) == 0 and len(seals()) == 1, "V: ...and pay it on the next tick")
+# THE NET. An exception inside a role's own logic: the set is flushed, the role returns 1.
+def boom(*a, **k):
+    raise RuntimeError("planted")
+
+
+for rname, role, victim in (("recompute", A.recompute, "_recompute"), ("tick", A.tick, "_tick"), ("wait", A.wait, "_wait"),
+                            ("seal", lambda c: A.seal(c, "budget"), "_seal"), ("ended", A.ended, "seal")):
+    rreset(); A.recompute(rcfg()); calls(); real = getattr(A, victim); setattr(A, victim, boom)
+    os.environ["SERVICE_RESULT"] = "timeout"
+    try:
+        try:
+            rc = role(rcfg()); raised = None
+        except Exception as e:
+            rc, raised = None, e
+    finally:
+        setattr(A, victim, real); os.environ.pop("SERVICE_RESULT")
+    check(raised is None and rc == 1 and json.load(open(SETSTATE)) == [] and CLOSE in calls(),
+          "V: an exception inside %s must end with the set flushed and 1 (rc=%r raised=%r)" % (rname, rc, raised))
+pstatus_path = os.path.join(TMP, "p-status-deep"); open(pstatus_path, "w").write("[" * 100000)
+check(P.read_status(pstatus_path) == ("", None, ""), "V: the console program on a status nested past the parser")
+ok("V no reader raises on hostile contents; a role that raises anyway fails closed")
 
 print("agos-window-battery: PASS (%d criteria)" % len(passed))

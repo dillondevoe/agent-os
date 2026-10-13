@@ -28,9 +28,18 @@
 # after a valid marker and a confirmed flush. And once it exists the window cannot open again in that
 # boot, so removing the state re-provisions the box at the next boot, never under a running agent.
 #
-# NOT YET (3b, part 2): the seal-check assertions of spec 2.5, the audit-chain lines, moving the
-# pull's registry probe off uid 0. Until that lands the option stays off on every shipped image (a
-# flake assertion holds it there).
+# SLICE 3b, part 2: seal-check holds the second key (modules/seal-check.nix; spec 2.5).
+#
+# SLICE 3c (spec 2.7): THE RECORD. Every transition of the window is one record in the audit chain,
+# through the SAME pinned `audit` wrapper the wall uses and signed as the SAME participant (or
+# unsigned, if the wall is). Exactly two of the units below may append: the window oneshot (the
+# opens) and the tick (the seal, reconciled from the marker). They get write access to the audit
+# directory and Require the identity boot unit, as the wall does: a box whose signing identity has
+# drifted gets no window, not a record signed with whatever key is on disk. The wait
+# (`agentos-seal`) never appends and has no access to the chain: it is the one unit that parses
+# bytes from a process that has been on the network, and it must always be able to run.
+#
+# No shipped image enables the window. Turning it on is the product path's decision (slice 4).
 #
 # SECURITY SURFACE (egress wall): branch -> PR -> Fable, never direct-push, never self-merge.
 { config, options, pkgs, lib, ... }:
@@ -41,6 +50,15 @@ let
   table = "inet agentos_egress";
   runDir = "/run/agentos-setup";
   agentUser = config.services.getty.autologinUser;      # the account whose processes must not exist yet
+
+  # The record (spec 2.7). The audit binary is the one derivation the wall's broker and taint tracker
+  # pin (modules/audit-pkg.nix): the same ledger, modules and identity root, by construction. The
+  # signer and the pin are the WALL's options, read here and not re-typed: a window that signed as
+  # anyone else, or not at all on a signed chain, would break `audit verify` for every later record.
+  auditPkg = import ./audit-pkg.nix { inherit pkgs; };
+  auditDir = "/var/lib/agent-os/audit";
+  wallSigner = lib.attrByPath [ "agentos" "wall" "auditSigner" ] null config;
+  wallRequireSigned = lib.attrByPath [ "agentos" "wall" "auditRequireSigned" ] null config;
   loginToken = "${runDir}/login-ok";
   # The second key (slice 3b part 2): seal-check.nix writes it when the KERNEL's ruleset agrees that
   # the box is sealed. /run itself is root's (0755), so nothing else can plant it.
@@ -76,7 +94,12 @@ let
     run_dir = runDir;                                     # login-ok (the token) and status (the console's line)
     model = config.environment.variables.OLLAMA_MODEL;    # the one the detector looks for in /api/tags
     tags_port = 11434;
-  };
+    audit = "${auditPkg}/bin/audit";
+    audit_log = "${auditDir}/audit.log";
+  }
+  # Omitted when null, as the wall omits the variables: a set-but-empty signer is refused by `audit`.
+  // lib.optionalAttrs (wallSigner != null) { audit_signer = wallSigner; }
+  // lib.optionalAttrs (wallRequireSigned != null) { audit_require_signed = wallRequireSigned; };
 
   agos-progress = pkgs.runCommand "agos-setup-progress" { nativeBuildInputs = [ pkgs.makeBinaryWrapper ]; } ''
     install -Dm755 ${./agos_setup_progress.py} $out/libexec/agos_setup_progress.py
@@ -122,6 +145,14 @@ let
       --add-flags "-I $out/libexec/agos_window.py"
   '';
   run = "${agos-window}/libexec/agentos-setup-window";
+
+  # The two units that append to the audit chain, and only they: write access to the chain's
+  # directory (its lock file lives there too), and the identity boot unit REQUIRED, not merely
+  # ordered first. The capability set is unchanged: root without CAP_DAC_OVERRIDE writes there as the
+  # owner, which is also why these units could always READ the signing key. (When the audit
+  # directory gets a dedicated owner, these two units must be in its group; bin/audit says so.)
+  sandboxRecord = sandbox // { ReadWritePaths = sandbox.ReadWritePaths ++ [ auditDir ]; };
+  recordDeps = [ "agent-os-identity-boot.service" ];
 
   doorAssertions = [
     # THE DOORS THIS MODULE GATES ARE ALL THE DOORS THERE ARE. agetty's consoles and the user manager
@@ -221,6 +252,19 @@ in
   config = lib.mkIf (cr.enable && cfg.enable) {
     assertions = [
       {
+        # The program refuses, at run time, a configuration whose seal could hold the state lock
+        # longer than the others wait for it (agos_window.py, `worst_lock_seconds`: one unit to
+        # restart and two to stop is what fits). A program that refuses to run cannot close a window
+        # either, so such a configuration must not BUILD.
+        assertion = lib.length windowConfig.restart_units <= 1 && lib.length windowConfig.stop_units <= 2;
+        message = "setup-window: more than one unit to restart or two to stop at the seal would overrun the state lock (modules/agos_window.py, the table above LOCK_BUDGET).";
+      }
+      {
+        assertion = cr.sealed || ((config.systemd.services ? agent-os-identity-boot)
+                                  && lib.any (r: lib.hasPrefix "d ${auditDir} " r) config.systemd.tmpfiles.rules);
+        message = "setup-window: the window records its transitions in the audit chain (spec 2.7); modules/audit.nix and modules/identity.nix must be imported with it.";
+      }
+      {
         assertion = config.services.ollama.user == "ollama" && config.users.users.ollama.uid == cfg.fetchUid;
         message = "setup-window: the ollama daemon must run as the static user `ollama` with uid agentos.cleanRoom.setupWindow.fetchUid.";
       }
@@ -264,22 +308,23 @@ in
       # nftables recreates the table (and so the set, EMPTY) on every start and reload. This unit is
       # the set's only writer, so it follows both: PartOf re-runs it on a restart,
       # ReloadPropagatedFrom on a reload (which is what a rebuild that changes the ruleset does).
-      after = [ "nftables.service" "systemd-tmpfiles-setup.service" ];
+      after = [ "nftables.service" "systemd-tmpfiles-setup.service" ] ++ recordDeps;
+      requires = recordDeps;
       partOf = [ "nftables.service" ];
       unitConfig = {
         ReloadPropagatedFrom = [ "nftables.service" ];
         RequiresMountsFor = [ "/var/lib/agent-os" ];
         ConditionPathIsReadWrite = "/var/lib/agent-os/seal";     # no books, no window
       };
-      serviceConfig = sandbox // {
+      serviceConfig = sandboxRecord // {
         Type = "oneshot";
         RemainAfterExit = true;            # so ExecReload exists and ExecStop runs at shutdown
         ExecStart = "${run} recompute";
         ExecReload = "${run} recompute";
         ExecStop = "${run} stop";          # the shutdown stamp of the budget
-        # The stamp may wait for the state lock (150 s) behind a tick that is restarting the fetcher
-        # (120 s). The default 90 s would let systemd kill it, and the next boot would inherit a
-        # budget up to a minute too generous.
+        # The stamp may wait for the state lock (150 s) behind a tick that is sealing and recording
+        # (up to 145 s, agos_window.py). The default 90 s would let systemd kill it, and the next
+        # boot would inherit a budget up to a minute too generous.
         TimeoutStopSec = "180s";
       };
     };
@@ -289,9 +334,12 @@ in
     # flushes the set and fails (an enforcer that cannot keep its books closes the window).
     systemd.services.agentos-setup-window-tick = lib.mkIf (!cr.sealed) {
       description = "Agent OS setup window: budget tick";
-      after = [ "agentos-setup-window.service" ];
+      after = [ "agentos-setup-window.service" ] ++ recordDeps;
+      # Required too: the tick appends the seal's record. If the identity unit is down the tick does
+      # not run; the wait's own look (agos_window.py `_look`) still seals on the budget.
+      requires = recordDeps;
       unitConfig.RequiresMountsFor = [ "/var/lib/agent-os" ];
-      serviceConfig = sandbox // {
+      serviceConfig = sandboxRecord // {
         Type = "oneshot";
         ExecStart = "${run} tick";
       };

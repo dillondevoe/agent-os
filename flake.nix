@@ -292,6 +292,16 @@
           inherit baseModules;
         };
 
+        # THE RECORD of the setup window (first-login spec 2.7, slice 3c), on a booted box with a SIGNING
+        # wall: the chain's first record is the window's, signed by the pinned participant; reopened,
+        # re-derived and the seal follow; a wall request chains on; a torn chain means no window; a
+        # failed identity unit means no window and no record. Out of `checks` (boots a VM five times).
+        #   nix build .#test-window-record
+        test-window-record = import ./tests/window-record.nix {
+          pkgs = nixpkgs.legacyPackages.${system};
+          inherit baseModules;
+        };
+
         # THE REPAIR CONSOLE IS REACHABLE (modules/break-glass.nix), on a booted box: a VT switch to tty3
         # shows a root login prompt (not an autologin as the agent), the password works, a wrong one and
         # an unprovisioned one do not. Out of `checks` (boots two VMs); in the vm-tests.yml matrix.
@@ -2264,14 +2274,44 @@
             sealed0 = self.nixosConfigurations.agentos-sealed.config;      # sealed by build, WITHOUT the window's ruleset
           in
           assert lib.assertMsg (on.networking.nftables.checkRuleset) "setup-window would false-PASS: checkRuleset is false";
-          # THE SLICE BOUNDARY, ENFORCED. The wall side of the window is complete with slice 3b part 2
-          # (seal-check's assertions, spec 2.5). What is still owed before a shipped image turns it on is
-          # the RECORD: the audit-chain lines for every transition (spec 2.2), which need a ruling on a
-          # second root writer and signer of the chain (slice 3c). Until then the transitions are only
-          # in the journal. REMOVE THIS ASSERTION IN SLICE 3c, not before.
+          # (8) THE RECORD (spec 2.7, slice 3c). Until this slice an assertion here kept the window off
+          # every shipped image. It is replaced by the structure the record depends on, which must
+          # hold for ANY configuration that enables the window. Whether a shipped image does is the
+          # product path's decision (slice 4); none does today (asserted last, as a fact to notice,
+          # not as a gate).
+          # The audit binary is the wall's own derivation, by store path.
+          # (That it is the SAME store path the broker's and the taint tracker's wrappers pin is checked in
+          # the build below, on the wrappers' text.)
+          assert lib.assertMsg (lib.hasSuffix "-audit/bin/audit" wc.audit && lib.hasPrefix "/nix/store/" wc.audit
+                                && wc.audit_log == "/var/lib/agent-os/audit/audit.log")
+            "setup-window: the window must append through the audit wrapper of modules/audit-pkg.nix, to the pinned ledger";
+          # The signer and the pin are the wall's: equal to the wall unit's environment, key by key,
+          # and absent when the wall signs nothing.
+          assert lib.assertMsg (let
+                                  wallEnv = c: c.systemd.services."agent-os-wall@".environment;
+                                  winCfg = c: c.system.build.agosWindowConfig;
+                                  same = c: (winCfg c).audit_signer or null == (wallEnv c).AGENT_OS_AUDIT_SIGNER or null
+                                            && (winCfg c).audit_require_signed or null == (wallEnv c).AGENT_OS_AUDIT_REQUIRE_SIGNED or null;
+                                  signedOn = (mkSystem [ { agentos.cleanRoom.setupWindow.enable = true; agentos.wall.auditSigner = "agent"; } ]).config;
+                                  pinnedOn = (mkSystem [ { agentos.cleanRoom.setupWindow.enable = true; agentos.wall.auditSigner = "agent"; agentos.wall.auditRequireSigned = "1"; } ]).config;
+                                in same on && !(wc ? audit_signer) && !(wc ? audit_require_signed)
+                                   && same signedOn && (winCfg signedOn).audit_signer == "agent" && (winCfg signedOn).audit_require_signed == "agent"
+                                   && same pinnedOn && (winCfg pinnedOn).audit_require_signed == "1")
+            "setup-window: the window's signer and pin must be the wall unit's, and absent when the wall signs nothing";
+          # Exactly two units may append: the window oneshot and the tick. Both Require AND follow the
+          # identity boot unit (as the wall does) and may write the audit directory. The wait may not,
+          # and has no dependency on the identity unit (it must always run).
+          assert lib.assertMsg (let auditDir = "/var/lib/agent-os/audit"; idb = "agent-os-identity-boot.service"; in
+                                lib.all (u: lib.elem auditDir u.serviceConfig.ReadWritePaths && lib.elem idb u.requires && lib.elem idb u.after
+                                            && u.serviceConfig.CapabilityBoundingSet == [ "CAP_NET_ADMIN" ]) [ win tick ]
+                                && seal.serviceConfig.ReadWritePaths == [ "/var/lib/agent-os/seal" ] && !(lib.elem idb seal.requires) && !(lib.elem idb seal.after)
+                                && (on.systemd.services ? agent-os-identity-boot)
+                                && lib.elem "systemd-tmpfiles-setup.service" on.systemd.services.agent-os-identity-boot.after
+                                && lib.any (r: lib.hasPrefix "d /var/lib/agent-os/audit " r) on.systemd.tmpfiles.rules)
+            "setup-window: exactly the window oneshot and the tick may write the audit chain, and both must Require the identity boot unit; the wait must do neither";
           assert lib.assertMsg (lib.all (n: !(self.nixosConfigurations.${n}.config.agentos.cleanRoom.setupWindow.enable or false))
                                   (lib.attrNames self.nixosConfigurations))
-            "setup-window: slice 3c (the audit-chain record of the window's transitions) has not landed; no shipped configuration may enable the setup window";
+            "setup-window: a shipped configuration now enables the setup window. That is slice 4's decision; if this is it, delete this assertion in the same change";
           # (7) SEAL-CHECK, the second key (spec 2.5, slice 3b part 2). Sealed-class response; the early
           # run follows the window unit and precedes the network; the second run follows the wait, is
           # required by tty1's getty from ITS side, has no condition and is not RemainAfterExit.
@@ -2416,7 +2456,7 @@
                                 && win.unitConfig.ReloadPropagatedFrom == [ "nftables.service" ]
                                 && win.unitConfig.ConditionPathIsReadWrite == "/var/lib/agent-os/seal"
                                 && win.serviceConfig.CapabilityBoundingSet == [ "CAP_NET_ADMIN" ] && win.serviceConfig.ProtectSystem == "strict"
-                                && win.serviceConfig.ReadWritePaths == [ "/var/lib/agent-os/seal" ] && win.serviceConfig.NoNewPrivileges)
+                                && win.serviceConfig.ReadWritePaths == [ "/var/lib/agent-os/seal" "/var/lib/agent-os/audit" ] && win.serviceConfig.NoNewPrivileges)
             "setup-window: the window unit must be an idempotent RemainAfterExit oneshot that follows nftables' restarts AND reloads, with its stop stamp";
           assert lib.assertMsg (lib.hasSuffix " tick" tick.serviceConfig.ExecStart && !(tick.unitConfig ? ConditionPathIsReadWrite)
                                 && on.systemd.timers.agentos-setup-window-tick.timerConfig.OnUnitActiveSec == "1min"
@@ -2433,6 +2473,19 @@
             work="$(mktemp -d)"; mkdir -p "$work/modules" "$work/tests"
             cp ${./modules/agos_window.py} "$work/modules/agos_window.py"
             cp ${./modules/agos_setup_progress.py} "$work/modules/agos_setup_progress.py"
+            # The record: the window's audit binary is the very path the wall's broker and taint tracker pin.
+            for w in ${lib.concatStringsSep " " (map (x: "${x}/bin/${x.name}") (lib.filter (x: lib.elem (x.name or "") [ "broker" "taint" ]) on.environment.systemPackages))}; do
+              grep -qF -- '${wc.audit}' "$w" || { echo "setup-window: $w does not pin the audit wrapper the window appends through (${wc.audit})" >&2; exit 1; }
+              pinned_n=$((''${pinned_n:-0} + 1))
+            done
+            [ "''${pinned_n:-0}" = 2 ] || { echo "setup-window would false-PASS: expected the broker's and the taint tracker's wrappers, found ''${pinned_n:-0}" >&2; exit 1; }
+            grep -qF -- 'AGENT_OS_AUDIT_DIR=/var/lib/agent-os/audit' ${wc.audit} || { echo "setup-window: the audit wrapper does not pin the ledger" >&2; exit 1; }
+            # the record's arm runs the REAL audit primitive and a real identity
+            mkdir -p "$work/bin"
+            cp ${./bin/audit} "$work/bin/audit"
+            cp ${./modules/identity.py} "$work/modules/identity.py"
+            cp ${./modules/bip340.py} "$work/modules/bip340.py"
+            cp ${./modules/bech32.py} "$work/modules/bech32.py"
             cp ${./tests/agos-window-battery.py} "$work/tests/agos-window-battery.py"
             ( cd "$work"; python3 tests/agos-window-battery.py </dev/null )
             # Slice 3b part 1: the gates as files. (The sandbox has no /run/agentos-setup: the token is absent.)
