@@ -620,6 +620,105 @@ for; the guest booted, the test ran, and the failures looked exactly like CI's. 
 caught it was reading CI's own workflow for what it compensates for — a compensation in the
 pipeline is evidence about a hazard the environment has.
 
+## SHAPE A HAS AT LEAST ONE IDENTIFIED CAUSE: plymouthd blocks on a terminal read (2026-10-12, Mirror, dellon)
+
+**This does NOT close shape A.** It names one mechanism that produces shape A's exact signature,
+reproduced locally 9 times, with the cause read out of upstream source. Whether it explains any of
+the specimens recorded above is **not established** — see the armed zero at the end of this section.
+
+Found while answering dellon-claude's q80, who saw ~1 boot in 20 of the product image stop for good
+a few seconds in, on `test-setup-window`'s box and once on unmodified `main`.
+
+**The signature, which is shape A's.** The last unit started is `plymouth-read-write.service`
+("Tell Plymouth To Write Out Runtime Data"). It never finishes, so `sysinit.target` is never
+reached, so `backdoor.service` never starts, so the driver retries 20 times and dies with
+`RuntimeError: Shell did not start in time`. Every guest line before that point is normal.
+
+**The mechanism, read out of plymouth 26.134.222 — the version in our closure — on the host that
+runs it.**
+
+- `src/libply-splash-core/ply-terminal.c:602` opens the terminal `O_RDWR | O_NOCTTY | O_NONBLOCK`,
+  and `:621` immediately calls `ply_set_fd_as_blocking()`, which clears `O_NONBLOCK`. The fd is
+  blocking from then on.
+- The keyboard path calls `ply_buffer_append_from_fd()` (`src/libply/ply-buffer.c:209`), which does
+  `ply_fd_has_data(fd)` — a `poll()` with a 10 ms timeout — and then a plain
+  `read(fd, bytes, PLY_BUFFER_MAX_APPEND_SIZE)`. That is a check-then-act race on a blocking fd.
+- If the terminal reports readable but has no byte to give by the time `read()` runs, the read never
+  returns. plymouthd is single-threaded, so it stops answering its socket; the
+  `plymouth update-root-fs --read-write` client then waits in `epoll_wait` forever, and the unit is
+  `Type=oneshot` with no `TimeoutStartSec` and `Before=sysinit.target`.
+
+**The dumps pin it rather than resembling it.** sysrq-t from a stalled guest shows
+`task:plymouthd` in `n_tty_read <- tty_read <- vfs_read`, with `RDI=7` and `RDX=1024` — and 1024 is
+`PLY_BUFFER_MAX_APPEND_SIZE`, the literal buffer in that function.
+
+**The guest is NOT frozen, and that is the cheapest way to recognise it.** During every stall the
+QEMU monitor reports `VM status: running` with both vCPUs halted at one unchanging RIP across six
+samples. The kernel also keeps printing to the serial console throughout: sysrq replies appeared at
+58 s and 62 s. So "nothing on the console" is plymouthd being stuck, not the machine being stuck.
+
+**Which terminal — measured, not argued.** On each stall, one key was sent to the virtual console
+(`sendkey` on the QEMU monitor) and, only if that failed, one byte down the serial line. The VT key
+freed it **6 of 6**, in about a second, and the boot then reached `sysinit.target` normally. The
+serial arm was never reached. A VT keypress cannot unblock a read on `ttyS0`, so the terminal is the
+**virtual console**. This is therefore not a captured-serial-console artifact of the test harness,
+and a machine with a real display can hang the same way. **The field workaround is to press a key.**
+
+**It needs host load. That is why one-at-a-time runs look clean.**
+
+| condition | boots | stalls |
+|---|---|---|
+| 1 stream, idle host | 120 | 0 |
+| 4 streams in parallel | 240 | 3 (none recovered unaided in 60 s) |
+| 4 streams in parallel, VT key sent on stall | 240 | 6 (all 6 freed by the key) |
+
+About 1 in 50 under 4-way load on this host; zero in 120 unloaded. `sysrq_always_enabled=1` on the
+kernel command line made no difference (stalls occurred with and without it), so the sysrq used to
+take the dumps is not itself implicated.
+
+**NOT established, and listed rather than guessed:**
+
+- What makes the VT report readable with no byte behind it. Every stall falls in the second where
+  fbcon takes the console and `systemd-vconsole-setup` restarts two or three times. That is a lead,
+  not a measurement. Ordering alone does not discriminate: the framebuffer handover landed while
+  write-out was pending in 21 **healthy** boots.
+- Whether a machine with no serial console reaches the trigger. Every stall observed was on a
+  harness VM (`console=ttyS0 console=tty0`). The blocked fd is the VT either way.
+- Whether a `TimeoutStartSec` on `plymouth-read-write` is a safe remedy. Untested, and the
+  prediction is that it is not sufficient on its own: the daemon stays stuck in `read()`, so
+  `plymouth-quit` / `plymouth-quit-wait` would be expected to inherit the hang. Measure before
+  shipping it.
+
+**THE ARMED ZERO: this cause is NOT shown to explain the specimens recorded above.** The
+discriminator is one grep over a run log — does `Starting Tell Plymouth To Write Out Runtime Data`
+appear without its matching `Finished`? Run against the five most recent failed `vm-tests` runs
+(`38178263037`, `38003997582`, `37398939240`, `33786089610`, `33760434288`): four have the marker
+lines present and **balanced** (start count == finish count, 3-4 each), and one predates the unit
+entirely. None is shape A — `Shell did not start in time` appears zero times in all five. So the
+instrument can count these lines and does; it returns zero stalls on real failed runs. Those
+failures have a different cause, and the shape-A specimens censused in August are beyond log
+retention, so they could not be tested either way.
+
+**How to classify the next shape A in one grep**, before re-running it:
+
+```bash
+gh run view <id> --log-failed \
+  | grep -c "Starting Tell Plymouth To Write Out Runtime Data"   # vs the matching "Finished"
+```
+
+Unbalanced (a start with no finish) means this cause. Balanced means look elsewhere, and this
+section does not apply.
+
+**To reproduce.** `nix build .#test-setup-window.driver`, then run four copies of the driver in
+parallel against a test script that loops `box.start()` / `box.shutdown()` and, on a boot where
+`Finished Tell Plymouth To Write Out Runtime Data` does not appear, reads `info status` and
+`info registers -a` off the QEMU monitor and sends one `sendkey`. **Give each copy its own
+`XDG_RUNTIME_DIR`**: the driver keys its vde switch socket and VM state directories off
+`XDG_RUNTIME_DIR`, not `TMPDIR`, so without separate ones parallel runs collide and all but the
+first silently fail to start. Mirror holds the loop script, the nine result files, a stalled console
+carrying the full task dump, and a screenshot of a stalled display; ask for them rather than
+re-deriving.
+
 ## What is NOT established
 
 - **Root cause.** Two shapes fit every observation equally well: (a) the console/backdoor channel
