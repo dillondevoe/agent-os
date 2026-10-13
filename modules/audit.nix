@@ -5,7 +5,9 @@
 #
 # /var/lib/agent-os/audit is a Step-1 PROTECTED path: no capability impl sandbox may
 # hold it in writable OR readable scope (asserted in modules/capability-registry.nix).
-# Only the broker writes here.
+# Who writes here: the wall (broker and taint tracker) and the setup-window program's two
+# appending units (modules/setup-window.nix; first-login spec §2.7). Nobody else, and never a
+# process of the agent's account. bin/audit's docstring lists them and what Step 7 must keep.
 #
 # v1 scope is deliberately small: create the dir 0700 root:root. Ownership tightens to
 # the dedicated broker user when that user lands in Step 5 (the broker core); until

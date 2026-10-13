@@ -69,6 +69,7 @@ REASONS = {
     "timeout": "setup did not finish in time",
     "ended": "setup was stopped",
     "not open": "setup could not start on this boot",
+    "refused": "the record of setup could not be written, or the firewall refused to open",
     "invalid state": "the setup record on disk could not be read",
 }
 

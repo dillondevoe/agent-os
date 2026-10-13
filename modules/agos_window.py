@@ -42,7 +42,7 @@
 # after it was closed. Every one of them therefore holds an exclusive lock on the state directory from
 # its first read to its last effect, and re-reads nothing it decided on outside it. Whoever cannot get
 # the lock may still CLOSE the set (closing is always safe) but never opens it. The wait for the lock
-# is LOCK_WAIT (150 s): longer than the one slow thing a holder does, restarting the fetcher (120 s).
+# is LOCK_WAIT (150 s): longer than the longest holder (the table at the limits below; 145 s).
 # The window unit's stop timeout is set above both (setup-window.nix), or systemd would kill the
 # shutdown stamp while it waits.
 #
@@ -68,6 +68,19 @@
 # <run_dir>/status is one line for the console (open and how long is left, or sealed and why). It is
 # display only: nothing decides anything from it.
 #
+# THE RECORD (spec 2.7). Every transition of the window is one record in the audit chain, written
+# through the same pinned `audit` wrapper the wall uses and signed as the same participant (or not at
+# all, if the wall signs nothing). Two roles append, and only these two: `recompute` (the opens) and
+# `tick` (the seal). The wait never does: it is the one role that reads bytes from a process that has
+# been on the network, and its unit has no write access to the chain.
+#   - OPENING needs its record FIRST: books, record, set. No record, no window, and no waiting out
+#     a budget behind a set that never opened: a refused record, like a refused nft open, seals the
+#     box at once (reason `refused`).
+#   - SEALING never waits for the record. Whoever seals writes the marker; the tick, which runs once
+#     a minute on a sealed box too, appends `window-sealed` built from the marker. Whether that has
+#     been done is read from the CHAIN (a scan for this marker's boot id and time), never from a side
+#     file: `recorded.json` only saves the scan. So a record can be late, never lost and never twice.
+#
 # FAIL DIRECTION. Anything this cannot read, parse or decide ends with the set empty. A state
 # directory that cannot be written means the window does not open, and a tick that cannot write
 # closes it. A `sealed` marker that is present but malformed is "the wall is DOWN" (seal-check acts on
@@ -87,8 +100,28 @@ LOCK_WAIT = 150            # seconds to wait for the state lock (a seal holds it
 # a budget up to a minute too generous. Killing `systemctl` at its limit does not cancel the job it
 # queued; the restart is tidying, never what makes the seal true.
 NFT_LIMIT = 20
-RESTART_LIMIT = 60
-STOP_LIMIT = 20
+RESTART_LIMIT = 45
+STOP_LIMIT = 10
+# The audit chain (spec 2.7): one append, and one read-only scan of the log for a seal's record,
+# each limited. While the window is open the agent does not exist, so nothing else writes the chain:
+# ten seconds is a failure, not a queue.
+AUDIT_LIMIT = 10
+SCAN_LIMIT = 10
+# The longest holders of the state lock, every tool at its limit (LOCK_WAIT is 150):
+#   a seal                                   20 (flush) + 45 (restart) + 2 x 10 (stops)        =  85
+#   a recompute whose open is refused        20 (measure) + 10 (record) + 20 (open) + a seal   = 135
+#   a tick that seals and then records it    20 (flush) + a seal + 10 (scan) + 20 (measure) + 10 = 145
+# The table assumes ONE unit to restart and TWO to stop, which is what setup-window.nix compiles in.
+# `config()` computes the same bound from the lists it is given and refuses a configuration that
+# would not fit: a third unit to stop would otherwise pass every test and overrun the lock.
+LOCK_BUDGET = LOCK_WAIT                               # the design value (tests shorten LOCK_WAIT itself)
+
+
+def worst_lock_seconds(c):
+    seal_s = NFT_LIMIT + RESTART_LIMIT * len(c.get("restart_units", [])) + STOP_LIMIT * len(c.get("stop_units", []))
+    return NFT_LIMIT + seal_s + SCAN_LIMIT + NFT_LIMIT + AUDIT_LIMIT
+RECORD_SCHEMA = 1
+SEAL_REASONS = ("complete", "budget", "deadline", "invalid state", "timeout", "not open", "refused")
 STATE_MAX = 4096           # bytes of a state file
 POLL = 5                   # seconds between looks while the seal waits for the model
 PROBE_LIMIT = 15           # seconds, in all, one look at the fetcher's model list may take
@@ -106,6 +139,9 @@ def config():
         raise SystemExit("agos-window: the fetch uid must be a positive number (never root)")
     if not 0 < c["length"] <= 4 * 3600:
         raise SystemExit("agos-window: the window length must be at most 4 hours")
+    if worst_lock_seconds(c) >= LOCK_BUDGET:
+        raise SystemExit("agos-window: with these units a seal could hold the state lock for %d s, and the others wait %d"
+                         % (worst_lock_seconds(c), LOCK_BUDGET))
     return c
 
 
@@ -197,8 +233,9 @@ def load_sealed(c):
         m = json.loads(data.decode("ascii"))
     except ValueError:
         return "malformed", "not JSON"
-    if (not isinstance(m, dict) or set(m) != {"schema", "toplevel", "ruleset_sha256", "sealed_at", "reason"}
-            or m["schema"] != SCHEMA or not isinstance(m["toplevel"], str)
+    if (not isinstance(m, dict) or set(m) != {"schema", "toplevel", "ruleset_sha256", "sealed_at", "reason", "boot_id"}
+            or m.get("reason") not in SEAL_REASONS     # it goes into the audit chain verbatim (reconcile)
+            or m["schema"] != SCHEMA or not isinstance(m["toplevel"], str) or not isinstance(m["boot_id"], str)
             or not m["toplevel"].startswith(c.get("store_prefix", "/nix/store/"))
             or not isinstance(m["ruleset_sha256"], str) or len(m["ruleset_sha256"]) != 64
             or any(ch not in "0123456789abcdef" for ch in m["ruleset_sha256"])
@@ -423,6 +460,125 @@ def open_set(c):
     return _tool([c["nft"], "-f", c["open_file"]]) == 0
 
 
+def set_elements(c):
+    """How many uids the KERNEL's set holds, or None if nft cannot say. Measured, never assumed: it is
+    the one field of a record that says what the wall held, not what this program intended."""
+    try:
+        p = subprocess.run([c["nft"], "-j", "list", "set", "inet", "agentos_egress", "setup_uid"],
+                           stdin=subprocess.DEVNULL, capture_output=True, timeout=NFT_LIMIT, env={})
+        if p.returncode != 0:
+            return None
+        for item in json.loads(p.stdout.decode("utf-8"))["nftables"]:
+            if isinstance(item, dict) and isinstance(item.get("set"), dict):
+                elem = item["set"].get("elem", [])
+                return len(elem) if isinstance(elem, list) else None
+        return None
+    except (OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError):
+        return None
+
+
+def _generation(c):
+    """(toplevel, sha256 of the rendered ruleset): the generation a record or a marker speaks for."""
+    with open(c["ruleset_file"], "rb") as f:
+        digest = hashlib.sha256(f.read()).hexdigest()
+    return os.path.realpath(c.get("toplevel", "/run/current-system")), digest
+
+
+def _append_record(c, event, **fields):
+    """One record to the audit chain. True only if `audit append` said it is durable. The signer and
+    the pin are the wall's, compiled in and handed to the child explicitly: the child's environment
+    is otherwise empty, and a record that silently lost its signature would break every later one."""
+    if not c.get("audit"):
+        return True                                  # no chain on this box (tests of the core)
+    rec = {"src": "setup-window", "schema": RECORD_SCHEMA, "event": event, "fetch_uid": c["fetch_uid"]}
+    rec.update(fields)
+    env = {}
+    if c.get("audit_signer"):
+        env["AGENT_OS_AUDIT_SIGNER"] = c["audit_signer"]
+    if c.get("audit_require_signed"):
+        env["AGENT_OS_AUDIT_REQUIRE_SIGNED"] = c["audit_require_signed"]
+    try:
+        p = subprocess.run([c["audit"], "append"], input=(json.dumps(rec, sort_keys=True) + "\n").encode("ascii"),
+                           capture_output=True, timeout=AUDIT_LIMIT, env=env)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    if p.returncode != 0:
+        log("the audit chain refused the record %s (audit append exited %d)" % (event, p.returncode))
+        return False
+    return True
+
+
+def _chain_has_seal(c, marker):
+    """Is this marker's seal in the chain? True / False, or None if the log cannot be read, or not
+    within SCAN_LIMIT (then the record stays owed: a log too long to read in that time is also too
+    long for `audit append`, which reads all of it to find its head). The log is root's own ledger,
+    read-only here; lines are appended whole, so a reader needs no lock."""
+    import time as real_time                         # a deadline on the real clock, whatever a test did to `time`
+    deadline = real_time.monotonic() + SCAN_LIMIT
+    try:
+        fd = os.open(c["audit_log"], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return None
+    try:
+        import stat
+        try:
+            regular = stat.S_ISREG(os.fstat(fd).st_mode)
+        except OSError:
+            regular = False
+        if not regular:                              # a FIFO there would hold the lock for ever
+            os.close(fd)
+            return None
+        with os.fdopen(fd, "r", encoding="utf-8", errors="replace") as f:
+            for n, line in enumerate(f):
+                if n % 1024 == 0 and real_time.monotonic() > deadline:
+                    return None
+                if "window-sealed" not in line:
+                    continue
+                try:
+                    r = json.loads(line)
+                except ValueError:
+                    continue
+                if (isinstance(r, dict) and r.get("src") == "setup-window" and r.get("event") == "window-sealed"
+                        and r.get("boot_id") == marker["boot_id"] and r.get("sealed_at") == marker["sealed_at"]):
+                    return True
+        return False
+    except OSError:
+        return None
+
+
+def reconcile(c, marker):
+    """Under the state lock, by the tick only: make sure this marker's seal is in the chain. True if
+    it is (now or already). A False is a record still owed; the next tick tries again."""
+    if not c.get("audit"):
+        return True
+    key = {"boot_id": marker["boot_id"], "sealed_at": marker["sealed_at"]}
+    cache = os.path.join(c["state_dir"], "recorded.json")
+    data, _ = _read(cache)
+    try:
+        if data is not None and json.loads(data.decode("ascii")) == key:
+            return True                              # the cache only saves the scan below
+    except ValueError:
+        pass
+    found = _chain_has_seal(c, marker)
+    if found is None:
+        return False
+    if not found:
+        elements = set_elements(c)
+        if elements is None:
+            return False
+        if not _append_record(c, "window-sealed", boot_id=marker["boot_id"], toplevel=marker["toplevel"],
+                              ruleset_sha256=marker["ruleset_sha256"], reason=marker["reason"],
+                              sealed_at=marker["sealed_at"], elements=elements):
+            return False
+    try:
+        _write(cache, key)
+    except OSError:
+        pass                                         # no cache: the next tick scans, finds it, and stops there
+    return True
+
+
 def _boot_id(c):
     try:
         with open(c.get("boot_id_path", "/proc/sys/kernel/random/boot_id")) as f:
@@ -471,10 +627,9 @@ def _seal(c, reason):
     for unit in c.get("stop_units", []):             # they also carry a condition on the marker below, so
         _tool([c["systemctl"], "stop", unit], timeout=STOP_LIMIT)    # they stay down across reboots (a runtime mask would not)
     try:
-        with open(c["ruleset_file"], "rb") as f:
-            digest = hashlib.sha256(f.read()).hexdigest()
-        marker = {"schema": SCHEMA, "toplevel": os.path.realpath(c.get("toplevel", "/run/current-system")),
-                  "ruleset_sha256": digest, "sealed_at": time.time(), "reason": reason}
+        toplevel, digest = _generation(c)
+        marker = {"schema": SCHEMA, "toplevel": toplevel,
+                  "ruleset_sha256": digest, "sealed_at": time.time(), "reason": reason, "boot_id": _boot_id(c)}
         _write(os.path.join(c["state_dir"], "sealed"), marker)
     except OSError as e:
         log("seal: the set is empty but the marker could not be written (%s)" % e.__class__.__name__)
@@ -527,10 +682,26 @@ def _recompute(c):
         close_set(c)
         log("recompute: the state cannot be written (%s); the window stays closed" % e.__class__.__name__)
         return 1
+    # The record BEFORE the set: books, record, set. It says the program authorised the open and is
+    # about to attempt it; `elements` is what the kernel's set held at that moment. If the chain will
+    # not take the record, or nft then refuses the open, there is no window in this boot and nothing
+    # to wait for: seal now (the tick records that seal), instead of counting a budget against an
+    # empty set for two hours.
+    try:
+        toplevel, digest = _generation(c)
+    except OSError:
+        toplevel = digest = None
+    elements = set_elements(c)
+    if (toplevel is None or elements is None
+            or not _append_record(c, {"opened": "window-opened", "reopened": "window-reopened", "re-derived": "window-rederived"}[kind],
+                                  boot_id=boot_id, toplevel=toplevel, ruleset_sha256=digest, elements=elements,
+                                  remaining=int(state["remaining"]), budget_at_boot=int(state["budget_at_boot"]),
+                                  boots=state["boots"])):
+        log("recompute: the open could not be recorded; no record, no window: sealing")
+        return _seal(c, "refused")
     if not open_set(c):
-        close_set(c)
-        log("recompute: nft refused the open; the window stays closed")
-        return 1
+        log("recompute: nft refused the open: sealing")
+        return _seal(c, "refused")
     log("window %s remaining=%d boots=%d" % (kind, int(state["remaining"]), state["boots"]))
     _status(c, state="open", remaining=int(state["remaining"]))
     return 0
@@ -544,7 +715,15 @@ def tick(c, final=False):
             close_set(c)                             # cannot coordinate: closing is the one safe act
             log("tick: the state lock could not be taken; window closed")
             return 1
-        return _tick(c, final)
+        r = _tick(c, final)
+        if not final and not c.get("sealed_by_build"):
+            # The seal's record (spec 2.7): whoever sealed, this is where it reaches the chain. Not
+            # at shutdown (`stop`): a record is not worth holding a shutdown for, and the next boot's
+            # first tick writes it. The tick's own result is the wall's state, not the record's.
+            sealed = load_sealed(c)
+            if sealed[0] == "valid" and not reconcile(c, sealed[1]):
+                log("tick: the seal's record is still owed to the audit chain; trying again in a minute")
+        return r
 
 
 def _tick(c, final):
