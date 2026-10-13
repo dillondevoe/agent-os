@@ -275,6 +275,11 @@ jobs:
           # no serial line and no lingering user manager produces a process of the agent's account
           # while the fetcher has egress, and that the box seals itself the moment the model is listed.
           - test-seal-wait
+          # THE RECORD. Same rule: added with tests/window-record.nix. The battery runs the real audit
+          # primitive, but only a booted box shows the window's units writing the real ledger under the
+          # real sandbox, signed with the key the identity unit minted at that boot, before any wall
+          # request exists; and that a chain that refuses the record means the firewall never opened.
+          - test-window-record
           # THE REPAIR CONSOLE. Same rule: added with tests/break-glass.nix. Unit text said tty3 had a
           # root login prompt for months; a booted box showed that a VT switch there logged the AGENT in
           # (logind starts the console under its other name, which ran the template). Only a booted box,

@@ -143,7 +143,8 @@ are temp file, `fsync`, `rename`, then `fsync` of the directory.
 | File | Content |
 |---|---|
 | `window.json` | `schema`, `remaining_seconds` (the budget), `opened_at` and `wall_deadline` (advisory), `boots` (count). One file, one atomic write. |
-| `sealed` | The store path of the running toplevel, the sha256 of the rendered ruleset file, UTC time, and the reason. Never removed by any unit. |
+| `sealed` | The store path of the running toplevel, the sha256 of the rendered ruleset file, UTC time, the reason, and the boot id of the boot that sealed. Never removed by any unit. |
+| `recorded.json` | A pointer: where in the audit chain the tick found this marker's seal (offset and hash of the line; 2.7). Checked against the chain on every use; losing it costs one scan. |
 
 The window is measured as a **budget of open seconds**, not as a wall-clock deadline. A box with
 no RTC battery boots near 1970 and time sync is itself behind the wall, so a deadline written from
@@ -176,13 +177,25 @@ Decision table, evaluated on every run of `agentos-setup-window.service`:
 | `sealed` | `window.json` | Action |
 |---|---|---|
 | valid | any | Set empty. Nothing else; nothing is deleted. |
-| absent | absent | First boot: write `window.json` with the full budget and this boot id, open. |
+| absent | absent | First boot: write `window.json` with the full budget and this boot id, record, open. |
+| absent | valid or absent, and the record or the open is refused | Seal at once, reason `refused` (2.7). |
 | absent | valid, same boot id, remaining > 0 | Re-derivation: open, charge nothing. |
 | absent | valid, new boot id, remaining > 0, wall deadline not passed (or clock unknown) | Settle the previous boot, open for the remainder. |
 | absent | valid, remaining ≤ 0 or wall deadline passed | Seal. |
 | present but malformed | — | Wall DOWN (seal-check's response); do not open. |
 | absent | unreadable or malformed | Seal, and say so on the console. |
 | absent | any, but the state directory is not writable | The unit is skipped by its condition; the set stays empty; seal-check (e) treats the box as sealed-or-down until a human fixes the filesystem. Intended. |
+
+**A reader never raises, and a role that raises anyway fails closed** (added in slice 3c, from the
+commit security review). Every role reads its state before it closes or opens anything, so an
+exception in a reader is a role that died with the set as it was: an open window with no
+enforcer. The first version could be made to raise by a number too large to become a float
+(`10**400` is valid JSON) and by a pointer offset too large to seek to; the wait's unit can
+write these files. (Nesting deeper than the parser allows is the third way a parser raises
+something that is not "bad JSON". On the Python this image ships the files' size cap keeps the
+depth far below that limit; the catch is general so that it does not depend on that.) Now every loader returns a verdict
+whatever it is given, every number is bounded before it is used, and each role is wrapped so
+that any exception at all ends with the set flushed and the role failed.
 
 "Valid" for `sealed` means: the schema parses, every field is well formed, and the toplevel is a
 store path. It does not mean the ruleset hash matches: a rebuild legitimately changes it, there is
@@ -201,7 +214,7 @@ invalid state), plus the set's element count.
 - A box that seals on the budget without a model still boots and says, on tty1, that it has no
   model.
 - **There is no reopen command and no reopen capability in v0** (ruling 2). Re-provisioning is a
-  reinstall, or a human with root on the break-glass console (tty3) removing the two state files
+  reinstall, or a human with root on the break-glass console (tty3) removing the two state files (a leftover `recorded.json` names the old seal and is ignored)
   and rebooting, which the table treats as a first boot. That path is root-only, needs no new
   code, and is what the console message points to.
 
@@ -366,6 +379,148 @@ the check again.
 - Not defended: root deleting the state. Root already owns the box.
 - Accepted: a wiped `/var/lib` looks like a first boot and opens one window of the configured
   length, for the fetch uid only, with no agent running.
+
+### 2.7 The record (slice 3c)
+
+2.2 says every transition of the window appends one line to the audit chain. This section says
+how: the chain had one writing unit until now (the wall), and it may be signed. The shape below
+is the proposal as changed by the spec ruling of 2026-10-13 (the changes are marked "ruling").
+
+**What is recorded.** Four transitions, one record each:
+
+| `event` | when | fields beyond the common ones |
+|---|---|---|
+| `window-opened` | first boot: the window is about to open with the full budget | `remaining`, `budget_at_boot`, `boots` |
+| `window-reopened` | a later boot is about to open it with what was left | `remaining`, `budget_at_boot`, `boots` |
+| `window-rederived` | same boot: the set is about to be put back after an nftables reload or restart | `remaining`, `budget_at_boot`, `boots` |
+| `window-sealed` | the box sealed itself | `marker`: what the marker says (`reason`, `sealed_at`, `boot_id`, `toplevel`, `ruleset_sha256`) |
+
+Common to all four (ruling): `"src": "setup-window"`, `schema`, `boot_id` (what the state is keyed
+on, and what tells reopened from re-derived), `fetch_uid` (the subject that had egress, as a
+number), `toplevel` and `ruleset_sha256` (the generation and the ruleset the record speaks for),
+and `elements`: how many uids the **kernel's** set held when the record was written, read back
+from nft, never assumed. These are always what the **writing role measured itself** at the
+moment it wrote. (`remaining`, `budget_at_boot` and `boots` on the opens are not measurements:
+they are what the program decided from its books, `window.json`, bounded by the window length.
+A forged book can make them wrong about history; it cannot put anything but bounded numbers
+there.) For the seal that role is the tick, possibly in a later boot and from a later
+generation than the seal; what the *marker* says about the seal is quoted under `marker`, as the
+marker's. (Found by the commit security review after the code review: the first version copied
+the marker's fields to the top of a signed record. The marker can be written by the wait, the
+one role that reads bytes from a process that has been on the network, so a file's claims came
+out as the signer's own.) The marker is validated field by field before any of it is quoted: a
+finite, non-negative time (a NaN equals nothing, itself included, and would have been recorded
+again every minute), a boot id of letters, digits and dashes, a toplevel of printable
+characters, each with a length limit. For the three opens that is the state before the open: the record says
+the program authorised the open and is about to attempt it. (So on a run with no reload and no
+reboot no record ever says 1: the opens say 0 and the seal says 0. The chain witnesses that the
+open was authorised and that the box sealed. A re-derive after an nftables reload says 0 too:
+the reload is what emptied the set. A non-zero count appears only when the window unit is run
+again with the set still full, for instance restarted by hand.) The marker's `reason` is one of exactly seven: `complete`, `budget`, `deadline`,
+`invalid state`, `timeout`, `not open`, `refused`. On a box with no clock battery `sealed_at`
+and the chain's own `ts` may be near 1970; the order of events is `boot_id` and the chain's
+`seq`, not the times. Nothing in a record comes from the model server's answers, except that a marker's
+`reason: complete` is the wait's conclusion from one, quoted as the marker's.
+
+Refusals and closes that are not a seal (a re-provisioning refused until the reboot, a tick that
+closes because it cannot keep its books, a wall that seal-check finds DOWN) stay in the journal.
+One of them, "the state was removed under a running agent", is security-relevant rather than
+operational and is a candidate for the chain in slice 4. So is this one: the login token
+appearing while the window is open (only something already root in the wait's unit could do
+that). It closes the window at the next reload and no marker is ever written, so the chain shows
+an open with no seal and only the journal says why; logins stay shut all the same, because the
+second key is seal-check's.
+
+**Who writes.** The window program, through the same pinned `audit` wrapper the wall uses (one
+derivation, `modules/audit-pkg.nix`: the same ledger, modules and identity root). The chain
+already has more than one writing program (the broker and the taint tracker), and `audit append`
+serialises on its own lock. The window program takes nothing from the agent or the network for
+what it records, which makes it a less exposed writer than the wall. Ruling: **exactly two
+units append**, the window oneshot (the opens) and the tick (the seal). The wait
+(`agentos-seal`) never appends and gets no access to the audit directory: it is the one unit
+that parses bytes from a process that has been on the network, and it must always be able to
+run. Rejected: a wall verb (the launcher refuses a root peer by design), a ledger of its own
+(not "the chain"), journal only (the one tamper-evident witness that egress existed on a box
+that now says it is sealed would be missing).
+
+**Who signs.** The same participant as the wall, or nobody if the wall signs nothing. The
+window's signer and pin are read from `agentos.wall.auditSigner` / `auditRequireSigned`, compiled
+into the program's configuration, left out when null, and handed to the `audit` child in its
+environment explicitly (ruling: the program runs its children with an empty environment, so
+without this every window record on a signed box would be unsigned and `audit verify` would
+fail the chain from there on). One signer keeps `AGENT_OS_AUDIT_REQUIRE_SIGNED=<participant>`
+true of every record. Reading the key is not a new grant: these units are root, and root reads
+its own files. The two appending units `Require=` and follow the identity boot unit, as the wall
+does: a box whose identity failed its self-test gets **no window** (the set stays empty; the
+wait seals `not open`), never a record signed with whatever key is on disk. A window record may
+be the first record of the chain.
+
+**What a failed write means.**
+
+- *Opening*: no record, no window. The order is books, record, set, under the state lock.
+  Ruling: if the chain refuses the record, or nft then refuses the open, the box is **sealed at
+  once**, reason `refused`. Before this slice an open that nft refused left the books saying
+  "open" over an empty set, and the box waited out its whole budget (two hours) before it
+  sealed with no model; a refused record would have inherited that. **Any** refused record does
+  this, a transient one as much as a corrupt chain: an append that times out, a lock file that
+  cannot be opened, a set that cannot be measured. The box is then sealed with no model until a
+  human re-provisions it. That is the price of "no record, no window", and the ruling accepted
+  it: the way back is the one 2.3 names (root on the repair console repairs the log if it needs
+  it, removes the state, reboots). A refused boot is charged one floor of budget. One case still
+  waits out the budget: nft refusing the open *and* the flush, where no marker can be written
+  (the marker never lies); that is a wall seal-check calls DOWN.
+- *Sealing*: never waits for the record. Whoever seals (the wait, its timeout backstop, the
+  tick, the window oneshot, a `seal` typed by root) writes the marker, as before. Ruling: **the tick reconciles**. It runs once a minute on a
+  sealed box too, and appends `window-sealed` built from the marker, so the record is at most a
+  minute behind the seal. Whether that has been done is read from the **chain** (a read-only
+  scan for a `window-sealed` whose `marker` has this marker's `boot_id`: a box seals at most
+  once per boot, so that is the honest count, and a marker rewritten with a new time does not
+  get a second record).
+  `seal/recorded.json` is a **pointer**, not a statement: the offset and the hash of that line,
+  checked against the chain every time it is used. (The first version stored only "recorded",
+  which let a side file decide whether a security record is written: a chain that later lost
+  the record would have stayed without it. Found by the commit security review.) The tick that
+  appends writes no pointer; the next tick finds the line and writes it. So the record can be
+  late (the chain is broken: the tick keeps trying, quietly), never lost (the debt is the
+  default state of "valid marker, no such record in the chain") and never written twice (the
+  scan comes before every append, under the state lock). The marker
+  gains `boot_id` for this. Nothing about logins waits for the record.
+
+The file-as-queue of the first draft (`audit-owed.json`) is gone: it could be unwritable, it
+could duplicate after a crash, and it could grow.
+
+**Time under the lock.** One append is limited to 10 seconds (`AUDIT_LIMIT`), and so is the
+scan of the log for a seal's record (one scan per tick at most: the tick that appends does not
+look for what it wrote) (`SCAN_LIMIT`; a log too long to read in that time is also
+too long for `audit append`, which reads all of it, and the record then stays owed). While the
+window is open nothing else writes the chain, so longer is a failure and not a queue. With every
+tool at its limit the longest holders of the state lock are: a seal, 20 + 45 + 2 x 10 = 85
+seconds (the review of this slice found the earlier limits let a refused open reach 170, past
+the 150 the others wait; the restart and stop limits were shortened, and killing `systemctl` at
+its limit does not cancel the job it queued); a recompute whose open is refused, 20 + 10 + 20
++ 85 = 135; a tick that seals and then records it, 20 + 85 + 10 + 20 + 10 = 145. The battery
+pins the table to the constants, and the program computes the same bound from the units it is
+configured to restart and stop and refuses a configuration that would not fit.
+
+**The broker's anchor.** The broker writes the head hash of the chain outside the audit
+directory after each of its own appends. Records appended by the window (as by the taint
+tracker) move the head without moving the anchor; the anchor remains a hash that must be found
+*in* the chain, which is what it is for.
+
+**Step 7 of the audit plan** (a dedicated owner for the audit directory, `chattr +a` on the log):
+append-only is compatible with every writer. A dedicated owner is not, as planned: the two
+appending units are root with one capability and write only as the owner. `bin/audit` now names
+the writers and says Step 7 must give the directory a group they are in.
+
+**The surface choice.** Slice 1 owes the same treatment to its "store written" line. That store
+is written by a root helper on the developer image, which has no audit chain; the line moves to
+the chain when the surfaces move to the product path (slice 4), through the same wrapper. The
+readers' fallback lines are written by processes of the agent's account, which cannot and must
+not write the chain; they stay in the journal.
+
+**After this slice** the flake assertion that kept the window off shipped images is replaced by
+assertions on the structure above, which hold for any configuration that enables it. Turning it
+on for a shipped image is slice 4's decision.
 
 ## 3. The surface choice
 
@@ -534,7 +689,7 @@ Split in two (ruling 4), so that no root process reads keyboard bytes:
 | 3a | The setup window: the mechanism | wall; Fable code review | `agentos.cleanRoom.setupWindow.enable` (default OFF, the existing rulesets byte-identical): the set and its rules, the fetcher's fixed uid, the state machine (`modules/agos_window.py`), the window oneshot following nftables' restarts and reloads, the tick that closes and seals on the budget, the pull units conditioned on the marker. VM test `tests/setup-window.nix` (W1-W10) |
 | 3b part 1 | The setup window: the agent does not exist while it is open | wall; Fable code review | `agentos-seal.service` (the wait, the detector, `ExecStopPost`), tty1's getty behind it, the login token and the gates on every other console and on the user manager, no reopening in a sealed boot, the tty1 progress unit (2.4). VM test `test-seal-wait`. The option stays off on shipped images. |
 | 3b part 2 | The setup window: seal-check and the rest | wall; Fable code review | The seal-check assertions (2.5) and the second key at every door, the registry probe as the fetcher's uid, the tool timeouts under the lock wait, the quiet tick while a re-provisioning waits for its reboot. The flake assertion stays, now pointing at 3c. |
-| 3c | The record | wall; Fable spec ruling first | The audit-chain lines for the window's transitions and the surface choice (2.2). They need a ruling on a second root writer and signer of the chain. Until then the transitions are in the journal only, and no shipped image may enable the window. |
+| 3c | The record | wall; Fable spec ruling, then code review | The audit-chain records of the window's four transitions (2.7): two appending units, the wall's signer, seal-at-once on a refused open, the seal's record reconciled by the tick. The flake gate is replaced by structural assertions. The surface-choice line moves with the surfaces in slice 4. |
 | 4 | Product path | wall; Fable code review | Surfaces and first login in `agentos`; a human account; `agentos-sealed` retired once the window has acceptance evidence |
 
 Slices 1 and 2 touch no wall code and can land while 3 is in review.
@@ -565,6 +720,7 @@ failure mode (curl exit 28, as `egress-uid-scope.nix` does), so a dead network c
 | `setup-window-seal-fails` (VM) | The seal unit made to fail or time out: the set is still empty afterwards and `sealed` is written; with the seal unit broken outright, the tick alone empties the set at `remaining ≤ 0` |
 | `setup-window-agent-absent` (VM, `test-seal-wait`) | Window open: tty1's getty has not started; a second virtual terminal, a getty started by hand and a serial console refuse and produce no process of the agent's account; with lingering enabled the user manager is refused at boot. A sampler on the box watches "agent process, then non-empty set" for the whole test. Controls: each door logs the agent in once the box is sealed |
 | `setup-window-seal-on-model` (VM, `test-seal-wait`) | A look-alike model name does not seal; the configured name in `/api/tags` does (reason `complete`), and only then does the agent exist. A killed wait does NOT seal (only a timeout does) and the agent stays absent. State removed in a sealed boot does not reopen the window and is not re-sealed; after a reboot it is a first boot |
+| `setup-window-record` (VM, `test-window-record`) | On a signed node the first record of the chain is `window-opened`, signed by the pinned participant; reopened and re-derived follow; the seal is recorded within a tick, once, from the marker; `audit verify` passes under the pin. A torn tail before first boot: sealed `refused`, nothing opened, no agent before the seal; after the repair a reboot is a first boot. The identity unit failing: no window and no record |
 | `first-login-choice-survives` (VM) | A non-default choice made in the front end reaches the store (the runtime directory is still there when the helper reads) |
 | budget battery | Recompute is idempotent (ticking twice gives one charge); a same-boot run charges nothing; a new boot id settles the previous boot; the floor applies once per boot |
 | `setup-window-unit-dead` (VM) | Window unit killed with `sealed` absent: seal-check treats the box as sealed-or-down |

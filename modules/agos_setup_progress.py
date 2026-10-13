@@ -53,7 +53,7 @@ def read_status(path):
     """-> (state, remaining, reason). Anything unreadable or malformed is ("", None, "")."""
     try:
         doc = json.loads(_read(path))
-    except ValueError:
+    except Exception:                                # not JSON, or nested past the parser's patience
         return "", None, ""
     if not isinstance(doc, dict) or doc.get("state") not in ("open", "sealed", "failed", "down"):
         return "", None, ""
@@ -69,6 +69,7 @@ REASONS = {
     "timeout": "setup did not finish in time",
     "ended": "setup was stopped",
     "not open": "setup could not start on this boot",
+    "refused": "the record of setup could not be written, or the firewall refused to open",
     "invalid state": "the setup record on disk could not be read",
 }
 

@@ -14,11 +14,22 @@ primary write controls, and (b) the broker anchoring each head hash (echoed on s
 by `append`) OUTSIDE the audit dir, which makes a suffix-rewrite detectable before
 Step 7 lands. So this is tamper-EVIDENCE, not tamper-prevention.
 
-Trust boundary: this runs as the broker (the trusted layer), NEVER as a capability
-impl. The log directory (/var/lib/agent-os/audit) is a Step-1 PROTECTED path — no impl
-sandbox may write it (asserted in modules/capability-registry.nix). The primitive
-assumes a single trusted writer and additionally takes an exclusive lock so concurrent
-writers cannot interleave the sequence/chain.
+Trust boundary: this runs on the root side (the trusted layer), NEVER as a capability
+impl and NEVER as a process of the agent's account. The log directory
+(/var/lib/agent-os/audit) is a Step-1 PROTECTED path — no impl sandbox may write it
+(asserted in modules/capability-registry.nix). THE WRITERS, by name: the wall (the
+broker and the taint tracker, in the wall's unit) and the setup-window program
+(modules/agos_window.py, in its window oneshot and its tick; first-login spec §2.7).
+All of them go through this primitive, which takes an exclusive lock so concurrent
+writers cannot interleave the sequence/chain, and all of them sign as ONE participant
+or none (the `=<participant>` pin below is only true of a chain with one signer).
+
+Step-7 consequence, recorded now so the plan does not forget a writer: `chattr +a` on
+the log is compatible with every writer (O_APPEND only; nothing here truncates or
+renames). A dedicated OWNER for the directory is not, as planned: the setup-window
+units are root with only CAP_NET_ADMIN, and root without CAP_DAC_OVERRIDE writes only
+as the owner. Step 7 must give the directory a group that those units are in (or
+route their records through a unit that runs as the owner).
 
 Commands:
   audit append   < record.json     stamp seq+prev+ts, append one line, fsync, echo hash
