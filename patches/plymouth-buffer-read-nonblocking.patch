@@ -1,0 +1,28 @@
+--- a/src/libply/ply-buffer.c
++++ b/src/libply/ply-buffer.c
+@@ -218,7 +218,24 @@
+         if (!ply_fd_has_data (fd))
+                 return;
+ 
+-        bytes_read = read (fd, bytes, sizeof(bytes));
++        /* ply_fd_has_data() is a poll(); the fd it vouched for is BLOCKING (the terminal is
++         * opened O_NONBLOCK and then made blocking by ply_set_fd_as_blocking).  If the readable
++         * condition does not yield a byte, this read never returns and plymouthd -- which is
++         * single-threaded -- stops answering its socket, hanging the boot at
++         * plymouth-read-write.service.  Read non-blocking for the duration of the call and
++         * restore the flag, so a spurious readable costs one EAGAIN instead of the boot. */
++        {
++                int flags = fcntl (fd, F_GETFL);
++                bool restore = (flags != -1) && !(flags & O_NONBLOCK);
++
++                if (restore)
++                        fcntl (fd, F_SETFL, flags | O_NONBLOCK);
++
++                bytes_read = read (fd, bytes, sizeof(bytes));
++
++                if (restore)
++                        fcntl (fd, F_SETFL, flags);
++        }
+ 
+         if (bytes_read > 0)
+                 ply_buffer_append_bytes (buffer, bytes, bytes_read);

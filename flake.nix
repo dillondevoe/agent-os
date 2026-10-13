@@ -2708,6 +2708,34 @@
               touch $out
             '';
 
+        # THE BOOT MUST NOT WAIT FOR A KEYPRESS. Every image that shows the splash carries the
+        # plymouth patch from modules/boot-branding.nix (plymouthd blocking forever on a console
+        # read; docs/ci-flake-ledger.md). This is the cheap half: it reads the patch list of the
+        # plymouth each image actually ships, so dropping the override, or a variant setting its
+        # own package, fails here. The booted half is a load loop and is documented in the ledger.
+        plymouth-blocking-read-patched =
+          let
+            pkgs = nixpkgs.legacyPackages.${system};
+            lib = nixpkgs.lib;
+            variants = [ "agentos" "agentos-sealed" "agentos-sealed-s5" "agentos-open" ];
+            patched = n:
+              let c = self.nixosConfigurations.${n}.config; in
+              !c.boot.plymouth.enable
+              || lib.any (p: lib.hasSuffix "plymouth-buffer-read-nonblocking.patch" (toString p))
+                         (c.boot.plymouth.package.patches or [ ]);
+            missing = lib.filter (n: !(patched n)) variants;
+          in
+            assert lib.assertMsg (missing == [ ])
+              "plymouth-blocking-read-patched: these images ship a plymouth WITHOUT the blocking-read patch, so their boot can hang until a key is pressed: ${lib.concatStringsSep " " missing}";
+            assert lib.assertMsg (!(lib.any (p: lib.hasSuffix "plymouth-buffer-read-nonblocking.patch" (toString p))
+                                            (pkgs.plymouth.patches or [ ])))
+              "plymouth-blocking-read-patched: stock nixpkgs plymouth already matches the patch name, so this check cannot tell patched from unpatched.";
+            pkgs.runCommand "plymouth-blocking-read-patched-check" { } ''
+              echo "plymouth carries the blocking-read patch on: ${lib.concatStringsSep " " variants}"
+              touch $out
+            '';
+
+
 
         # R1 runtime (tier 0, item 3) — THE BOOT PREWARM MUST WARM THE MODEL THE SESSION USES.
         #
