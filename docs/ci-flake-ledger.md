@@ -718,6 +718,59 @@ parallel against a test script that loops `box.start()` / `box.shutdown()` and, 
 first silently fail to start. Mirror holds the loop script, the nine result files, a stalled console
 carrying the full task dump, and a screenshot of a stalled display; ask for them rather than
 re-deriving.
+### THE PATCH IS MEASURED: 0 stalls in 480 patched boots against 3 in 240 stock the same hour (2026-10-13, Mirror, dellon)
+
+The cause above is now fixed rather than only identified. `modules/boot-branding.nix` builds
+`boot.plymouth.package` with `patches/plymouth-buffer-read-nonblocking.patch`, which sets
+`O_NONBLOCK` for the duration of the one `read()` in `ply_buffer_append_from_fd` and restores the
+flag afterwards. A readable-with-nothing-behind-it console then costs one `EAGAIN` instead of the
+boot.
+
+| image | boots | stalls |
+|---|---|---|
+| patched, 4 streams, run 1 | 240 | 0 |
+| patched, 4 streams, run 2 | 240 | 0 |
+| **patched, total** | **480** | **0** |
+| stock, 4 streams, same host, same hour | 240 | 3 |
+
+Fisher exact one-sided on the same-session pair (0/480 vs 3/240) is **p = 0.037**; pooling the
+stock arm with the 9/480 baseline measured the day before gives 0/480 vs 12/720, **p = 0.0024**.
+
+**The control is the half that makes this worth reading.** A zero from a patched loop is also what
+a loop that stopped reproducing looks like — the stall needs host CPU contention, and contention is
+not a knob you set. So the stock arm ran on the same host, in the same hour, through the same
+4-stream harness, and it stalled three times; all three were freed by one `sendkey` to the virtual
+console, the same signature as every earlier specimen. Two independent 240-boot patched runs rather
+than one 480 for the same reason: a single long run can go quiet for a cause that has nothing to do
+with the patch.
+
+**Which plymouth each arm ran was read out of the closure, not inferred from a green build:** stock
+`lvk5f18…-plymouth-26.134.222`, patched `8fbxx2n…-plymouth-26.134.222`.
+
+**Upstream still has it.** `ply_buffer_append_from_fd` on plymouth `main` (`03fe0c1`) is byte-for-byte
+the version analysed above, and the patch applies to it cleanly. `ply-terminal.c` opens the terminal
+`O_RDWR | O_NOCTTY | O_NONBLOCK` and then calls `ply_set_fd_as_blocking` on it, which is where the
+blocking fd that this patch works around comes from. An upstream report is owed and is not written yet.
+
+**Stated limits, because a measured fix invites over-reading:**
+
+- The flag is flipped on a *file description*, so anything else holding that same description sees
+  it non-blocking for the duration of one `read()`. plymouthd is single-threaded and restores it
+  immediately, so the window is one syscall, but it is not zero.
+- 0 in 480 bounds the residual rate at roughly 0.6% at 95% confidence; it is not a proof of zero.
+- `TimeoutStartSec` on `plymouth-read-write` was never measured. It was the stopgap for a patch that
+  did not come out clean, and this one did. The prediction recorded above — that a timeout leaves the
+  daemon stuck and moves the hang to the next client — is therefore still untested.
+- No arm was run on a box with no serial console. That question is already answered from the other
+  side: a stall was observed on a VM whose `ttyS0` is a null device, so the serial line is not the
+  trigger either way.
+- The guard against regression is an eval check (`plymouth-blocking-read-patched`), which asserts
+  every image's plymouth carries the patch. It does **not** boot anything. The booted arm is the
+  4-stream loop described above and is run by hand.
+
+**To reproduce either arm**, follow the recipe above, building `.#test-setup-window.driver` for the
+stock arm and, for the patched arm, the same test with `pkgs` extended by an overlay that applies
+`patches/plymouth-buffer-read-nonblocking.patch` to `plymouth`.
 
 ## What is NOT established
 
