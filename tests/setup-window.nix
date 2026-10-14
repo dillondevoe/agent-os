@@ -23,7 +23,12 @@
 #   W7  sealed stays sealed: across an nftables reload and restart, and across a reboot.
 #   W8  re-provisioning is root removing the state: a garbage window.json seals ("invalid state").
 #   W9  an empty `sealed` file is not a seal and not a first boot: the unit fails, the set stays empty.
-#   W10 a clock with no battery (1970) on a first boot: the window opens on the budget alone.
+#   W10 THE UPGRADE DOOR (spec 5.1): with the agent logged in, and no marker, no books and no login
+#       token (what `nixos-rebuild switch` from an image without the window leaves), the window does
+#       NOT open: the box is sealed `refused` and the chain has one `window-anomaly`, foreign-process.
+#   W11 a clock with no battery (1970) on a first boot: the window opens on the budget alone. (The
+#       agent's sessions are ended first: until slice 4a this leg removed the token under a logged-in
+#       agent, and the window opened next to it.)
 { pkgs, baseModules }:
 
 let
@@ -160,6 +165,13 @@ pkgs.testers.runNixOSTest {
     box.fail(f"test -e {STATE}/sealed")
     box.succeed("journalctl -t agos-window --no-pager | grep -q 'window opened remaining=180 boots=1'")
 
+    # The window is open with the console's progress unit alive beside it, and stays open across the
+    # ticks of this test: that unit is DynamicUser=, and the program's allowlist takes systemd's range
+    # for such units from a constant. Pin the constant to what this systemd actually allocates.
+    dyn = int(box.wait_until_succeeds(
+        "pid=$(systemctl show -p MainPID --value agentos-setup-progress.service); test \"$pid\" != 0 && stat -c %u /proc/$pid", timeout=60).strip())
+    assert 61184 <= dyn <= 65519, f"W1: a DynamicUser= unit got uid {dyn}, outside the range agos_window.py treats as the system's own"
+
     # W2 — scope while open
     assert curl("ollama", 443) == 0, "W2: POSITIVE CONTROL: the fetcher's uid must reach 443 while the window is open"
     peer.wait_for_unit("echo-53.service")
@@ -168,6 +180,12 @@ pkgs.testers.runNixOSTest {
     assert curl("ollama", 80) == 28, f"W2: port 80 must stay closed for the fetcher: {curl('ollama', 80)}"
     hold("control")
     assert use("control") == "alive", "W2: CONTROL for W6: with the window open, a held connection must still work"
+    # The probes below run processes AS THE AGENT'S ACCOUNT while the window is open (root starts them
+    # with runuser: the one thing the gates cannot stop). Since slice 4a the tick closes and seals the
+    # window when it sees such a process, which is right and would end this test here. The tick's
+    # timer is stopped for these few probes and started again after them.
+    box.succeed("systemctl stop agentos-setup-window-tick.timer; while systemctl is-active --quiet agentos-setup-window-tick.service; do sleep 1; done")
+    assert elements() == [UID], f"W2: the window closed before the agent's probes: {elements()}"
     assert curl("agent", 443) == 28 and curl("agent", 80) == 28, "W2: the agent's uid must reach nothing"
     assert dns("agent") == 27, f"W2: the agent's uid must not reach DNS (27 = dropped at the wall): {dns('agent')}"
     assert curl("root", 80) == 28, "W2: root must gain nothing from the window (80 stays closed)"
@@ -176,6 +194,9 @@ pkgs.testers.runNixOSTest {
     box.fail("runuser -u agent -- nft list ruleset")
     box.fail("runuser -u agent -- systemctl start agentos-setup-window.service")
     box.fail("runuser -u agent -- sh -c 'command -v agentos-setup-window'")
+    box.wait_until_fails(f"pgrep -u {agent_uid} >/dev/null", timeout=30)
+    box.succeed("systemctl start agentos-setup-window-tick.timer")
+    assert elements() == [UID], f"W2: the window did not survive the probes: {elements()}"
 
     # W3 — nftables reload and restart: emptied, put back, not charged
     for verb in ("reload", "restart"):
@@ -263,15 +284,42 @@ pkgs.testers.runNixOSTest {
     box.fail(f"test -e {STATE}/window.json")
     box.succeed("journalctl -t agos-window --no-pager | grep -q 'the sealed marker is malformed'")
 
-    # W10 — a first boot with no clock battery. This boot was sealed, and a sealed boot refuses to open
-    # again (slice 3b: the agent may be running). A first boot has no login token: /run is new. The
-    # test stands in for that by removing it, which only root can do.
+    # W10 — the upgrade door. The agent is logged in on tty1 (this boot was sealed). Remove the marker,
+    # the books AND the login token: that is the state of a box that was running an image without the
+    # window when `nixos-rebuild switch` started the window unit for the first time. It must not open.
+    AUDIT = "/var/lib/agent-os/audit/audit.log"
+    box.wait_until_succeeds(f"pgrep -u {agent_uid} >/dev/null", timeout=60)       # the control: there IS an agent to refuse for
+    before = int(box.succeed(f"grep -c window-opened {AUDIT} || true").strip() or 0)
+    box.succeed(f"rm -f {STATE}/sealed {STATE}/window.json /run/agentos-setup/login-ok; systemctl reset-failed agentos-setup-window.service")
+    box.succeed("systemctl restart agentos-setup-window.service")
+    assert elements() == [], f"W10: the window opened next to a logged-in agent: {elements()}"
+    w10 = json.loads(box.succeed(f"cat {STATE}/sealed"))
+    assert w10["reason"] == "refused", f"W10: {w10}"
+    box.fail(f"test -e {STATE}/window.json")                                       # refused BEFORE the books
+    assert int(box.succeed(f"grep -c window-opened {AUDIT} || true").strip() or 0) == before, "W10: a window-opened record was written for a refused open"
+    anomalies = [json.loads(l) for l in box.succeed(f"grep window-anomaly {AUDIT}").splitlines()]
+    assert len(anomalies) == 1 and anomalies[0]["kind"] == "foreign-process" and anomalies[0]["processes"] >= 1 \
+        and anomalies[0]["src"] == "setup-window", f"W10: {anomalies}"
+    box.succeed("journalctl -t agos-window --no-pager | grep -q 'the window does not open next to them'")
+    assert curl("ollama", 443) == 28, "W10: the fetcher reaches 443 after a refused open"
+    # the same again in the same boot: still closed, still ONE record
+    box.succeed(f"rm -f {STATE}/sealed /run/agentos-setup/login-ok; systemctl restart agentos-setup-window.service")
+    assert elements() == [] and box.succeed(f"grep -c window-anomaly {AUDIT}").strip() == "1", "W10: a second refusal in one boot wrote a second record"
+
+    # W11 — a first boot with no clock battery. A first boot has no login token (/run is new) and no
+    # agent. The test stands in for it by ending the agent's sessions and removing the token; with the
+    # agent gone the same restart that W10 refused must open.
+    # (Keep this leg free of VT switches and key presses: tty1's getty is stopped, not gone. Anything
+    # that starts it again runs the wait first, which would seal `not open` before the restart below
+    # and fail this leg. It could not log the agent in: the token is removed.)
+    box.succeed("systemctl stop getty@tty1.service; loginctl terminate-user agent 2>/dev/null || true")
+    box.wait_until_fails(f"pgrep -u {agent_uid} >/dev/null", timeout=60)
     box.succeed(f"rm -f {STATE}/sealed {STATE}/window.json /run/agentos-setup/login-ok; systemctl stop systemd-timesyncd.service 2>/dev/null || true")
     box.succeed("date -s '1970-01-02 00:00:00' && test $(date +%Y) = 1970")
     box.succeed("systemctl reset-failed agentos-setup-window.service; systemctl restart agentos-setup-window.service")
     wait_open()
-    w10 = window()
-    assert w10["wall_deadline"] is None and w10["opened_at"] is None and w10["budget_at_boot"] == 240, f"W10: {w10}"
-    assert elements() == [UID] and curl("ollama", 443) == 0, "W10: a 1970 clock did not open on the budget"
+    w11 = window()
+    assert w11["wall_deadline"] is None and w11["opened_at"] is None and w11["budget_at_boot"] == 240, f"W11: {w11}"
+    assert elements() == [UID] and curl("ollama", 443) == 0, "W11: a 1970 clock did not open on the budget"
   '';
 }

@@ -139,7 +139,7 @@ else
   # the memory REPL below. The login shell must never crash-loop (that scar is real).
   # Reachability probe. MUST NOT use ping: ICMP echo has NO accept rule in the clean-room
   # egress wall (modules/clean-room.nix) — the wall permits DNS + tcp/{80,443} in the unsealed
-  # provisioning window but never ICMP for the non-root agent user — so `ping` ALWAYS fails
+  # provisioning allowance (an image built with the window off) but never ICMP for the non-root agent user — so `ping` ALWAYS fails
   # here even when online, wedging first boot at the memory floor (the brain never pulls). Use
   # a dep-free bash /dev/tcp probe over an ALREADY-PERMITTED channel (DNS-resolve the MODEL HOST
   # registry.ollama.ai + tcp/443): no curl dependency, opens no new egress hole. Probe the model
@@ -147,13 +147,39 @@ else
   # reachable — a reply here means the `ollama pull` can run. `timeout` bounds a black-hole SYN;
   # `2>/dev/null` swallows the connection-refused / DNS noise so a failure is silent.
   _net_ok() { timeout 4 bash -c ': >/dev/tcp/registry.ollama.ai/443' >/dev/null 2>&1; }
-  if command -v nmtui >/dev/null 2>&1 && ! _net_ok; then
+  # A BOX WITH THE SETUP WINDOW (the product image since slice 4a; /run/agentos-setup is the window
+  # units' runtime directory, made at every boot of such a box). On it this shell starts only AFTER
+  # the box has sealed itself, and this account never has a way off the machine. So if we are here
+  # with no brain, the window ended without a model; nothing below can change that (the probe always
+  # fails, the picker cannot help, and the pull is stopped for good). Say what happened and where
+  # the way back is, once, and go to the memory floor.
+  _windowed=""
+  if [ -d /run/agentos-setup ]; then
+    _windowed=1
+    printf "\n${BANNER}This machine sealed itself without a local model.${RST}\n"
+    # The status line is root's, world-readable, one line of JSON; display only. `refused` is the
+    # one reason "run setup again" may not cure: it is also what a box installed before the setup
+    # window gets (its model server keeps an old uid; that box needs a reinstall).
+    if grep -q '"reason": "refused"' /run/agentos-setup/status 2>/dev/null; then
+      printf "Setup was refused on this machine, and nothing here can reach the network.\n"
+      printf "Why is in the log: press Ctrl+Alt+F3, log in as root, and run\n"
+      printf "    journalctl -t agos-window --no-pager | tail -n 20\n"
+      printf "If it says a reinstall is needed, this machine was installed before the setup window\n"
+      printf "existed and has to be installed again. Otherwise, to run setup again:\n"
+    else
+      printf "Its setup window ended before the download finished, and nothing here can reach the network.\n"
+      printf "To run setup again: press Ctrl+Alt+F3, log in as root, connect the network if it was Wi-Fi\n"
+      printf "  (nmcli dev wifi connect <name> --ask), then:\n"
+    fi
+    printf "    rm /var/lib/agent-os/seal/sealed /var/lib/agent-os/seal/window.json && reboot\n\n"
+  fi
+  if [ -z "$_windowed" ] && command -v nmtui >/dev/null 2>&1 && ! _net_ok; then
     printf "\n${BANNER}Let's get you online.${RST} No network yet — I need it to install my brain.\n"
     printf "Open the wifi picker? [Y/n] "
     IFS= read -r _ans < /dev/tty 2>/dev/null || _ans=n
     case "$_ans" in ""|y|Y|yes|YES) nmtui || true ;; *) : ;; esac
   fi
-  if command -v systemctl >/dev/null 2>&1 && _net_ok; then
+  if [ -z "$_windowed" ] && command -v systemctl >/dev/null 2>&1 && _net_ok; then
     # Online but the local brain may still be DOWNLOADING. The pull is a ROOT service
     # (agent-os-pull-model) driven by a self-healing ROOT timer (agent-os-pull-model.timer,
     # modules/brain.nix); the agent is rootless by design (PR #21) so it can only WATCH the

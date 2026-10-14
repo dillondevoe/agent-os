@@ -39,7 +39,10 @@
 # (`agentos-seal`) never appends and has no access to the chain: it is the one unit that parses
 # bytes from a process that has been on the network, and it must always be able to run.
 #
-# No shipped image enables the window. Turning it on is the product path's decision (slice 4).
+# SLICE 4a (spec 5.1): the product image (`agentos`) enables the window. With that, a box installed
+# before the window can arrive here by `nixos-rebuild switch`, on a running system with the agent
+# logged in: the program refuses to open next to any process that is not the system's own and seals
+# at once (agos_window.py). Two anomalies get a record in the chain.
 #
 # SECURITY SURFACE (egress wall): branch -> PR -> Fable, never direct-push, never self-merge.
 { config, options, pkgs, lib, ... }:
@@ -96,6 +99,16 @@ let
     tags_port = 11434;
     audit = "${auditPkg}/bin/audit";
     audit_log = "${auditDir}/audit.log";
+    # Slice 4a (spec 5.1): the window does not open while a process exists that is not the system's
+    # own (this account's uid, or any uid outside the system and DynamicUser= ranges: the account
+    # can hold processes under its subordinate uids and as Nix build users), and only if the
+    # fetcher's account has the uid the set names. Both accounts are resolved from /etc/passwd at
+    # run time: the agent's has no static uid, and nixpkgs never changes the uid of an account that
+    # already exists (a box installed before the window keeps the fetcher's old one). The program
+    # has no switch for either check: without the first name the ranges still decide, and without
+    # the second it refuses to open.
+    agent_user = agentUser;
+    fetch_user = config.services.ollama.user;
   }
   # Omitted when null, as the wall omits the variables: a set-but-empty signer is refused by `audit`.
   // lib.optionalAttrs (wallSigner != null) { audit_signer = wallSigner; }
@@ -214,6 +227,11 @@ let
     RestrictAddressFamilies = [ "AF_UNIX" "AF_NETLINK" ];   # nft speaks netlink; systemctl a unix socket
     CapabilityBoundingSet = [ "CAP_NET_ADMIN" ];           # nft. Everything else is root on root's own files.
     SystemCallArchitectures = "native";
+    # DO NOT ADD PrivateUsers=, ProtectProc= or ProcSubset= HERE. The window program walks /proc for
+    # processes that are not the system's own (spec 5.1). PrivateUsers= would show every other
+    # process as uid 65534, which counts as foreign: every first boot would seal with no model.
+    # ProtectProc=/ProcSubset= would hide them: the look would see nobody, always. flake.nix asserts
+    # all three are absent from the two units that look.
   };
 in
 {
@@ -322,10 +340,10 @@ in
         ExecStart = "${run} recompute";
         ExecReload = "${run} recompute";
         ExecStop = "${run} stop";          # the shutdown stamp of the budget
-        # The stamp may wait for the state lock (150 s) behind a tick that is sealing and recording
-        # (up to 145 s, agos_window.py). The default 90 s would let systemd kill it, and the next
-        # boot would inherit a budget up to a minute too generous.
-        TimeoutStopSec = "180s";
+        # The stamp may wait for the state lock (175 s) behind the longest holder (up to 165 s,
+        # agos_window.py), and then flushes (20 s). The default 90 s would let systemd kill it, and
+        # the next boot would inherit a budget up to a minute too generous.
+        TimeoutStopSec = "200s";
       };
     };
 

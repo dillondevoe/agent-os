@@ -42,7 +42,7 @@
 # after it was closed. Every one of them therefore holds an exclusive lock on the state directory from
 # its first read to its last effect, and re-reads nothing it decided on outside it. Whoever cannot get
 # the lock may still CLOSE the set (closing is always safe) but never opens it. The wait for the lock
-# is LOCK_WAIT (150 s): longer than the longest holder (the table at the limits below; 145 s).
+# is LOCK_WAIT (175 s): longer than the longest holder (the table at the limits below; 165 s).
 # The window unit's stop timeout is set above both (setup-window.nix), or systemd would kill the
 # shutdown stamp while it waits.
 #
@@ -82,6 +82,26 @@
 #     for this marker's boot id and time), never from a side file: `recorded.json` is a pointer to
 #     the line, checked against the chain on every use. Late, never lost, never twice.
 #
+# NO OPEN NEXT TO THE AGENT (spec 5.1, slice 4a). The token only covers a boot this program sealed.
+# A box installed before the window existed arrives by `nixos-rebuild switch`: this program's first
+# run is on a RUNNING system, with the agent logged in, and there is no marker, no books and no
+# token. So before it opens the set, and again after, `recompute` reads /proc: if any process
+# exists that is not the system's own (or that cannot be said), the window does not open and the box
+# is sealed at once (`refused`). The tick asks the same question once a minute while the window is
+# open. "Not the system's own" and not "the agent's uid": the account can hold processes under
+# OTHER uids (its subordinate range through the setuid `newuidmap`; a Nix build it asked the daemon
+# for, which runs as a build user and, for a fixed-output build, on the host's network). So the
+# question is an allowlist: every uid of every process must be a system account's (below 1000) or
+# one systemd allocated for a unit of this image (DynamicUser=). The closing always comes BEFORE
+# the log line and the record: neither is worth a second of an open set. The fetcher's account must also have the uid the set names: on a box
+# upgraded in place nixpkgs keeps the account's old uid, and a window would admit nobody.
+#
+# ANOMALIES (spec 5.1). Two things that are not transitions go to the chain as `window-anomaly`,
+# once per boot each: `foreign-process` (the refusal above, by `recompute`) and `token-without-marker`
+# (the login token with no marker: the state was removed in a sealed boot, or the token appeared
+# while the window was open; by the tick, with what the books look like). Handling never waits for
+# the record.
+#
 # FAIL DIRECTION. Anything this cannot read, parse or decide ends with the set empty. A state
 # directory that cannot be written means the window does not open, and a tick that cannot write
 # closes it. A `sealed` marker that is present but malformed is "the wall is DOWN" (seal-check acts on
@@ -94,7 +114,7 @@ import fcntl, hashlib, json, os, signal, subprocess, sys, time
 CONFIG_JSON = "@AGOS_WINDOW_CONFIG@"
 
 FLOOR = 60                 # seconds every boot that opens the window is charged, at least
-LOCK_WAIT = 150            # seconds to wait for the state lock (a seal holds it while it restarts the fetcher)
+LOCK_WAIT = 175            # seconds to wait for the state lock (a seal holds it while it restarts the fetcher)
 # What a holder of the lock may spend on tools, each bounded: one nft, one restart, each stop. A seal
 # is the longest holder (nft + restart + the stops), and it must finish inside LOCK_WAIT, or whoever
 # waits behind it gives up: the shutdown stamp would then be skipped and the next boot would inherit
@@ -108,21 +128,32 @@ STOP_LIMIT = 10
 # ten seconds is a failure, not a queue.
 AUDIT_LIMIT = 10
 SCAN_LIMIT = 10
-# The longest holders of the state lock, every tool at its limit (LOCK_WAIT is 150):
-#   a seal                                   20 (flush) + 45 (restart) + 2 x 10 (stops)        =  85
-#   a recompute whose open is refused        20 (measure) + 10 (record) + 20 (open) + a seal   = 135
-#   a tick that seals and then records it    20 (flush) + a seal + 10 (scan) + 20 (measure) + 10 = 145
+PROC_LIMIT = 5             # one walk of /proc for processes of the agent's account (milliseconds, really)
+# The longest holders of the state lock, every tool at its limit (LOCK_WAIT is 175):
+#   a seal                                   20 (flush) + 45 (restart) + 2 x 10 (stops)          =  85
+#   a tick that seals and then records it    5 (/proc) + 20 (flush) + a seal + 10 (scan) + 20 (measure) + 10 = 150
+#   a recompute that finds the agent's account alive AFTER the open
+#                                            5 (/proc) + 20 (measure) + 10 (record) + 20 (open)
+#                                            + 5 (/proc) + a seal + 10 (scan) + 10 (the anomaly) = 165
+# A tick does ONE job on the chain per run (the seal's record or an anomaly, never both).
 # The table assumes ONE unit to restart and TWO to stop, which is what setup-window.nix compiles in.
 # `config()` computes the same bound from the lists it is given and refuses a configuration that
-# would not fit: a third unit to stop would otherwise pass every test and overrun the lock.
+# would not fit: a third unit to stop (175) would otherwise pass every test and overrun the lock.
 LOCK_BUDGET = LOCK_WAIT                               # the design value (tests shorten LOCK_WAIT itself)
 
 
 def worst_lock_seconds(c):
     seal_s = NFT_LIMIT + RESTART_LIMIT * len(c.get("restart_units", [])) + STOP_LIMIT * len(c.get("stop_units", []))
-    return NFT_LIMIT + seal_s + SCAN_LIMIT + NFT_LIMIT + AUDIT_LIMIT
+    tick_s = PROC_LIMIT + NFT_LIMIT + seal_s + SCAN_LIMIT + NFT_LIMIT + AUDIT_LIMIT
+    recompute_s = PROC_LIMIT + NFT_LIMIT + AUDIT_LIMIT + NFT_LIMIT + PROC_LIMIT + seal_s + SCAN_LIMIT + AUDIT_LIMIT
+    return max(tick_s, recompute_s)
 RECORD_SCHEMA = 1
 SEAL_REASONS = ("complete", "budget", "deadline", "invalid state", "timeout", "not open", "refused")
+ANOMALIES = ("foreign-process", "token-without-marker")
+SYSTEM_UID_MAX = 999       # the image's own accounts (root, its services); normal accounts start at 1000
+DYNAMIC_UIDS = (61184, 65519)      # what systemd allocates for DynamicUser= units, which only root's units get
+BOOKS = ("absent", "malformed", "this-boot", "other-boot")     # what a tick can SEE of window.json; not why
+PASSWD_MAX = 1 << 20       # bytes of /etc/passwd we are willing to read
 STATE_MAX = 4096           # bytes of a state file
 POLL = 5                   # seconds between looks while the seal waits for the model
 PROBE_LIMIT = 15           # seconds, in all, one look at the fetcher's model list may take
@@ -413,6 +444,79 @@ def _sealed_ok(c, flushed, reason):
     return 0 if _allow_logins(c) else 1
 
 
+# ── is there a process that is not the system's own? (spec 5.1) ───────────────────────────────────
+@_total(None)
+def _account_uid(c, name):
+    """The uid /etc/passwd gives this account, or None (no such account, or it cannot be said). Read
+    from the file, not through NSS: the box's accounts are declarative, and a lookup that can ask a
+    daemon is a lookup that can hang."""
+    with open(c.get("passwd_path", "/etc/passwd"), "rb") as f:
+        data = f.read(PASSWD_MAX + 1)
+    if len(data) > PASSWD_MAX:
+        return None
+    want = name.encode("ascii")
+    for line in data.split(b"\n"):
+        f = line.split(b":")
+        if len(f) >= 3 and f[0] == want:
+            uid = int(f[2]) if f[2].isdigit() and len(f[2]) <= 10 else None
+            return uid if uid is not None and 0 < uid < 1 << 32 else None       # never root
+    return None
+
+
+def _foreign_uid(uid, agent_uid):
+    """Is this uid anything but the system's own? The agent's account, by its number, whatever the
+    number is; and every uid that is neither a system account's nor one systemd allocated to a unit:
+    normal accounts, their subordinate ranges, the Nix build users, `nobody`."""
+    return uid == agent_uid or (uid > SYSTEM_UID_MAX and not DYNAMIC_UIDS[0] <= uid <= DYNAMIC_UIDS[1])
+
+
+@_total(None)
+def foreign_processes(c):
+    """How many processes exist that are not the system's own: a count, or None when that cannot be
+    said. EVERY CALLER TREATS None AS "SOME". A process counts if ANY of its four uids (real,
+    effective, saved, filesystem; as the reader's own namespace sees them) is foreign. There is no
+    configuration that switches this off: with no account named, the ranges alone decide. A process
+    that exits between the listing and the read is gone, not unknown: a boot is full of those, and
+    counting them would seal a first boot for nothing."""
+    name = c.get("agent_user")
+    agent_uid = None
+    if name:
+        agent_uid = _account_uid(c, name)
+        if agent_uid is None:
+            return None
+    import time as real_time                         # a deadline on the real clock, whatever a test did to `time`
+    deadline = real_time.monotonic() + PROC_LIMIT
+    proc = c.get("proc_path", "/proc")
+    count = 0
+    for n, d in enumerate(os.listdir(proc)):
+        if n % 256 == 0 and real_time.monotonic() > deadline:
+            return None
+        if not (d.isascii() and d.isdigit()):
+            continue
+        try:
+            fd = os.open(os.path.join(proc, d, "status"), os.O_RDONLY | os.O_CLOEXEC)
+        except (FileNotFoundError, NotADirectoryError, ProcessLookupError):
+            continue                                 # it exited
+        try:
+            data = os.read(fd, 4096)                 # `Uid:` is the ninth line
+        except ProcessLookupError:
+            continue                                 # it exited while we held the file
+        finally:
+            os.close(fd)
+        if not data:
+            continue
+        uids = None
+        for line in data.split(b"\n"):
+            if line.startswith(b"Uid:"):
+                uids = line[4:].split()
+                break
+        if uids is None or len(uids) != 4 or not all(u.isdigit() and len(u) <= 10 for u in uids):
+            return None                              # a process we cannot attribute
+        if any(_foreign_uid(int(u), agent_uid) for u in uids):
+            count += 1
+    return count
+
+
 # ── the one detector ────────────────────────────────────────────────────────────────────────────
 class _Deadline(Exception):
     pass
@@ -624,7 +728,13 @@ def _is_seal_of(line, marker):
 
 @_total(None)
 def _find_seal(c, marker):
-    """Where is this marker's seal in the chain? (offset, sha256 of the line) if it is there, False
+    """Where is this marker's seal in the chain?"""
+    return _find_line(c, lambda line: _is_seal_of(line, marker))
+
+
+@_total(None)
+def _find_line(c, is_it):
+    """Where is the record `is_it` recognises? (offset, sha256 of the line) if it is there, False
     if it is not, None if the log cannot be read or not within SCAN_LIMIT (then the record stays
     owed: a log too long to read in that time is also too long for `audit append`, which reads all
     of it to find its head). Only whole lines count: a torn tail is not a record."""
@@ -641,7 +751,7 @@ def _find_seal(c, marker):
             for n, line in enumerate(f):
                 if n % 1024 == 0 and real_time.monotonic() > deadline:
                     return None
-                if line.endswith(b"\n") and _is_seal_of(line, marker):
+                if line.endswith(b"\n") and is_it(line):
                     return offset, hashlib.sha256(line).hexdigest()
                 offset += len(line)
         return False
@@ -712,6 +822,89 @@ def reconcile(c, marker):
     except OSError:
         pass                                         # no pointer: the next tick scans again, and stops there
     return True
+
+
+@_total(False)
+def _is_anomaly_of(line, boot_id, kind):
+    """Is this one line of the chain the record of this kind of anomaly in this boot?"""
+    if b"window-anomaly" not in line:
+        return False
+    r = _json(line, "utf-8")
+    return (isinstance(r, dict) and r.get("src") == "setup-window" and r.get("event") == "window-anomaly"
+            and r.get("boot_id") == boot_id and r.get("kind") == kind)
+
+
+@_total(False)
+def _anomaly_pointer_holds(c, boot_id, kind):
+    """As `_pointer_holds`: the pointer file names a line, and only the line itself is believed."""
+    data, _ = _read(os.path.join(c["state_dir"], "anomaly-%s.json" % kind))
+    p = _json(data) if data is not None else None
+    if (not isinstance(p, dict) or set(p) != {"boot_id", "kind", "offset", "sha256"}
+            or p["boot_id"] != boot_id or p["kind"] != kind
+            or not isinstance(p["offset"], int) or isinstance(p["offset"], bool) or not 0 <= p["offset"] < 1 << 62
+            or not isinstance(p["sha256"], str)):
+        return False
+    fd = _open_log(c)
+    if fd is None or fd == "absent":
+        return False
+    try:
+        with os.fdopen(fd, "rb") as f:
+            f.seek(p["offset"])
+            line = f.readline(1 << 16)
+        return line.endswith(b"\n") and hashlib.sha256(line).hexdigest() == p["sha256"] and _is_anomaly_of(line, boot_id, kind)
+    except OSError:
+        return False
+
+
+@_total(False)
+def note_anomaly(c, kind, **measured):
+    """Under the state lock, by the two appending roles only: one `window-anomaly` record of this
+    kind per boot (spec 5.1). True if it is known to be in the chain. NOTHING WAITS FOR THIS: the
+    caller has already refused, closed or sealed, and a False only means the record is still owed.
+    The tick asks again every minute for its kind. `recompute` asks again only when it next runs
+    with the same thing in front of it, so a `foreign-process` the chain refused may stay unwritten
+    for that boot: what is then in the chain is the seal's own record (`refused`), and the journal.
+    (The seal comes first, so the login token may exist while this appends: the agent's own wall
+    can be writing the chain at the same moment. `audit append` takes the chain's lock.)
+
+    What is signed is what this role measured: the boot it runs in, the generation it runs from, and
+    the fields the caller counted or looked at itself. Nothing a process of the agent's account
+    said, and nothing copied from a file."""
+    if not c.get("audit"):
+        return True
+    if kind not in ANOMALIES:
+        return False
+    boot_id = _boot_id(c)
+    if not boot_id:
+        return False                                 # no boot to count "once per boot" in
+    if _anomaly_pointer_holds(c, boot_id, kind):
+        return True
+    found = _find_line(c, lambda line: _is_anomaly_of(line, boot_id, kind))
+    if found is None:
+        return False
+    if found is False:
+        try:
+            toplevel, digest = _generation(c)
+        except OSError:
+            return False
+        return _append_record(c, "window-anomaly", kind=kind, boot_id=boot_id, toplevel=toplevel,
+                              ruleset_sha256=digest, **measured)
+    try:
+        _write(os.path.join(c["state_dir"], "anomaly-%s.json" % kind),
+               {"boot_id": boot_id, "kind": kind, "offset": found[0], "sha256": found[1]})
+    except OSError:
+        pass                                         # no pointer: the next look scans again, and stops there
+    return True
+
+
+def _books(c):
+    """What window.json looks like to this boot: one of BOOKS. An observation, not a cause: the
+    books of this boot beside a token and no marker may mean the token appeared while the window
+    was open, or that only the marker was removed afterwards. The record says what was seen."""
+    status, w = load_window(c)
+    if status != "valid":
+        return "absent" if status == "absent" else "malformed"
+    return "this-boot" if w["boot_id"] == _boot_id(c) else "other-boot"
 
 
 def _boot_id(c):
@@ -813,6 +1006,26 @@ def _recompute(c):
         log("recompute: the state says open, but this boot was already sealed and logins are enabled; "
             "the window stays closed until a reboot")
         return 1
+    # NO OPEN NEXT TO THE AGENT (spec 5.1). The token above covers a boot this program sealed. This
+    # covers the rest: a box that was running before this program existed on it (an upgrade by
+    # `switch`), or one whose token was removed under a logged-in agent. Before the books, so that a
+    # refusal leaves no books and no `window-opened` behind. The box is sealed here and now: "closed,
+    # unmarked, agent running" is not a state the gates or seal-check know. A configuration that does
+    # not name the fetcher's account is refused the same way: no silent skip.
+    present = foreign_processes(c)
+    if present != 0:
+        r = _seal(c, "refused")                      # FIRST: the set may hold the uid already (a restart of this unit)
+        log("recompute: %s that is not the system's own; the window does not open next to them: sealed"
+            % ("it cannot be said that there is no process" if present is None else "%d process(es) exist" % present))
+        note_anomaly(c, "foreign-process", processes=present)
+        return r
+    if not c.get("fetch_user") or _account_uid(c, c["fetch_user"]) != c["fetch_uid"]:
+        # nixpkgs never changes the uid of an account that exists. A box installed before the window
+        # keeps the fetcher's old uid; the set names the new one; a window would admit nobody and
+        # burn its budget. Such a box cannot be provisioned in place.
+        log("recompute: the fetcher's account does not have uid %d on this box (it was installed before the "
+            "setup window); a window would admit nobody: sealing. Provisioning this box needs a reinstall" % c["fetch_uid"])
+        return _seal(c, "refused")
     try:
         _write(os.path.join(c["state_dir"], "window.json"), state)      # the books first: no state, no window
     except OSError as e:
@@ -839,6 +1052,14 @@ def _recompute(c):
     if not open_set(c):
         log("recompute: nft refused the open: sealing")
         return _seal(c, "refused")
+    # The second look. Every door to the account is gated, so nothing should have come through
+    # between the first look and the open; if something did, the window closes before anything else.
+    present = foreign_processes(c)
+    if present != 0:
+        r = _seal(c, "refused")                      # the flush first, before a word is logged or recorded
+        log("recompute: a process that is not the system's own appeared while the window was opening: sealed")
+        note_anomaly(c, "foreign-process", processes=present)
+        return r
     log("window %s remaining=%d boots=%d" % (kind, int(state["remaining"]), state["boots"]))
     _status(c, state="open", remaining=int(state["remaining"]))
     return 0
@@ -858,9 +1079,17 @@ def tick(c, final=False):
             # The seal's record (spec 2.7): whoever sealed, this is where it reaches the chain. Not
             # at shutdown (`stop`): a record is not worth holding a shutdown for, and the next boot's
             # first tick writes it. The tick's own result is the wall's state, not the record's.
+            # ONE job on the chain per tick (the lock's arithmetic counts one scan and one append).
             sealed = load_sealed(c)
-            if sealed[0] == "valid" and not reconcile(c, sealed[1]):
-                log("tick: the seal's record is still owed to the audit chain; trying again in a minute")
+            if sealed[0] == "valid":
+                if not reconcile(c, sealed[1]):
+                    log("tick: the seal's record is still owed to the audit chain; trying again in a minute")
+            elif sealed[0] == "absent" and logins_enabled(c):
+                # The login token with no marker (spec 5.1): the state was removed in a sealed boot,
+                # or the token appeared while the window was open. `_tick` has closed the set either
+                # way; this is the line in the chain that says it was seen.
+                if not note_anomaly(c, "token-without-marker", books=_books(c)):
+                    log("tick: the anomaly's record (token-without-marker) is still owed to the audit chain")
         return r
 
 
@@ -905,6 +1134,19 @@ def _tick(c, final):
         close_set(c)
         log("tick: the books open the window in the future; window closed")
         return _seal(c, "invalid state")
+    # NO OPEN NEXT TO THE AGENT, every minute (spec 5.1). `recompute` looks before and after it
+    # opens. This is for what is left: a refusal whose flush nft did not confirm (the set still holds
+    # the uid, the books say open, and nothing else would ask again until the budget is spent), a
+    # root process that became the account's after the second look, and a process root started for
+    # the account by hand. Close, then seal, then say so. (No anomaly record from here: a tick does
+    # one job on the chain, and this tick's is the seal's record. The journal has the count.)
+    present = foreign_processes(c)
+    if present != 0:
+        close_set(c)
+        r = _seal(c, "refused")
+        log("tick: %s that is not the system's own while the window is open; window closed"
+            % ("it cannot be said that there is no process" if present is None else "%d process(es) exist" % present))
+        return r
     left = remaining_now(s, time.monotonic())
     try:
         _write(os.path.join(c["state_dir"], "window.json"), dict(s, remaining=left))

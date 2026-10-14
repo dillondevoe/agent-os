@@ -99,8 +99,16 @@
     in {
       # The whole machine. `agent-shell.nix` is the part that makes it Agent OS;
       # `configuration.nix` is boring base plumbing (bootloader, user, network).
-      nixosConfigurations.agentos = mkSystem [ ];
-      # Same machine, egress wall sealed — the post-model-pull `switch` target.
+      # THE PRODUCT IMAGE SEALS ITSELF (setup window, spec 5.1, slice 4a; owner 2026-10-13: two
+      # hours of open time). The loaded ruleset is always the sealed one; for the window's budget the
+      # model fetcher's uid alone may reach DNS and 443; the box then closes that by itself, records
+      # it in the audit chain, and only then does the agent's account get a process. No rebuild.
+      nixosConfigurations.agentos = mkSystem [ {
+        agentos.cleanRoom.setupWindow.enable = true;
+        agentos.cleanRoom.setupWindow.seconds = 7200;
+      } ];
+      # Sealed by BUILD: the window never opens on this target (the pre-window `switch` target, kept
+      # until the window has acceptance evidence on real hardware; spec 5.1, slice 4d).
       nixosConfigurations.agentos-sealed = mkSystem [ {
         agentos.cleanRoom.sealed = true;
         # WP-S1: the sealed box meshes over WireGuard, never Tailscale. Topology (address,
@@ -2249,8 +2257,9 @@
           let
             lib = nixpkgs.lib;
             p = nixpkgs.legacyPackages.${system};
-            off = self.nixosConfigurations.agentos.config;
+            off = (mkSystem [ ]).config;                 # the option at its default: no shipped image any more, still the module's contract
             on = (mkSystem [ { agentos.cleanRoom.setupWindow.enable = true; } ]).config;
+            product = self.nixosConfigurations.agentos.config;
             onSealed = (mkSystem [ { agentos.cleanRoom.setupWindow.enable = true; agentos.cleanRoom.sealed = true; } ]).config;
             content = c: c.networking.nftables.tables.agentos_egress.content;
             code = c: lib.filter (l: l != "" && !(lib.hasPrefix "#" l)) (map (l: lib.trim l) (lib.splitString "\n" (content c)));
@@ -2276,9 +2285,8 @@
           assert lib.assertMsg (on.networking.nftables.checkRuleset) "setup-window would false-PASS: checkRuleset is false";
           # (8) THE RECORD (spec 2.7, slice 3c). Until this slice an assertion here kept the window off
           # every shipped image. It is replaced by the structure the record depends on, which must
-          # hold for ANY configuration that enables the window. Whether a shipped image does is the
-          # product path's decision (slice 4); none does today (asserted last, as a fact to notice,
-          # not as a gate).
+          # hold for ANY configuration that enables the window. Since slice 4a the product image
+          # does (asserted below, with the class every other shipped image belongs to).
           # The audit binary is the wall's own derivation, by store path.
           # (That it is the SAME store path the broker's and the taint tracker's wrappers pin is checked in
           # the build below, on the wrappers' text.)
@@ -2309,9 +2317,35 @@
                                 && lib.elem "systemd-tmpfiles-setup.service" on.systemd.services.agent-os-identity-boot.after
                                 && lib.any (r: lib.hasPrefix "d /var/lib/agent-os/audit " r) on.systemd.tmpfiles.rules)
             "setup-window: exactly the window oneshot and the tick may write the audit chain, and both must Require the identity boot unit; the wait must do neither";
-          assert lib.assertMsg (lib.all (n: !(self.nixosConfigurations.${n}.config.agentos.cleanRoom.setupWindow.enable or false))
-                                  (lib.attrNames self.nixosConfigurations))
-            "setup-window: a shipped configuration now enables the setup window. That is slice 4's decision; if this is it, delete this assertion in the same change";
+          # SLICE 4a (spec 5.1). The assertion that stood here said no shipped configuration enables
+          # the window. Its successor: the product image does, with the owner's length; every other
+          # shipped configuration is either sealed by build or has no wall at all. A new image has
+          # to be placed in one of the three on purpose.
+          assert lib.assertMsg (let
+                                  cr = n: self.nixosConfigurations.${n}.config.agentos.cleanRoom or { };
+                                  windowed = lib.filter (n: (cr n).enable or false && (cr n).setupWindow.enable or false && !((cr n).sealed or false)) (lib.attrNames self.nixosConfigurations);
+                                  sealedByBuild = lib.filter (n: (cr n).enable or false && (cr n).sealed or false) (lib.attrNames self.nixosConfigurations);
+                                  noWall = lib.filter (n: !((cr n).enable or false)) (lib.attrNames self.nixosConfigurations);
+                                # EXHAUSTIVE: a wall that is on, not sealed by build and without the
+                                # window (the module at its defaults: DNS and 80/443 for every uid
+                                # until a rebuild) is in none of the three lists, so the lists are
+                                # also counted against every configuration there is.
+                                in lib.length windowed + lib.length sealedByBuild + lib.length noWall == lib.length (lib.attrNames self.nixosConfigurations)
+                                   && windowed == [ "agentos" ] && sealedByBuild == [ "agentos-sealed" "agentos-sealed-s5" ]
+                                   && noWall == [ "agentos-open" "installer" ]
+                                   && product.agentos.cleanRoom.setupWindow.seconds == 7200
+                                   && lib.all (n: !((cr n).setupWindow.enable or false)) sealedByBuild)
+            "setup-window: the product image `agentos` is the one shipped configuration with the setup window (two hours); agentos-sealed and agentos-sealed-s5 are sealed by build with the window off; agentos-open and installer have no wall. A new or changed image must be placed on purpose (spec 5.1).";
+          # The two units that walk /proc must see every process, with its real uids (setup-window.nix,
+          # the note in `sandbox`).
+          assert lib.assertMsg (lib.all (u: !(u.serviceConfig ? PrivateUsers) && !(u.serviceConfig ? ProtectProc) && !(u.serviceConfig ? ProcSubset)) [ win tick ])
+            "setup-window: the window oneshot and the tick read /proc for foreign processes; PrivateUsers=, ProtectProc= or ProcSubset= on them would blind that look or seal every first boot";
+          # The product image is exactly the configuration these assertions describe, plus its length.
+          assert lib.assertMsg (product.system.build.agosWindowConfig == on.system.build.agosWindowConfig
+                                && content product == content on
+                                && wc.agent_user == "agent" && wc.agent_user == on.services.getty.autologinUser
+                                && wc.fetch_user == "ollama" && on.users.users.ollama.uid == wc.fetch_uid)
+            "setup-window: the product image's window must be the one asserted here, and the program must be told the agent's account and the fetcher's (it reads /proc for the first and /etc/passwd for both)";
           # (7) SEAL-CHECK, the second key (spec 2.5, slice 3b part 2). Sealed-class response; the early
           # run follows the window unit and precedes the network; the second run follows the wait, is
           # required by tty1's getty from ITS side, has no condition and is not RemainAfterExit.
@@ -2415,8 +2449,8 @@
                                             && !(c.systemd.services."user@".serviceConfig ? ExecCondition))
                                         [ off onSealed ])
             "setup-window: with the window off, or on a box sealed by build, no console is gated and none of the units exist";
-          assert lib.assertMsg (win.serviceConfig.TimeoutStopSec == "180s")
-            "setup-window: the window unit's stop timeout must exceed the lock wait (150 s), or the shutdown stamp is killed";
+          assert lib.assertMsg (win.serviceConfig.TimeoutStopSec == "200s")
+            "setup-window: the window unit's stop timeout must exceed the lock wait (175 s) plus one flush, or the shutdown stamp is killed";
           assert lib.assertMsg (lib.count (l: l == "set setup_uid {") cOn == 1 && lib.count (l: l == r1) cOn == 1 && lib.count (l: l == r2) cOn == 1
                                 && lib.count (l: lib.hasInfix "setup_uid" l) cOn == 4 && lib.elem "typeof meta skuid" cOn
                                 && !(lib.any (l: lib.hasInfix "elements" l) cOn))
@@ -2555,14 +2589,18 @@
             touch $out
           '';
 
+        # Since slice 4a no shipped image loads this ruleset (`agentos` has the setup window, whose
+        # ruleset the `setup-window` check parses in all three of its states). It is still what the
+        # module renders at its defaults, and a module default that does not parse is a trap for
+        # whoever turns the window off; so the parse gate stays on it.
         nft-ruleset-unsealed =
           assert nixpkgs.lib.assertMsg
-            self.nixosConfigurations.agentos.config.networking.nftables.checkRuleset
+            (mkSystem [ ]).config.networking.nftables.checkRuleset
             "nft-ruleset-unsealed would false-PASS: networking.nftables.checkRuleset is false";
           nixpkgs.legacyPackages.${system}.runCommand "nft-ruleset-unsealed-check" { } ''
-            echo "agentos (unsealed) nftables ruleset passed nft --check via: ${
+            echo "the module-default (unsealed, no window; shipped by no image) nftables ruleset passed nft --check via: ${
               nixpkgs.lib.concatStringsSep " "
-                self.nixosConfigurations.agentos.config.systemd.services.nftables.serviceConfig.ExecStart
+                (mkSystem [ ]).config.systemd.services.nftables.serviceConfig.ExecStart
             }"
             touch $out
           '';

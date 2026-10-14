@@ -26,7 +26,8 @@
 #       is empty, the token exists, and only then tty1's getty starts and the agent exists. Controls:
 #       the second terminal and the serial console now log the agent in.
 #   D6  re-provisioning under a running agent is refused: with the state removed and the window unit
-#       restarted in the sealed boot, the set stays empty. After a reboot the same state IS a first
+#       restarted in the sealed boot, the set stays empty, and the tick writes ONE `window-anomaly`
+#       (token-without-marker, books absent) to the chain. After a reboot the same state IS a first
 #       boot: the window opens, and the agent is absent again.
 #   D7  the wait is killed: nothing seals (only a timeout does), the window is left to the tick, and
 #       the agent stays absent: no token, tty1's getty did not follow a wait that failed. Starting
@@ -293,6 +294,15 @@ pkgs.testers.runNixOSTest {
     box.succeed("journalctl -t agos-window --no-pager | grep -q 'the window stays closed until a reboot'")
     box.succeed("systemctl restart nftables.service; sleep 3")
     assert elements() == [], f"D6: an nftables restart opened it: {elements()}"
+    # Slice 4a (spec 5.1): the tick records what it sees, once: the login token with no marker and no
+    # books. Nothing is sealed again (no marker comes back), and a second tick adds no second line.
+    box.wait_until_succeeds("grep -q token-without-marker /var/lib/agent-os/audit/audit.log", timeout=150)
+    box.succeed("systemctl start agentos-setup-window-tick.service; systemctl start agentos-setup-window-tick.service")
+    this_boot = box.succeed("cat /proc/sys/kernel/random/boot_id").strip()
+    d6 = [r for r in (json.loads(l) for l in box.succeed("grep window-anomaly /var/lib/agent-os/audit/audit.log").splitlines())
+          if r["boot_id"] == this_boot]           # (an earlier boot's re-provisioning may have left its own)
+    assert len(d6) == 1 and d6[0]["kind"] == "token-without-marker" and d6[0]["books"] == "absent", f"D6: {d6}"
+    box.fail(f"test -e {STATE}/sealed")
     no_violation("D6")
     reprovision("D6")
     no_agent("D6 after the reboot")

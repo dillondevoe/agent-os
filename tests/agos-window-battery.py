@@ -59,6 +59,20 @@
 #      role, the set ends EMPTY, there is no login token, and the seal's record is still written when
 #      the hostile file is only the pointer. Then the net itself: an exception planted inside each
 #      role's own logic ends with the set flushed and 1.
+#   W. NO OPEN NEXT TO THE AGENT (spec 5.1), against a fake /proc and passwd. A process with a uid
+#      that is not the system's own in ANY of its four uid slots (the agent's account; a normal
+#      account; a subordinate uid; a Nix build user; `nobody`; but not a system account or a
+#      DynamicUser= uid), before the open: nothing opens, no books, no `window-opened`; the box is
+#      sealed `refused` and ONE `window-anomaly` (foreign-process, with the count) is in the chain
+#      per boot, whatever is done to its pointer. The set is flushed BEFORE the record is attempted.
+#      Nothing in the configuration turns the look off. A process that
+#      appears between the open and the second look: the set is flushed BEFORE anything else.
+#      What cannot be said counts as present (no /proc, a status with no Uid line, an account that
+#      does not resolve or resolves to root, the walk past its limit); a process that EXITED
+#      between the listing and the read does not (a first boot is full of them). The fetcher's
+#      account with another uid than the set names: sealed, nothing opened. The tick records the
+#      login token with no marker once per boot, with what the books look like, and does ONE job on
+#      the chain per run.
 #   K. config: the fetch uid must be a positive number (never root, never a name); the window is at
 #      most 4 hours; the installed copy ignores AGOS_WINDOW_CONFIG; the placeholder appears once.
 #
@@ -104,8 +118,14 @@ def ok(tag):
     passed.append(tag); print("  ok  " + tag)
 
 
+CORE_PROC, CORE_PASSWD = os.path.join(TMP, "core-proc"), os.path.join(TMP, "core-passwd")
+os.makedirs(CORE_PROC)                               # nobody at all: the program has no way to skip the look
+open(CORE_PASSWD, "w").write("root:x:0:0::/root:/bin/sh\nollama:x:61:61::/var/empty:/nologin\n")
+
+
 def cfg(**over):
     c = {"state_dir": STATE, "length": LENGTH, "build_epoch": BUILD, "fetch_uid": 61, "nft": NFT, "systemctl": SYSTEMCTL,
+         "proc_path": CORE_PROC, "passwd_path": CORE_PASSWD, "fetch_user": "ollama",
          "open_file": OPEN_F, "close_file": CLOSE_F, "ruleset_file": RULESET, "boot_id_path": BOOTID, "toplevel": TOP,
          "restart_units": ["ollama.service"], "stop_units": ["agent-os-pull-model.timer", "agent-os-pull-model.service"],
          "store_prefix": TMP + "/"}                       # the battery's "store"; the installed copy has no such key
@@ -435,14 +455,15 @@ finally:
 check([t for _, _, t in spent] == [A.NFT_LIMIT, A.RESTART_LIMIT, A.STOP_LIMIT, A.STOP_LIMIT], "J: every tool call under the lock must carry its limit: %r" % spent)
 # The longest holders, every tool at its limit (the table above LOCK_WAIT in the program):
 seal_s = A.NFT_LIMIT + A.RESTART_LIMIT + 2 * A.STOP_LIMIT
-check(seal_s == 85 and A.NFT_LIMIT + A.AUDIT_LIMIT + A.NFT_LIMIT + seal_s == 135
-      and A.NFT_LIMIT + seal_s + A.SCAN_LIMIT + A.NFT_LIMIT + A.AUDIT_LIMIT == 145,
+check(seal_s == 85 and A.PROC_LIMIT + A.NFT_LIMIT + seal_s + A.SCAN_LIMIT + A.NFT_LIMIT + A.AUDIT_LIMIT == 150
+      and A.PROC_LIMIT == 5
+      and A.PROC_LIMIT + A.NFT_LIMIT + A.AUDIT_LIMIT + A.NFT_LIMIT + A.PROC_LIMIT + seal_s + A.SCAN_LIMIT + A.AUDIT_LIMIT == 165,
       "J: the lock-time table in the program no longer matches its constants")
 import re
 REAL_LOCK_WAIT = int(re.search(r"^LOCK_WAIT = (\d+)", open(MOD).read(), re.M).group(1))      # the battery shortens A.LOCK_WAIT
-check(A.NFT_LIMIT + seal_s + A.SCAN_LIMIT + A.NFT_LIMIT + A.AUDIT_LIMIT < REAL_LOCK_WAIT          # the longest holder of all
-      and sum(t for _, _, t in spent) < REAL_LOCK_WAIT and A.NFT_LIMIT + REAL_LOCK_WAIT < 180,
-      "J: a seal (%d s of tools at most) must finish inside the lock wait (%d s), and a stamp that waited for the lock must still fit the unit's 180 s stop timeout"
+check(165 < REAL_LOCK_WAIT                                                                       # the longest holder of all
+      and sum(t for _, _, t in spent) < REAL_LOCK_WAIT and A.NFT_LIMIT + REAL_LOCK_WAIT < 200,
+      "J: a seal (%d s of tools at most) must finish inside the lock wait (%d s), and a stamp that waited for the lock must still fit the unit's 200 s stop timeout"
       % (sum(t for _, _, t in spent), REAL_LOCK_WAIT))
 reset(); tool(NFT, rc=1); calls()
 check(A.tick(cfg()) == 1, "J: a tick that cannot close (no window yet) must report it")
@@ -1131,7 +1152,7 @@ finally:
     os.unlink(os.path.join(TMP, "hang"))
 check(limit0 == 10, "U: AUDIT_LIMIT")
 # the bound is computed from the units the program is given: one more to stop would not fit.
-check(A.worst_lock_seconds(cfg()) == 145 and A.LOCK_BUDGET == REAL_LOCK_WAIT == 150, "U: the worst case under the lock: %r" % A.worst_lock_seconds(cfg()))
+check(A.worst_lock_seconds(cfg()) == 165 and A.LOCK_BUDGET == REAL_LOCK_WAIT == 175, "U: the worst case under the lock: %r" % A.worst_lock_seconds(cfg()))
 for label, over, fits in (("as shipped", {}, True), ("a third unit to stop", {"stop_units": ["a", "b", "c"]}, False),
                           ("a second unit to restart", {"restart_units": ["a", "b"]}, False), ("nothing to restart or stop", {"restart_units": [], "stop_units": []}, True)):
     os.environ["AGOS_WINDOW_CONFIG"] = json.dumps(cfg(**over))
@@ -1178,8 +1199,10 @@ callers = {}
 for fn in [n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)]:
     for call in [n for n in ast.walk(fn) if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)]:
         callers.setdefault(call.func.id, set()).add(fn.name)
-check(callers.get("_append_record") == {"_recompute", "reconcile"} and callers.get("reconcile") == {"tick"},
-      "U: only recompute (the opens) and the tick (the seal) may append: %r %r" % (callers.get("_append_record"), callers.get("reconcile")))
+check(callers.get("_append_record") == {"_recompute", "reconcile", "note_anomaly"} and callers.get("reconcile") == {"tick"}
+      and callers.get("note_anomaly") == {"_recompute", "tick"},
+      "U: only recompute (the opens, a refusal) and the tick (the seal, an anomaly) may append: %r %r %r"
+      % (callers.get("_append_record"), callers.get("reconcile"), callers.get("note_anomaly")))
 reasons = set()
 for call in [n for n in ast.walk(tree) if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id in ("_seal", "seal")]:
     reasons |= {c.value for a in call.args[1:] for c in ast.walk(a) if isinstance(c, ast.Constant) and isinstance(c.value, str)}
@@ -1345,5 +1368,313 @@ for rname, role, victim in (("recompute", A.recompute, "_recompute"), ("tick", A
 pstatus_path = os.path.join(TMP, "p-status-deep"); open(pstatus_path, "w").write("[" * 100000)
 check(P.read_status(pstatus_path) == ("", None, ""), "V: the console program on a status nested past the parser")
 ok("V no reader raises on hostile contents; a role that raises anyway fails closed")
+
+# ── W. no open next to the agent; the anomaly records ───────────────────────────────────────────
+PROC, PASSWD = os.path.join(TMP, "proc"), os.path.join(TMP, "passwd")
+AGENT_UID = 1000
+
+
+def passwd(text="root:x:0:0::/root:/bin/sh\nollama:x:61:61::/var/empty:/nologin\nagent:x:%d:100::/home/agent:/bin/bash\n" % AGENT_UID):
+    open(PASSWD, "w").write(text)
+
+
+def status_of(pid, uids):
+    return ("Name:\tx\nUmask:\t0022\nState:\tS (sleeping)\nTgid:\t%d\nNgid:\t0\nPid:\t%d\nPPid:\t1\nTracerPid:\t0\n"
+            "Uid:\t%d\t%d\t%d\t%d\nGid:\t100\t100\t100\t100\n" % ((pid, pid) + tuple(uids))).encode()
+
+
+def procs(*entries):
+    """(pid, uids) with uids four numbers, raw bytes for the status file, or None for a process that
+    was listed and then exited (the directory is there, the file is not)."""
+    shutil.rmtree(PROC, True); os.makedirs(PROC)
+    os.makedirs(os.path.join(PROC, "sys")); open(os.path.join(PROC, "cpuinfo"), "w").close()
+    for pid, st in entries:
+        d = os.path.join(PROC, str(pid)); os.makedirs(d)
+        if st is not None:
+            open(os.path.join(d, "status"), "wb").write(st if isinstance(st, bytes) else status_of(pid, st))
+
+
+QUIET = [(1, (0, 0, 0, 0)), (40, (61, 61, 61, 61)), (41, None), (77, (154, 154, 154, 154))]
+
+
+def wcfg(**over):
+    return acfg(**dict({"agent_user": "agent", "fetch_user": "ollama", "proc_path": PROC, "passwd_path": PASSWD}, **over))
+
+
+def anomalies(kind=None):
+    return [r for r in mine() if r["event"] == "window-anomaly" and kind in (None, r["kind"])]
+
+
+def unseal():
+    """Take the box back to "no marker, no token" without a new boot (what removing the state and
+    the token by hand does)."""
+    for f in (os.path.join(STATE, "sealed"), TOKEN):
+        if os.path.exists(f):
+            os.unlink(f)
+
+
+passwd()
+# nobody of the account: it opens. An exited process (41) and other accounts change nothing.
+areset(); procs(*QUIET)
+check(A.foreign_processes(wcfg()) == 0 and A.recompute(wcfg()) == 0 and json.load(open(SETSTATE)) == [61]
+      and [r["event"] for r in mine()] == ["window-opened"],
+      "W: with no process of the agent's account the window must open: %r" % [r["event"] for r in mine()])
+# a name that only LOOKS like a pid entry, and an empty status (a task being torn down), are not processes
+procs(*QUIET); os.makedirs(os.path.join(PROC, "self")); open(os.path.join(PROC, "self", "status"), "wb").write(status_of(9, (AGENT_UID,) * 4))
+os.makedirs(os.path.join(PROC, "55")); open(os.path.join(PROC, "55", "status"), "wb").close()
+check(A.foreign_processes(wcfg()) == 0, "W: only numeric entries are processes, and an empty status is one that is gone")
+
+# WHO COUNTS. Not "the agent's uid": the account can hold processes under other uids (its
+# subordinate range via newuidmap, a Nix build it asked for). Everything that is not a system
+# account's uid or one systemd allocated for a unit counts.
+for uid, counts, what in ((0, 0, "root"), (61, 0, "the fetcher"), (999, 0, "the last system uid"), (1000, 1, "the first normal uid"),
+                          (1001, 1, "another normal account"), (30001, 1, "a Nix build user"), (100000, 1, "a subordinate uid"),
+                          (165535, 1, "the end of a subordinate range"), (61183, 1, "just below the DynamicUser range"),
+                          (61184, 0, "the first DynamicUser uid"), (65519, 0, "the last DynamicUser uid"), (65520, 1, "just above it"),
+                          (65534, 1, "nobody"), (4294967294, 1, "the largest uid")):
+    procs(*(QUIET + [(900, (uid,) * 4)]))
+    got = A.foreign_processes(wcfg(agent_user=None))        # the ranges alone: the named account (uid 1000 here) must not mask a boundary
+    check(got == counts and A.foreign_processes(wcfg()) == counts, "W: %s (uid %d) must count as %d: %r" % (what, uid, counts, got))
+# with no account named in the configuration the ranges still decide: there is no switch
+procs(*(QUIET + [(900, (100000,) * 4)]))
+check(A.foreign_processes(wcfg(agent_user=None)) == 1 and A.foreign_processes(cfg(proc_path=PROC)) == 1,
+      "W: a configuration that names no account must still see a foreign process")
+# an agent's account below 1000 still counts, by its number
+passwd("root:x:0:0::/root:/bin/sh\nollama:x:61:61::/:/n\nagent:x:500:100::/:/n\n"); procs(*(QUIET + [(900, (500,) * 4)]))
+check(A.foreign_processes(wcfg()) == 1 and A.foreign_processes(wcfg(agent_user=None)) == 0, "W: the named account counts by its number, wherever it is")
+passwd()
+# a uid field that is not a number is a process we cannot attribute
+procs(*(QUIET + [(900, b"Name:\tx\nUid:\t0\t0\tx\t0\n")]))
+check(A.foreign_processes(wcfg()) is None, "W: a Uid line with a non-number")
+
+# the account in ANY of the four slots, before the open
+for slot in range(4):
+    uids = [0, 0, 0, 0]; uids[slot] = AGENT_UID
+    areset(); procs(*(QUIET + [(900, tuple(uids))])); calls()
+    check(A.foreign_processes(wcfg()) == 1, "W: uid slot %d must count" % slot)
+    rc = A.recompute(wcfg()); did = calls()
+    check(rc == 0 and OPEN not in did and CLOSE in did and json.load(open(SETSTATE)) == []
+          and "window.json" not in state_files() and marker()["reason"] == "refused" and os.path.exists(TOKEN),
+          "W: slot %d: with the agent's account alive nothing may open, no books, and the box is sealed `refused`: rc=%r %r %r"
+          % (slot, rc, did, state_files()))
+    recs = mine()
+    check([r["event"] for r in recs] == ["window-anomaly"] and recs[0]["kind"] == "foreign-process" and recs[0]["processes"] == 1
+          and recs[0]["boot_id"] == "boot-1" and recs[0]["toplevel"] == TOP and recs[0]["ruleset_sha256"] == RULESET_SHA
+          and set(recs[0]) >= {"src", "schema", "event", "fetch_uid"},
+          "W: slot %d: one foreign-process record, nothing else, and no window-opened: %r" % (slot, recs))
+# the tick then records that seal; the chain reads: anomaly, sealed(refused)
+check(A.tick(wcfg()) == 0 and [r["event"] for r in mine()] == ["window-anomaly", "window-sealed"]
+      and seals()[0]["marker"]["reason"] == "refused", "W: the tick must record the refusal's seal: %r" % [r["event"] for r in mine()])
+
+# once per boot, whatever is done to the pointer; again in a new boot
+PTR = os.path.join(STATE, "anomaly-foreign-process.json")
+unseal(); check(A.recompute(wcfg()) == 0 and len(anomalies("foreign-process")) == 1 and os.path.exists(PTR),
+                "W: a second refusal in the same boot must find the record and write the pointer, not a second record")
+p0 = json.load(open(PTR))
+line = open(AUDIT_LOG, "rb").read()[p0["offset"]:].split(b"\n")[0] + b"\n"
+check(set(p0) == {"boot_id", "kind", "offset", "sha256"} and hashlib.sha256(line).hexdigest() == p0["sha256"]
+      and json.loads(line)["kind"] == "foreign-process", "W: the pointer must name the anomaly's line: %r" % p0)
+for label, bad in (("another boot", dict(p0, boot_id="boot-9")), ("another kind", dict(p0, kind="token-without-marker")),
+                   ("an offset past the file", dict(p0, offset=10 ** 12)), ("an offset no file has", dict(p0, offset=10 ** 400)),
+                   ("a hash that is not the line's", dict(p0, sha256="0" * 64)), ("not an object", [1]), ("nested past the parser", "[" * 3000),
+                   ("another line", dict(p0, offset=0)), ("absent", None)):
+    unseal()
+    if bad is None:
+        os.unlink(PTR)
+    else:
+        put("anomaly-foreign-process.json", bad)
+    try:
+        rc = A.recompute(wcfg()); raised = None
+    except Exception as e:
+        rc, raised = None, e
+    check(raised is None and rc == 0 and len(anomalies("foreign-process")) == 1 and marker()["reason"] == "refused",
+          "W: pointer %s: still sealed, still ONE record (rc=%r raised=%r n=%d)" % (label, rc, raised, len(anomalies("foreign-process"))))
+# the pointer is a pointer: a chain that LOST the record gets it again, whatever the file says
+put("anomaly-foreign-process.json", p0); shutil.rmtree(AUDIT_DIR); unseal()
+check(A.recompute(wcfg()) == 0 and [r["event"] for r in mine()] == ["window-anomaly"],
+      "W: a pointer into a chain that no longer has the record must not be believed: %r" % [r["event"] for r in mine()])
+# ...and so does a chain that never had it: a pointer at a REAL line, with that line's own hash,
+# which is some other record (here the window's own `window-opened`).
+areset(); procs(*QUIET); check(A.recompute(wcfg()) == 0 and [r["event"] for r in mine()] == ["window-opened"], "W: fixture: one other record")
+line0 = open(AUDIT_LOG, "rb").read().split(b"\n")[0] + b"\n"
+put("anomaly-foreign-process.json", {"boot_id": "boot-1", "kind": "foreign-process", "offset": 0, "sha256": hashlib.sha256(line0).hexdigest()})
+procs(*(QUIET + [(900, (AGENT_UID,) * 4)]))
+check(A.recompute(wcfg()) == 0 and [r["event"] for r in mine()] == ["window-opened", "window-anomaly"] and marker()["reason"] == "refused",
+      "W: a pointer at a line that is not the anomaly's must not be believed: %r" % [r["event"] for r in mine()])
+# the pointer's own bound, tested on the reader itself (the net around it would hide a hole here)
+for off in (HUGE, str(2 ** 63), str(2 ** 62)):
+    put("anomaly-foreign-process.json", raw({"boot_id": "boot-1", "kind": "foreign-process", "sha256": "0" * 64}, offset=off))
+    try:
+        got = A._anomaly_pointer_holds.__wrapped__(wcfg(), "boot-1", "foreign-process"); raised = None
+    except Exception as e:
+        got, raised = None, e
+    check(raised is None and got is False, "W: the anomaly pointer's own bound must refuse offset %s... before any seek (raised %r)" % (off[:12], raised))
+# the other kind in the same boot is its own record (the key is the boot AND the kind)
+unseal(); open(TOKEN, "w").close()
+check(A.tick(wcfg()) == 0 and sorted(r["kind"] for r in anomalies()) == ["foreign-process", "token-without-marker"],
+      "W: one record per kind per boot, not one per boot: %r" % [r["kind"] for r in anomalies()])
+unseal(); boot(2)
+check(A.recompute(wcfg()) == 0 and [r["boot_id"] for r in anomalies("foreign-process")] == ["boot-1", "boot-2"],
+      "W: a new boot's refusal is a new record")
+# a chain that refuses the record changes nothing about the refusal
+areset(); procs(*(QUIET + [(900, (AGENT_UID,) * 4)])); os.makedirs(AUDIT_DIR); open(AUDIT_LOG, "w").write('{"torn')
+check(A.recompute(wcfg()) == 0 and json.load(open(SETSTATE)) == [] and marker()["reason"] == "refused" and "window.json" not in state_files(),
+      "W: a refusal must not wait for its record")
+
+# what cannot be said counts as present; nothing raises
+for label, setup, over in (
+        ("no /proc", lambda: shutil.rmtree(PROC), {}),
+        ("a status with no Uid line", lambda: procs(*(QUIET + [(900, b"Name:\tx\nState:\tS\n")])), {}),
+        ("a Uid line with three numbers", lambda: procs(*(QUIET + [(900, b"Name:\tx\nUid:\t1\t2\t3\n")])), {}),
+        ("a status that is noise", lambda: procs(*(QUIET + [(900, bytes(range(256)) * 8)])), {}),
+        ("an account that does not exist", lambda: (procs(*QUIET), passwd("root:x:0:0::/root:/bin/sh\nollama:x:61:61::/:/n\n")), {}),
+        ("an account that is root", lambda: (procs(*QUIET), passwd("agent:x:0:0::/root:/bin/sh\nollama:x:61:61::/:/n\n")), {}),
+        ("an account with no number", lambda: (procs(*QUIET), passwd("agent:x:abc:0::/:/n\nollama:x:61:61::/:/n\n")), {}),
+        ("a uid too long to be one", lambda: (procs(*QUIET), passwd("agent:x:%s:0::/:/n\nollama:x:61:61::/:/n\n" % ("9" * 400))), {}),
+        ("no passwd", lambda: (procs(*QUIET), os.unlink(PASSWD)), {}),
+        ("an account name that is not ASCII", lambda: procs(*QUIET), {"agent_user": "agént"}),
+        ("the walk past its limit", lambda: procs(*QUIET), None)):
+    areset(); passwd(); setup(); calls()
+    limit0 = A.PROC_LIMIT
+    if over is None:
+        A.PROC_LIMIT, over = -1, {}
+    try:
+        try:
+            n = A.foreign_processes(wcfg(**over)); rc = A.recompute(wcfg(**over)); raised = None
+        except Exception as e:
+            n = rc = None; raised = e
+    finally:
+        A.PROC_LIMIT = limit0
+    did = calls()
+    check(raised is None and n is None and rc == 0 and OPEN not in did and json.load(open(SETSTATE)) == []
+          and marker()["reason"] == "refused" and "window.json" not in state_files()
+          and [(r["kind"], r["processes"]) for r in anomalies()] == [("foreign-process", None)],
+          "W: %s must count as present: n=%r rc=%r raised=%r %r" % (label, n, rc, raised, did))
+passwd(); check(limit0 == 5, "W: PROC_LIMIT")
+
+# the second look: a process of the account appears while the set is being opened
+areset(); procs(*QUIET); calls(); order = []
+real_open, real_record, real_tool2 = A.open_set, A._append_record, A._tool
+
+
+def open_then_appear(c):
+    r = real_open(c); procs(*(QUIET + [(901, (AGENT_UID,) * 4)])); return r
+
+
+A.open_set = open_then_appear
+A._append_record = lambda c, event, **f: (order.append(("record " + event + " " + f.get("kind", ""),
+                                                        json.load(open(SETSTATE)) if os.path.exists(SETSTATE) else None)), real_record(c, event, **f))[1]
+try:
+    rc = A.recompute(wcfg())
+finally:
+    A.open_set, A._append_record = real_open, real_record
+did = calls()
+check(rc == 0 and OPEN in did and did.index(CLOSE, did.index(OPEN)) > did.index(OPEN) and json.load(open(SETSTATE)) == []
+      and marker()["reason"] == "refused" and [r["event"] for r in mine()] == ["window-opened", "window-anomaly"]
+      and order[-1] == ("record window-anomaly foreign-process", []),
+      "W: a process that appears during the open: flushed first, sealed `refused`, then recorded: rc=%r %r %r" % (rc, did, order))
+
+# the tick asks too, once a minute, while the window is open: here the refusal's flush is NOT
+# confirmed (nft opens but will not close), so the set still holds the uid and the books say open.
+areset(); procs(*QUIET); tool(NFT, rc=1, measure_rc=0, open_rc=0); calls()
+A.open_set = open_then_appear
+try:
+    rc = A.recompute(wcfg())
+finally:
+    A.open_set = real_open
+check(rc == 1 and json.load(open(SETSTATE)) == [61] and "sealed" not in state_files() and window()["boot_id"] == "boot-1",
+      "W: fixture: a refusal whose flush failed leaves the set full and no marker (rc=%r %r)" % (rc, state_files()))
+check(A.tick(wcfg()) == 1 and "sealed" not in state_files(), "W: while nft still refuses, the tick cannot seal either (and says so by failing)")
+tool(NFT); calls()
+rc = A.tick(wcfg()); did = calls()
+check(rc == 0 and did[0] == CLOSE and json.load(open(SETSTATE)) == [] and marker()["reason"] == "refused",
+      "W: the tick must close a window that is open next to the agent's account, whatever is left of the budget: rc=%r %r" % (rc, did))
+# ...and it does not disturb a healthy window: nobody of the account, nothing closes
+areset(); procs(*QUIET); A.recompute(wcfg()); calls()
+check(A.tick(wcfg()) == 0 and CLOSE not in calls() and json.load(open(SETSTATE)) == [61] and "sealed" not in state_files(),
+      "W: a tick on a healthy open window closed it")
+# what the tick cannot say counts as present there too
+shutil.rmtree(PROC)
+check(A.tick(wcfg()) == 0 and json.load(open(SETSTATE)) == [] and marker()["reason"] == "refused", "W: a tick that cannot read /proc must close the window")
+
+# THE FLUSH COMES BEFORE THE RECORD, in the first look too: the unit restarted with the set still
+# full (a restart does not flush nft) and a foreign process now there.
+areset(); procs(*QUIET); check(A.recompute(wcfg()) == 0 and json.load(open(SETSTATE)) == [61], "W: fixture: open")
+procs(*(QUIET + [(900, (100000,) * 4)])); calls(); order = []; del SYS.lines[:]
+real_log = A.log
+A._append_record = lambda c, event, **f: (order.append(("record " + event + " " + f.get("kind", ""), json.load(open(SETSTATE)))), real_record(c, event, **f))[1]
+A.log = lambda line: (order.append(("log", json.load(open(SETSTATE)))), real_log(line))[1]
+try:
+    rc = A.recompute(wcfg())
+finally:
+    A._append_record, A.log = real_record, real_log
+check(rc == 0 and marker()["reason"] == "refused" and order and all(state == [] for _, state in order)
+      and ("record window-anomaly foreign-process", []) in order,
+      "W: a refusal with the set already full must flush before it logs or records anything: rc=%r %r" % (rc, order))
+
+# a configuration that does not name the fetcher's account is refused, not waved through
+areset(); procs(*QUIET); calls()
+rc = A.recompute(wcfg(fetch_user=None)); did = calls()
+check(rc == 0 and OPEN not in did and marker()["reason"] == "refused" and "window.json" not in state_files(),
+      "W: no fetcher account in the configuration must seal, not open: rc=%r %r" % (rc, did))
+
+# the fetcher's account does not have the uid the set names (a box upgraded in place)
+areset(); procs(*QUIET); passwd("root:x:0:0::/root:/bin/sh\nollama:x:992:992::/:/n\nagent:x:1000:100::/:/n\n"); calls(); del SYS.lines[:]
+rc = A.recompute(wcfg()); did = calls()
+check(rc == 0 and OPEN not in did and marker()["reason"] == "refused" and "window.json" not in state_files() and mine() == []
+      and any("reinstall" in l for l in SYS.lines),
+      "W: a fetcher account with another uid: sealed, nothing opened, and the log says a reinstall is needed: %r %r" % (did, SYS.lines))
+passwd()
+check(A._account_uid(wcfg(), "ollama") == 61 and A._account_uid(wcfg(), "agent") == AGENT_UID and A._account_uid(wcfg(), "nobody-here") is None,
+      "W: account lookup")
+
+# the tick: the login token with no marker, once per boot, with what the books look like
+scans = []
+real_find_line = A._find_line                     # every scan of the chain goes through this one function
+A._find_line = lambda c, is_it: (scans.append("scan"), real_find_line(c, is_it))[1]
+appended = []
+A._append_record = lambda c, event, **f: (appended.append(event), real_record(c, event, **f))[1]
+try:
+    def one_tick(c):
+        del scans[:]; del appended[:]
+        rc = A.tick(c)
+        check(len(scans) <= 1 and len(appended) <= 1, "W: a tick did more than one job on the chain: %r %r" % (scans, appended))
+        return rc
+    # (a) books of this boot: the window is open and the token appears
+    areset(); procs(*QUIET); check(A.recompute(wcfg()) == 0 and json.load(open(SETSTATE)) == [61], "W: fixture: open")
+    open(TOKEN, "w").close(); calls()
+    rc = one_tick(wcfg()); did = calls()
+    a = anomalies("token-without-marker")
+    check(rc == 0 and CLOSE in did and json.load(open(SETSTATE)) == [] and "sealed" not in state_files()
+          and len(a) == 1 and a[0]["books"] == "this-boot" and a[0]["boot_id"] == "boot-1" and "processes" not in a[0],
+          "W: the token while the window is open: closed, no marker, one record with books=this-boot: rc=%r %r %r" % (rc, did, a))
+    check(one_tick(wcfg()) == 0 and one_tick(wcfg()) == 0 and len(anomalies("token-without-marker")) == 1
+          and os.path.exists(os.path.join(STATE, "anomaly-token-without-marker.json")), "W: once per boot, and the pointer is written")
+    # (b) the state removed in a sealed boot: no books at all
+    areset(); procs(*QUIET); A.recompute(wcfg()); check(A.seal(wcfg(), "complete") == 0 and os.path.exists(TOKEN), "W: fixture: sealed")
+    rc = one_tick(wcfg())
+    check(rc == 0 and anomalies() == [] and len(seals()) == 1, "W: a sealed box with its marker is no anomaly: rc=%r %r %r" % (rc, [r["event"] for r in mine()], SYS.lines[-3:]))
+    for f in state_files():
+        os.unlink(os.path.join(STATE, f))
+    check(one_tick(wcfg()) == 0 and [x["books"] for x in anomalies("token-without-marker")] == ["absent"]
+          and "sealed" not in state_files() and json.load(open(SETSTATE)) == [], "W: the state removed in a sealed boot: books=absent, and no new marker")
+    # (c) books of another boot, (d) books that are not books: one record per BOOT, so each in its own
+    for n, (label, books, want) in enumerate((("another boot's", None, "other-boot"), ("malformed", "{not json", "malformed")), 3):
+        areset(); procs(*QUIET); A.recompute(wcfg()); A.tick(wcfg()); boot(n)
+        if books is not None:
+            put("window.json", books)
+        open(TOKEN, "w").close()
+        check(one_tick(wcfg()) in (0, 1) and [x["books"] for x in anomalies("token-without-marker")] == [want]
+              and json.load(open(SETSTATE)) == [], "W: %s books beside a token: %r" % (label, anomalies()))
+    # no boot id: nothing to count "once per boot" in, so nothing is written (and nothing raises)
+    areset(); procs(*QUIET); open(BOOTID, "w").close()
+    check(A.note_anomaly(wcfg(), "token-without-marker", books="absent") is False and mine() == [], "W: no boot id, no anomaly record")
+    boot(1)
+    check(A.note_anomaly(wcfg(), "made-up", x=1) is False and mine() == [], "W: only the two kinds exist")
+finally:
+    A._find_line, A._append_record = real_find_line, real_record
+check(A.ANOMALIES == ("foreign-process", "token-without-marker") and A.BOOKS == ("absent", "malformed", "this-boot", "other-boot"), "W: the kinds")
+ok("W no open next to the agent's account; the two anomalies, once per boot each")
+
 
 print("agos-window-battery: PASS (%d criteria)" % len(passed))
