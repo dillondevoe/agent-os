@@ -498,7 +498,9 @@ tool at its limit the longest holders of the state lock are: a seal, 20 + 45 + 2
 seconds (the review of this slice found the earlier limits let a refused open reach 170, past
 the 150 the others wait; the restart and stop limits were shortened, and killing `systemctl` at
 its limit does not cancel the job it queued); a recompute whose open is refused, 20 + 10 + 20
-+ 85 = 135; a tick that seals and then records it, 20 + 85 + 10 + 20 + 10 = 145. The battery
++ 85 = 135; a tick that seals and then records it, 20 + 85 + 10 + 20 + 10 = 145. (Slice 4a adds
+two walks of `/proc`, 5 seconds each at most, and an anomaly's scan and append to the recompute:
+165 at the worst, and the lock wait went from 150 to 175 with it; section 5.1.) The battery
 pins the table to the constants, and the program computes the same bound from the units it is
 configured to restart and stop and refuses a configuration that would not fit.
 
@@ -690,9 +692,172 @@ Split in two (ruling 4), so that no root process reads keyboard bytes:
 | 3b part 1 | The setup window: the agent does not exist while it is open | wall; Fable code review | `agentos-seal.service` (the wait, the detector, `ExecStopPost`), tty1's getty behind it, the login token and the gates on every other console and on the user manager, no reopening in a sealed boot, the tty1 progress unit (2.4). VM test `test-seal-wait`. The option stays off on shipped images. |
 | 3b part 2 | The setup window: seal-check and the rest | wall; Fable code review | The seal-check assertions (2.5) and the second key at every door, the registry probe as the fetcher's uid, the tool timeouts under the lock wait, the quiet tick while a re-provisioning waits for its reboot. The flake assertion stays, now pointing at 3c. |
 | 3c | The record | wall; Fable spec ruling, then code review | The audit-chain records of the window's four transitions (2.7): two appending units, the wall's signer, seal-at-once on a refused open, the seal's record reconciled by the tick. The flake gate is replaced by structural assertions. The surface-choice line moves with the surfaces in slice 4. |
-| 4 | Product path | wall; Fable code review | Surfaces and first login in `agentos`; a human account; `agentos-sealed` retired once the window has acceptance evidence |
+| 4 | Product path (cut in four: 5.1) | wall; Fable spec ruling and code review | The window on in `agentos` (4a); first login and the offered desktops there (4b); a human account (4c, an owner question); `agentos-sealed` retired once the window has acceptance evidence (4d) |
 
 Slices 1 and 2 touch no wall code and can land while 3 is in review.
+
+### 5.1 Slice 4, cut in four (2026-10-13)
+
+The owner answered section 7 on 2026-10-13: the window is 2 hours (cap 4); the product image
+offers `none` and Hyprland + Noctalia; first login is on in the product image only.
+
+| # | Lane | Contents | Waits on |
+|---|---|---|---|
+| 4a | wall; Fable spec ruling, then code review | `agentos` enables the window. The upgrade door (below). Two anomaly records. | nothing |
+| 4a-pin | product | The installer's pinned revision moves to a commit that has 4a, and in the SAME change `install.sh`, the README and the installer-honesty battery stop saying the box installs unsealed. | 4a merged |
+| 4b | wall (the seal's ordering) and product image | First login and the two offered desktops in `agentos`; the surface-choice record in the chain; the seal refuses a chosen desktop that is not in the closure. | 4a |
+| 4c | owner question | A human account (`docs/design/egress-policy.md`, open question 1). v0 keeps one account: the desktop is the agent's session, as on the developer image. | the owner |
+| 4d | product | `agentos-sealed` retired. | acceptance on real hardware (2.5 names what a VM cannot show) |
+
+A Fable spec ruling (2026-10-14) accepted 4a with changes on every point; they are folded in
+below and marked *(ruling)*.
+
+**Where it is turned on.** In the flake's `agentos` only. `agentos-sealed` and
+`agentos-sealed-s5` stay sealed by build with the window option off and today's ruleset. The
+flake assertion "no shipped configuration enables the window" is replaced by its successor: every
+shipped configuration is in exactly one of three classes (the window: `agentos`; sealed by build;
+no wall: `agentos-open`, `installer`), by name, and the three are counted against every
+configuration there is (code review: a wall that is on, unsealed and without the window is in none
+of them), so a new image has to be placed on purpose. The
+ruleset the module renders at its defaults (uid-blind DNS and 80/443 until a rebuild) is shipped
+by no image any more; its parse gate stays.
+
+**The upgrade door.** Sections 2.1 to 2.7 describe a box that boots with the window. A box
+installed from an older `agentos` arrives differently: root runs `nixos-rebuild switch` (or
+`test`), and the new generation's units start on a RUNNING system, with the agent logged in on
+tty1 (nixpkgs never restarts a getty on a switch). Before this slice the window unit, started by
+that switch, found no marker, no books and no login token, and OPENED: the fetcher's uid on the
+network next to a running agent, for as long as the model took, or the whole budget if there was
+none. No shipped image had the window, so nothing reached this; turning it on in `agentos` does.
+The same hole, reached on purpose, is how a test leg "stood in for a new boot" (it removed the
+token under a logged-in agent, and the window opened).
+
+The rule is the property 2.4 already claims, **the window does not open next to the agent**,
+with the agent taken as what it is: not one uid.
+
+- **Who counts** (commit security review). The first version looked for the account's own uid.
+  The account can hold processes under other uids: its subordinate range (NixOS gives every
+  normal account one, and `newuidmap` is setuid), and a Nix build it asked the daemon for, which
+  runs as a build user and, for a fixed-output build, on the host's network. So the question is
+  an allowlist. A process is **foreign** if any of its four uids (`/proc/<pid>/status`, `Uid:`)
+  is the account's own, or is neither a system account's (below 1000) nor one systemd allocated
+  for a `DynamicUser=` unit (61184 to 65519). Normal accounts, subordinate uids, build users and
+  `nobody` are all foreign. The window does not open while a foreign process exists. Nothing in
+  the configuration turns the look off: with no account named, the ranges alone decide.
+- The window oneshot reads `/proc` on the open branch only: after the token check, BEFORE the
+  books are written *(ruling)*, so a refusal leaves no books and no `window-opened` behind. It
+  reads again after `nft` has applied the open.
+- **The closing comes first** (commit security review). On a refusal the set is flushed and the
+  box sealed BEFORE the log line and before the anomaly's record is attempted: the oneshot can
+  be restarted with the set still full, and a scan and an append are twenty seconds.
+- What cannot be said counts as "exists": no `/proc`, a status without a `Uid:` line, an account
+  that does not resolve or resolves to root, a walk past its limit (5 seconds). A process that
+  EXITED between the listing and the read does not *(ruling)*: a boot is full of those, and
+  counting them would seal first boots for nothing.
+- A root process that becomes the account's after the second look (an old getty about to log
+  in) is not seen by either look. The gates make that hard; the tick, below, bounds it to a
+  minute.
+- The account's name is compiled in (`services.getty.autologinUser`); its uid is read from
+  `/etc/passwd` at run time (the account has no static uid) *(ruling)*. The file is read
+  directly, not through NSS: the accounts are declarative, and a lookup that can ask a daemon
+  can hang.
+- **The refusal seals** *(ruling)*: the oneshot seals the box itself, reason `refused`, as it
+  does for a refused record or a refused `nft` open. Leaving it to the wait would make "closed,
+  unmarked, agent running" a state whenever the wait is not there to run. The seal restarts the
+  fetcher under the running agent; that is acceptable (its downloads are over either way).
+- "Open only while the system manager is still starting" was considered as a second predicate
+  and not adopted: it does not name the property, it is one more tool call under the state lock,
+  and a `systemctl` that hangs would seal a first boot.
+- **The tick looks too** (code review): once a minute, while the window is open in this boot, it
+  asks the same question and closes and seals (`refused`) on any answer but "no such process".
+  Without it one
+  state had no second chance: a refusal after the open whose flush `nft` did not confirm leaves
+  the set holding the uid and the books saying "open", and nothing else would ask again until the
+  budget was spent. It also bounds, to a minute, a process root starts for the account by hand
+  (`runuser`) while the window is open. The tick's close writes no anomaly of its own (a tick
+  does one job on the chain, and that tick's is the seal's record): the chain shows
+  `window-sealed`, reason `refused`, and the journal has the count.
+- Blind spots, named: `/proc` lists thread-group leaders, and `Uid:` is the leader's. A process
+  that has changed ALL FOUR of its uids away from the account (a setuid-root program that has
+  fully become root), or a root process with one thread switched to the account by a raw system
+  call, is not seen. Both need a privilege the agent's account does not have on this image (no
+  sudo, no setuid path to root: the no-agent-root assertions); a setuid program that keeps the
+  real uid IS counted.
+
+**An upgraded box cannot be provisioned in place** *(ruling)*. nixpkgs never changes the uid of
+an account that already exists (`update-users-groups.pl`: "not applying UID change"). A box
+installed before the window keeps the fetcher's auto-allocated uid; the set names 351; a window
+there would admit nobody and burn its budget. So: the switch seals an upgraded box (it has its
+model already, or it has none). If it has none, 2.3's "remove the state and reboot" does not
+help: the oneshot checks that the fetcher's account has the uid the set names, and seals
+(`refused`) with a line that says a reinstall is needed. A configuration that does not name the
+fetcher's account at all is refused the same way (no silent skip). Rolling back to a generation without the
+window brings back that generation's ruleset, uid-blind allowance included; the README says so.
+
+**Two anomaly records.** `window-anomaly`, `src=setup-window`, `kind` one of:
+
+- `foreign-process`: the window oneshot refused an open, or closed one it had just made,
+  because a foreign process exists. Written by the window oneshot only. Carries `processes`: the
+  count, or `null` when it could not be counted.
+- `token-without-marker`: the login token with no marker. Written by the tick. Carries `books`:
+  what `window.json` looks like to that tick, one of `absent`, `malformed`, `this-boot`,
+  `other-boot`. *(ruling)* This is one kind and not the two first proposed ("state removed" and
+  "token appeared while open"): a tick cannot tell them apart. The books of this boot beside a
+  token may mean the token appeared while the window was open, or that only the marker was
+  removed afterwards. The record says what was seen, not why.
+
+Each carries `boot_id`, `toplevel` and `ruleset_sha256`, all measured by the role that writes it,
+and nothing a file or a process of the agent's account said (the rule of 2.7). No `elements`:
+measuring the set is twenty seconds of lock time, and the seal's record that follows carries it.
+One record per kind per boot: the chain is scanned for (`window-anomaly`, `boot_id`, `kind`), and
+`anomaly-<kind>.json` is a pointer (offset and hash) checked against the chain before it is
+believed, exactly as `recorded.json` is. With no boot id nothing is written. Handling never waits
+for the record: the refusal, the close and the seal come first, and a record the chain refuses is
+owed. The tick pays its own kind a minute later. The oneshot's `foreign-process` is retried only
+when the oneshot next runs into the same thing, so it can stay unwritten for that boot; the
+chain then has the seal's record, reason `refused`, and the journal has the rest.
+
+The two units that look must see every process with its real uids: `PrivateUsers=` on them would
+make every process read as 65534 (foreign: every first boot would seal), and `ProtectProc=` or
+`ProcSubset=` would hide them (the look would see nobody). The flake asserts all three absent.
+
+**Lock time** *(ruling)*. A tick does one job on the chain per run: the seal's record or an
+anomaly, never both (they need a valid marker and no marker, respectively); with its own look
+at `/proc` its worst case is 150. The longest holder
+is now a recompute that finds the agent's account alive after the open: 5 (`/proc`) + 20 + 10 +
+20 + 5 (`/proc`) + 85 (a seal) + 10 + 10 (the anomaly's scan and append) = 165 seconds. The lock
+wait is 175 (was 150) and the window unit's stop timeout 200 (was 180); a third unit to stop
+still does not fit, and the program and the module still refuse it.
+
+**Tests.** Battery arm W: a fake `/proc` and passwd; who counts (system, normal, subordinate,
+build, DynamicUser and `nobody` uids, at each boundary); the four uid slots; refused before the
+books; the second look; everything that cannot be said; the exited process; the pointer under
+attack; the fetcher's uid; the tick's own look (a refusal whose flush failed is closed and sealed
+by the next tick that can; a healthy window is left alone); the tick's anomaly in each of the
+four `books`; one chain job per tick; the flush before the log line and the record. `test-setup-window` W10 is now the door
+itself (a logged-in agent; marker, books and token removed; restart: nothing opens, sealed
+`refused`, one `foreign-process`), W2 stops the tick's timer around its own agent-uid probes
+(they are exactly what the tick now closes the window for), and W11, the old W10,
+ends the agent's sessions before it stands in for a first boot. `test-seal-wait` D6 waits for
+the tick's `token-without-marker`.
+
+**What 4a does not change, and who does.** `install.sh` installs a pinned revision, and its text
+(and the README's install section, and `tests/installer-honesty-battery.sh`) must describe THAT
+revision. They change together with the pin, in the change right after this one (4a-pin). That
+change also owes: the README's first-boot network note (wired DHCP works unattended; Wi-Fi is
+root at the break-glass console, Ctrl+Alt+F3, `nmcli dev wifi connect <name> --ask`, while the
+window is open: the pull retries every minute, so a late connection still completes it; the
+agent does not exist yet and there is no human account, 4c), and the rollback note above.
+`install.sh` always provisions the break-glass password for `agentos` (it refuses to install
+without one), so "a DOWN wall and no break-glass password" (2.5) needs a hand install.
+
+The agent's shell (`bin/agent-shell`) *(ruling)*: on a box with the window it starts only after
+the seal, and its account never has a way off the box. Its first-boot branch (probe the
+registry, offer the Wi-Fi picker, watch the pull) can then only mislead; on such a box it says
+instead that the machine sealed itself without a model and how setup is run again. When the
+status line's reason is `refused` it points at the log first (code review): that is also what a
+box installed before the window gets, and for that box "run setup again" loops; it needs a
+reinstall.
 
 ## 6. Tests
 
@@ -736,7 +901,7 @@ Each battery arm is mutation-tested before merge, as elsewhere in this repo.
 
 ## 7. Open questions for the owner
 
-Neither blocks slices 1 and 2.
+Neither blocks slices 1 and 2. **Both answered 2026-10-13, as proposed** (and: first login is on in the product image only). The question slice 4 leaves open is the human account (5.1, 4c).
 
 - A. Window length: 2 hours proposed (option, capped at 4).
 - B. Which desktops ship in the product image: `none` and Hyprland + Noctalia proposed; each

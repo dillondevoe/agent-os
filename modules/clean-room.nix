@@ -19,6 +19,12 @@
 # provisioning allowance — the ollama daemon's own update-ping goes with it — and the box
 # is sealed to nixpkgs-only.
 #
+# THAT IS THE MODULE AT ITS DEFAULTS, and since slice 4a (docs/design/first-login-and-setup-window.md
+# 5.1) no shipped image is built that way. The product image (`agentos`) sets
+# `agentos.cleanRoom.setupWindow.enable`: the ruleset loaded is always the sealed one, plus one named
+# set that admits the model fetcher's uid to DNS + 443 for a budget of open seconds, and the box
+# closes that itself (modules/setup-window.nix). `agentos-sealed` is sealed by build.
+#
 # SECURITY SURFACE (boot/login + egress wall): routed branch -> PR -> Fable, never
 # direct-push, never self-merge.
 { config, pkgs, lib, ... }:
