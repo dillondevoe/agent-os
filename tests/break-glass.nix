@@ -82,12 +82,22 @@ pkgs.testers.runNixOSTest {
     def failures(m):
         # What the login stack itself recorded. The screen cannot be the witness across attempts: the
         # getty respawns after a few failures and the console is wiped with it.
-        return int(m.succeed("journalctl -b --no-pager | grep -c 'FAILED LOGIN\\|authentication failure' || true").strip() or 0)
+        #
+        # Count login's OWN line, not pam_unix's. A refused password produces two journal lines in
+        # order: `pam_unix(login:auth): authentication failure` the moment the password is checked, then
+        # a randomised fail delay (pam_fail_delay, ~2-3 s), THEN `FAILED LOGIN (n) on '/dev/tty3' FOR
+        # 'root'` as login re-prompts (or exits and the getty respawns). Between those two lines the tty
+        # is still owned by the delay: anything typed is echoed and then flushed by the new prompt. Until
+        # 2026-10-14 this counted both lines, so `refused` was satisfied by the FIRST one and the next
+        # attempt's name landed in that window whenever the delay drew long (red on main at bcbb93a:
+        # delay 2.52 s against the harness's 2.2 s; the same tree passed at 2.07 s). Only the second line
+        # proves the console is ready for another name.
+        return int(m.succeed("journalctl -b --no-pager | grep -c 'FAILED LOGIN' || true").strip() or 0)
 
     def refused(m, tty, name, password, tag):
         before = failures(m)
         type_login(m, tty, name, password)
-        m.wait_until_succeeds(f"test \"$(journalctl -b --no-pager | grep -c 'FAILED LOGIN\\|authentication failure')\" -gt {before}", timeout=60)
+        m.wait_until_succeeds(f"test \"$(journalctl -b --no-pager | grep -c 'FAILED LOGIN')\" -gt {before}", timeout=60)
         assert m.execute(f"pgrep -t tty{tty} -x bash")[0] != 0, f"{tag}: a shell is running on the console"
         prompt(m, tty)                           # the console asks again (same login, or a new getty)
 

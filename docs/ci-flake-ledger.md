@@ -95,6 +95,22 @@ Unresolved and stated rather than guessed: whether `--fallback` belongs in the w
 tradeoff with a real cost, and nobody has measured how often B occurs. **One instance is not a
 rate.** Recorded so the second instance has something to be the second of.
 
+## Neither shape, CLASSIFIED — `tty3: never asked for a password` (2026-10-14)
+
+Run `38493936637` attempt 1, `vm-test (test-break-glass)`, main at `bcbb93a` (the plymouth
+patch), 4m22s, VM booted, failed on a real assertion in B6. **Not shape A, not shape B, and not
+the diff** — `bcbb93a` touches `boot-branding.nix`, `flake.nix`, a patch file and this ledger; the
+test's own B6 leg is where it died. Attempt 2 on the identical sha was green, which is the cheap
+discriminator, not the explanation.
+
+The explanation is a race in `tests/break-glass.nix`, now fixed: `refused()` waited on the
+`pam_unix … authentication failure` journal line, which login writes BEFORE its randomised fail
+delay; the next attempt's name was typed inside that delay and flushed. Attempt 1 drew a 2.52 s
+delay against the harness's ~2.2 s and lost; attempt 2 drew 2.07 s and won. The witness is now
+login's post-delay `FAILED LOGIN` line. Filed here, against this file's own rule, only so the next
+reader who meets `never asked for a password` knows it has a named cause and a fix, and does not
+re-count it under A. It is not a harness defect and does not go in A's table.
+
 ## The signature
 
 Nineteen observed failures, six **different** jobs, one **byte-identical** signature:
