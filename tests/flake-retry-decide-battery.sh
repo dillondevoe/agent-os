@@ -107,6 +107,50 @@ echo "$out" | grep -q 'FLAKE-A-RETRY' && bad "co-occurring genuine assertion emi
 grep -qE "$ASSERT_OLD" "$TMP/e.log" \
   || bad "PRE-FIX ARM: the old whole-file ASSERT no longer matches the real shape — ARM 7 is now vacuous"
 
-if [ "$fails" -eq 0 ]; then echo "flake-retry-decide battery: all 9 arms pass"; else
+# --- ARM 10: SUBSTITUTER 5xx BEFORE ANY VM -> RETRY, with ITS OWN marker ------------------
+# The real specimen: run 38513189502 attempt 1, test-seal-faildown, main at 37c6bb9, 2026-10-14.
+# Four warnings, one hard error, zero driver lines, 434-line log. The decider said rc=1 "no
+# shape-A signature" — true, and the wrong answer: nothing ran, so nothing can be masked.
+# Fixtured from the job log verbatim.
+URL="https://cache.nixos.org/wjjiyvsp580064q1yj0jr1vw4jg2dz69.narinfo"
+{ printf "copying path '/nix/store/aiapnjc6w07cz0jxy8s3j8cg1vfh1k8b-source' from 'https://cache.nixos.org'...\n"
+  for _ in 1 2 3 4; do printf "warning: unable to download '%s': HTTP error 503\n" "$URL"; done
+  printf "error: unable to download '%s': HTTP error 503\n" "$URL"; } > "$TMP/g.log"
+run "$TMP/g.log"
+[ "$rc" -eq 0 ] || bad "a substituter 5xx before any VM was NOT retried (rc=$rc)"
+echo "$out" | grep -q '^::warning::FLAKE-S-RETRY test=test-identity-boot run=33049576961 attempt=1$' \
+  || bad "substituter arm emitted no FLAKE-S-RETRY marker"
+echo "$out" | grep -q 'FLAKE-A-RETRY' && bad "substituter arm emitted shape A's marker — it would pollute A's census"
+
+# --- ARM 11 / CONTROL: the WARNING form alone is not the shape ---------------------------
+# nix retries a 5xx itself; four warnings and then a build that fails for its own reason is a
+# build failure. Only the hard `error:` line says the download was the thing that died.
+{ for _ in 1 2 3 4; do printf "warning: unable to download '%s': HTTP error 503\n" "$URL"; done
+  printf 'error: builder failed with exit code 1\n'; } > "$TMP/h.log"
+run "$TMP/h.log"
+[ "$rc" -ne 0 ] || bad "warnings-only 5xx was retried — the hard-error requirement was dropped"
+echo "$out" | grep -q 'RETRY test=' && bad "warnings-only path emitted a marker"
+
+# --- ARM 12 / CONTROL: a 5xx in a log where the VM RAN decides nothing by itself ----------
+# A VM that started owns the verdict; whatever the substituter did before it is history.
+{ printf "error: unable to download '%s': HTTP error 503\n" "$URL"
+  printf 'vm-test-run-agentos-seal-faildown> box: must succeed: true\n'
+  printf 'RequestedAssertionFailed: identity seal absent\n'; } > "$TMP/i.log"
+run "$TMP/i.log"
+[ "$rc" -ne 0 ] || bad "a 5xx next to a VM that ran and failed was retried — the VM's red was masked"
+echo "$out" | grep -q 'FLAKE-S-RETRY' && bad "substituter marker emitted although the VM ran"
+
+# --- ARM 13 / CONTROL: 5xx + shape A in one log still reaches shape A's gate --------------
+# Fall-through, not exit: a driver line is present so arm S declines, and shape A then decides
+# on its own terms. Asserts the new arm sits in FRONT of A without replacing it.
+{ printf "error: unable to download '%s': HTTP error 503\n" "$URL"
+  printf 'vm-test-run-agentos-identity-boot> box: starting\n'
+  printf '%s\n' "$REAL"; printf 'RuntimeError: %s\n' "$SIG"; } > "$TMP/j.log"
+run "$TMP/j.log"
+[ "$rc" -eq 0 ] || bad "5xx + shape A with the VM run was not handed to shape A (rc=$rc)"
+echo "$out" | grep -qE "$CENSUS" || bad "5xx + shape A emitted no shape-A census marker"
+echo "$out" | grep -q 'FLAKE-S-RETRY' && bad "5xx + shape A emitted the substituter marker"
+
+if [ "$fails" -eq 0 ]; then echo "flake-retry-decide battery: all 13 arms pass"; else
   echo "flake-retry-decide battery: $fails FAILING"; fi
 exit "$fails"

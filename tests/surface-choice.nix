@@ -59,7 +59,13 @@ pkgs.testers.runNixOSTest {
     stopped = box.succeed(f"ps -o stat= -p {front}").strip()
     assert not stopped.startswith("T"), "S1: Ctrl-Z stopped the front end: " + stopped
     box.send_chars("\n")                                   # the control bytes make this line invalid
-    box.wait_until_tty_matches("1", "Please type a number")
+    # 60 s, not the driver's 900. Twice on 2026-10-14 (run 38513189502, both attempts, main at 37c6bb9)
+    # this wait ran the full 900 s and the dump at its end showed getty's login prompt: the front end
+    # had spent its 300 s budget, written the defaults and handed tty1 over, so the screen that would
+    # have said what happened was gone. A bounded wait dumps tty1 while the front end still owns it,
+    # which is the one observation that separates "the line was read as empty and Shell: is up" from
+    # "nothing was read and > is still waiting". The green path matches in 0.07 s. ci-flake-ledger.md.
+    box.wait_until_tty_matches("1", "Please type a number", timeout=60)
 
     # Terminals are offered in name order: alacritty, foot, ghostty, kitty. A bad line first.
     box.send_chars("9\n")

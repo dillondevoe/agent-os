@@ -111,6 +111,58 @@ login's post-delay `FAILED LOGIN` line. Filed here, against this file's own rule
 reader who meets `never asked for a password` knows it has a named cause and a fix, and does not
 re-count it under A. It is not a harness defect and does not go in A's table.
 
+## Neither shape, CLASSIFIED — substituter 503 before any VM (2026-10-14)
+
+Run `38513189502` attempt 1, `vm-test (test-seal-faildown)`, main at `37c6bb9` (slice 4a). The
+job log is 434 lines and has **zero** `vm-test-run-…> box` lines: nix asked `cache.nixos.org` for
+one narinfo (`wjjiyvsp…`), got HTTP 503 four times (warnings — nix's own retries), then a hard
+`error: unable to download … HTTP error 503`. No VM was started. Attempt 2 on the identical sha was
+green on this job. Not shape A, not shape B, not the diff: the diff never got to run.
+
+The detector said `failed WITHOUT the shape-A signature. Not retrying.` — true, and useless. A retry
+here can hide nothing, because nothing ran that could have been red. `scripts/flake-retry-decide.sh`
+now carries that arm (arm S): the hard `error:` line present, no driver line present, no assertion
+present → one retry, marker **`FLAKE-S-RETRY`**. Its own letter on purpose: shape A's census grep
+must not count it. Battery arms 10–13 fixture the specimen verbatim, the warning-only form (not the
+shape — nix recovered), the 5xx-next-to-a-VM-that-ran form (the VM owns the verdict) and 5xx + shape
+A (falls through to A's gate). Census recipe for S, when there is something to count: the census
+grep in this file with `FLAKE-S-RETRY` in place of `FLAKE-A-RETRY`. **Standing count at filing: 0.**
+The arm has never fired in CI; the first firing is what proves the detector, not this entry.
+
+## Neither shape, UNCLASSIFIED — surface-choice: the Enter after the control keys produced no line (2026-10-14)
+
+Run `38513189502`, `vm-test (test-surface-choice)`, main at `37c6bb9`, **both attempts**, 900 s
+timeouts at the same step. `tests/surface-choice.nix` sends Ctrl-C, Ctrl-Z, Ctrl-\ then Enter and
+waits for `Please type a number`. It never appeared. The front end (`agentos-firstlogin`, started at
+~16 s) ran out its whole 300 s budget, wrote the defaults (`desktop=none terminal=kitty shell=bash`)
+at 317 s, and getty took tty1 — so the driver's end-of-wait dump shows only the login prompt. The
+screen that would have said what happened was gone before anything looked at it.
+
+What IS established:
+- **Not the diff.** Mirror measured the test derivation byte-identical across the PR head `a05a3b1`,
+  `37c6bb9` and `2d6e4ce` (relayed; the CI record is consistent with it). That one derivation
+  **built and passed** on the PR's slow lane at `a05a3b1` (run `38511927407`, 04:32Z: Enter → match
+  in 0.07 s), **failed twice** at `37c6bb9` (04:47Z and 05:10Z), and **built and passed** again at
+  `2d6e4ce` (run `38515070506` attempt 2). This workflow has no Nix cache, so each of those four was a
+  real run: 2 red of 4 within 50 minutes on one derivation.
+- Not shape A (no `Shell did not start in time`), not shape B, and all three runners had KVM.
+- Boot speed is not the split: the VM reached `Terminal:` at 19.0–19.4 s in all four runs.
+
+What is NOT established: the mechanism. Two candidates, neither proven, and the one observation that
+separates them was lost with the screen:
+1. The front end's `tcflush(TCIFLUSH)` after it prints the prompt — if the keys landed before it, the
+   whole line was discarded and the prompt still sat at `> `. Unlikely: the test types ≥3 s after
+   `Terminal:` is on screen, and the box answered seven backdoor commands briskly in that gap.
+2. ISIG still on when the keys arrived — the control bytes become ignored signals instead of bytes,
+   Enter reads as an **empty** line, the default is taken, and the screen shows `Shell:`.
+
+The test now waits 60 s instead of the driver's 900 for that match, so the next instance dumps tty1
+while the front end still owns it: `> ` says (1), `Shell:` says (2). That is the instrument; this
+entry is what it will measure. **Not retry-eligible by any arm, and it should not be:** an
+assertion-free 900 s hang is also exactly what a real regression in the front end would look like. A
+rerun on the identical sha is the cheap discriminator while this stays open; the next observation
+closes it one way or the other.
+
 ## The signature
 
 Nineteen observed failures, six **different** jobs, one **byte-identical** signature:
