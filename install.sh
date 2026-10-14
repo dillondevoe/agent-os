@@ -12,13 +12,16 @@
 #            (the var is in CURL's env; sudo -E has nothing to preserve → script sees it UNSET)
 #       ❌  curl -sL .../install.sh | sudo VARIANT=agentos-open bash
 #            (sudo's default env_reset strips it → script sees it UNSET)
-#    A lost VARIANT silently defaults to the sovereign box (unsealed until you seal it), so the
+#    A lost VARIANT silently defaults to the sovereign box (it seals itself after setup), so the
 #    YES-gate below prints the RESOLVED variant and makes you type it — a fall-through can't install the wrong OS unseen.
 #
 # VARIANTS:
-#   (default)              — the sovereign box. Installs the flake's `agentos`, which starts UNSEALED
-#     (egress open so the first-boot model pull works); you seal it afterwards — see the final
-#     summary. This script does NOT seal it. Just `| bash`.
+#   (default)              — the sovereign box. Installs the flake's `agentos`, which SEALS ITSELF:
+#     on first boot a setup window ALSO lets the model server's account reach DNS + 443 (on top of
+#     what a sealed box always allows: root's nixpkgs cache and time sync) for at most two hours of
+#     open time to download the model, then the box closes that by itself and records it in its
+#     audit chain. The agent does not exist until then. No rebuild, no step to
+#     forget (docs/design/first-login-and-setup-window.md 5.1). Just `| bash`.
 #   VARIANT=agentos-open   — the OPEN / MESHED dev box (Dillon msg 8926): OpenSSH + Tailscale +
 #     full-power user + real shell, no egress wall, no auto-pull. Pass a Tailscale PRE-AUTH key so
 #     the Dell auto-joins the mesh on first boot (written to the TARGET only, mode 0600 — never in
@@ -53,7 +56,9 @@ esac
 # this line back into the moving ref it replaced while still looking pinned.
 #
 # Override for testing an unmerged branch:  ... | FLAKE_REV=my-branch bash
-FLAKE_REV="${FLAKE_REV:-05781ca33df4baa14206cda92311c676fadbdb66}"
+# The pin must contain the setup window (37c6bb9, slice 4a): the text of this script says the box
+# seals itself, and tests/installer-honesty-battery.sh fails if the pinned revision predates that.
+FLAKE_REV="${FLAKE_REV:-37c6bb951e369204e95364f11f7bb6fbb9fbe812}"
 FLAKE="github:dillondevoe/agent-os/${FLAKE_REV}#${VARIANT}"
 DISK="${DISK:-/dev/nvme0n1}"   # override:  curl ... | DISK=/dev/sdX bash   (prefix on the piped bash)
 TS_AUTHKEY="${TS_AUTHKEY:-}"   # OPEN variant only — Tailscale pre-auth key (runtime secret, never committed)
@@ -71,8 +76,8 @@ echo "--------------------------------------------------------------"
 echo "This will ERASE $DISK completely and install Agent OS (variant: $VARIANT) on it."
 echo "The USB you booted from is separate and will NOT be touched."
 if [ "$VARIANT" = agentos ]; then
-  echo "  → variant 'agentos' = the sovereign box. It installs UNSEALED (outbound DNS + 80/443 open so"
-  echo "    the model can be pulled) and stays that way until you seal it after the first boot. If you meant the OPEN/MESHED dev box"
+  echo "  → variant 'agentos' = the sovereign box. On first boot its model server's account may also reach the"
+  echo "    network, for at most two hours, to download the model; then it seals itself. If you meant the OPEN/MESHED dev box"
   echo "    and this fell through to the default, ABORT and re-run with the var on the PIPED bash:"
   echo "        curl -sL .../install.sh | VARIANT=agentos-open bash   (NOT before curl, NOT after sudo)"
 fi
@@ -262,11 +267,19 @@ fi
 
 # Network on first boot is NOT carried from the installer. A copied NetworkManager profile
 # produces a DEAD connection in the installed system — it comes up "connected" but never
-# routes, which masks the real no-network state AND fights the boot-time brain pull. Instead
-# the installed system's agent-shell offers an nmtui wifi picker on first boot and pulls the
-# brain in-shell once genuinely online (see bin/agent-shell `_net_ok`). Ethernet just DHCPs.
-echo ">>> Network: set up on FIRST BOOT (agent-shell offers a wifi picker), not carried"
-echo "    from the installer — a carried wifi profile comes up dead. Ethernet auto-DHCPs."
+# routes, which masks the real no-network state AND fights the boot-time brain pull. Instead:
+# on the open variant the agent-shell offers an nmtui wifi picker on first boot (bin/agent-shell
+# `_net_ok`); on `agentos` the agent does not exist until the box has sealed, so Wi-Fi is root's,
+# at the break-glass console, during setup. Ethernet just DHCPs on both.
+if [ "$VARIANT" = agentos ]; then
+  # The setup window: the agent (and so its wifi picker) does not exist until the box has sealed.
+  echo ">>> Network: NOT carried from the installer (a carried wifi profile comes up dead)."
+  echo "    Ethernet auto-DHCPs. Wi-Fi: during the first boot's setup, press Ctrl+Alt+F3, log in as"
+  echo "    root (the break-glass password you set above) and run:  nmcli dev wifi connect <name> --ask"
+else
+  echo ">>> Network: set up on FIRST BOOT (agent-shell offers a wifi picker), not carried"
+  echo "    from the installer — a carried wifi profile comes up dead. Ethernet auto-DHCPs."
+fi
 
 echo "=============================================================="
 echo " ✅ DONE. Run:  reboot"
@@ -278,16 +291,16 @@ if [ "$VARIANT" = agentos-open ]; then
   echo " 'sudo tailscale up --ssh'. The brain is baked into the image — nothing to rsync."
   echo " SSH is key-only for agent@ and root@ (the mini's and Mirror's keys are baked in)."
 else
-  echo " First boot: it gets online (wifi: it offers a picker; ethernet: auto), installs"
-  echo " its local brain, then you're talking to it at a  you ›  prompt."
-  echo ""
-  echo " ⚠️  THIS MACHINE IS UNSEALED. The install is the flake's 'agentos' target, whose egress"
-  echo "     wall still allows outbound DNS + 80/443 so the model can be pulled. Nothing seals it"
-  echo "     automatically. Until you do, the 'nothing leaves the box' guarantee does NOT hold."
-  echo "     NEXT STEP, once the model has finished pulling (as root, via the tty3 break-glass login):"
-  echo "         nixos-rebuild switch --flake github:dillondevoe/agent-os/${FLAKE_REV}#agentos-sealed"
-  echo "     That is the same machine with agentos.cleanRoom.sealed = true (egress: nixpkgs cache +"
-  echo "     time sync only)."
+  echo " First boot is SETUP: the screen shows the model download. For at most two hours of"
+  echo " open time the model server's account may ALSO reach DNS + 443, on top of what the sealed"
+  echo " box always allows (root's nixpkgs cache, time sync). No other account gets that, and the"
+  echo " agent does not exist yet. When the model is in, or the time is up, the machine"
+  echo " SEALS ITSELF: that access is closed for good, the event is written to its audit chain,"
+  echo " and only then does the agent start, at a  you ›  prompt. Nothing for you to run."
+  echo " Wired network: automatic. Wi-Fi: see the Network line above (during setup)."
+  echo " If the time runs out before the download finishes, the machine is sealed with no model."
+  echo " To run setup again, as root on Ctrl+Alt+F3:"
+  echo "     rm /var/lib/agent-os/seal/sealed /var/lib/agent-os/seal/window.json && reboot"
 fi
 echo ""
 echo " ⚠️  If boot hangs on 'waiting for /dev/disk/by-label/nixos': your"

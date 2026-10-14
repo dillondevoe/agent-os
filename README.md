@@ -34,11 +34,28 @@ curl -sL https://raw.githubusercontent.com/dillondevoe/agent-os/main/install.sh 
 > ⚠️ **This ERASES the target disk.** Use a machine you don't need. The installer shows you
 > the disk and makes you type `YES` before it touches anything.
 
-It partitions, installs, and on first boot pulls a local model (`qwen3.5:9b`, ~6.6GB — see
-`modules/brain.nix`). The box ships *unsealed* so that pull can reach the network; once the
-weights are present you set `agentos.cleanRoom.sealed = true` and `nixos-rebuild switch`
-(or build the `agentos-sealed` target), and that rebuild is the seal. After that it works with
-the ethernet unplugged. `VARIANT=agentos-open` instead installs the open dev box (below).
+It partitions, installs, and on first boot downloads a local model (`qwen3.5:9b`, ~6.6GB — see
+`modules/brain.nix`). **The box seals itself.** First boot is a *setup window*: for at most two
+hours of open time, the model server's account may also reach DNS and port 443, on top of what
+the sealed box always allows (root's nixpkgs cache and time sync). No other account gets that,
+and the agent does not exist yet. When the model is in, or the time is up,
+the box closes that access for good, writes the event to its audit chain, and only then starts
+the agent. No rebuild, nothing to remember. After that it works with the ethernet unplugged.
+(How it works, and what it guards against: `docs/design/first-login-and-setup-window.md`.)
+
+- **Network on first boot.** Wired: automatic. Wi-Fi: during setup press Ctrl+Alt+F3, log in as
+  root with the break-glass password the installer asked for, and run
+  `nmcli dev wifi connect <name> --ask`. The download keeps retrying (about every three
+  minutes while there is no network), so connecting late in the window still works.
+- **If the time runs out first,** the box is sealed with no model, and the agent's console says
+  so. To run setup again, as root on Ctrl+Alt+F3:
+  `rm /var/lib/agent-os/seal/sealed /var/lib/agent-os/seal/window.json && reboot`.
+- **A box installed before the window existed** (an older `agentos`) is sealed by the update
+  that brings the window, with the model it has. It cannot run setup again in place (its model
+  server's account keeps an old uid); that needs a reinstall. Rolling such a box back to a
+  generation without the window brings back that generation's open provisioning rules.
+
+`VARIANT=agentos-open` instead installs the open dev box (below).
 
 **Just want to see it first?** Boot it in a VM, no hardware or wipe needed:
 
@@ -73,8 +90,8 @@ anyone should trust.
 
 **Works:** bootable sovereign NixOS · autologin → agent shell · local Qwen brain (`qwen3.5:9b`,
 auto-pulled on first boot by the sealed-lane `modules/brain.nix`) · markdown memory (`remember` / `recall` / `tree`) · clean-room egress wall (nftables
-default-DROP outbound; the shipped `agentos` target starts unsealed and `agentos-sealed` is
-nixpkgs-only) · **fail-loud egress seal** — if the wall ever fails
+default-DROP outbound; the shipped `agentos` target seals itself after a time-boxed, audited
+setup window, and `agentos-sealed` is sealed by build) · **fail-loud egress seal** — if the wall ever fails
 to load on a sealed box, the machine drops the network and refuses to hand you the agent rather than
 silently running unsealed (fail-*closed*, not fail-silent) · no cloud brain on the sealed image (the open variant can be configured with a cloud
 escalation provider) · graceful
@@ -110,7 +127,7 @@ behind Intel VMD — if boot times out looking for the disk, set **BIOS → SATA
 
 | | sealed (`agentos`, `agentos-sealed`) | open (`agentos-open`) |
 |---|---|---|
-| Outbound firewall | nftables default-DROP (`modules/clean-room.nix`). `agentos` starts *unsealed*: DNS and 80/443 are open until you seal. `agentos-sealed`: nixpkgs cache + time sync only. | none: `configuration-open.nix` does not import `clean-room.nix` |
+| Outbound firewall | nftables default-DROP (`modules/clean-room.nix`). `agentos`: the sealed rules from the start, plus a setup window in which the model server's account alone may reach DNS + 443 for at most two hours; the box then closes it by itself (`modules/setup-window.nix`). `agentos-sealed`: sealed by build. Sealed, both allow the nixpkgs cache (root) + time sync only. | none: `configuration-open.nix` does not import `clean-room.nix` |
 | Agent privileges | no `sudo`, not in `wheel` | separate `operator` account holds wheel + passwordless sudo; the agent does not |
 | Remote access | not enabled by the sealed config (the mesh is WireGuard, opt-in per deployment) | OpenSSH + Tailscale |
 | Cloud model | none on the image | optional: `modules/escalate-secret-open.nix` can configure a cloud escalation provider if you supply an API key |

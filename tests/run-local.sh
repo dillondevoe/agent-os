@@ -47,7 +47,7 @@
 #                                 keypairs, NIP-19 npub, 0600/0700 preflight, boot self-test,
 #                                 name-namespace confinement; perms/markers/traversal/collision
 #                                 control-armed
-#   installer-honesty-battery.sh  install.sh never claims 'sealed' without the unsealed caveat + next step
+#   installer-honesty-battery.sh  install.sh describes the revision it pins (self-sealing since 4a; pin checked)
 #   mem-battery.py                11 checks — bin/mem (memory-as-filesystem) contract
 #   evals-battery.py              9 criteria — evals/run.py model-agnostic eval runner, control-armed
 #   router-battery.py             10 criteria — evals/router.py router experiment: contract, thresholds, DANGEROUS, fake transport

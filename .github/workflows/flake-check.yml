@@ -228,12 +228,15 @@ jobs:
           git fetch --depth=200 origin main
           BASE=FETCH_HEAD ./tests/pin-freshness.sh
 
-  # install.sh installs the UNSEALED `agentos` target and must say so (see the battery header).
-  # Pure grep, no Nix needed.
+  # install.sh must describe the revision it pins: since slice 4a the `agentos` target seals itself,
+  # and the battery checks the text AND that the pin contains the window (see the battery header).
+  # No Nix; it needs git history to check the pin, and FAILS without it rather than skipping.
   installer-honesty:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-      - name: install.sh does not claim the box is sealed
+        with:
+          fetch-depth: 0
+      - name: install.sh describes the system its pin installs
         run: bash tests/installer-honesty-battery.sh install.sh
