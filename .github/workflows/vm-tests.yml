@@ -431,14 +431,15 @@ jobs:
           ./scripts/flake-retry-decide.sh vm-build-attempt-1.log \
             '${{ matrix.test }}' "${GITHUB_RUN_ID}" "${GITHUB_RUN_ATTEMPT}" || exit 1
 
-          echo "Shape-A signature matched and no assertion failure present — retrying ONCE."
+          echo "flake-retry-decide.sh granted ONE retry; its ::warning:: marker above names the shape" \
+               "(FLAKE-A-RETRY = shape A; FLAKE-S-RETRY = substituter 5xx before any VM). Retrying ONCE."
           if run_once vm-build-attempt-2.log; then
-            echo "Retry passed. The attempt-1 failure is recorded above as FLAKE-A-RETRY and is" \
+            echo "Retry passed. The attempt-1 failure is recorded above as a FLAKE-*-RETRY marker and is" \
                  "a countable instance for docs/ci-flake-ledger.md — it is NOT a non-event."
             exit 0
           fi
 
-          echo "::error::${{ matrix.test }} failed TWICE with the shape-A signature. This is not" \
+          echo "::error::${{ matrix.test }} failed TWICE after a granted retry. This is not" \
                "the one-shot case; both logs are retained as artifacts. Stop and read them."
           exit 1
 

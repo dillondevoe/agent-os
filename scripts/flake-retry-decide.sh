@@ -4,6 +4,9 @@
 #   flake-retry-decide.sh <log> <test> <run_id> <attempt>
 #     rc 0  -> retry; the `FLAKE-A-RETRY test= run= attempt=` marker is written to stdout
 #              (as a ::warning::) and appended to $GITHUB_STEP_SUMMARY when that is set
+#              Also rc 0, with the marker `FLAKE-S-RETRY test= run= attempt=`, for a substituter 5xx
+#              that killed the build before any VM started (arm S below). Its own letter on purpose:
+#              shape A's census grep must not count it.
 #     rc 1  -> do not retry: the failure carries no shape-A signature
 #     rc 2  -> do not retry: a genuine assertion failure, even though shape A is also present
 #     rc 3  -> do not retry: the log does not exist
@@ -37,6 +40,25 @@ ASSERT='RequestedAssertionFailed|AssertionError|Test .* failed'
 if [ ! -f "$log" ]; then
   echo "::error::${test_name}: retry decision asked for on a log that does not exist (${log})."
   exit 3
+fi
+
+# ARM S — A SUBSTITUTER THAT NEVER ANSWERED IS NOT A TEST OUTCOME. Observed 2026-10-14 (run
+# 38513189502 attempt 1, test-seal-faildown, main at 37c6bb9): nix asked cache.nixos.org for one
+# narinfo, got HTTP 503 four times (its own retries, logged as warnings), then gave up with a hard
+# `error: unable to download`. The job log has ZERO vm-test-run lines because no VM was started.
+# This script said "no shape-A signature, not retrying" — true, and the wrong answer: the retry a
+# 5xx wants cannot mask a red, because nothing ran that could have been red. Fail-closed on exactly
+# that: the hard `error:` line must be present (the warning form means nix recovered on its own), no
+# driver line may be present (a VM that ran owns the verdict, whatever came before it), and no
+# assertion may be present. Anything else falls THROUGH to shape A's gates below, it does not exit.
+# Only the 5xx form has been observed; "Couldn't connect" / "Operation timed out" are not claimed.
+SUBST="error: unable to download '[^']*': HTTP error 5[0-9][0-9]"
+DRIVER='vm-test-run-[a-z0-9-]+> '
+if grep -qE "$SUBST" "$log" && ! grep -qE "$DRIVER" "$log" && ! grep -qE "$ASSERT" "$log"; then
+  marker="FLAKE-S-RETRY test=${test_name} run=${run_id} attempt=${attempt}"
+  echo "::warning::${marker}"
+  [ -n "${GITHUB_STEP_SUMMARY:-}" ] && echo "$marker" >> "$GITHUB_STEP_SUMMARY"
+  exit 0
 fi
 
 if ! grep -q "$SIG" "$log"; then
