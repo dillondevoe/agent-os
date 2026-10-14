@@ -123,6 +123,31 @@ in {
   boot.consoleLogLevel = lib.mkDefault 3;
   boot.initrd.verbose  = false;
   boot.plymouth.enable = true;
+  # plymouthd is single-threaded and reads the console with a poll()-then-read() on a BLOCKING
+  # fd (ply_buffer_append_from_fd). When the poll says readable and no byte arrives, the read
+  # never returns, the daemon stops answering its socket, and plymouth-read-write.service (a
+  # oneshot with no timeout, Before=sysinit.target) holds the boot until someone presses a key.
+  # Seen at roughly 1 boot in 60 with the host under CPU load. The patch makes that one read
+  # non-blocking. Measurements and the reproducer: docs/ci-flake-ledger.md.
+  #
+  # NOTE the `.override` before `.overrideAttrs`: it reproduces the nixpkgs module's own default
+  # (`pkgs.plymouth.override { systemd = config.boot.initrd.systemd.package; }`), which a bare
+  # `pkgs.plymouth.overrideAttrs` would silently drop. Measured 2026-10-13: it builds the IDENTICAL
+  # derivation today, because `boot.initrd.systemd.package` here IS `pkgs.systemd` -- so this line
+  # is latent-divergence insurance, not a live fix, and the systemd initrd is enabled on all four
+  # images (true on agentos, agentos-open, agentos-sealed, agentos-sealed-s5).
+  boot.plymouth.package = (pkgs.plymouth.override {
+    systemd = config.boot.initrd.systemd.package;
+  }).overrideAttrs (o: {
+    # builtins.path, not a bare path: a bare path resolves inside the flake source, whose store
+    # path changes on every commit, and plymouth would rebuild on every commit with it.
+    patches = (o.patches or [ ]) ++ [
+      (builtins.path {
+        path = ../patches/plymouth-buffer-read-nonblocking.patch;
+        name = "plymouth-buffer-read-nonblocking.patch";
+      })
+    ];
+  });
   boot.plymouth.themePackages = [ agentOsTheme ];
   boot.plymouth.theme  = "agent-os";
 
