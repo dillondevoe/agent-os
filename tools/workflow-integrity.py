@@ -56,6 +56,10 @@ REQUIRED = ("gate", "flake-check", "installer-honesty", "pin-freshness", "vm-tes
 WF_DIR = ".github/workflows"
 
 
+class UnresolvableName(ValueError):
+    """A job name this tool cannot resolve to the context GitHub will actually report."""
+
+
 def contexts(text):
     """{check-context-name: job-body} for one workflow file. Raises on unparseable input."""
     doc = yaml.load(text, Loader=_StrictLoader)
@@ -67,6 +71,17 @@ def contexts(text):
     out = []
     for jid, body in jobs.items():
         name = body.get("name") if isinstance(body, dict) else None
+        # GitHub EVALUATES expressions in `jobs.<id>.name`, so the context it reports is the
+        # evaluated string and this tool only ever has the literal text. Keying `${{ matrix.n }}`
+        # under its own source would let a job whose name evaluates to a required context sit
+        # invisible to the duplicate check below -- a confident clean answer over an input we
+        # cannot read. Every other unreadable input here fails CLOSED (unparseable YAML, an
+        # in-file duplicate key, a merge key, a 1000-entry listing, a non-file entry); this one
+        # did not. Refuse instead. (code-qa run 1 high, verified 2026-10-31; arms A14/A15.)
+        if isinstance(name, str) and "${{" in name:
+            raise UnresolvableName(
+                f"job `{jid}` names itself with a GitHub expression, which Actions evaluates and "
+                f"this tool cannot — a duplicate of a required check could hide behind it")
         # Compare on a folded form: whether GitHub matches a required context case- or
         # space-sensitively is not something this tool can see, so `Gate` or `gate ` counts as
         # `gate`. Folding can only ADD a collision, never hide one (the fail-safe direction).
@@ -89,6 +104,9 @@ def judge(base_files, head_files):
         try:
             for name, body in contexts(text):
                 defs.setdefault(name, []).append((path, body))
+        except UnresolvableName as e:
+            # Not a parse failure: the YAML is fine and the message must not say otherwise.
+            fails.append(f"{_safe(path)}: {e}")
         except Exception as e:  # noqa: BLE001 — any parse failure is a fail-closed verdict
             fails.append(f"{_safe(path)}: cannot parse ({e.__class__.__name__}) — cannot tell what it defines")
     base = {}
@@ -178,6 +196,18 @@ def selftest():
     # A11 a hostile path is inert in the report (no mention, no backtick break-out)
     f, _ = judge(base, {**base, "@everyone`](http://x)": ok({"gate": {"runs-on": "x"}})})
     arms.append(("A11 hostile path neutralised", bool(f) and "@" not in f[0] and "`?everyone???http://x?`" in f[0], f, []))
+    # A14 EXPRESSION NAME (code-qa run 1 high, verified by scout 2026-10-31; q226). GitHub
+    # EVALUATES expressions in `jobs.<id>.name`, so the context it reports is the evaluated
+    # string; this tool only has the literal text. A job named `${{ ... }}` that evaluates to a
+    # required context is therefore invisible to the duplicate check. Every other unreadable
+    # input here fails CLOSED (A7 unparseable, A9 dup key, A10 merge key, the 1000-entry
+    # listing, a non-file entry) -- this one input degraded into a confident clean answer.
+    arm("A14 expression job name fails closed",
+        {**base, f"{WF_DIR}/evil.yml": ok({"x1": {"name": "${{ matrix.n }}"}})}, True)
+    # A15 CONTROL for A14: a literal name with no expression must still be judged, not refused,
+    # or A14 passes on a tool that fails closed on every `name:` it sees.
+    arm("A15 CONTROL plain name: still judged, not refused",
+        {**base, f"{WF_DIR}/b.yml": ok({"x1": {"name": "lint"}})}, False)
     # A13 a case/space variant of a required name is treated as that name
     arm("A13 `Gate ` via name: collides with gate", {**base, f"{WF_DIR}/evil.yml": ok({"x1": {"name": "Gate "}})}, True)
     # A12 END-TO-END through gh_tree with a stub `gh` on PATH. A1-A11 call judge() directly, and a

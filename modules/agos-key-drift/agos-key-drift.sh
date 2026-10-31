@@ -46,7 +46,12 @@ fps() {
   local f="$1" line tmp fp
   [ -r "$f" ] || return 0
   tmp="$(mktemp)"
-  while IFS= read -r line; do
+  # `|| [ -n "$line" ]`: read returns non-zero on a final line with NO trailing newline, having
+  # already filled $line. Without the guard the loop body never runs for it, so a key appended by
+  # `echo -n` or landed by a truncated copy is never fingerprinted and the scanner reports CLEAN
+  # over exactly the hand-written key it exists to catch. sshd accepts that key. (code-qa run 1
+  # high, verified 2026-10-31; arm L, with M as the declared-key control.)
+  while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in ''|'#'*) continue ;; esac
     printf '%s\n' "$line" > "$tmp"
     if fp="$(ssh-keygen -lf "$tmp" 2>/dev/null)"; then
@@ -104,7 +109,12 @@ else
   # real enumeration untested — the battery writes an $PREFIX/etc/passwd and exercises
   # exactly the lines that run on the box.
   if [ -r "$PREFIX/etc/passwd" ]; then
-    while IFS=: read -r u _ _ _ _ home _; do
+    # Same read-drops-an-unterminated-last-line defect as fps() above, on a different input:
+    # a hand-edited or truncated passwd with no trailing newline would drop its LAST ACCOUNT
+    # from enumeration entirely, and an unscanned user reads exactly like a clean one. Found
+    # while fixing fps(); arm N covers it. $u, not $line -- the guard must name THIS loop's
+    # variable or it is a control that cannot fire.
+    while IFS=: read -r u _ _ _ _ home _ || [ -n "$u" ]; do
       [ -n "$u" ] && [ -n "$home" ] || continue
       check_user "$u" "$PREFIX$home/.ssh/authorized_keys"
     done < "$PREFIX/etc/passwd"
