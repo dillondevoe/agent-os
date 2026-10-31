@@ -53,6 +53,8 @@ ENTRY_MAX = 8192           # bytes of one boot entry file
 LINE_MAX = 16              # bytes a typed line may have, newline included
 TIMEOUT = 300              # seconds for the whole front end; then the defaults
 ATTEMPTS = 5               # bad lines per question before its default is taken
+AUDIT_LIMIT = 10           # seconds for one `audit append` (modules/agos_window.py uses the same)
+RECORD_SCHEMA = 1          # the shape of this module's records in the chain
 
 
 def config():
@@ -77,6 +79,40 @@ def log(line):
         syslog.syslog(syslog.LOG_INFO, line)
     except Exception:
         pass
+
+
+def _append_record(c, event, **fields):
+    """One record to the audit chain, through the pinned `audit` wrapper (modules/audit-pkg.nix) and
+    signed as the wall's participant. True only if `audit append` said it is durable.
+
+    WHY THIS IS SPELLED HERE and not imported from modules/agos_window.py, which has the same twenty
+    lines: every program in this tree is ONE self-contained file run as `python3 -I <abspath>`, and
+    `-I` implies `-P`, so the script's own directory is NOT on sys.path and a sibling import simply
+    fails (measured, python 3.11+). `-I` is a deliberate property of these programs — no user site,
+    no PYTHON* environment, no cwd on sys.path — so sharing a module would mean giving it up. What
+    MUST be the same is shared where it can be: the `audit` derivation and the signer options are
+    pinned once in the .nix and handed to both programs. tests/agos-choice-battery.py F2-twin asserts
+    the two appenders agree on the properties that matter. Do not "fix" this into an import.
+    """
+    if not c.get("audit"):
+        return True                                  # no chain on this box (the developer image)
+    rec = {"src": "surface-choice", "schema": RECORD_SCHEMA, "event": event}
+    rec.update(fields)
+    env = {}
+    if c.get("audit_signer"):
+        env["AGENT_OS_AUDIT_SIGNER"] = c["audit_signer"]
+    if c.get("audit_require_signed"):
+        env["AGENT_OS_AUDIT_REQUIRE_SIGNED"] = c["audit_require_signed"]
+    try:
+        p = subprocess.run([c["audit"], "append"], input=(json.dumps(rec, sort_keys=True) + "\n").encode("ascii"),
+                           capture_output=True, timeout=AUDIT_LIMIT, env=env)
+    except (OSError, subprocess.SubprocessError):
+        log("the audit chain refused the record %s (the append could not be run)" % event)
+        return False
+    if p.returncode != 0:
+        log("the audit chain refused the record %s (audit append exited %d)" % (event, p.returncode))
+        return False
+    return True
 
 
 # ── the store reader ─────────────────────────────────────────────────────────────────────────────
@@ -325,6 +361,12 @@ def apply(c=None):
     body = "schema = 1\n" + "".join('%s = "%s"\n' % (k, v) for k, v in zip(KINDS, picked))
     _write_atomic(c["store"], body.encode("ascii"), 0o644)
     log("store written: desktop=%s terminal=%s shell=%s" % tuple(picked))
+    # THE RECORD (spec 2.7 "The surface choice", slice 4b part 1). The store is already written when
+    # the record is attempted, and a refusal leaves the choice standing: these three values come from
+    # compiled-in closed lists, so the record is accountability and not an authorization gate. Making
+    # it a gate would block first login on a box with a torn chain and leave the setup window unable
+    # to close. The journal line above stays: it is all the developer image, which has no chain, has.
+    _append_record(c, "surface-chosen", **dict(zip(KINDS, picked)))
     marker = c.get("applied_marker")
     if marker:                                       # "the choice was made on THIS boot" (see boot_default)
         try:

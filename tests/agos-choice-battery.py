@@ -344,6 +344,178 @@ check(A.read_store(cfg()) == ({"desktop": "sway", "terminal": "foot", "shell": "
 check(SYS.lines == ["store written: desktop=sway terminal=foot shell=zsh"], "F: log: %r" % SYS.lines)
 ok("F valid tokens become the store (0644, exact text); the tokens file is read once and removed")
 
+# F2 — THE RECORD IN THE AUDIT CHAIN (slice 4b part 1; spec 2.7 "The surface choice").
+# Slice 1 wrote only a journal line. On the product path the store write is recorded in the audit
+# chain, through the SAME pinned `audit` wrapper the wall and the window use (modules/audit-pkg.nix),
+# signed as the same participant. Run against the REAL bin/audit and a real identity, as the window
+# battery's U arms are: a stub would prove the call shape and not that the chain accepts the record.
+REPO = os.path.abspath(os.path.join(HERE, ".."))
+ABIN = os.path.join(TMP, "abin"); os.makedirs(ABIN)
+AUDIT_DIR, IDROOT = os.path.join(TMP, "audit"), os.path.join(TMP, "identity")
+AUDIT_LOG = os.path.join(AUDIT_DIR, "audit.log")
+AUDIT_WRAP = os.path.join(ABIN, "audit")
+AUDIT_ENV = {"AGENT_OS_AUDIT_DIR": AUDIT_DIR, "AGENT_OS_MODULES": os.path.join(REPO, "modules"),
+             "AGENT_OS_IDENTITY_ROOT": IDROOT}
+# The production wrapper's shape (modules/audit-pkg.nix): pin the ledger, the modules and the
+# identity root, then the real primitive. `hang` and `fail` let the refusal arms drive it.
+with open(AUDIT_WRAP, "w") as f:
+    f.write("#!/bin/sh\n%s\n[ ! -e %s/hang ] || exec %s -c 'import time; time.sleep(30)'\n"
+            "[ ! -e %s/fail ] || exit 4\nexec %s -I %s \"$@\"\n" % (
+                "\n".join("export %s=%s" % kv for kv in sorted(AUDIT_ENV.items())),
+                TMP, sys.executable, TMP, sys.executable, os.path.join(REPO, "bin", "audit")))
+os.chmod(AUDIT_WRAP, 0o755)
+_r = subprocess.run([sys.executable, "-I", "-c",
+                     "import sys; sys.path.insert(0, %r); import identity; identity.ensure_boot_identities()"
+                     % AUDIT_ENV["AGENT_OS_MODULES"]],
+                    env=AUDIT_ENV, stdin=subprocess.DEVNULL, capture_output=True, text=True)
+check(_r.returncode == 0, "F2: fixture: could not mint the identities: " + _r.stderr[-300:])
+
+
+def acfg(**over):
+    return cfg(**dict({"audit": AUDIT_WRAP, "audit_log": AUDIT_LOG}, **over))
+
+
+def areset():
+    gone(STORE); gone(TOKENS); SYS.lines.clear()
+    shutil.rmtree(AUDIT_DIR, True)
+    for _f in ("hang", "fail"):
+        if os.path.exists(os.path.join(TMP, _f)):
+            os.unlink(os.path.join(TMP, _f))
+
+
+def records():
+    """This module's records in the chain, oldest first. One record is one physical line, flat:
+    the caller's fields plus seq/prev/ts (bin/audit `canonical`)."""
+    if not os.path.exists(AUDIT_LOG):
+        return []
+    out = []
+    for line in open(AUDIT_LOG):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            rec = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(rec, dict) and rec.get("src") == "surface-choice":
+            out.append(rec)
+    return out
+
+
+# THE case: a valid apply on a box WITH a chain leaves a record naming the three choices.
+areset(); put(TOKENS, "sway foot zsh\n", 0o600)
+rc = A.apply(acfg())
+recs = records()
+check(rc == 0, "F2: apply rc=%r" % rc)
+check(len(recs) == 1, "F2: the store write must leave exactly ONE surface-choice record: %r" % recs)
+check(recs and recs[0].get("event") == "surface-chosen"
+      and (recs[0].get("desktop"), recs[0].get("terminal"), recs[0].get("shell")) == ("sway", "foot", "zsh"),
+      "F2: the record must name the event and the three chosen values: %r" % recs)
+ok("F2 the store write is recorded in the audit chain, naming the three chosen values")
+
+# F2-control-a: the record is genuinely IN the chain — `audit verify` accepts the log it produced.
+_v = subprocess.run([AUDIT_WRAP, "verify"], capture_output=True, text=True, stdin=subprocess.DEVNULL)
+check(_v.returncode == 0, "F2-control-a: audit verify refused the chain the record went into: %s" % (_v.stdout + _v.stderr)[-300:])
+ok("F2-control-a the chain the record landed in verifies")
+
+# F2-control-b: WITHOUT a chain configured (the developer image) nothing is appended and the apply
+# still succeeds. Without this arm an appender that fired unconditionally would pass the arm above.
+areset(); put(TOKENS, "sway foot zsh\n", 0o600)
+rc = A.apply(cfg())
+check(rc == 0 and records() == [], "F2-control-b: a box with no chain must get no record: rc=%r %r" % (rc, records()))
+ok("F2-control-b with no chain configured the apply still succeeds and appends nothing")
+
+# F2-refusal: a chain that REFUSES the record. The store is already written when the record is
+# attempted, so the choice stands and the refusal is LOUD in the journal rather than silent. The
+# record is not an authorization gate here (the values come from compiled-in closed lists); it is
+# accountability, so refusing the whole apply would block first login on a box with a torn chain
+# and leave the setup window unable to close. A DECISION for the spec review, not an assumption.
+areset(); put(TOKENS, "sway foot zsh\n", 0o600); put(os.path.join(TMP, "fail"), "")
+rc = A.apply(acfg())
+check(rc == 0 and os.path.exists(STORE), "F2-refusal: the choice must still stand: rc=%r" % rc)
+check(any("chain" in l and "refused" in l for l in SYS.lines),
+      "F2-refusal: a refused record must leave a loud journal line: %r" % SYS.lines)
+ok("F2-refusal a chain that refuses the record leaves the choice standing and says so")
+
+# F2-hang: the appender must not hang the helper. The wrapper sleeps 30 s; the call is bounded.
+areset(); put(TOKENS, "sway foot zsh\n", 0o600); put(os.path.join(TMP, "hang"), "")
+_t0 = time.time()
+rc = A.apply(acfg())
+_dt = time.time() - _t0
+check(rc == 0 and _dt < 25, "F2-hang: the append must be bounded: rc=%r %.1fs" % (rc, _dt))
+ok("F2-hang a chain that hangs cannot hang the helper (bounded append)")
+
+# F2-env: the child's environment carries the signer and the pin and NOTHING else — the same rule
+# the window's U arms pin (a record that silently lost its signature breaks every later one).
+ENVDUMP = os.path.join(TMP, "audit-env.json")
+ENVWRAP = os.path.join(ABIN, "audit-env")
+with open(ENVWRAP, "w") as f:
+    f.write("#!%s\nimport json, os, sys\njson.dump({k: v for k, v in os.environ.items() if k != 'LC_CTYPE'}, open(%r, 'w'))\nsys.stdin.read()\nprint('0' * 64)\n"
+            % (sys.executable, ENVDUMP))
+os.chmod(ENVWRAP, 0o755)                     # (LC_CTYPE: the child interpreter sets it for itself at startup)
+areset(); put(TOKENS, "sway foot zsh\n", 0o600)
+A.apply(acfg(audit=ENVWRAP, audit_signer="agent", audit_require_signed="agent"))
+check(json.load(open(ENVDUMP)) == {"AGENT_OS_AUDIT_SIGNER": "agent", "AGENT_OS_AUDIT_REQUIRE_SIGNED": "agent"},
+      "F2-env: the child's environment must be exactly the signer and the pin: %r" % json.load(open(ENVDUMP)))
+areset(); put(TOKENS, "sway foot zsh\n", 0o600)
+A.apply(acfg(audit=ENVWRAP))
+check(json.load(open(ENVDUMP)) == {}, "F2-env: with no signer the child's environment must be EMPTY: %r" % json.load(open(ENVDUMP)))
+ok("F2-env the child's environment is the signer and the pin, or empty")
+
+# F2-twin — THE TWO APPENDERS MUST AGREE. modules/agos_choice.py and modules/agos_window.py each
+# carry their own `_append_record`, on purpose: every program here is one self-contained file run as
+# `python3 -I <abspath>`, and `-I` implies `-P`, so a sibling import fails and sharing a module would
+# mean giving up `-I`. That is a deliberate trade, and the cost of it is drift — one rule in two
+# files. This arm is the control that makes the duplication safe: it drives BOTH functions over the
+# same inputs and asserts the same answers, so a change to one that the other does not get is a red
+# test rather than a record that silently loses its signature. It is ARMED below: perturbing one
+# side must turn it red, or it is a control that cannot fail.
+WMOD = os.path.abspath(os.path.join(HERE, "..", "modules", "agos_window.py"))
+_wspec = importlib.util.spec_from_file_location("agos_window", WMOD)
+W = importlib.util.module_from_spec(_wspec); _wspec.loader.exec_module(W)
+
+
+def twin_probe(append, base):
+    """The properties that matter, as answers: (no chain, refused, hung, env-with-signer, env-bare)."""
+    out = []
+    out.append(append(dict(base, audit=None), "e"))                      # no chain -> True, no append
+    areset(); put(os.path.join(TMP, "fail"), "")
+    out.append(append(dict(base, audit=AUDIT_WRAP), "e"))                # refused -> False
+    areset(); put(os.path.join(TMP, "hang"), "")
+    _t = time.time()
+    out.append(append(dict(base, audit=AUDIT_WRAP), "e"))                # hung -> False, bounded
+    out.append(time.time() - _t < 25)
+    areset()
+    append(dict(base, audit=ENVWRAP, audit_signer="agent", audit_require_signed="agent"), "e")
+    out.append(json.load(open(ENVDUMP)))
+    areset()
+    append(dict(base, audit=ENVWRAP), "e")
+    out.append(json.load(open(ENVDUMP)))
+    return out
+
+
+# The window's record carries fetch_uid, so its config needs it; nothing else differs.
+CBASE, WBASE = {}, {"fetch_uid": 999}
+mine, theirs = twin_probe(A._append_record, CBASE), twin_probe(W._append_record, WBASE)
+check(mine == theirs, "F2-twin: the two appenders disagree: choice=%r window=%r" % (mine, theirs))
+check(mine == [True, False, False, True,
+               {"AGENT_OS_AUDIT_SIGNER": "agent", "AGENT_OS_AUDIT_REQUIRE_SIGNED": "agent"}, {}],
+      "F2-twin: the agreed answers are not the specified ones: %r" % mine)
+
+# ARMED: perturb one side (a signer the child must not be told about) and the arm must go red.
+_real = A._append_record
+
+
+def _drifted(c, event, **f):
+    c = dict(c)
+    if c.get("audit_signer"):
+        c["audit_require_signed"] = None          # the drift: the pin silently dropped
+    return _real(c, event, **f)
+
+
+check(twin_probe(_drifted, CBASE) != theirs, "F2-twin: ARMED CONTROL — a drifted appender was not caught")
+ok("F2-twin the choice and window appenders agree on chain/refusal/timeout/env, and a drift is caught")
+
 # G — the helper refuses and writes nothing
 target = os.path.join(TMP, "elsewhere"); put(target, "sway foot zsh\n", 0o600)
 
