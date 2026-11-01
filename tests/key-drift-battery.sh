@@ -99,8 +99,48 @@ else
   echo "FAIL K population absent or identical — empty=[$empty_line] one=[$one_line]"; fail=$((fail+1))
 fi
 
+# L — UNTERMINATED FINAL LINE (code-qa run 1 high, verified by scout 2026-10-31; q226).
+# sshd accepts a last key with no trailing newline; `while read` returns non-zero on it, so the
+# loop body never runs and that key is never fingerprinted. The scanner then reports CLEAN over
+# exactly the hand-appended key it exists to catch -- `printf '%s'`, no \n, is how an append by
+# `echo -n` or a truncated copy actually lands. Pre-fix: this arm reports rc=0 and no UNDECLARED.
+setup; printf '%s' "$PLANT" > "$W/root/.ssh/authorized_keys"
+check "L unterminated last line, undeclared key -> DRIFT" "$(run)" 1
+if grep -q 'UNDECLARED root' "$W/out"; then echo "PASS L names the user"; pass=$((pass+1));
+else echo "FAIL L: unterminated last key not named"; fail=$((fail+1)); fi
+
+# M — CONTROL for L. The same unterminated shape carrying a DECLARED key must stay clean, or L
+# would pass on a scanner that simply calls every unterminated file drift.
+#
+# THE rc=0 ALONE IS NOT A TEST OF THE FIX, and scout said so reviewing PR 359. Pre-fix the
+# unterminated declared key is DROPPED, nothing is fingerprinted, and the scan reports clean —
+# so `check ... 0` passes with the fix and without it. It guards over-flagging only. The
+# population half is what makes it an arm: the key must have been EXAMINED, which is exactly
+# arm K's instrument pointed at the unterminated shape. Pre-fix this reads `examined 0 mutable`.
+setup; printf '%s' "$MIR" > "$W/root/.ssh/authorized_keys"
+check "M unterminated last line, declared key -> clean" "$(run)" 0
+# ASSERT ON THE KEY COUNT, NOT THE FILE COUNT. The RESULT line carries both, and the first
+# version of this arm read `examined 1 mutable ... file(s)` — which is 1 pre-fix as well, because
+# the file IS opened; it is the key inside it that is dropped. Shown green against the reverted
+# fix, i.e. it asserted nothing, exactly the failure mode this arm was added to remove. The
+# `key(s)` column goes 1 -> 0 when the fix is reverted and is the only half that discriminates.
+m_line="$(grep '^RESULT' "$W/out")"
+case "$m_line" in
+  *"1 key(s)"*) echo "PASS M the declared key was fingerprinted, not skipped"; pass=$((pass+1));;
+  *) echo "FAIL M clean over an unread key — [$m_line]"; fail=$((fail+1));;
+esac
+
+# N — UNTERMINATED /etc/passwd. Same defect, different input: the last ACCOUNT is dropped from
+# enumeration, so its planted key is never looked at and the scan reports clean. Found while
+# fixing fps(), not by the sweep, and it gets its own arm rather than riding fps()'s.
+setup; printf 'root:x:0:0::/root:/bin/sh\nagent:x:1000:1000::/home/agent:/bin/sh' > "$W/etc/passwd"
+printf '%s\n' "$PLANT" > "$W/home/agent/.ssh/authorized_keys"
+check "N unterminated passwd, last account scanned -> DRIFT" "$(run)" 1
+if grep -q 'UNDECLARED agent' "$W/out"; then echo "PASS N names the account"; pass=$((pass+1));
+else echo "FAIL N: last account in an unterminated passwd not scanned"; fail=$((fail+1)); fi
+
 # A verdict that does not depend on how many arms ran cannot notice any going missing.
-WANT_ARMS=11
+WANT_ARMS=17
 ran=$((pass+fail))
 if [ "$ran" != "$WANT_ARMS" ]; then
   echo "FAIL arm count: $ran arms ran, expected $WANT_ARMS -- an arm was added or silently lost"

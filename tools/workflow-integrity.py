@@ -56,6 +56,10 @@ REQUIRED = ("gate", "flake-check", "installer-honesty", "pin-freshness", "vm-tes
 WF_DIR = ".github/workflows"
 
 
+class UnresolvableName(ValueError):
+    """A job name this tool cannot resolve to the context GitHub will actually report."""
+
+
 def contexts(text):
     """{check-context-name: job-body} for one workflow file. Raises on unparseable input."""
     doc = yaml.load(text, Loader=_StrictLoader)
@@ -67,6 +71,17 @@ def contexts(text):
     out = []
     for jid, body in jobs.items():
         name = body.get("name") if isinstance(body, dict) else None
+        # GitHub EVALUATES expressions in `jobs.<id>.name`, so the context it reports is the
+        # evaluated string and this tool only ever has the literal text. Keying `${{ matrix.n }}`
+        # under its own source would let a job whose name evaluates to a required context sit
+        # invisible to the duplicate check below -- a confident clean answer over an input we
+        # cannot read. Every other unreadable input here fails CLOSED (unparseable YAML, an
+        # in-file duplicate key, a merge key, a 1000-entry listing, a non-file entry); this one
+        # did not. Refuse instead. (code-qa run 1 high, verified 2026-10-31; arms A14/A15.)
+        if isinstance(name, str) and "${{" in name:
+            raise UnresolvableName(
+                f"job `{jid}` names itself with a GitHub expression, which Actions evaluates and "
+                f"this tool cannot — a duplicate of a required check could hide behind it")
         # Compare on a folded form: whether GitHub matches a required context case- or
         # space-sensitively is not something this tool can see, so `Gate` or `gate ` counts as
         # `gate`. Folding can only ADD a collision, never hide one (the fail-safe direction).
@@ -89,6 +104,9 @@ def judge(base_files, head_files):
         try:
             for name, body in contexts(text):
                 defs.setdefault(name, []).append((path, body))
+        except UnresolvableName as e:
+            # Not a parse failure: the YAML is fine and the message must not say otherwise.
+            fails.append(f"{_safe(path)}: {e}")
         except Exception as e:  # noqa: BLE001 — any parse failure is a fail-closed verdict
             fails.append(f"{_safe(path)}: cannot parse ({e.__class__.__name__}) — cannot tell what it defines")
     base = {}
@@ -152,9 +170,20 @@ def selftest():
                                      "installer-honesty": {"runs-on": "x"}, "pin-freshness": {"runs-on": "x"},
                                      "vm-tests-all": {"runs-on": "x"}})}
     arms = []
-    def arm(label, head, want_fail, want_note=None):
+    def arm(label, head, want_fail, want_note=None, want_fail_text=None):
+        """want_note asserts on ANNOUNCEMENTS, want_fail_text on FAIL REASONS.
+
+        They were one parameter until scout's PR-359 review (2026-10-31): `want_note` only ever
+        searched `n`, so an arm could not assert anything about WHY a fail-closed verdict fired.
+        A14 was the exposure — deleting the dedicated `except UnresolvableName` branch lets the
+        generic `except Exception` catch it (UnresolvableName IS a ValueError), the tool still
+        fails closed, and A14 stays green while the message it exists to pin goes untested.
+        A green arm that cannot distinguish the two branches is a reworded assertion, not a test.
+        """
         f, n = judge(base, head)
-        good = bool(f) == want_fail and (want_note is None or any(want_note in x for x in n))
+        good = (bool(f) == want_fail
+                and (want_note is None or any(want_note in x for x in n))
+                and (want_fail_text is None or any(want_fail_text in x for x in f)))
         arms.append((label, good, f, n))
     # A1 permitting twin: the unchanged tree is GREEN (without it a checker that fails everything passes)
     arm("A1 unchanged tree passes", dict(base), False)
@@ -178,6 +207,26 @@ def selftest():
     # A11 a hostile path is inert in the report (no mention, no backtick break-out)
     f, _ = judge(base, {**base, "@everyone`](http://x)": ok({"gate": {"runs-on": "x"}})})
     arms.append(("A11 hostile path neutralised", bool(f) and "@" not in f[0] and "`?everyone???http://x?`" in f[0], f, []))
+    # A14 EXPRESSION NAME (code-qa run 1 high, verified by scout 2026-10-31; q226). GitHub
+    # EVALUATES expressions in `jobs.<id>.name`, so the context it reports is the evaluated
+    # string; this tool only has the literal text. A job named `${{ ... }}` that evaluates to a
+    # required context is therefore invisible to the duplicate check. Every other unreadable
+    # input here fails CLOSED (A7 unparseable, A9 dup key, A10 merge key, the 1000-entry
+    # listing, a non-file entry) -- this one input degraded into a confident clean answer.
+    # The `want_fail_text` is the load-bearing half (scout, PR 359): without it the generic
+    # fail-closed path satisfies this arm and the dedicated branch is untested.
+    arm("A14 expression job name fails closed, as a name problem not a parse failure",
+        {**base, f"{WF_DIR}/evil.yml": ok({"x1": {"name": "${{ matrix.n }}"}})}, True,
+        want_fail_text="names itself with a GitHub expression")
+    # A15 CONTROL for A14: a literal name with no expression must still be judged, not refused,
+    # or A14 passes on a tool that fails closed on every `name:` it sees.
+    arm("A15 CONTROL plain name: still judged, not refused",
+        {**base, f"{WF_DIR}/b.yml": ok({"x1": {"name": "lint"}})}, False)
+    # A15b CONTROL, scout's: an expression ANYWHERE ELSE in the job is none of this check's
+    # business. A regression that refuses on a bare `${{` or `{{` sighting passes A14 and A15
+    # (neither contains one outside `name:`) and would fail every matrix workflow in the repo.
+    arm("A15b CONTROL expression outside name: still judged",
+        {**base, f"{WF_DIR}/b.yml": ok({"x1": {"runs-on": "${{ matrix.os }}"}})}, False)
     # A13 a case/space variant of a required name is treated as that name
     arm("A13 `Gate ` via name: collides with gate", {**base, f"{WF_DIR}/evil.yml": ok({"x1": {"name": "Gate "}})}, True)
     # A12 END-TO-END through gh_tree with a stub `gh` on PATH. A1-A11 call judge() directly, and a
