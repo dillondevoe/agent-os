@@ -48,6 +48,14 @@ REPORT = os.environ.get("AGOS_USER_DRIFT_REPORT",
 
 out = []
 rc = 0
+# DUPLICATE NAMES ARE DRIFT. NixOS activation never writes the same name twice, so a
+# duplicate is always a hand edit, and no single "which line wins" rule is safe to scan by:
+# getpwnam/getgrnam take the FIRST line, but getpwuid can reach a line that name lookup
+# shadows, and initgroups()/getgrouplist() build a login's supplementary groups by scanning
+# EVERY group line. A first-wins scanner (this file's 2026-11-01 code-qa fix, corrected the
+# same day by a security review) still missed `wheel:x:1:operator,agent` appended BEHIND a
+# clean wheel line, which grants agent wheel at login. Arms J-K2 in tests/user-drift-battery.sh.
+DUPS = []
 
 
 def say(line):
@@ -85,6 +93,9 @@ def parse_passwd(path):
         f = line.split(":")
         if len(f) < 7:
             raise ValueError("malformed passwd line in %s: %r" % (path, line))
+        if f[0] in users:                      # see DUPS: reported, never silently dropped
+            DUPS.append(("USER", f[0], "this line: uid=%s gid=%s shell=%s" % (f[2], f[3], f[6])))
+            continue
         users[f[0]] = {"uid": f[2], "gid": f[3], "shell": f[6]}
     return users
 
@@ -98,8 +109,14 @@ def parse_group(path):
         f = line.split(":")
         if len(f) < 4:
             raise ValueError("malformed group line in %s: %r" % (path, line))
-        groups[f[0]] = {"gid": f[2],
-                        "members": [m for m in f[3].split(",") if m]}
+        mem = [m for m in f[3].split(",") if m]
+        if f[0] in groups:                     # see DUPS. Members are UNIONED across every
+            DUPS.append(("GROUP", f[0],        # line for the name: initgroups() scans ALL
+                         "this line: gid=%s members=%s  <- initgroups grants THIS gid to them"
+                         % (f[2], ",".join(mem) or "-")))
+            groups[f[0]]["members"] += [m for m in mem if m not in groups[f[0]]["members"]]
+            continue                           # lines, so a shadowed twin still grants.
+        groups[f[0]] = {"gid": f[2], "members": mem}
     return groups
 
 
@@ -124,6 +141,14 @@ def main():
     decl_groups = {g["name"]: g for g in spec.get("groups", [])}
     say("declared: %d users, %d groups; live: %d users, %d groups"
         % (len(decl_users), len(decl_groups), len(live_users), len(live_groups)))
+
+    # Each duplicate names what ITS line grants: a twin sshd with a bash shell, or a twin wheel
+    # carrying gid 0, must not read the same as a harmless exact copy -- the other report lines
+    # only see the first line's uid/gid/shell.
+    for kind, name, detail in DUPS:
+        say("DUPLICATE-%s %s  <- appears more than once (activation never writes that); %s"
+            % (kind, name, detail))
+        rc = 1
 
     for name, live in sorted(live_users.items()):
         if name not in decl_users:

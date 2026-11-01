@@ -160,6 +160,34 @@ check(oj_with(None, content="D") == ("refuse-or-ask", 0.0), "no logprobs: said l
 check(oj_with(None, content="Z") == (None, 0.0), "no logprobs and no letter: abstain")
 ok("D openjev probabilities renormalised over candidate letters")
 
+# ── D2. `in "ABCD"` IS A SUBSTRING TEST, NOT A MEMBERSHIP TEST ────────────────────────────
+# Found by code-qa run 1 (evals/router.py:195 and :199). LABELS is the STRING "ABCD", so
+# `tok in self.LABELS` is true for "" and for any contiguous run like "AB" -- and
+# "ABCD".index("") is 0, so every one of those non-labels maps to HANDLERS[0], local-answer.
+# The router's abstain path is what the cascade is built on: an abstain defers to the next,
+# more expensive stage (arm F's c4), so a bogus confident local-answer does not merely
+# mislabel one row, it stops the cascade from ever asking the model that could answer.
+# Both the logprob loop and the no-logprobs fallback spell the test the same way.
+check(oj_with([{"token": " ", "logprob": -0.1}], content="Z") == (None, 0.0),
+      "a whitespace-only token strips to '' and must NOT be read as a label")
+check(oj_with([{"token": "\n", "logprob": -0.1}], content="Z") == (None, 0.0),
+      "a newline token strips to '' and must NOT be read as a label")
+check(oj_with([{"token": "AB", "logprob": -0.1}], content="Z") == (None, 0.0),
+      "a multi-letter token is not one of the four labels")
+check(oj_with(None, content="") == (None, 0.0),
+      "no logprobs and EMPTY content must abstain, not report local-answer")
+check(oj_with(None, content="   ") == (None, 0.0),
+      "no logprobs and whitespace content must abstain, not report local-answer")
+# D2c is the permitting twin, and it carries the five arms above: without it a predicate that
+# rejected EVERYTHING would satisfy all of them while disabling the router completely. The
+# genuine single letters must still route, and to their own handlers -- a fix that mapped every
+# valid label to one handler would also pass a single-letter check.
+check(oj_with([{"token": "A", "logprob": -0.1}]) == ("local-answer", 1.0), "CONTROL: 'A' still routes")
+check(oj_with([{"token": " D", "logprob": -0.1}]) == ("refuse-or-ask", 1.0),
+      "CONTROL: a letter with leading whitespace still strips to a real label")
+check(oj_with(None, content="B") == ("tool", 0.0), "CONTROL: the fallback still reads a real letter")
+ok("D2 a non-label token abstains instead of silently becoming HANDLERS[0]")
+
 # ── E. embed ──────────────────────────────────────────────────────────────────────────────
 fp = FakePost()
 em = M.Embed(fp, [{"prompt": "what is it", "handler": "local-answer"}, {"prompt": "open it", "handler": "tool"},

@@ -185,6 +185,20 @@ class OpenJev:
                 + json.dumps(task, ensure_ascii=False, sort_keys=True)
                 + "\nReturn only the selected letter: " + ", ".join(self.LABELS) + ".\nAnswer:")
 
+    def _is_label(self, tok):
+        """One of the four labels -- MEMBERSHIP, not `in LABELS`.
+
+        LABELS is the string "ABCD", so `tok in self.LABELS` is a SUBSTRING test: it is true
+        for "" and for any contiguous run ("AB", "BCD"), and `"ABCD".index("")` is 0, so every
+        such non-label silently became HANDLERS[0] = local-answer. That is the worst direction
+        available here, because a confident bogus local-answer does not merely mislabel one row:
+        the cascade only escalates to the next, more expensive stage on an ABSTAIN, so it stops
+        the stage that could actually answer from ever being asked. Spelled once and used by
+        both the logprob loop and the no-logprobs fallback -- the two carried the same bug
+        because they spelled the same rule twice. Arms D2 in tests/router-battery.py.
+        """
+        return len(tok) == 1 and tok in self.LABELS
+
     def __call__(self, prompt):
         out = self.post("/api/chat", {"model": self.model, "messages": [{"role": "user", "content": self.prompt(prompt)}],
                                       "think": False, "stream": False, "logprobs": True, "top_logprobs": 20,
@@ -192,11 +206,11 @@ class OpenJev:
         lp = {}
         for x in ((out.get("logprobs") or [{}])[0].get("top_logprobs") or []):
             tok = x["token"].strip()
-            if tok in self.LABELS and tok not in lp:
+            if self._is_label(tok) and tok not in lp:
                 lp[tok] = x["logprob"]
         said = (out.get("message", {}).get("content") or "").strip()[:1]
         if not lp:   # no distribution: fall back to the letter, with no confidence
-            return (HANDLERS[self.LABELS.index(said)] if said in self.LABELS else None), 0.0
+            return (HANDLERS[self.LABELS.index(said)] if self._is_label(said) else None), 0.0
         z = sum(math.exp(v) for v in lp.values())
         probs = {l: math.exp(v) / z for l, v in lp.items()}
         top = max(probs, key=probs.get)

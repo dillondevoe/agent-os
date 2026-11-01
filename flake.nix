@@ -1005,7 +1005,7 @@
               touch $out
             '';
 
-        # pr-currency-selftest -- 18 arms, 6 of them controls.
+        # pr-currency-selftest -- 36 arms, 13 of them controls (counted 2026-11-01; recount, don't trust).
         #
         # It ran BY HAND ONLY until 2026-09-05, and that is the exact shape the tool it tests was
         # written about: a battery nothing executes is prose with a shell prompt, and its green is a
@@ -3987,6 +3987,24 @@
               cp ${./tests/router-battery.py} "$work/tests/router-battery.py"
               cd "$work"
               python3 tests/router-battery.py
+              touch $out
+            '';
+
+        # examples/apps/gym-spending/report.py — a worked example app, so its shape gets copied.
+        # code-qa run 1 found it printing `gym spending: 0.00` and exiting 0 on any export
+        # carrying a UTF-8 BOM or capitalised headers — a wrong total shaped exactly like a
+        # right one. The arms run
+        # the script as a subprocess under LC_ALL=C (what a unit or a cron job hands it), which
+        # is the condition the default-encoding defect needs.
+        gym-spending-contract =
+          nixpkgs.legacyPackages.${system}.runCommand "gym-spending-contract-check"
+            { nativeBuildInputs = [ nixpkgs.legacyPackages.${system}.python3 ]; } ''
+              work="$(mktemp -d)"
+              mkdir -p "$work/examples/apps/gym-spending" "$work/tests"
+              cp ${./examples/apps/gym-spending/report.py} "$work/examples/apps/gym-spending/report.py"
+              cp ${./tests/gym-spending-battery.py} "$work/tests/gym-spending-battery.py"
+              cd "$work"
+              python3 tests/gym-spending-battery.py
               touch $out
             '';
 
