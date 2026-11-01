@@ -26,7 +26,10 @@ import io
 import os
 import subprocess
 import sys
+import shutil
 import tempfile
+
+SIDE_EFFECTS = []  # scratch HOME under mktemp, removed at exit; the script under test is run as a subprocess, nothing leaves the box
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SCRIPT = os.environ.get("GYM_REPORT", os.path.join(
@@ -50,7 +53,10 @@ def run(csv_text, encoding="utf-8"):
     env["LC_ALL"] = "C"
     env["LANG"] = "C"
     env.pop("PYTHONIOENCODING", None)
-    p = subprocess.run([sys.executable, SCRIPT], capture_output=True, text=True, env=env)
+    try:
+        p = subprocess.run([sys.executable, SCRIPT], capture_output=True, text=True, env=env)
+    finally:
+        shutil.rmtree(d, ignore_errors=True)       # removed at exit: the declaration above is a promise
     return p.returncode, (p.stdout + p.stderr)
 
 
