@@ -118,6 +118,28 @@ rc=$( cd "$d" && base=$(git rev-parse HEAD~2) && lsha=$(git rev-parse HEAD) &&
 ok "H5 ref UPDATE still scans only the pushed range" "$rc" 0
 rm -rf "$d"
 
+# H6 -- A REAL `git push`, to a local bare repo (a file path remote, no network). Every arm above
+# drives the hook through git's stdin contract, so none of them can see a regression where git
+# never CALLS the hook -- install-hooks writing to the wrong path, or the file losing its exec
+# bit. This is the one arm that proves the hook is wired to git at all (Scout's review of #360).
+# A new remote with no clone has no refs/remotes/origin/HEAD, so this is also the defect's own
+# precondition reached the way a user reaches it, not by construction.
+d=$(scratch first); bare=$(mktemp -d)
+git init -q --bare "$bare"
+rc=$( cd "$d" && git remote add origin "$bare" && git push -q origin HEAD:refs/heads/main >/dev/null 2>&1; echo $? )
+ok "H6 real git push of a leaking new ref is REFUSED" "$( [ "$rc" != 0 ] && echo refused || echo pushed )" refused
+ok "H6a ...and nothing reached the remote" "$(git -C "$bare" rev-parse -q --verify refs/heads/main >/dev/null && echo landed || echo absent)" absent
+rm -rf "$d" "$bare"
+
+# H6b -- VACUITY arm for H6: the same push from a repo where the hook was NEVER installed must go
+# through. Without it H6 also passes when the push fails for an unrelated reason (a bad remote
+# path, a missing ref), and then it proves nothing about the hook.
+d=$(scratch first); bare=$(mktemp -d)
+git init -q --bare "$bare"; rm -f "$d/.git/hooks/pre-push"
+rc=$( cd "$d" && git remote add origin "$bare" && git push -q origin HEAD:refs/heads/main >/dev/null 2>&1; echo $? )
+ok "H6b same push with NO hook installed goes through" "$rc" 0
+rm -rf "$d" "$bare"
+
 echo
 echo "install-hooks battery: $pass passed, $fail failed ($((pass+fail)) arms)"
 [ "$fail" -eq 0 ]

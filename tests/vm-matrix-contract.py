@@ -121,6 +121,13 @@ WIRED_VIA_WORKFLOW = {
     # repo's test registry is one workflow deletion away from being decorative — the same shape
     # the gate itself guards against, aimed back at me on my first commit.
     "personal-data-gate-battery.sh": "personal-data-gate.yml",
+    # The hook INSTALLER's battery (PR #360) — same workflow, same reason: it is the other half
+    # of the same publication control. And it tripped this check on the commit that added it, for
+    # the THIRD time on my hand (#211, #222, now #360), with the entry directly above describing
+    # the exact mistake in my own words. Reading a scar is not the same as carrying it: the rule
+    # that would have caught it is "adding a tests/ file means adding its registry line in the
+    # same commit", and that is a step, not a sentence -- which is why this check exists at all.
+    "install-hooks-battery.sh": "personal-data-gate.yml",
     # Migrated here on the #163 merge (2026-08-27). This branch had independently grown a
     # WORKFLOW_INVOKED frozenset + _named_in_any_workflow() making the SAME claim — filed 08-23,
     # four days before #184 landed WIRED_VIA_WORKFLOW. Convergence, not conflict. Keeping both
