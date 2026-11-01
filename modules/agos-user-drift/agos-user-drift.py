@@ -94,7 +94,7 @@ def parse_passwd(path):
         if len(f) < 7:
             raise ValueError("malformed passwd line in %s: %r" % (path, line))
         if f[0] in users:                      # see DUPS: reported, never silently dropped
-            DUPS.append(("USER", f[0]))
+            DUPS.append(("USER", f[0], "this line: uid=%s gid=%s shell=%s" % (f[2], f[3], f[6])))
             continue
         users[f[0]] = {"uid": f[2], "gid": f[3], "shell": f[6]}
     return users
@@ -111,7 +111,9 @@ def parse_group(path):
             raise ValueError("malformed group line in %s: %r" % (path, line))
         mem = [m for m in f[3].split(",") if m]
         if f[0] in groups:                     # see DUPS. Members are UNIONED across every
-            DUPS.append(("GROUP", f[0]))       # line for the name: initgroups() scans ALL
+            DUPS.append(("GROUP", f[0],        # line for the name: initgroups() scans ALL
+                         "this line: gid=%s members=%s  <- initgroups grants THIS gid to them"
+                         % (f[2], ",".join(mem) or "-")))
             groups[f[0]]["members"] += [m for m in mem if m not in groups[f[0]]["members"]]
             continue                           # lines, so a shadowed twin still grants.
         groups[f[0]] = {"gid": f[2], "members": mem}
@@ -140,9 +142,12 @@ def main():
     say("declared: %d users, %d groups; live: %d users, %d groups"
         % (len(decl_users), len(decl_groups), len(live_users), len(live_groups)))
 
-    for kind, name in DUPS:
-        say("DUPLICATE-%s %s  <- the name appears more than once; activation never writes that"
-            % (kind, name))
+    # Each duplicate names what ITS line grants: a twin sshd with a bash shell, or a twin wheel
+    # carrying gid 0, must not read the same as a harmless exact copy -- the other report lines
+    # only see the first line's uid/gid/shell.
+    for kind, name, detail in DUPS:
+        say("DUPLICATE-%s %s  <- appears more than once (activation never writes that); %s"
+            % (kind, name, detail))
         rc = 1
 
     for name, live in sorted(live_users.items()):

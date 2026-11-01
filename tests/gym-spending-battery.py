@@ -100,6 +100,18 @@ rc, out = run('description,amount\nCity Gym monthly,"banana"\n')
 check(rc != 0 or "banana" in out,
       "F an amount that cannot be read must be named, not counted as 0 (rc=%d, %r)" % (rc, out.strip()))
 
+# --- G. a BLANK gym amount (a pending row / auth hold) must not vanish as 0. ---------------
+rc, out = run("description,amount\nCity Gym monthly,\nGym annual,100.00\n")
+check(rc != 0 and "100.00" not in out, "G a blank gym amount must fail, not total 100.00 (rc=%d, %r)" % (rc, out.strip()))
+
+# --- H. `amount` and `Amount` both present: ambiguous, not resolved by dict order. ----------
+rc, out = run("description,amount,Amount\nCity Gym monthly,45.00,999.00\n")
+check(rc != 0 and "999.00" not in out, "H colliding headers must fail, not pick one (rc=%d, %r)" % (rc, out.strip()))
+
+# --- I. the error names the PHYSICAL line, so a multi-line quoted field cannot misdirect. ---
+rc, out = run('description,amount\n"City Gym\nmonthly",banana\n')
+check("line 3" in out, "I a bad amount after a 2-line quoted field is reported at line 3 (%r)" % out.strip())
+
 print("gym-spending-battery: %s (%d ok, %d failed)" % (
     "PASS" if not failed else "FAIL", len(passed), len(failed)))
 sys.exit(1 if failed else 0)

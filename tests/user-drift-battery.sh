@@ -145,6 +145,14 @@ echo "sshd:x:997:997:SSH privilege separation user:/var/empty:$BASH" >> "$W/j2/e
 rc=$(run "$W/j2")
 [ "$rc" = 1 ] && ok "J2 shadowed-dirty twin -> rc 1" || bad "J2 shadowed-dirty twin -> rc $rc (want 1)"
 grep -q 'DUPLICATE-USER sshd' "$W/out" && ok "J2 names the duplicate" || bad "J2 did not name DUPLICATE-USER sshd"
+grep -q "DUPLICATE-USER sshd.*shell=$BASH" "$W/out" && ok "J2 says what the twin grants (its shell)" || bad "J2 did not report the twin's shell"
+
+# K3 — a twin wheel line with its OWN gid 0: initgroups grants agent gid 0, not wheel's 1.
+mkroot "$W/k3"
+echo "wheel:x:0:agent" >> "$W/k3/etc/group"
+rc=$(run "$W/k3")
+[ "$rc" = 1 ] && ok "K3 twin wheel with gid 0 -> rc 1" || bad "K3 -> rc $rc (want 1)"
+grep -q 'DUPLICATE-GROUP wheel.*gid=0' "$W/out" && ok "K3 reports the twin's gid 0" || bad "K3 hid the twin's gid behind wheel's first gid"
 
 # K — the first wheel line gains a member; a clean twin is appended after it.
 mkroot "$W/k"

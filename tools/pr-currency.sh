@@ -443,6 +443,35 @@ if [ "${1:-}" = "--selftest" ]; then
   case "$pd" in *"lower bound"*) echo "  FAIL LB2 CONTROL: lower-bound caveat on a linear gap with no merges"; fail=1 ;;
     *) echo "  ok   LB2 CONTROL: a linear gap gets no lower-bound caveat" ;; esac
   rm -rf "$MFIX"
+  # LB3: the caveat keys on merges that CARRIED criteria paths, not on any merge. A merge-landing
+  # repo whose gap holds only a docs merge must stay uncaveated, or LB1's signal is noise there.
+  NFIX="$(mktemp -d)"
+  ( cd "$NFIX" || exit 1; git init -q -b main .
+    git config user.email t@t; git config user.name t; git config commit.gpgsign false
+    echo base > README; git add -A; git commit -qm base
+    git checkout -q -b docs; echo more >> README; git add -A; git commit -qm docs
+    git checkout -q main; git merge -q --no-ff -m "merge docs" docs ) >/dev/null 2>&1
+  NFORK="$(git -C "$NFIX" rev-parse main^1 2>/dev/null)"
+  nb="$(FIXTURE="$NFIX" BASE_OVERRIDE=main STUB_DATE=2026-03-01T00:00:00Z STUB_HEAD="$NFORK" \
+        ord_run 'gate\tpass\t3s\thttps://github.com/o/r/actions/runs/1/job/2\n')"
+  case "$nb" in *"lower bound"*) echo "  FAIL LB3: a docs-only merge triggered the criteria caveat"; fail=1 ;;
+    *"criteria commit"*) echo "  ok   LB3 a merge carrying no criteria paths gets no caveat" ;;
+    *) echo "  FAIL LB3: no currency line; got [$nb]"; fail=1 ;; esac
+  rm -rf "$NFIX"
+  # MB3: unrelated histories -- git says nothing, so the board must not assert the fork cause.
+  UFIX="$(mktemp -d)"
+  ( cd "$UFIX" || exit 1; git init -q -b main .
+    git config user.email t@t; git config user.name t; git config commit.gpgsign false
+    echo a > A; git add -A; git commit -qm a
+    git checkout -q --orphan other; git rm -rqf . ; echo b > B; git add -A; git commit -qm b
+    git checkout -q main ) >/dev/null 2>&1
+  UHEAD="$(git -C "$UFIX" rev-parse other 2>/dev/null)"
+  ub="$(FIXTURE="$UFIX" BASE_OVERRIDE=main STUB_DATE=2026-03-01T00:00:00Z STUB_HEAD="$UHEAD" \
+        ord_run 'gate\tpass\t3s\thttps://github.com/o/r/actions/runs/1/job/2\n')"
+  case "$ub" in *"refspec"*) echo "  FAIL MB3: asserted the fork-refspec cause for unrelated histories"; fail=1 ;;
+    *"share no ancestor"*) echo "  ok   MB3 unrelated histories are named as such, not blamed on the refspec" ;;
+    *) echo "  FAIL MB3: no diagnostic; got [$ub]"; fail=1 ;; esac
+  rm -rf "$UFIX"
 
   rm -rf "$nog" "$FIX"
   [ "$fail" = 0 ] && echo "ALL GREEN" || echo "SELFTEST FAILED"
@@ -545,12 +574,22 @@ for pr in $prs; do
     echo "PR $pr"
     echo "    outcome  : $outcome"
     echo "    currency : unknown — no merge-base for $BASE..${head:-<empty head>}"
-    echo "               ($(head -1 "$TMP_MBERR" 2>/dev/null | cut -c1-90))"
-    echo "               a fork PR head is not fetched by the default refspec; try"
-    echo "               gh pr checkout $pr, or fetch refs/pull/$pr/head, then re-run."
+    # The cause is only NAMED when git named it. merge-base exits 1 with empty stdout AND empty
+    # stderr when both commits resolve but share no ancestor, and the fork-refspec remedy cannot
+    # fix that -- so the remedy is offered as a hypothesis keyed on what git actually said.
+    if [ -s "$TMP_MBERR" ]; then
+      echo "               git: $(head -1 "$TMP_MBERR" | cut -c1-90)"
+      echo "               likely the head is not fetched (the default refspec skips fork PR"
+      echo "               heads): try gh pr checkout $pr, or fetch refs/pull/$pr/head, then re-run."
+    else
+      echo "               git printed no error: both commits resolve but share no ancestor"
+      echo "               (unrelated histories), or this cwd is not the PR's repository."
+    fi
     echo "               NOT reported as current: an unresolvable base would otherwise be"
     echo "               measured against this checkout and read as 0 commits behind."
-    rc=1; continue
+    # rc untouched: per the contract at the bottom of this file, rc reflects OUTCOME only, and a
+    # currency we could not compute is context, not a verdict. The line above is the signal.
+    continue
   fi
   dist="$(git rev-list --count "${mb}..${BASE}" 2>/dev/null || echo '?')"
   # Is the count about to be a LOWER BOUND? Committer date is not landing time: with merge-commit
@@ -559,7 +598,16 @@ for pr in $prs; do
   # and is skipped too. Disclose rather than classify -- a guessed landing time fails toward "no
   # re-run needed". Arms LB1/LB2. (This repo squash-merges today, which rewrites committer dates
   # and hides it; that is a property of the current merge strategy, not of this tool.)
-  merges_in_gap="$(git rev-list --count --merges "${mb}..${BASE}" 2>/dev/null || echo 0)"
+  # Only merges that CARRIED criteria work count: a caveat on every gap that holds any merge is
+  # one that is always present on a merge-landing repo, and that carries no information (LB2).
+  merges_in_gap=0
+  for m in $(git rev-list --merges "${mb}..${BASE}" 2>/dev/null); do
+    # NO PIPE into `grep -q`: under pipefail, grep exiting on its first match SIGPIPEs a git
+    # still writing a long path list, the pipeline goes false, and the caveat is dropped --
+    # permissive, and only on the big merges where it matters. Redirect, then read.
+    git diff --name-only "$m^1" "$m" > "$TMP_MBERR.paths" 2>/dev/null
+    grep -qE "$CRITERIA_RE" "$TMP_MBERR.paths" && merges_in_gap=$((merges_in_gap+1))
+  done
 
   n=0; which=""; detail=""
   for c in $(git rev-list "${mb}..${BASE}" 2>/dev/null); do
@@ -592,7 +640,7 @@ $(echo "$cp" | sed 's/^/                    /')"
   echo "    distance : $dist commits behind $BASE"
   echo "    currency : $n criteria commit(s) landed after its run ($when)"
   [ "${merges_in_gap:-0}" -gt 0 ] && \
-    echo "               ^ a lower bound: $merges_in_gap merge commit(s) in this gap, and the test above" && \
+    echo "               ^ a lower bound: $merges_in_gap merge commit(s) here carried criteria paths, and the test above" && \
     echo "                 compares COMMITTER DATE, which is not landing time. Work merged in after" && \
     echo "                 the run but committed before it is not counted here."
   [ "$n" -gt 0 ] && echo "               ->$which"

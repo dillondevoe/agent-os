@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """gym-spending: sum the gym lines in one bank CSV. Reads ONE file read-only, no network.
 
-Kept short on purpose -- this is the reference output for the ag-gym-spending eval, so it is
-the pattern the build-app path gets taught. Two things in it are not incidental:
+Kept short on purpose: it is a worked example of an Agent OS app, so its shape gets copied.
+Two things in it are not incidental:
 
   utf-8-sig and a case-folded header map. Real exports carry a UTF-8 BOM (Excel writes one)
   and capitalise their headers. With a plain open() and exact keys, every row misses and the
@@ -29,25 +29,30 @@ def money(text):
     t = text.replace(",", "").replace("$", "").strip()
     if t.startswith("(") and t.endswith(")"):      # accounting-style debit
         t = "-" + t[1:-1]
-    return float(t or 0)
+    return float(t)                                # blank raises too: a pending row is not 0
 
 
 # utf-8-sig strips the BOM if one is there and is a plain utf-8 read if it is not.
 with open(os.path.expanduser("~/Documents/bank.csv"), newline="", encoding="utf-8-sig") as fh:
     reader = csv.DictReader(fh)
-    headers = {(h or "").strip().lower(): h for h in (reader.fieldnames or [])}
+    headers = {}
+    for h in reader.fieldnames or []:
+        k = (h or "").strip().lower()
+        if k in headers:                           # `amount` AND `Amount`: ambiguous, say so
+            sys.exit("bank.csv: two columns read as %r (%r, %r)" % (k, headers[k], h))
+        headers[k] = h
     missing = [w for w in WANT if w not in headers]
     if missing:
         sys.exit("bank.csv: no %s column (found: %s)"
                  % (", ".join(missing), ", ".join(reader.fieldnames or []) or "no header row"))
     total = 0.0
-    for n, row in enumerate(reader, 2):            # 2 = first data line, counting the header
+    for row in reader:
         if "gym" not in cell(row, headers["description"]).lower():
             continue
         raw = cell(row, headers["amount"])
         try:
             total += money(raw)
         except ValueError:
-            sys.exit("bank.csv line %d: cannot read amount %r" % (n, raw))
+            sys.exit("bank.csv line %d: cannot read amount %r" % (reader.line_num, raw))
 
 print("gym spending: %.2f" % total)
