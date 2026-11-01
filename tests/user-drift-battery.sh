@@ -120,22 +120,16 @@ rc=$(run "$W/i")
 grep -q 'PRIMARY-GID-MEMBER' "$W/out" && bad "I flagged a DECLARED primary group" || ok "I declared primary group is silent"
 
 # ---------------------------------------------------------------------------
-# J/J2 and K/K2 — DUPLICATE NAMES. glibc's name lookup is FIRST-WINS (nss_files
-# walks the file and returns the first match), so the entry that decides who can
-# log in and who is privileged is the FIRST one. A parser that builds a dict by
-# assignment is LAST-WINS, and the two disagree exactly when a name appears twice
-# — which is the whole attack: edit the real line, append a clean-looking twin,
-# and a last-wins scanner reads the twin and reports clean while glibc honors the
-# edit. Found by code-qa run 1 (agos-user-drift.py:88 parse_passwd, :101
-# parse_group), both security-tagged.
-#
-# J2/K2 are the permitting twins and they are load-bearing: without them, a
-# scanner that flagged ANY duplicate name would pass J and K while still not
-# following the resolver. A duplicate whose FIRST entry is clean is clean BY THIS
-# MODULE'S SCOPE — glibc never resolves to the shadowed line, so it grants
-# nothing today. Stated non-goal, not an oversight: a shadowed dirty line is a
-# LATENT grant (it activates if the first line is ever removed), and reporting
-# latent grants is a new report class with its own doctrine, not this fix.
+# J/J2 and K/K2 — DUPLICATE NAMES ARE DRIFT, whichever line is dirty.
+# code-qa run 1 found the parsers LAST-WINS (agos-user-drift.py:88, :101): edit the real
+# line, append a clean twin, scan reports clean. The first fix went FIRST-WINS "to match
+# glibc" and a security review refuted that premise the same day: getgrnam is first-wins,
+# but initgroups()/getgrouplist() scan EVERY group line, so a dirty twin appended BEHIND a
+# clean wheel line still grants wheel at login (K2), and getpwuid can reach a passwd line
+# that name lookup shadows (J2). No single winning-line rule is safe, and activation never
+# writes a duplicate, so any duplicate is reported. J2/K2 were permitting twins asserting
+# rc 0 -- they asserted the refuted premise and are INVERTED here, not amended.
+# The permitting twin for all four is arm B: the clean box, with no duplicates, stays rc 0.
 
 # J — the first sshd line is given a real shell; a clean twin is appended after it.
 mkroot "$W/j"
@@ -145,11 +139,12 @@ rc=$(run "$W/j")
 [ "$rc" = 1 ] && ok "J shadowed shell grant -> rc 1" || bad "J shadowed shell grant -> rc $rc (want 1)"
 grep -q 'SHELL-DRIFT sshd' "$W/out" && ok "J names sshd" || bad "J did not name sshd (last-wins read the clean twin)"
 
-# J2 — control: the FIRST entry is the declared one, so glibc grants nothing.
+# J2 — dirty twin BEHIND a clean first line. Still drift: getpwuid can reach it.
 mkroot "$W/j2"
 echo "sshd:x:997:997:SSH privilege separation user:/var/empty:$BASH" >> "$W/j2/etc/passwd"
 rc=$(run "$W/j2")
-[ "$rc" = 0 ] && ok "J2 shadowed-dirty twin is clean -> rc 0" || bad "J2 shadowed-dirty twin -> rc $rc (want 0)"
+[ "$rc" = 1 ] && ok "J2 shadowed-dirty twin -> rc 1" || bad "J2 shadowed-dirty twin -> rc $rc (want 1)"
+grep -q 'DUPLICATE-USER sshd' "$W/out" && ok "J2 names the duplicate" || bad "J2 did not name DUPLICATE-USER sshd"
 
 # K — the first wheel line gains a member; a clean twin is appended after it.
 mkroot "$W/k"
@@ -159,11 +154,12 @@ rc=$(run "$W/k")
 [ "$rc" = 1 ] && ok "K shadowed wheel grant -> rc 1" || bad "K shadowed wheel grant -> rc $rc (want 1)"
 grep -q 'UNDECLARED-MEMBER agent in wheel' "$W/out" && ok "K names agent in wheel" || bad "K did not name agent in wheel (last-wins read the clean twin)"
 
-# K2 — control: declared entry first, dirty twin shadowed behind it.
+# K2 — dirty twin BEHIND the clean wheel line. initgroups() reads it: agent HAS wheel.
 mkroot "$W/k2"
 echo "wheel:x:1:operator,agent" >> "$W/k2/etc/group"
 rc=$(run "$W/k2")
-[ "$rc" = 0 ] && ok "K2 shadowed-dirty group twin is clean -> rc 0" || bad "K2 shadowed-dirty group twin -> rc $rc (want 0)"
+[ "$rc" = 1 ] && ok "K2 shadowed wheel twin -> rc 1" || bad "K2 shadowed wheel twin -> rc $rc (want 1)"
+grep -q 'UNDECLARED-MEMBER agent in wheel' "$W/out" && ok "K2 names agent in wheel (members unioned)" || bad "K2 did not name agent in wheel"
 
 [ "$fail" = 0 ] && { echo "user-drift battery: PASS"; exit 0; }
 echo "user-drift battery: FAIL"; exit 1

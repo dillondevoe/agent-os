@@ -48,6 +48,14 @@ REPORT = os.environ.get("AGOS_USER_DRIFT_REPORT",
 
 out = []
 rc = 0
+# DUPLICATE NAMES ARE DRIFT. NixOS activation never writes the same name twice, so a
+# duplicate is always a hand edit, and no single "which line wins" rule is safe to scan by:
+# getpwnam/getgrnam take the FIRST line, but getpwuid can reach a line that name lookup
+# shadows, and initgroups()/getgrouplist() build a login's supplementary groups by scanning
+# EVERY group line. A first-wins scanner (this file's 2026-11-01 code-qa fix, corrected the
+# same day by a security review) still missed `wheel:x:1:operator,agent` appended BEHIND a
+# clean wheel line, which grants agent wheel at login. Arms J-K2 in tests/user-drift-battery.sh.
+DUPS = []
 
 
 def say(line):
@@ -85,7 +93,8 @@ def parse_passwd(path):
         f = line.split(":")
         if len(f) < 7:
             raise ValueError("malformed passwd line in %s: %r" % (path, line))
-        if f[0] in users:                      # FIRST-WINS: see parse_group's note
+        if f[0] in users:                      # see DUPS: reported, never silently dropped
+            DUPS.append(("USER", f[0]))
             continue
         users[f[0]] = {"uid": f[2], "gid": f[3], "shell": f[6]}
     return users
@@ -100,18 +109,12 @@ def parse_group(path):
         f = line.split(":")
         if len(f) < 4:
             raise ValueError("malformed group line in %s: %r" % (path, line))
-        if f[0] in groups:                     # FIRST-WINS, matching the resolver.
-            continue                           # glibc's nss_files walks the file and returns
-                                               # the FIRST entry for a name, so the first line
-                                               # is the one that decides who is privileged.
-                                               # Assigning into a dict is LAST-WINS, and the two
-                                               # disagree exactly when a name is duplicated —
-                                               # which is the attack: edit the real line, append
-                                               # a clean twin, and a last-wins scan reports clean
-                                               # over a grant glibc is honoring. Arms J/K; the
-                                               # J2/K2 twins hold the other direction.
-        groups[f[0]] = {"gid": f[2],
-                        "members": [m for m in f[3].split(",") if m]}
+        mem = [m for m in f[3].split(",") if m]
+        if f[0] in groups:                     # see DUPS. Members are UNIONED across every
+            DUPS.append(("GROUP", f[0]))       # line for the name: initgroups() scans ALL
+            groups[f[0]]["members"] += [m for m in mem if m not in groups[f[0]]["members"]]
+            continue                           # lines, so a shadowed twin still grants.
+        groups[f[0]] = {"gid": f[2], "members": mem}
     return groups
 
 
@@ -136,6 +139,11 @@ def main():
     decl_groups = {g["name"]: g for g in spec.get("groups", [])}
     say("declared: %d users, %d groups; live: %d users, %d groups"
         % (len(decl_users), len(decl_groups), len(live_users), len(live_groups)))
+
+    for kind, name in DUPS:
+        say("DUPLICATE-%s %s  <- the name appears more than once; activation never writes that"
+            % (kind, name))
+        rc = 1
 
     for name, live in sorted(live_users.items()):
         if name not in decl_users:
