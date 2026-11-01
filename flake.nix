@@ -1823,8 +1823,17 @@
           p.runCommand "surface-choice-check" { nativeBuildInputs = [ p.python3 ]; } ''
             work="$(mktemp -d)"; mkdir -p "$work/modules" "$work/tests"
             cp ${./modules/agos_choice.py} "$work/modules/agos_choice.py"
+            # Slice 4b: the F2 arms run the REAL audit primitive and a real identity (a stub would
+            # prove the call shape, not that the chain accepts the record), and F2-twin drives the
+            # window's appender beside this module's to catch drift between the two copies.
+            mkdir -p "$work/bin"
+            cp ${./bin/audit} "$work/bin/audit"
+            cp ${./modules/identity.py} "$work/modules/identity.py"
+            cp ${./modules/bip340.py} "$work/modules/bip340.py"
+            cp ${./modules/bech32.py} "$work/modules/bech32.py"
+            cp ${./modules/agos_window.py} "$work/modules/agos_window.py"
             cp ${./tests/agos-choice-battery.py} "$work/tests/agos-choice-battery.py"
-            ( cd "$work"; python3 tests/agos-choice-battery.py )
+            ( cd "$work"; python3 tests/agos-choice-battery.py </dev/null )
             src=${pkg}/libexec/agos_choice.py
             if grep -q '@AGOS_CHOICE_CONFIG@' "$src"; then echo "surface-choice: the placeholder survived in the installed copy" >&2; exit 1; fi
             # The compiled-in configuration, read back the way the program reads it.
