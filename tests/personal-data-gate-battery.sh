@@ -255,7 +255,41 @@ rangearm "range: deletion + leak still BLOCKs"         1 'git rm -q doomed.txt; 
 # ---- arm count -------------------------------------------------------------------------------
 # #252's general form, applied here: a verdict that does not depend on HOW MANY arms ran cannot
 # notice any of them going missing. An arm deleted in a refactor leaves a byte-identical PASS.
-WANT_ARMS=51
+
+# ---- SCANNED-NOTHING arms: the gate reporting CLEAN over files it never read -----------------
+# code-qa run 1 (2026-10-31) found four defects in the publication path that all fail in the SAME
+# direction -- clean -- which is the unarmed-control shape inside the control itself. A scanner
+# whose failure mode is silence cannot be distinguished from a clean tree by anything it prints.
+# Each arm below plants a leak the gate MUST find, in a file it cannot currently read, so a pass
+# can never mean "there was nothing to find". Every one was shown RED before its fix.
+
+# T6: a tracked path whose NAME is non-ASCII. `git ls-files` without -z honours core.quotePath
+# (the default), so the name arrives C-quoted ("caf\303\251.txt"); grep is handed a literal that
+# does not exist, its "No such file" goes to the 2>/dev/null on the xargs line, and the file is
+# never opened. The leak inside it is invisible.
+tarm "T6 non-ASCII filename is still scanned"   1 'printf "K=tskey-auth-aBcDeFgHiJ\n" > "café.txt"'  # gate-allow
+# PERMITTING TWIN: the same name with nothing in it must still pass, or T6 could be satisfied by
+# a gate that blocks whenever it sees a byte it cannot quote.
+tarm "T6b non-ASCII filename, clean: passes"    0 'printf "nothing here\n" > "café.txt"'
+
+# T7: a file grep calls binary. Since GNU grep 3.5 a match in such a file is reported ONLY as
+# "binary file matches" on STDERR -- which this line discards -- so the hit is dropped while the
+# exit status still says "found". A single NUL byte anywhere in the file is enough.
+tarm "T7 leak in a file with a NUL byte blocks" 1 'printf "K=tskey-auth-aBcDeFgHiJ\n\000trailing\n" > b.bin'  # gate-allow
+# PERMITTING TWIN: a binary file with no leak must pass. Without this, T7 passes on a gate that
+# refuses every file containing a NUL.
+tarm "T7b NUL-byte file, no leak: passes"       0 'printf "harmless\n\000trailing\n" > b.bin'
+
+# T8: a malformed ERE in the denylist. grep exits 2 with its diagnostic discarded, the pattern
+# matches nothing, and it is still counted among the patterns applied -- so the gate reports a
+# full sweep having silently dropped one rule. ERROR (2) is the only honest answer: a denylist
+# the engine rejected is not a denylist that found nothing.
+tarm "T8 invalid ERE in the denylist refuses"   2 'echo x > f.txt; printf "tskey-auth-[A-Za-z0-9-]{6,}\n[unclosed\n" > tools/dl.txt'
+# PERMITTING TWIN: a denylist of valid patterns must NOT refuse, or T8 is satisfied by a gate
+# that errors on every denylist it is given.
+tarm "T8b valid denylist does not refuse"       0 'echo x > f.txt; printf "tskey-auth-[A-Za-z0-9-]{6,}\n192\\\\.168\\\\.[0-9]{1,3}\n" > tools/dl.txt'
+
+WANT_ARMS=57
 ran=$((pass+fail))
 if [ "$ran" != "$WANT_ARMS" ]; then
   echo "FAIL arm count: $ran arms ran, expected $WANT_ARMS -- an arm was added or silently lost"

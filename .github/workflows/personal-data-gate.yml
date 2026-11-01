@@ -18,6 +18,12 @@ jobs:
         # fails, the job fails even when the diff is clean -- a broken instrument
         # returning "no hits" is the failure mode this whole file exists to prevent.
         run: bash tests/personal-data-gate-battery.sh
+      - name: self-test the hook INSTALLER too
+        # The gate had 57 arms and the thing that decides WHICH COMMITS it ever sees had none.
+        # That asymmetry was the defect: a correct scanner pointed at the wrong range reports
+        # clean, and nothing it prints says otherwise. This battery drives the generated
+        # pre-push hook through git's own stdin contract.
+        run: bash tests/install-hooks-battery.sh
       - name: scan added lines
         run: |
           if [ "${{ github.event_name }}" = "pull_request" ]; then
