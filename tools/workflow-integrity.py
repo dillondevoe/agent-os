@@ -170,9 +170,20 @@ def selftest():
                                      "installer-honesty": {"runs-on": "x"}, "pin-freshness": {"runs-on": "x"},
                                      "vm-tests-all": {"runs-on": "x"}})}
     arms = []
-    def arm(label, head, want_fail, want_note=None):
+    def arm(label, head, want_fail, want_note=None, want_fail_text=None):
+        """want_note asserts on ANNOUNCEMENTS, want_fail_text on FAIL REASONS.
+
+        They were one parameter until scout's PR-359 review (2026-10-31): `want_note` only ever
+        searched `n`, so an arm could not assert anything about WHY a fail-closed verdict fired.
+        A14 was the exposure — deleting the dedicated `except UnresolvableName` branch lets the
+        generic `except Exception` catch it (UnresolvableName IS a ValueError), the tool still
+        fails closed, and A14 stays green while the message it exists to pin goes untested.
+        A green arm that cannot distinguish the two branches is a reworded assertion, not a test.
+        """
         f, n = judge(base, head)
-        good = bool(f) == want_fail and (want_note is None or any(want_note in x for x in n))
+        good = (bool(f) == want_fail
+                and (want_note is None or any(want_note in x for x in n))
+                and (want_fail_text is None or any(want_fail_text in x for x in f)))
         arms.append((label, good, f, n))
     # A1 permitting twin: the unchanged tree is GREEN (without it a checker that fails everything passes)
     arm("A1 unchanged tree passes", dict(base), False)
@@ -202,12 +213,20 @@ def selftest():
     # required context is therefore invisible to the duplicate check. Every other unreadable
     # input here fails CLOSED (A7 unparseable, A9 dup key, A10 merge key, the 1000-entry
     # listing, a non-file entry) -- this one input degraded into a confident clean answer.
-    arm("A14 expression job name fails closed",
-        {**base, f"{WF_DIR}/evil.yml": ok({"x1": {"name": "${{ matrix.n }}"}})}, True)
+    # The `want_fail_text` is the load-bearing half (scout, PR 359): without it the generic
+    # fail-closed path satisfies this arm and the dedicated branch is untested.
+    arm("A14 expression job name fails closed, as a name problem not a parse failure",
+        {**base, f"{WF_DIR}/evil.yml": ok({"x1": {"name": "${{ matrix.n }}"}})}, True,
+        want_fail_text="names itself with a GitHub expression")
     # A15 CONTROL for A14: a literal name with no expression must still be judged, not refused,
     # or A14 passes on a tool that fails closed on every `name:` it sees.
     arm("A15 CONTROL plain name: still judged, not refused",
         {**base, f"{WF_DIR}/b.yml": ok({"x1": {"name": "lint"}})}, False)
+    # A15b CONTROL, scout's: an expression ANYWHERE ELSE in the job is none of this check's
+    # business. A regression that refuses on a bare `${{` or `{{` sighting passes A14 and A15
+    # (neither contains one outside `name:`) and would fail every matrix workflow in the repo.
+    arm("A15b CONTROL expression outside name: still judged",
+        {**base, f"{WF_DIR}/b.yml": ok({"x1": {"runs-on": "${{ matrix.os }}"}})}, False)
     # A13 a case/space variant of a required name is treated as that name
     arm("A13 `Gate ` via name: collides with gate", {**base, f"{WF_DIR}/evil.yml": ok({"x1": {"name": "Gate "}})}, True)
     # A12 END-TO-END through gh_tree with a stub `gh` on PATH. A1-A11 call judge() directly, and a
