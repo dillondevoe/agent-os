@@ -52,7 +52,9 @@ is_exempt_path() {
 }
 
 TREE_HITS=$(mktemp)
-trap 'rm -f "$TREE_HITS"' EXIT
+# FILES_Z holds the NUL-delimited tracked-file list for --tree; see the comment at its writer.
+FILES_Z=$(mktemp)
+trap 'rm -f "$TREE_HITS" "$FILES_Z"' EXIT
 HERE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 LIST="${PERSONAL_DATA_DENYLIST:-$HERE/personal-data-denylist.txt}"
 
@@ -62,6 +64,20 @@ LIST="${PERSONAL_DATA_DENYLIST:-$HERE/personal-data-denylist.txt}"
 # while exiting 0 -- the null-instrument failure. Refuse to run empty.
 pats=$(grep -v '^[[:space:]]*#' "$LIST" | grep -v '^[[:space:]]*$') || true
 [ -n "$pats" ] || { echo "gate: denylist has no patterns -- refusing to run" >&2; exit 2; }
+
+# A pattern the ERE engine REJECTS is not a pattern that found nothing. grep exits 2 and writes
+# its diagnostic to stderr, which both scan paths discard -- so a malformed entry matched nothing,
+# was still counted among the patterns applied, and the gate reported a full sweep with one rule
+# silently dropped. Validated here, at the ONE load point, so neither half carries its own copy of
+# the rule (the exempt-path lesson above, applied before it could repeat). Checked against
+# /dev/null: rc 0/1 both mean "the engine accepted it", and only rc>=2 is a bad pattern.
+while IFS= read -r p; do
+  [ -n "$p" ] || continue
+  printf '' | grep -E -- "$p" >/dev/null 2>&1
+  [ $? -lt 2 ] || { echo "gate: denylist pattern is not a valid ERE, refusing to run: $p" >&2; exit 2; }
+done <<EOF
+$pats
+EOF
 
 # ---- --tree: scan tracked files at HEAD against the baseline --------------------------------
 if [ "${1:-}" = "--tree" ]; then
@@ -74,20 +90,28 @@ if [ "${1:-}" = "--tree" ]; then
   # tradeoff -- a leak smuggled into either is invisible here. Both are short files of nothing
   # but regexes and paths, where a literal address is conspicuous on review, and GitHub push
   # protection still sees it. Widen this to no other path.
-  files=$(git ls-files) || exit 2
+  # -z, and NUL-delimited all the way to xargs -0. Without it `git ls-files` honours
+  # core.quotePath (the DEFAULT), so a path with non-ASCII, a tab, a quote or a backslash
+  # arrives C-quoted -- "caf\303\251.txt" -- and grep is handed a literal that does not exist.
+  # The "No such file" went to the 2>/dev/null below and the file was never opened, so a leak
+  # inside it was invisible while the gate reported a clean sweep. -z also carries a filename
+  # containing a NEWLINE, which the old line-oriented read split into two nonexistent paths.
+  # Into a FILE, never a variable: `$(...)` strips NUL bytes, so a command substitution would
+  # silently concatenate every path into one string and the count below would read 0 -- the
+  # refusal path, i.e. this fix failing closed instead of open. A NUL-delimited list has to be
+  # held somewhere that can carry a NUL, and that is a file.
+  git ls-files -z > "$FILES_Z" || exit 2
   # Same null-instrument refusal as the denylist: a sweep over zero files exits 0 while
   # proving nothing, and that is indistinguishable from a clean tree.
-  nfiles=$(printf '%s\n' "$files" | grep -c .)
+  nfiles=$(tr -cd '\0' < "$FILES_Z" | wc -c | tr -d ' ')
   [ "$nfiles" -gt 0 ] || { echo "gate: --tree matched no tracked files -- refusing to run" >&2; exit 2; }
 
   thits=0
   while IFS= read -r p; do
     # One grep per pattern over the whole tree: same ERE engine and same -i as the diff path,
     # because two spellings of one rule is how the halves drift apart.
-    printf '%s\n' "$files" \
-      | while IFS= read -r cand; do is_exempt_path "$cand" || printf '%s\n' "$cand"; done \
-      | tr '\n' '\0' \
-      | xargs -0 grep -EinH -- "$p" 2>/dev/null \
+    while IFS= read -r -d '' cand; do is_exempt_path "$cand" || printf '%s\0' "$cand"; done < "$FILES_Z" \
+      | xargs -0 grep -EinHa -- "$p" 2>/dev/null \
       | while IFS= read -r hit; do
           hf=${hit%%:*}
           rest=${hit#*:}; hl=${rest%%:*}
