@@ -47,9 +47,16 @@ def run(csv_text, encoding="utf-8"):
     with open(os.path.join(docs, "bank.csv"), "w", encoding=encoding, newline="") as fh:
         fh.write(csv_text)
     env = dict(os.environ, HOME=d)
-    # LC_ALL=C is deliberate: it is what a systemd unit or a cron job hands the script, and it
-    # is the condition under which the default-encoding defect actually bites. An arm that ran
-    # under the developer's own UTF-8 locale could not see it.
+    # LC_ALL=C pins the environment for determinism, NOT because it creates the defect.
+    # CORRECTION (2026-11-01, Geist on PR 361): the original header said C locale was "the
+    # condition under which the default-encoding defect actually bites". That is false --
+    # Python 3.7+ enables UTF-8 mode under the C locale (measured here: LC_ALL=C gives
+    # sys.flags.utf8_mode 1, preferredencoding utf-8), so the encoding is utf-8 either way.
+    # The BOM arm bites through the HEADER KEY instead: any utf-8 read that is not utf-8-sig
+    # leaves '\ufeff' glued to the first field name, so row.get("description") misses. Measured
+    # against the pre-fix script under both LC_ALL=C and en_US.UTF-8: 0.00 in both.
+    # The arm is sound; the reason I gave for it was not, and a wrong reason is what makes a
+    # future reader "fix" the right test.
     env["LC_ALL"] = "C"
     env["LANG"] = "C"
     env.pop("PYTHONIOENCODING", None)

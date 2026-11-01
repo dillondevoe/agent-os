@@ -3993,9 +3993,9 @@
         # examples/apps/gym-spending/report.py — a worked example app, so its shape gets copied.
         # code-qa run 1 found it printing `gym spending: 0.00` and exiting 0 on any export
         # carrying a UTF-8 BOM or capitalised headers — a wrong total shaped exactly like a
-        # right one. The arms run
-        # the script as a subprocess under LC_ALL=C (what a unit or a cron job hands it), which
-        # is the condition the default-encoding defect needs.
+        # right one. The arms run the
+        # script as a subprocess with a pinned locale -- for determinism, not because the locale
+        # creates the defect (Python 3.7+ is UTF-8 mode under C; the BOM bites via the header key).
         gym-spending-contract =
           nixpkgs.legacyPackages.${system}.runCommand "gym-spending-contract-check"
             { nativeBuildInputs = [ nixpkgs.legacyPackages.${system}.python3 ]; } ''
