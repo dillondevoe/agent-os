@@ -119,5 +119,51 @@ mkroot "$W/i"
 rc=$(run "$W/i")
 grep -q 'PRIMARY-GID-MEMBER' "$W/out" && bad "I flagged a DECLARED primary group" || ok "I declared primary group is silent"
 
+# ---------------------------------------------------------------------------
+# J/J2 and K/K2 — DUPLICATE NAMES. glibc's name lookup is FIRST-WINS (nss_files
+# walks the file and returns the first match), so the entry that decides who can
+# log in and who is privileged is the FIRST one. A parser that builds a dict by
+# assignment is LAST-WINS, and the two disagree exactly when a name appears twice
+# — which is the whole attack: edit the real line, append a clean-looking twin,
+# and a last-wins scanner reads the twin and reports clean while glibc honors the
+# edit. Found by code-qa run 1 (agos-user-drift.py:88 parse_passwd, :101
+# parse_group), both security-tagged.
+#
+# J2/K2 are the permitting twins and they are load-bearing: without them, a
+# scanner that flagged ANY duplicate name would pass J and K while still not
+# following the resolver. A duplicate whose FIRST entry is clean is clean BY THIS
+# MODULE'S SCOPE — glibc never resolves to the shadowed line, so it grants
+# nothing today. Stated non-goal, not an oversight: a shadowed dirty line is a
+# LATENT grant (it activates if the first line is ever removed), and reporting
+# latent grants is a new report class with its own doctrine, not this fix.
+
+# J — the first sshd line is given a real shell; a clean twin is appended after it.
+mkroot "$W/j"
+sed -i "s|^sshd:x:997:997:\(.*\):$NOLOGIN|sshd:x:997:997:\1:$BASH|" "$W/j/etc/passwd"
+echo "sshd:x:997:997:SSH privilege separation user:/var/empty:$NOLOGIN" >> "$W/j/etc/passwd"
+rc=$(run "$W/j")
+[ "$rc" = 1 ] && ok "J shadowed shell grant -> rc 1" || bad "J shadowed shell grant -> rc $rc (want 1)"
+grep -q 'SHELL-DRIFT sshd' "$W/out" && ok "J names sshd" || bad "J did not name sshd (last-wins read the clean twin)"
+
+# J2 — control: the FIRST entry is the declared one, so glibc grants nothing.
+mkroot "$W/j2"
+echo "sshd:x:997:997:SSH privilege separation user:/var/empty:$BASH" >> "$W/j2/etc/passwd"
+rc=$(run "$W/j2")
+[ "$rc" = 0 ] && ok "J2 shadowed-dirty twin is clean -> rc 0" || bad "J2 shadowed-dirty twin -> rc $rc (want 0)"
+
+# K — the first wheel line gains a member; a clean twin is appended after it.
+mkroot "$W/k"
+sed -i 's/^wheel:x:1:operator/wheel:x:1:operator,agent/' "$W/k/etc/group"
+echo "wheel:x:1:operator" >> "$W/k/etc/group"
+rc=$(run "$W/k")
+[ "$rc" = 1 ] && ok "K shadowed wheel grant -> rc 1" || bad "K shadowed wheel grant -> rc $rc (want 1)"
+grep -q 'UNDECLARED-MEMBER agent in wheel' "$W/out" && ok "K names agent in wheel" || bad "K did not name agent in wheel (last-wins read the clean twin)"
+
+# K2 — control: declared entry first, dirty twin shadowed behind it.
+mkroot "$W/k2"
+echo "wheel:x:1:operator,agent" >> "$W/k2/etc/group"
+rc=$(run "$W/k2")
+[ "$rc" = 0 ] && ok "K2 shadowed-dirty group twin is clean -> rc 0" || bad "K2 shadowed-dirty group twin -> rc $rc (want 0)"
+
 [ "$fail" = 0 ] && { echo "user-drift battery: PASS"; exit 0; }
 echo "user-drift battery: FAIL"; exit 1

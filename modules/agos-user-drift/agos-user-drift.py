@@ -85,6 +85,8 @@ def parse_passwd(path):
         f = line.split(":")
         if len(f) < 7:
             raise ValueError("malformed passwd line in %s: %r" % (path, line))
+        if f[0] in users:                      # FIRST-WINS: see parse_group's note
+            continue
         users[f[0]] = {"uid": f[2], "gid": f[3], "shell": f[6]}
     return users
 
@@ -98,6 +100,16 @@ def parse_group(path):
         f = line.split(":")
         if len(f) < 4:
             raise ValueError("malformed group line in %s: %r" % (path, line))
+        if f[0] in groups:                     # FIRST-WINS, matching the resolver.
+            continue                           # glibc's nss_files walks the file and returns
+                                               # the FIRST entry for a name, so the first line
+                                               # is the one that decides who is privileged.
+                                               # Assigning into a dict is LAST-WINS, and the two
+                                               # disagree exactly when a name is duplicated —
+                                               # which is the attack: edit the real line, append
+                                               # a clean twin, and a last-wins scan reports clean
+                                               # over a grant glibc is honoring. Arms J/K; the
+                                               # J2/K2 twins hold the other direction.
         groups[f[0]] = {"gid": f[2],
                         "members": [m for m in f[3].split(",") if m]}
     return groups

@@ -3990,6 +3990,25 @@
               touch $out
             '';
 
+        # examples/apps/gym-spending/report.py — the reference output for the ag-gym-spending
+        # app-generation eval, so it is the shape the build-app path is scored against. It gets
+        # a real check for that reason: code-qa run 1 found it printing `gym spending: 0.00` and
+        # exiting 0 on any export carrying a UTF-8 BOM or capitalised headers — a wrong total
+        # shaped exactly like a right one, in the file that teaches the pattern. The arms run
+        # the script as a subprocess under LC_ALL=C (what a unit or a cron job hands it), which
+        # is the condition the default-encoding defect needs.
+        gym-spending-contract =
+          nixpkgs.legacyPackages.${system}.runCommand "gym-spending-contract-check"
+            { nativeBuildInputs = [ nixpkgs.legacyPackages.${system}.python3 ]; } ''
+              work="$(mktemp -d)"
+              mkdir -p "$work/examples/apps/gym-spending" "$work/tests"
+              cp ${./examples/apps/gym-spending/report.py} "$work/examples/apps/gym-spending/report.py"
+              cp ${./tests/gym-spending-battery.py} "$work/tests/gym-spending-battery.py"
+              cd "$work"
+              python3 tests/gym-spending-battery.py
+              touch $out
+            '';
+
         mem-contract =
           nixpkgs.legacyPackages.${system}.runCommand "mem-contract-check"
             { nativeBuildInputs = [ nixpkgs.legacyPackages.${system}.python3 ]; } ''

@@ -70,6 +70,7 @@ BASE="${BASE:-origin/main}"
 GATE_STRENGTH=0
 case "${1:-}" in --gate-strength) GATE_STRENGTH=1 ;; esac
 _GS_CACHE="$(mktemp -d)"; trap 'rm -rf "$_GS_CACHE"' EXIT
+TMP_MBERR="$_GS_CACHE/mberr"                 # merge-base stderr; kept, because it IS the diagnostic
 
 # sha -> "<pr>:<nchecks>", cached, because one criteria commit devalues many PRs and would otherwise
 # be looked up once per PR. Prints "?" on any failure -- an unresolvable commit must not render as a
@@ -189,17 +190,32 @@ if [ "${1:-}" = "--selftest" ]; then
     *) echo "  FAIL ORD1: outcome suppressed by the no-run path; got [$o]"; fail=1 ;; esac
   case "$o" in *"currency : unknown"*) echo "  ok   ORD2 currency degrades instead of eating the row" ;;
     *) echo "  FAIL ORD2: no degraded currency line; got [$o]"; fail=1 ;; esac
+  FIX="$(mk_fixture)" || { echo "  FAIL FX0: could not build the fixture repo"; fail=1; FIX=""; }
+  if [ -n "$FIX" ]; then FIXBASE="$(git -C "$FIX" rev-parse main)"; FIXFORK="$(git -C "$FIX" rev-parse main~2)"; fi
   # ORD3 is the control arm. Without it, a script that printed "currency : unknown" unconditionally --
   # i.e. one that had lost currency entirely -- would satisfy ORD1 and ORD2 both.
-  o3="$(ord_run 'gate\tpass\t3s\thttps://github.com/o/r/actions/runs/1/job/2\n')"
+  #
+  # IT RUNS AGAINST THE FIXTURE WITH A RESOLVABLE HEAD, and that is a correction, not a tidy-up
+  # (2026-11-01, with the MB arms below). It used to take the stub's default head `deadbeef`, which
+  # exists in no repo -- so `git merge-base` FAILED on every invocation of this arm, and the only
+  # reason it still printed a currency line was the very defect MB1 now pins: an empty merge-base
+  # fell through to `HEAD..BASE` and measured the ambient checkout. The control arm was passing
+  # BECAUSE of the bug, and would have turned red on the fix. A battery cannot tell you your premise
+  # is wrong -- it can only tell you the code matches it -- so when a fix reddens a control, read
+  # WHY that arm was ever green before touching the fix.
+  # head == base, so the gap is empty: a real run, a computed line, nothing in it to count.
+  o3="$(FIXTURE="$FIX" BASE_OVERRIDE=main STUB_DATE=2026-01-01T00:00:00Z STUB_HEAD="$FIXBASE" \
+        ord_run 'gate\tpass\t3s\thttps://github.com/o/r/actions/runs/1/job/2\n')"
   case "$o3" in *"currency : unknown"*) echo "  FAIL ORD3 CONTROL: a real Actions run still read as unknown"; fail=1 ;;
     *"criteria commit"*) echo "  ok   ORD3 CONTROL: a real run gets a computed currency line, not 'unknown'" ;;
     *) echo "  FAIL ORD3 CONTROL: no currency line at all; got [$o3]"; fail=1 ;; esac
+  # ORD3b: the arm above is only a control if the merge-base genuinely RESOLVED. Without this,
+  # ORD3 could go green again on a future regression that re-introduced the HEAD..BASE fallthrough.
+  case "$o3" in *"merge-base"*) echo "  FAIL ORD3b: ORD3's head did not resolve -- it is measuring a fallthrough again"; fail=1 ;;
+    *) echo "  ok   ORD3b ORD3 ran on a genuinely resolvable merge-base" ;; esac
   # GS arms: --gate-strength annotates each counted commit with the gate its OWN PR passed.
   # The stub answers `pr checks` with one row, so an annotated commit must read "(1ck)".
   echo "GS arms: gate strength of the commits that devalue the green"
-  FIX="$(mk_fixture)" || { echo "  FAIL FX0: could not build the fixture repo"; fail=1; FIX=""; }
-  if [ -n "$FIX" ]; then FIXBASE="$(git -C "$FIX" rev-parse main)"; FIXFORK="$(git -C "$FIX" rev-parse main~2)"; fi
   gs="$(FIXTURE="$FIX" BASE_OVERRIDE=main STUB_DATE=2026-01-01T00:00:00Z STUB_HEAD="$FIXFORK" ord_run 'gate\tpass\t3s\thttps://github.com/o/r/actions/runs/1/job/2\n' --gate-strength)"
   case "$gs" in *"ck)"*) echo "  ok   GS1 counted commits carry their own PR's check count" ;;
     *) echo "  FAIL GS1: no gate annotation under --gate-strength; got [$gs]"; fail=1 ;; esac
@@ -353,6 +369,81 @@ if [ "${1:-}" = "--selftest" ]; then
   case "$pd" in *"fetched just now"*) echo "  FAIL BD5 CONTROL: claimed a fetch for a purely local base"; fail=1 ;;
     *"never fetched"*) echo "  ok   BD5 CONTROL: a local base is reported as never fetched, not as fresh" ;;
     *) echo "  FAIL BD5 CONTROL: no fetch state at all; got [$pd]"; fail=1 ;; esac
+  # MB arms: `git merge-base` CAN FAIL, AND ITS FAILURE IS SILENT AND PERMISSIVE.
+  # Found by code-qa run 1 (tools/pr-currency.sh:444). The capture suppressed stderr and
+  # checked no status, so on failure `mb` is EMPTY -- and `"${mb}..${BASE}"` is then the
+  # string `..main`, which git reads as `HEAD..main`. Distance and the criteria scan are
+  # silently measured against THE OPERATOR'S OWN CHECKOUT instead of the PR's fork point.
+  # In a checkout sitting on the base (the normal case) that is zero commits, so a stale PR
+  # reads `0 criteria commit(s)` -- the permissive direction this file forbids at line 459.
+  # Reachable without any exotic state: the fetch uses the default refspec, which does not
+  # bring in fork PR heads, and `gh pr view` can leave `head` empty while the run lookup
+  # still succeeds.
+  echo "MB arms: an unresolvable merge-base must degrade loudly, not measure the operator's checkout"
+  mbo="$(FIXTURE="$FIX" BASE_OVERRIDE=main STUB_DATE=2026-01-01T00:00:00Z \
+         STUB_HEAD=0000000000000000000000000000000000000000 \
+         ord_run 'gate\tpass\t3s\thttps://github.com/o/r/actions/runs/1/job/2\n')"
+  case "$mbo" in *"currency : 0 criteria commit"*)
+      echo "  FAIL MB1: unresolvable merge-base read as CURRENT -- measured the ambient checkout"; fail=1 ;;
+    *"merge-base"*) echo "  ok   MB1 an unresolvable merge-base is named, not absorbed into a count" ;;
+    *) echo "  FAIL MB1: no merge-base diagnostic and no count; got [$mbo]"; fail=1 ;; esac
+  # MB2 is the permitting twin, and it is load-bearing: without it a script that printed the
+  # merge-base diagnostic UNCONDITIONALLY -- i.e. one that had lost currency altogether --
+  # would satisfy MB1 while reporting nothing about any PR ever.
+  case "$pd" in *"merge-base"*) echo "  FAIL MB2 CONTROL: a resolvable merge-base still reported a merge-base problem"; fail=1 ;;
+    *"currency : 2 criteria commit"*) echo "  ok   MB2 CONTROL: a resolvable merge-base still computes a real currency line" ;;
+    *) echo "  FAIL MB2 CONTROL: no currency line on the good fixture; got [$pd]"; fail=1 ;; esac
+
+  # LB arms: COMMITTER DATE IS NOT LANDING TIME. Found by code-qa run 1 (line 463).
+  # The count asks "did this criteria commit land after the run", and answers it with the
+  # commit's own committer date. Those differ whenever the repo lands work by merge commit or
+  # fast-forward: a branch commit authored and committed BEFORE the run keeps its early stamp
+  # and is skipped, while the merge commit that actually carried it in yields no paths from
+  # `git show --name-only` on a clean merge and is skipped too. The gap is real and the board
+  # prints 0 -- permissive again.
+  #
+  # The fix is DISCLOSURE, NOT A CLASSIFIER, for the reason stated at line 459: a classifier
+  # that guessed landing times would fail toward "no re-run needed". So when the gap contains
+  # a merge commit, the count is reported as a LOWER BOUND and says why. This repo squash-
+  # merges today, which rewrites committer dates and hides the defect -- that is a property of
+  # the current merge strategy, not of this tool, and it is exactly the kind of fact that goes
+  # stale silently. The arm pins the behaviour against a merge-landing fixture regardless.
+  echo "LB arms: a merge commit in the gap makes the count a lower bound, and says so"
+  MFIX="$(mktemp -d)"
+  ( cd "$MFIX" || exit 1
+    git init -q -b main .
+    git config user.email t@t; git config user.name t; git config commit.gpgsign false
+    export GIT_AUTHOR_DATE=2026-01-01T00:00:00Z GIT_COMMITTER_DATE=2026-01-01T00:00:00Z
+    mkdir -p .github/workflows
+    echo base > README; git add -A; git commit -qm base
+    git checkout -q -b feat
+    export GIT_AUTHOR_DATE=2026-01-02T00:00:00Z GIT_COMMITTER_DATE=2026-01-02T00:00:00Z
+    echo "on: [pull_request]" > .github/workflows/late.yml; git add -A; git commit -qm "ci: landed late"
+    git checkout -q main
+    export GIT_AUTHOR_DATE=2026-06-01T00:00:00Z GIT_COMMITTER_DATE=2026-06-01T00:00:00Z
+    git merge -q --no-ff -m "merge feat" feat ) >/dev/null 2>&1 \
+    || { echo "  FAIL LB0: could not build the merge fixture"; fail=1; }
+  MBASE="$(git -C "$MFIX" rev-parse main 2>/dev/null)"
+  MFORK="$(git -C "$MFIX" rev-parse main^1 2>/dev/null)"
+  # LB0 is the fixture's own control: the gap must really contain the merge AND the branch commit,
+  # or LB1 measures nothing. Without it a fixture that produced an empty gap would pass LB1 for a
+  # reason unrelated to the code under test -- the FX1 lesson, reapplied.
+  mgap="$(git -C "$MFIX" rev-list --count "${MFORK}..${MBASE}" 2>/dev/null)"
+  [ "$mgap" = 2 ] && ok_lb=1 || ok_lb=0
+  [ "$ok_lb" = 1 ] && echo "  ok   LB0 CONTROL: the merge fixture puts 2 commits (branch + merge) in the gap" \
+                   || { echo "  FAIL LB0 CONTROL: merge fixture gap is [$mgap], want 2"; fail=1; }
+  # The run is dated BETWEEN the branch commit (01-02) and the merge (06-01): the workflow change
+  # genuinely landed after the run, and its committer date genuinely precedes it.
+  lb="$(FIXTURE="$MFIX" BASE_OVERRIDE=main STUB_DATE=2026-03-01T00:00:00Z STUB_HEAD="$MFORK" \
+        ord_run 'gate\tpass\t3s\thttps://github.com/o/r/actions/runs/1/job/2\n')"
+  case "$lb" in *"lower bound"*) echo "  ok   LB1 a merge-landed criteria commit is disclosed as a lower bound" ;;
+    *) echo "  FAIL LB1: merge-landed work in the gap reported with no lower-bound caveat; got [$lb]"; fail=1 ;; esac
+  # LB2 is the permitting twin: a board that stamped "lower bound" on every PR would satisfy LB1
+  # and destroy the signal, because a caveat that is always present carries no information.
+  case "$pd" in *"lower bound"*) echo "  FAIL LB2 CONTROL: lower-bound caveat on a linear gap with no merges"; fail=1 ;;
+    *) echo "  ok   LB2 CONTROL: a linear gap gets no lower-bound caveat" ;; esac
+  rm -rf "$MFIX"
+
   rm -rf "$nog" "$FIX"
   [ "$fail" = 0 ] && echo "ALL GREEN" || echo "SELFTEST FAILED"
   exit "$fail"
@@ -441,8 +532,34 @@ for pr in $prs; do
     rc=1; continue
   fi
 
-  mb="$(git merge-base "$BASE" "$head" 2>/dev/null)"
+  # CHECK THE MERGE-BASE BEFORE BUILDING A RANGE OUT OF IT. An empty `mb` makes the range the
+  # string `..${BASE}`, which git reads as `HEAD..${BASE}` -- so a failure here silently
+  # re-points the whole measurement at the OPERATOR'S CHECKOUT, and in a checkout sitting on
+  # the base that is zero commits, i.e. a stale PR reads as perfectly current. Permissive, and
+  # the one direction this tool must never fail in (see the note at the criteria loop below).
+  # Reachable with no exotic state: the fetch uses the default refspec, which does not bring in
+  # fork PR heads, and `gh pr view` can leave `head` empty while the run lookup still succeeds.
+  # Arms MB1/MB2. Keep stderr -- the reason is the diagnostic.
+  mb="$(git merge-base "$BASE" "$head" 2>"$TMP_MBERR")"; mb_rc=$?
+  if [ "$mb_rc" != 0 ] || [ -z "$mb" ]; then
+    echo "PR $pr"
+    echo "    outcome  : $outcome"
+    echo "    currency : unknown — no merge-base for $BASE..${head:-<empty head>}"
+    echo "               ($(head -1 "$TMP_MBERR" 2>/dev/null | cut -c1-90))"
+    echo "               a fork PR head is not fetched by the default refspec; try"
+    echo "               gh pr checkout $pr, or fetch refs/pull/$pr/head, then re-run."
+    echo "               NOT reported as current: an unresolvable base would otherwise be"
+    echo "               measured against this checkout and read as 0 commits behind."
+    rc=1; continue
+  fi
   dist="$(git rev-list --count "${mb}..${BASE}" 2>/dev/null || echo '?')"
+  # Is the count about to be a LOWER BOUND? Committer date is not landing time: with merge-commit
+  # or fast-forward landing, a branch commit committed before the run keeps its early stamp and is
+  # skipped below, while the merge that carried it in yields no paths from `git show --name-only`
+  # and is skipped too. Disclose rather than classify -- a guessed landing time fails toward "no
+  # re-run needed". Arms LB1/LB2. (This repo squash-merges today, which rewrites committer dates
+  # and hides it; that is a property of the current merge strategy, not of this tool.)
+  merges_in_gap="$(git rev-list --count --merges "${mb}..${BASE}" 2>/dev/null || echo 0)"
 
   n=0; which=""; detail=""
   for c in $(git rev-list "${mb}..${BASE}" 2>/dev/null); do
@@ -474,6 +591,10 @@ $(echo "$cp" | sed 's/^/                    /')"
   echo "    outcome  : $outcome"
   echo "    distance : $dist commits behind $BASE"
   echo "    currency : $n criteria commit(s) landed after its run ($when)"
+  [ "${merges_in_gap:-0}" -gt 0 ] && \
+    echo "               ^ a lower bound: $merges_in_gap merge commit(s) in this gap, and the test above" && \
+    echo "                 compares COMMITTER DATE, which is not landing time. Work merged in after" && \
+    echo "                 the run but committed before it is not counted here."
   [ "$n" -gt 0 ] && echo "               ->$which"
   [ "$n" -gt 0 ] && printf '%s\n' "${detail#?}"
   [ "$n" -gt 0 ] && echo "               a NEW run repairs this (gh pr update-branch $pr, a push, or close/reopen);"
